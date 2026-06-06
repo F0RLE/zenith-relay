@@ -1,0 +1,59 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zenith Codex",
+  "version": "1.0.0",
+  "identifier": "com.zenith.codex",
+  "build": {
+    "beforeDevCommand": "cd ../src && bun run dev",
+    "beforeBuildCommand": "cd ../src && bun run build",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../src/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Zenith Codex",
+        "width": 900,
+        "height": 340,
+        "minWidth": 760,
+        "minHeight": 280,
+        "decorations": false,
+        "backgroundColor": "#071018",
+        "resizable": true,
+        "center": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://api.zenithmarket.dev https://github.com https://*.githubusercontent.com http://127.0.0.1:*;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGQkQyM0UwQzdFQzU2ODgKUldTSVZ1ekg0Q085VDRCRFcyWURGTGdsVHdDVTVJa1lmRmpMTGh3bXdLd0N4MmdaMEpkc2c2dzAK",
+      "endpoints": [
+        "https://github.com/F0RLE/zenith-codex/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

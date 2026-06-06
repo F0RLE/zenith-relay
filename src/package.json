@@ -1,0 +1,37 @@
+{
+  "name": "zenith-codex",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b tsconfig.json && vite build",
+    "check": "tsc -b tsconfig.json --pretty false",
+    "clean": "bun ../.github/tools/clean.mjs",
+    "clean:all": "bun ../.github/tools/clean.mjs --all",
+    "verify": "bun run check && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "app:dev": "bun ../.github/tools/tauri-dev.mjs",
+    "app:build": "bun ../.github/tools/tauri-build.mjs",
+    "app:build:signed": "bun ../.github/tools/tauri-build.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/plugin-process": "^2.3.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
+    "i18next": "^26.3.1",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-i18next": "^17.0.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}

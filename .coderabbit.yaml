@@ -1,0 +1,69 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+tone_instructions: "Be direct and concise. Prioritize updater safety, local key storage, cross-platform packaging, Codex config writes, and user-visible regressions over style-only comments."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: false
+  collapse_walkthrough: true
+  poem: false
+  suggested_labels: true
+  auto_apply_labels: false
+  labeling_instructions:
+    - label: "desktop"
+      instructions: "Use for Tauri app, tray, updater, OS integration, local paths, and key storage."
+    - label: "frontend"
+      instructions: "Use for React UI, styling, localization, and responsive layout."
+    - label: "security"
+      instructions: "Use for credential storage, config writes, updater signing, or filesystem paths."
+    - label: "ci"
+      instructions: "Use for GitHub Actions, release packaging, Dependabot, or repository automation."
+    - label: "dependencies"
+      instructions: "Use for package-lock, Cargo.lock, npm, cargo, Tauri, or action updates."
+  path_filters:
+    - "!node_modules/**"
+    - "!target/**"
+    - "!gen/**"
+    - "!**/*.log"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: "Review Tauri commands, keyring use, Codex config writes, path handling, process launch, tray behavior, and updater safety."
+    - path: "ui/src/**/*"
+      instructions: "Review UI layout for compact desktop windows, localization parity, no overflow, and no exposed secrets."
+    - path: ".github/workflows/*.yml"
+      instructions: "Review cross-platform release builds for Windows/macOS/Linux and x64/ARM64 coverage."
+  auto_review:
+    enabled: true
+    drafts: true
+    auto_incremental_review: true
+    base_branches:
+      - "nightly"
+      - "main"
+  tools:
+    clippy:
+      enabled: true
+    eslint:
+      enabled: true
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    semgrep:
+      enabled: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "README.md"
+      - "CONTRIBUTING.md"
+      - "AGENTS.md"
+      - "docs/**/*.md"
+

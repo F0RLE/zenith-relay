@@ -1,0 +1,52 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /src
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+    target-branch: nightly
+    groups:
+      react-vite:
+        patterns:
+          - react
+          - react-dom
+          - vite
+          - "@vitejs/*"
+          - typescript
+      tauri-js:
+        patterns:
+          - "@tauri-apps/*"
+      ui:
+        patterns:
+          - lucide-react
+          - i18next
+          - react-i18next
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:15"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+    target-branch: nightly
+    groups:
+      tauri-rust:
+        patterns:
+          - tauri
+          - tauri-*
+          - tauri-build
+          - keyring
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:30"
+      timezone: Europe/Minsk
+    open-pull-requests-limit: 5
+    target-branch: nightly
