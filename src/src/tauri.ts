@@ -18,8 +18,11 @@ export type KeyStats = {
   enabled: boolean;
   status: string;
   balanceCents: number;
+  balanceMicrousd?: number | null;
   spentCents: number;
+  spentMicrousd?: number | null;
   totalCreditsCents: number;
+  totalCreditsMicrousd?: number | null;
   requests: number;
   inputTokens: number;
   cachedInputTokens: number;
@@ -27,8 +30,11 @@ export type KeyStats = {
   outputTokens: number;
   totalTokens: number;
   dailySpentCents: number;
+  dailySpentMicrousd?: number | null;
   weeklySpentCents: number;
+  weeklySpentMicrousd?: number | null;
   monthlySpentCents: number;
+  monthlySpentMicrousd?: number | null;
   balance: string;
   spent: string;
   totalCredits: string;
@@ -53,6 +59,7 @@ export type UsageLogEntry = {
   outputTokens: number;
   totalTokens: number;
   costCents: number;
+  costMicrousd?: number | null;
   status: string;
   createdAt: string;
   modelDisplay: string;

@@ -283,13 +283,30 @@ fn redact_config_secrets(content: &str) -> String {
         .lines()
         .map(|line| {
             if line.trim_start().starts_with("experimental_bearer_token =") {
-                "experimental_bearer_token = \"<redacted>\""
+                "experimental_bearer_token = \"<redacted>\"".to_string()
             } else {
-                line
+                redact_inline_tokens(line)
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_inline_tokens(line: &str) -> String {
+    let mut redacted = line.to_string();
+    for marker in ["znt_", "zrk_", "sk-"] {
+        while let Some(start) = redacted.find(marker) {
+            let end = redacted[start..]
+                .find(|ch: char| {
+                    ch.is_whitespace()
+                        || matches!(ch, '"' | '\'' | ',' | ';' | ')' | ']' | '}' | '<' | '>')
+                })
+                .map(|offset| start + offset)
+                .unwrap_or_else(|| redacted.len());
+            redacted.replace_range(start..end, "<redacted>");
+        }
+    }
+    redacted
 }
 
 #[cfg(test)]
@@ -342,15 +359,18 @@ base_url = "https://gateway.example/v1"
     }
 
     #[test]
-    fn redact_config_secrets_hides_legacy_inline_token() {
+    fn redact_config_secrets_hides_inline_tokens() {
         let original = r#"
 [model_providers.codex_local_access]
 experimental_bearer_token = "znt_secret"
+notes = "manual token zrk_customer_secret and sk-secret"
 "#;
 
         let redacted = redact_config_secrets(original);
 
         assert!(redacted.contains(r#"experimental_bearer_token = "<redacted>""#));
         assert!(!redacted.contains("znt_secret"));
+        assert!(!redacted.contains("zrk_customer_secret"));
+        assert!(!redacted.contains("sk-secret"));
     }
 }

@@ -135,13 +135,9 @@ export function App() {
       setUpdating(true);
       if (!automatic) setBusy(true);
       try {
-        const result = await updateAndRelaunch(() => undefined);
-        if (result === "none" && !automatic) {
-          // No update available when manually triggered
-          console.log("No updates available");
-        }
-      } catch (err) {
-        console.error("Update failed:", err);
+        await updateAndRelaunch(() => undefined);
+      } catch {
+        // Update checks run silently; avoid exposing updater internals in the UI console.
       } finally {
         updatingRef.current = false;
         setUpdating(false);
@@ -182,7 +178,11 @@ export function App() {
       if (result.usage.length === 0) return;
       setHistory((current) => {
         const seen = new Set(current.map((entry) => entry.id));
-        return [...result.usage.filter((entry) => !seen.has(entry.id)), ...current];
+        const next = [...result.usage.filter((entry) => !seen.has(entry.id)), ...current];
+        if (result.limit > 0 && next.length >= result.limit) {
+          setHistoryCanLoadMore(true);
+        }
+        return next;
       });
       usageVersionRef.current = Math.max(
         usageVersionRef.current ?? 0,
@@ -255,6 +255,7 @@ export function App() {
       setKeyStats(null);
       setHistory([]);
       setHistoryCanLoadMore(false);
+      usageVersionRef.current = null;
       await refreshState();
     } finally {
       setBusy(false);

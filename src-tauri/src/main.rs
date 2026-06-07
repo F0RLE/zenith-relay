@@ -36,6 +36,7 @@ const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:47831";
 const DEFAULT_API_BASE_URL: &str = "https://api.zenithmarket.dev/v1";
 const TOP_UP_BOT_URL: &str = "https://t.me/zenith_service_bot";
 const TOP_UP_BOT_DOMAIN: &str = "zenith_service_bot";
+const MAX_TOP_UP_AMOUNT_CENTS: i64 = 1_000_000;
 const USAGE_HISTORY_LIMIT: u8 = 8;
 const STATS_WATCH_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -55,8 +56,14 @@ struct KeyStats {
     enabled: bool,
     status: String,
     balance_cents: i64,
+    #[serde(default)]
+    balance_microusd: Option<i64>,
     spent_cents: i64,
+    #[serde(default)]
+    spent_microusd: Option<i64>,
     total_credits_cents: i64,
+    #[serde(default)]
+    total_credits_microusd: Option<i64>,
     requests: i64,
     input_tokens: i64,
     cached_input_tokens: i64,
@@ -64,8 +71,14 @@ struct KeyStats {
     output_tokens: i64,
     total_tokens: i64,
     daily_spent_cents: i64,
+    #[serde(default)]
+    daily_spent_microusd: Option<i64>,
     weekly_spent_cents: i64,
+    #[serde(default)]
+    weekly_spent_microusd: Option<i64>,
     monthly_spent_cents: i64,
+    #[serde(default)]
+    monthly_spent_microusd: Option<i64>,
     #[serde(default)]
     balance: String,
     #[serde(default)]
@@ -104,6 +117,8 @@ struct UsageLogEntry {
     output_tokens: i64,
     total_tokens: i64,
     cost_cents: i64,
+    #[serde(default)]
+    cost_microusd: Option<i64>,
     status: String,
     created_at: String,
     #[serde(default)]
@@ -191,23 +206,12 @@ async fn get_key_stats(api_key: String) -> Result<KeyStats, String> {
 
 async fn fetch_key_stats(api_key: &str) -> Result<KeyStats, String> {
     let client = reqwest::Client::new();
-    let primary = api_get(&client, "/zenith/key/stats", api_key).await?;
-    if primary.status().is_success() {
-        let payload = primary
-            .json::<ApiEnvelope<Value>>()
-            .await
-            .map_err(|err| format!("Stats response is invalid: {err}"))?;
-        let mut stats = key_stats_from_value(&payload.data);
-        enrich_key_stats(&mut stats);
-        return Ok(stats);
+    let response = api_get(&client, "/zenith/key/stats", api_key).await?;
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "Stats request failed.").await);
     }
 
-    let fallback = api_get(&client, "/key", api_key).await?;
-    if !fallback.status().is_success() {
-        return Err(api_error_message(fallback, "Stats request failed.").await);
-    }
-
-    let payload = fallback
+    let payload = response
         .json::<ApiEnvelope<Value>>()
         .await
         .map_err(|err| format!("Stats response is invalid: {err}"))?;
@@ -352,9 +356,7 @@ async fn create_top_up_intent_and_open(
     app: AppHandle,
 ) -> Result<(), String> {
     let api_key = normalize_api_key(&api_key)?;
-    if amount_cents <= 0 {
-        return Err("Top-up amount must be positive.".to_string());
-    }
+    validate_top_up_amount_cents(amount_cents)?;
 
     let client = reqwest::Client::new();
     let response = client
@@ -496,9 +498,7 @@ fn sanitize_api_error_message(message: &str, fallback: &str) -> String {
         return fallback.to_string();
     }
     let lower = trimmed.to_ascii_lowercase();
-    let sensitive_markers = [
-        "http://",
-        "https://",
+    let sensitive_non_url_markers = [
         "znt_",
         "zrk_",
         "sk-",
@@ -511,13 +511,51 @@ fn sanitize_api_error_message(message: &str, fallback: &str) -> String {
         "cf-ray",
         "cloudflare",
     ];
-    if sensitive_markers
+    if sensitive_non_url_markers
         .iter()
         .any(|marker| lower.contains(marker))
     {
         return fallback.to_string();
     }
+    let url_markers = ["http://", "https://", "tg://"];
+    if url_markers.iter().any(|marker| lower.contains(marker))
+        && !contains_only_safe_public_support_links(trimmed)
+    {
+        return fallback.to_string();
+    }
     trimmed.chars().take(240).collect()
+}
+
+fn contains_only_safe_public_support_links(message: &str) -> bool {
+    for word in message.split_whitespace() {
+        let candidate = word.trim_matches(|character: char| {
+            matches!(character, '.' | ',' | ';' | ':' | ')' | ']' | '}')
+        });
+        if candidate.starts_with("http://")
+            || candidate.starts_with("https://")
+            || candidate.starts_with("tg://")
+        {
+            if !is_safe_public_support_link(candidate) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn is_safe_public_support_link(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if url.scheme() == "https" && url.host_str() == Some("t.me") {
+        return url.path() == "/zenith_service_bot";
+    }
+    if url.scheme() == "tg" && url.host_str() == Some("resolve") {
+        return url
+            .query_pairs()
+            .any(|(key, value)| key == "domain" && value == TOP_UP_BOT_DOMAIN);
+    }
+    false
 }
 
 fn key_stats_from_value(data: &Value) -> KeyStats {
@@ -533,21 +571,24 @@ fn key_stats_from_value(data: &Value) -> KeyStats {
             .map(str::to_string),
         enabled,
         status: string_field(data, &["status"]),
-        balance_cents: int_field(
-            data,
-            &["balanceCents", "remainingCents", "limit_remaining_cents"],
-        ),
-        spent_cents: int_field(data, &["spentCents", "usage_cents"]),
-        total_credits_cents: int_field(data, &["totalCreditsCents", "limit_cents"]),
+        balance_cents: int_field(data, &["balanceCents"]),
+        balance_microusd: optional_int_field(data, &["balanceMicrousd"]),
+        spent_cents: int_field(data, &["spentCents"]),
+        spent_microusd: optional_int_field(data, &["spentMicrousd"]),
+        total_credits_cents: int_field(data, &["totalCreditsCents"]),
+        total_credits_microusd: optional_int_field(data, &["totalCreditsMicrousd"]),
         requests: int_field(data, &["requests"]),
-        input_tokens: int_field(data, &["inputTokens", "input_tokens"]),
-        cached_input_tokens: int_field(data, &["cachedInputTokens", "cached_input_tokens"]),
-        reasoning_tokens: int_field(data, &["reasoningTokens", "reasoning_tokens"]),
-        output_tokens: int_field(data, &["outputTokens", "output_tokens"]),
-        total_tokens: int_field(data, &["totalTokens", "total_tokens"]),
-        daily_spent_cents: int_field(data, &["dailySpentCents", "usage_daily_cents"]),
-        weekly_spent_cents: int_field(data, &["weeklySpentCents", "usage_weekly_cents"]),
-        monthly_spent_cents: int_field(data, &["monthlySpentCents", "usage_monthly_cents"]),
+        input_tokens: int_field(data, &["inputTokens"]),
+        cached_input_tokens: int_field(data, &["cachedInputTokens"]),
+        reasoning_tokens: int_field(data, &["reasoningTokens"]),
+        output_tokens: int_field(data, &["outputTokens"]),
+        total_tokens: int_field(data, &["totalTokens"]),
+        daily_spent_cents: int_field(data, &["dailySpentCents"]),
+        daily_spent_microusd: optional_int_field(data, &["dailySpentMicrousd"]),
+        weekly_spent_cents: int_field(data, &["weeklySpentCents"]),
+        weekly_spent_microusd: optional_int_field(data, &["weeklySpentMicrousd"]),
+        monthly_spent_cents: int_field(data, &["monthlySpentCents"]),
+        monthly_spent_microusd: optional_int_field(data, &["monthlySpentMicrousd"]),
         balance: string_field(data, &["balance"]),
         spent: string_field(data, &["spent"]),
         total_credits: string_field(data, &["totalCredits"]),
@@ -568,13 +609,22 @@ fn enrich_key_stats(stats: &mut KeyStats) {
         stats.status = if stats.enabled { "active" } else { "disabled" }.to_string();
     }
     if stats.balance.is_empty() {
-        stats.balance = format_money(stats.balance_cents);
+        stats.balance = stats
+            .balance_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.balance_cents));
     }
     if stats.spent.is_empty() {
-        stats.spent = format_money(stats.spent_cents);
+        stats.spent = stats
+            .spent_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.spent_cents));
     }
     if stats.total_credits.is_empty() {
-        stats.total_credits = format_money(stats.total_credits_cents);
+        stats.total_credits = stats
+            .total_credits_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.total_credits_cents));
     }
     if stats.requests_display.is_empty() {
         stats.requests_display = format_number(stats.requests);
@@ -595,13 +645,22 @@ fn enrich_key_stats(stats: &mut KeyStats) {
         stats.total_tokens_display = format_number(stats.total_tokens);
     }
     if stats.daily_spent.is_empty() {
-        stats.daily_spent = format_money(stats.daily_spent_cents);
+        stats.daily_spent = stats
+            .daily_spent_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.daily_spent_cents));
     }
     if stats.weekly_spent.is_empty() {
-        stats.weekly_spent = format_money(stats.weekly_spent_cents);
+        stats.weekly_spent = stats
+            .weekly_spent_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.weekly_spent_cents));
     }
     if stats.monthly_spent.is_empty() {
-        stats.monthly_spent = format_money(stats.monthly_spent_cents);
+        stats.monthly_spent = stats
+            .monthly_spent_microusd
+            .map(format_money_microusd)
+            .unwrap_or_else(|| format_money(stats.monthly_spent_cents));
     }
 }
 
@@ -612,7 +671,10 @@ fn enrich_usage_log_entry(entry: &mut UsageLogEntry) {
         .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "Unknown model".to_string());
     entry.created_at_display = format_api_date(&entry.created_at);
-    entry.cost = format_money(entry.cost_cents);
+    entry.cost = entry
+        .cost_microusd
+        .map(format_money_microusd)
+        .unwrap_or_else(|| format_money(entry.cost_cents));
     entry.input_tokens_display = format_number(entry.input_tokens);
     entry.cached_input_tokens_display = format_number(entry.cached_input_tokens);
     entry.reasoning_tokens_display = format_number(entry.reasoning_tokens);
@@ -624,6 +686,16 @@ fn format_money(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     let abs = cents.abs();
     format!("{sign}${}.{:02}", format_number(abs / 100), abs % 100)
+}
+
+fn format_money_microusd(microusd: i64) -> String {
+    let sign = if microusd < 0 { "-" } else { "" };
+    let abs = microusd.abs();
+    format!(
+        "{sign}${}.{:06}",
+        format_number(abs / 1_000_000),
+        abs % 1_000_000
+    )
 }
 
 fn format_number(value: i64) -> String {
@@ -673,6 +745,16 @@ fn parse_usd_amount(value: &str) -> Option<f64> {
     Some((amount * 100.0).round() / 100.0)
 }
 
+fn validate_top_up_amount_cents(amount_cents: i64) -> Result<(), String> {
+    if amount_cents <= 0 {
+        return Err("Top-up amount must be positive.".to_string());
+    }
+    if amount_cents > MAX_TOP_UP_AMOUNT_CENTS {
+        return Err("Top-up amount is too large.".to_string());
+    }
+    Ok(())
+}
+
 fn looks_like_grouped_decimal(value: &str) -> bool {
     value
         .split_once(',')
@@ -684,6 +766,11 @@ fn int_field(data: &Value, keys: &[&str]) -> i64 {
     keys.iter()
         .find_map(|key| data.get(key).and_then(Value::as_i64))
         .unwrap_or_default()
+}
+
+fn optional_int_field(data: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| data.get(key).and_then(Value::as_i64))
 }
 
 fn string_field(data: &Value, keys: &[&str]) -> String {
@@ -760,8 +847,11 @@ fn is_valid_top_up_start(start: &str) -> bool {
 mod tests {
     use super::{
         extract_top_up_start, extract_top_up_start_from_url, fallback_api_date, format_api_date,
-        is_allowed_top_up_url, sanitize_api_error_message, telegram_start_url, TopUpIntentData,
+        format_money_microusd, is_allowed_top_up_url, key_stats_from_value,
+        sanitize_api_error_message, telegram_start_url, validate_top_up_amount_cents,
+        TopUpIntentData, MAX_TOP_UP_AMOUNT_CENTS,
     };
+    use serde_json::json;
 
     #[test]
     fn top_up_opener_allows_only_telegram_app_deep_link() {
@@ -852,6 +942,43 @@ mod tests {
     }
 
     #[test]
+    fn usage_history_cost_uses_micro_usd_precision() {
+        assert_eq!(format_money_microusd(77_592), "$0.077592");
+        assert_eq!(format_money_microusd(1_234_567), "$1.234567");
+    }
+
+    #[test]
+    fn key_stats_uses_micro_usd_precision() {
+        let mut stats = key_stats_from_value(&json!({
+            "maskedKey": "znt_aa...bbbb",
+            "enabled": true,
+            "balanceCents": 9969,
+            "balanceMicrousd": 99701145,
+            "spentCents": 31,
+            "spentMicrousd": 298855,
+            "totalCreditsCents": 10000,
+            "totalCreditsMicrousd": 100000000,
+            "monthlySpentCents": 31,
+            "monthlySpentMicrousd": 298855
+        }));
+
+        super::enrich_key_stats(&mut stats);
+
+        assert_eq!(stats.balance, "$99.701145");
+        assert_eq!(stats.spent, "$0.298855");
+        assert_eq!(stats.total_credits, "$100.000000");
+        assert_eq!(stats.monthly_spent, "$0.298855");
+    }
+
+    #[test]
+    fn top_up_amount_validation_rejects_invalid_ipc_amounts() {
+        assert!(validate_top_up_amount_cents(100).is_ok());
+        assert!(validate_top_up_amount_cents(MAX_TOP_UP_AMOUNT_CENTS).is_ok());
+        assert!(validate_top_up_amount_cents(0).is_err());
+        assert!(validate_top_up_amount_cents(MAX_TOP_UP_AMOUNT_CENTS + 1).is_err());
+    }
+
+    #[test]
     fn api_error_sanitizer_hides_backend_and_token_details() {
         assert_eq!(
             sanitize_api_error_message(
@@ -863,6 +990,27 @@ mod tests {
         assert_eq!(
             sanitize_api_error_message("Requested model is disabled", "Stats request failed."),
             "Requested model is disabled"
+        );
+        assert_eq!(
+            sanitize_api_error_message(
+                "Insufficient Zenith balance. Top up your Zenith API balance in the bot: https://t.me/zenith_service_bot",
+                "Stats request failed."
+            ),
+            "Insufficient Zenith balance. Top up your Zenith API balance in the bot: https://t.me/zenith_service_bot"
+        );
+        assert_eq!(
+            sanitize_api_error_message(
+                "upstream token failed; contact https://t.me/zenith_service_bot",
+                "Stats request failed."
+            ),
+            "Stats request failed."
+        );
+        assert_eq!(
+            sanitize_api_error_message(
+                "Insufficient Zenith balance. Top up at https://evil.example",
+                "Stats request failed."
+            ),
+            "Stats request failed."
         );
     }
 }

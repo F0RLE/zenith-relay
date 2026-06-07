@@ -4,6 +4,8 @@ gen/
 src/.build/
 src/dist/
 src/node_modules/
+src/.env
+src/.env.local
 windows/
 node_modules/
 dist/

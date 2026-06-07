@@ -42,25 +42,3 @@ pub fn default_codex_home() -> PathBuf {
     }
 }
 
-pub fn app_data_dir() -> PathBuf {
-    if cfg!(windows) {
-        env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .or_else(|| {
-                env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("AppData/Roaming"))
-            })
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Zenith Codex")
-    } else if cfg!(target_os = "macos") {
-        env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("Library/Application Support/Zenith Codex")
-    } else {
-        env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("zenith-codex")
-    }
-}

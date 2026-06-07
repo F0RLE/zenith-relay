@@ -47,7 +47,7 @@ If you need to generate update artifacts locally:
    bun run app:build:signed
    ```
 
-3. The following files are generated in `src-tauri/target/release/bundle/`:
+3. From the `src` working directory, the following files are generated in `../src-tauri/target/release/bundle/`:
    - Platform installers (.exe, .msi, .dmg, .deb, .rpm, .AppImage)
    - Signature files (*.sig)
    - `latest.json` with version info and download URLs
@@ -85,6 +85,5 @@ tauri signer generate -w ~/.tauri/zenith-codex.key
 3. ✅ Wait for CI to pass
 4. ✅ Merge PR
 5. ✅ Create and push `v*` tag on `main`
-6. ✅ GitHub Actions builds and creates Release
-7. ✅ Publish the draft Release
-8. ✅ Users receive automatic updates on next startup
+6. ✅ GitHub Actions builds, creates or updates the public Release, and uploads signed artifacts
+7. ✅ Users receive automatic updates on next startup

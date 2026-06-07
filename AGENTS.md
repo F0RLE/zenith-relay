@@ -17,14 +17,14 @@ Run before committing:
 
 ```bash
 cd src
-npm run verify
+bun run verify
 ```
 
 For packaging changes:
 
 ```bash
 cd src
-npm run app:build
+bun run app:build
 ```
 
 ## Map
