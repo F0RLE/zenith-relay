@@ -1,5 +1,17 @@
 # Release Flow
 
+## v1.0.1
+
+Patch release for the first public Zenith Codex build.
+
+Changes:
+
+- Rebuilds the desktop app with version `1.0.1` so signed updater artifacts can supersede `v1.0.0`.
+- Keeps the existing Zenith API endpoint and local Codex configuration flow unchanged.
+- No user action is required beyond installing or updating to the latest release.
+
+No breaking changes.
+
 GitHub default branch: `main`.
 
 Use this flow:
