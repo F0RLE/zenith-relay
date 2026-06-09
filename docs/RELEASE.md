@@ -1,5 +1,19 @@
 # Release Flow
 
+## v1.0.3
+
+Patch release for the current Zenith desktop build.
+
+Changes:
+
+- Promotes the current nightly desktop app state to the stable `main` release line.
+- Keeps the current Zenith API contract, billing precision, sanitized API errors, and request history fixes from `v1.0.2`.
+- Aligns the frontend package, Tauri config, Cargo package, and lockfile version to `1.0.3`.
+
+No user action is required beyond updating to the latest release.
+
+No breaking changes from `v1.0.2`.
+
 ## v1.0.2
 
 Patch release for the current Zenith API contract and billing display fixes.
@@ -39,8 +53,8 @@ Use this flow:
 ```bash
 git checkout main
 git pull origin main
-git tag v1.0.2
-git push origin v1.0.2
+git tag v1.0.3
+git push origin v1.0.3
 ```
 
 The `Build` workflow runs on `main`, `nightly`, pull requests, and tags matching `v*`.

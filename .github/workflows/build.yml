@@ -93,9 +93,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
-          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
-          releaseName: "Zenith Codex ${{ github.ref_name }}"
-          releaseBody: "Release assets are being prepared. Full notes are updated after packaging."
+          tagName: ""
           releaseDraft: ${{ !startsWith(github.ref, 'refs/tags/') }}
           prerelease: ${{ contains(github.ref_name, 'nightly') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
       - name: Collect release files
@@ -132,6 +130,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          gh release view $env:GITHUB_REF_NAME > $null 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Codex $env:GITHUB_REF_NAME" --notes-file release-notes.md
+          }
           Get-ChildItem "artifacts/zenith-codex-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |
             ForEach-Object { gh release upload $env:GITHUB_REF_NAME $_.FullName --clobber }
       - name: Update stable release notes
