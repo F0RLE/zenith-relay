@@ -41,4 +41,3 @@ pub fn default_codex_home() -> PathBuf {
             .join(".codex")
     }
 }
-

@@ -1,7 +1,6 @@
 ## Target Branch
 
-- [ ] This PR targets `nightly`, or
-- [ ] This is a release promotion PR from `nightly` to `main`.
+- [ ] This PR targets `main`.
 
 ## Checks
 

@@ -2,9 +2,9 @@
 
 ## Rules
 
-- Default development branch is `nightly`.
-- Open feature work into `nightly`; promote `nightly` to `main` only through a PR.
-- Do not push normal product changes directly to `main`.
+- Default branch is `main`.
+- Open feature work into `main` when review is needed.
+- Small operational fixes may be pushed to `main` after checks pass.
 - Keep the public app free of old upstream provider URLs and private workspace paths.
 - Use stable dependencies only. No beta, alpha, nightly, or prerelease packages unless explicitly approved.
 - Keep UI text localized through `src/src/i18n`.

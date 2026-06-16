@@ -37,7 +37,7 @@ export const en = {
     amount: "Top-up amount",
     openBot: "Top up",
     opening: "Opening",
-    secure: "The amount will be attached to this API key through a secure intent.",
+    secure: "$1 top-up gives $10 API balance on this key.",
     lockedTitle: "Top-up unlocks after saving a key",
     saveKeyFirst: "Save your key first, then stats and top-up will appear.",
     failed: "Could not create a top-up intent. Try again later.",

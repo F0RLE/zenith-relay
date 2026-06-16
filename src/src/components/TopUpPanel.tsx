@@ -70,6 +70,7 @@ export function TopUpPanel({ disabled, error, loading, amount, preparedAmount, o
       </div>
 
       {error ? <span className="top-up-hint error-text">{t("topUp.failed")}</span> : null}
+      {!error ? <span className="top-up-hint">{t("topUp.secure")}</span> : null}
     </form>
   );
 }

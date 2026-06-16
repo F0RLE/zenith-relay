@@ -67,7 +67,7 @@ cd src
 bun run clean
 ```
 
-Release and contributor workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/RELEASE.md](docs/RELEASE.md).
+Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md). Auto-update details live in [docs/UPDATES.md](docs/UPDATES.md).
 
 ## License
 

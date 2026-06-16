@@ -80,10 +80,8 @@ tauri signer generate -w ~/.tauri/zenith-codex.key
 
 ## Release Checklist
 
-1. ✅ Merge changes into `nightly`
-2. ✅ Open PR from `nightly` into `main`
-3. ✅ Wait for CI to pass
-4. ✅ Merge PR
-5. ✅ Create and push `v*` tag on `main`
-6. ✅ GitHub Actions builds, creates or updates the public Release, and uploads signed artifacts
-7. ✅ Users receive automatic updates on next startup
+1. ✅ Merge or commit changes into `main`
+2. ✅ Wait for CI to pass
+3. ✅ Create and push `v*` tag on `main`
+4. ✅ GitHub Actions builds, creates or updates the public Release, and uploads signed artifacts
+5. ✅ Users receive automatic updates on next startup

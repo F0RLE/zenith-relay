@@ -8,7 +8,6 @@ updates:
       time: "09:00"
       timezone: Europe/Minsk
     open-pull-requests-limit: 5
-    target-branch: nightly
     groups:
       react-vite:
         patterns:
@@ -33,7 +32,6 @@ updates:
       time: "09:15"
       timezone: Europe/Minsk
     open-pull-requests-limit: 5
-    target-branch: nightly
     groups:
       tauri-rust:
         patterns:
@@ -49,4 +47,3 @@ updates:
       time: "09:30"
       timezone: Europe/Minsk
     open-pull-requests-limit: 5
-    target-branch: nightly
