@@ -147,3 +147,29 @@ jobs:
           name: zenith-codex-${{ matrix.name }}
           path: artifacts/*
           if-no-files-found: error
+
+  publish-updater-manifest:
+    name: Publish updater manifest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+      - name: Prepare updater assets
+        shell: pwsh
+        run: |
+          .github/tools/publish-updater-manifest.ps1 `
+            -TagName "${{ github.ref_name }}" `
+            -Repository "${{ github.repository }}" `
+            -ArtifactsDir "release-artifacts" `
+            -OutputDir "updater-assets"
+      - name: Upload updater assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          Get-ChildItem "updater-assets" -File |
+            ForEach-Object { gh release upload "${{ github.ref_name }}" $_.FullName --clobber }
