@@ -58,12 +58,18 @@ struct KeyStats {
     balance_cents: i64,
     #[serde(default)]
     balance_microusd: Option<i64>,
+    #[serde(default)]
+    display_balance_microusd: Option<i64>,
     spent_cents: i64,
     #[serde(default)]
     spent_microusd: Option<i64>,
+    #[serde(default)]
+    display_spent_microusd: Option<i64>,
     total_credits_cents: i64,
     #[serde(default)]
     total_credits_microusd: Option<i64>,
+    #[serde(default)]
+    display_total_credits_microusd: Option<i64>,
     requests: i64,
     input_tokens: i64,
     cached_input_tokens: i64,
@@ -73,12 +79,18 @@ struct KeyStats {
     daily_spent_cents: i64,
     #[serde(default)]
     daily_spent_microusd: Option<i64>,
+    #[serde(default)]
+    display_daily_spent_microusd: Option<i64>,
     weekly_spent_cents: i64,
     #[serde(default)]
     weekly_spent_microusd: Option<i64>,
+    #[serde(default)]
+    display_weekly_spent_microusd: Option<i64>,
     monthly_spent_cents: i64,
     #[serde(default)]
     monthly_spent_microusd: Option<i64>,
+    #[serde(default)]
+    display_monthly_spent_microusd: Option<i64>,
     #[serde(default)]
     balance: String,
     #[serde(default)]
@@ -119,6 +131,8 @@ struct UsageLogEntry {
     cost_cents: i64,
     #[serde(default)]
     cost_microusd: Option<i64>,
+    #[serde(default)]
+    display_cost_microusd: Option<i64>,
     status: String,
     created_at: String,
     #[serde(default)]
@@ -573,10 +587,13 @@ fn key_stats_from_value(data: &Value) -> KeyStats {
         status: string_field(data, &["status"]),
         balance_cents: int_field(data, &["balanceCents"]),
         balance_microusd: optional_int_field(data, &["balanceMicrousd"]),
+        display_balance_microusd: optional_int_field(data, &["displayBalanceMicrousd"]),
         spent_cents: int_field(data, &["spentCents"]),
         spent_microusd: optional_int_field(data, &["spentMicrousd"]),
+        display_spent_microusd: optional_int_field(data, &["displaySpentMicrousd"]),
         total_credits_cents: int_field(data, &["totalCreditsCents"]),
         total_credits_microusd: optional_int_field(data, &["totalCreditsMicrousd"]),
+        display_total_credits_microusd: optional_int_field(data, &["displayTotalCreditsMicrousd"]),
         requests: int_field(data, &["requests"]),
         input_tokens: int_field(data, &["inputTokens"]),
         cached_input_tokens: int_field(data, &["cachedInputTokens"]),
@@ -585,22 +602,25 @@ fn key_stats_from_value(data: &Value) -> KeyStats {
         total_tokens: int_field(data, &["totalTokens"]),
         daily_spent_cents: int_field(data, &["dailySpentCents"]),
         daily_spent_microusd: optional_int_field(data, &["dailySpentMicrousd"]),
+        display_daily_spent_microusd: optional_int_field(data, &["displayDailySpentMicrousd"]),
         weekly_spent_cents: int_field(data, &["weeklySpentCents"]),
         weekly_spent_microusd: optional_int_field(data, &["weeklySpentMicrousd"]),
+        display_weekly_spent_microusd: optional_int_field(data, &["displayWeeklySpentMicrousd"]),
         monthly_spent_cents: int_field(data, &["monthlySpentCents"]),
         monthly_spent_microusd: optional_int_field(data, &["monthlySpentMicrousd"]),
-        balance: string_field(data, &["balance"]),
-        spent: string_field(data, &["spent"]),
-        total_credits: string_field(data, &["totalCredits"]),
+        display_monthly_spent_microusd: optional_int_field(data, &["displayMonthlySpentMicrousd"]),
+        balance: string_field(data, &["displayBalance", "balance"]),
+        spent: string_field(data, &["displaySpent", "spent"]),
+        total_credits: string_field(data, &["displayTotalCredits", "totalCredits"]),
         requests_display: string_field(data, &["requestsDisplay"]),
         input_tokens_display: string_field(data, &["inputTokensDisplay"]),
         cached_input_tokens_display: string_field(data, &["cachedInputTokensDisplay"]),
         reasoning_tokens_display: string_field(data, &["reasoningTokensDisplay"]),
         output_tokens_display: string_field(data, &["outputTokensDisplay"]),
         total_tokens_display: string_field(data, &["totalTokensDisplay"]),
-        daily_spent: string_field(data, &["dailySpent"]),
-        weekly_spent: string_field(data, &["weeklySpent"]),
-        monthly_spent: string_field(data, &["monthlySpent"]),
+        daily_spent: string_field(data, &["displayDailySpent", "dailySpent"]),
+        weekly_spent: string_field(data, &["displayWeeklySpent", "weeklySpent"]),
+        monthly_spent: string_field(data, &["displayMonthlySpent", "monthlySpent"]),
     }
 }
 
@@ -610,19 +630,22 @@ fn enrich_key_stats(stats: &mut KeyStats) {
     }
     if stats.balance.is_empty() {
         stats.balance = stats
-            .balance_microusd
+            .display_balance_microusd
+            .or(stats.balance_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.balance_cents));
     }
     if stats.spent.is_empty() {
         stats.spent = stats
-            .spent_microusd
+            .display_spent_microusd
+            .or(stats.spent_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.spent_cents));
     }
     if stats.total_credits.is_empty() {
         stats.total_credits = stats
-            .total_credits_microusd
+            .display_total_credits_microusd
+            .or(stats.total_credits_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.total_credits_cents));
     }
@@ -646,19 +669,22 @@ fn enrich_key_stats(stats: &mut KeyStats) {
     }
     if stats.daily_spent.is_empty() {
         stats.daily_spent = stats
-            .daily_spent_microusd
+            .display_daily_spent_microusd
+            .or(stats.daily_spent_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.daily_spent_cents));
     }
     if stats.weekly_spent.is_empty() {
         stats.weekly_spent = stats
-            .weekly_spent_microusd
+            .display_weekly_spent_microusd
+            .or(stats.weekly_spent_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.weekly_spent_cents));
     }
     if stats.monthly_spent.is_empty() {
         stats.monthly_spent = stats
-            .monthly_spent_microusd
+            .display_monthly_spent_microusd
+            .or(stats.monthly_spent_microusd)
             .map(format_money_microusd)
             .unwrap_or_else(|| format_money(stats.monthly_spent_cents));
     }
@@ -672,7 +698,8 @@ fn enrich_usage_log_entry(entry: &mut UsageLogEntry) {
         .unwrap_or_else(|| "Unknown model".to_string());
     entry.created_at_display = format_api_date(&entry.created_at);
     entry.cost = entry
-        .cost_microusd
+        .display_cost_microusd
+        .or(entry.cost_microusd)
         .map(format_money_microusd)
         .unwrap_or_else(|| format_money(entry.cost_cents));
     entry.input_tokens_display = format_number(entry.input_tokens);
@@ -954,20 +981,24 @@ mod tests {
             "enabled": true,
             "balanceCents": 9969,
             "balanceMicrousd": 99701145,
+            "displayBalanceMicrousd": 997011450,
             "spentCents": 31,
             "spentMicrousd": 298855,
+            "displaySpentMicrousd": 2988550,
             "totalCreditsCents": 10000,
             "totalCreditsMicrousd": 100000000,
+            "displayTotalCreditsMicrousd": 1000000000,
             "monthlySpentCents": 31,
-            "monthlySpentMicrousd": 298855
+            "monthlySpentMicrousd": 298855,
+            "displayMonthlySpentMicrousd": 2988550
         }));
 
         super::enrich_key_stats(&mut stats);
 
-        assert_eq!(stats.balance, "$99.701145");
-        assert_eq!(stats.spent, "$0.298855");
-        assert_eq!(stats.total_credits, "$100.000000");
-        assert_eq!(stats.monthly_spent, "$0.298855");
+        assert_eq!(stats.balance, "$997.011450");
+        assert_eq!(stats.spent, "$2.988550");
+        assert_eq!(stats.total_credits, "$1 000.000000");
+        assert_eq!(stats.monthly_spent, "$2.988550");
     }
 
     #[test]
