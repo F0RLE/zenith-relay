@@ -65,6 +65,8 @@ export const en = {
     more: "More",
     unknownModel: "Unknown model",
     tokens: "tokens",
+    firstResponse: "First response",
+    responseTime: "Response time",
   },
   settings: {
     label: "Settings",
