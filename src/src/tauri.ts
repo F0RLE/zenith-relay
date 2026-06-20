@@ -60,6 +60,8 @@ export type UsageLogEntry = {
   totalTokens: number;
   costCents: number;
   costMicrousd?: number | null;
+  timeToFirstByteMs?: number | null;
+  streamDurationMs?: number | null;
   status: string;
   createdAt: string;
   modelDisplay: string;
@@ -70,6 +72,8 @@ export type UsageLogEntry = {
   reasoningTokensDisplay: string;
   outputTokensDisplay: string;
   totalTokensDisplay: string;
+  timeToFirstByteDisplay: string;
+  responseTimeDisplay: string;
 };
 
 export type UsageVersion = {

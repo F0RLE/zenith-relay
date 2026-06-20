@@ -65,6 +65,8 @@ export const ru = {
     more: "Дальше",
     unknownModel: "Модель не указана",
     tokens: "токенов",
+    firstResponse: "Первый ответ",
+    responseTime: "Время ответа",
   },
   settings: {
     label: "Настройки",
