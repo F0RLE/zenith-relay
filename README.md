@@ -12,6 +12,8 @@ Desktop app for connecting Codex to Zenith API.
 
 Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
 
+Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+
 ## API Gateway
 
 The app uses:
