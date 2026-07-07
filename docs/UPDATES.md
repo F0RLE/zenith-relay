@@ -41,7 +41,7 @@ If you need to generate update artifacts locally:
    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
    ```
 
-2. Build signed artifacts:
+2. Build artifacts. The command signs updater artifacts only when `TAURI_SIGNING_PRIVATE_KEY` is set; without that variable, the local build disables updater artifacts:
    ```bash
    cd src
    bun run app:build:signed

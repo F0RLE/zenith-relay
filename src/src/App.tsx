@@ -72,7 +72,7 @@ export function App() {
   const canSave = editedKey.length > 0 && !keyAlreadySaved && !busy;
   const saveButtonSaved = saved || keyAlreadySaved;
   const canLaunch = state.providerActive && !busy;
-  const canReset = (state.providerActive || Boolean(state.savedApiKey)) && !busy;
+  const canReset = !busy;
   const statsKey = state.savedApiKey.trim();
   const hasStatsKey = Boolean(statsKey);
 

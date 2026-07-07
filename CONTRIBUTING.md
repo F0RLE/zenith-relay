@@ -51,8 +51,8 @@ Tag stable releases from the repository root after CI is green:
 ```bash
 git checkout main
 git pull origin main
-git tag v1.0.3
-git push origin v1.0.3
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The release workflow creates GitHub Release artifacts for Windows, macOS, and Linux on x64 and ARM64.

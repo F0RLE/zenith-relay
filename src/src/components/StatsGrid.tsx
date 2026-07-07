@@ -7,6 +7,9 @@ type StatsGridProps = {
 
 export function StatsGrid({ keyStats }: StatsGridProps) {
   const { t } = useTranslation();
+  const inputTokens = keyStats
+    ? Math.max(keyStats.inputTokens - keyStats.cachedInputTokens, 0)
+    : 0;
 
   return (
     <div className="stats-grid" aria-label={t("stats.label")}>
@@ -14,13 +17,17 @@ export function StatsGrid({ keyStats }: StatsGridProps) {
       <Stat label={t("stats.spent")} value={keyStats?.spent ?? "$0.00"} tone="money" />
       <Stat label={t("stats.requests")} value={keyStats?.requestsDisplay ?? "0"} />
       <Stat label={t("stats.totalTokens")} value={keyStats?.totalTokensDisplay ?? "0"} />
-      <Stat label={t("stats.inputTokens")} value={keyStats?.inputTokensDisplay ?? "0"} />
+      <Stat label={t("stats.inputTokens")} value={formatNumber(inputTokens)} />
       <Stat label={t("stats.reasoningTokens")} value={keyStats?.reasoningTokensDisplay ?? "0"} />
       <Stat label={t("stats.outputTokens")} value={keyStats?.outputTokensDisplay ?? "0"} />
       <Stat label={t("stats.cachedTokens")} value={keyStats?.cachedInputTokensDisplay ?? "0"} />
       <Stat label={t("stats.month")} value={keyStats?.monthlySpent ?? "$0.00"} />
     </div>
   );
+}
+
+function formatNumber(value: number) {
+  return value.toLocaleString("ru-RU");
 }
 
 function Stat({

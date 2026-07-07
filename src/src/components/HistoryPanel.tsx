@@ -53,12 +53,16 @@ export function HistoryPanel({
               <span>{entry.totalTokensDisplay} {t("history.tokens")}</span>
             </div>
             <div>
-              <span>{t("stats.inputTokens")}: {entry.inputTokensDisplay}</span>
+              <span>{t("stats.inputTokens")}: {formatNetInput(entry)}</span>
               <span>{t("stats.outputTokens")}: {entry.outputTokensDisplay}</span>
             </div>
             <div>
               <span>{t("stats.reasoningTokens")}: {entry.reasoningTokensDisplay}</span>
               <span>{t("stats.cachedTokens")}: {entry.cachedInputTokensDisplay}</span>
+            </div>
+            <div>
+              <span>{t("history.firstResponse")}: {entry.timeToFirstByteDisplay || "—"}</span>
+              <span>{t("history.responseTime")}: {entry.responseTimeDisplay || "—"}</span>
             </div>
           </article>
         ))}
@@ -75,4 +79,8 @@ export function HistoryPanel({
       </div>
     </section>
   );
+}
+
+function formatNetInput(entry: UsageLogEntry) {
+  return Math.max(entry.inputTokens - entry.cachedInputTokens, 0).toLocaleString("ru-RU");
 }

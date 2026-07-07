@@ -668,7 +668,7 @@ svg {
 .history-row {
   min-height: 42px;
   display: grid;
-  grid-template-columns: minmax(150px, 1.2fr) minmax(110px, 0.8fr) minmax(145px, 1fr) minmax(130px, 1fr);
+  grid-template-columns: minmax(140px, 1.15fr) minmax(105px, 0.75fr) minmax(130px, 0.95fr) minmax(125px, 0.9fr) minmax(130px, 0.9fr);
   gap: 8px;
   align-items: center;
   padding: 0 10px;

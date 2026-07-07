@@ -133,6 +133,10 @@ struct UsageLogEntry {
     cost_microusd: Option<i64>,
     #[serde(default)]
     display_cost_microusd: Option<i64>,
+    #[serde(default)]
+    time_to_first_byte_ms: Option<i64>,
+    #[serde(default)]
+    stream_duration_ms: Option<i64>,
     status: String,
     created_at: String,
     #[serde(default)]
@@ -151,6 +155,10 @@ struct UsageLogEntry {
     output_tokens_display: String,
     #[serde(default)]
     total_tokens_display: String,
+    #[serde(default)]
+    time_to_first_byte_display: String,
+    #[serde(default)]
+    response_time_display: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -707,6 +715,14 @@ fn enrich_usage_log_entry(entry: &mut UsageLogEntry) {
     entry.reasoning_tokens_display = format_number(entry.reasoning_tokens);
     entry.output_tokens_display = format_number(entry.output_tokens);
     entry.total_tokens_display = format_number(entry.total_tokens);
+    entry.time_to_first_byte_display = entry
+        .time_to_first_byte_ms
+        .map(format_duration_ms)
+        .unwrap_or_default();
+    entry.response_time_display = entry
+        .stream_duration_ms
+        .map(format_duration_ms)
+        .unwrap_or_default();
 }
 
 fn format_money(cents: i64) -> String {
@@ -736,6 +752,17 @@ fn format_number(value: i64) -> String {
         output.push(ch);
     }
     format!("{sign}{}", output.chars().rev().collect::<String>())
+}
+
+fn format_duration_ms(milliseconds: i64) -> String {
+    if milliseconds < 1_000 {
+        return format!("{milliseconds}ms");
+    }
+    let seconds = milliseconds as f64 / 1_000.0;
+    if seconds < 10.0 {
+        return format!("{seconds:.1}s");
+    }
+    format!("{:.0}s", seconds)
 }
 
 fn format_api_date(value: &str) -> String {
