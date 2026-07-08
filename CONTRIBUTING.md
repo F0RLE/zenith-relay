@@ -8,9 +8,9 @@ Use `main` as the stable branch. Open pull requests into `main` when review is n
 - Frontend: React + TypeScript + Vite in `src`.
 - Backend: Tauri + Rust in `src-tauri`.
 - Store user API keys through the existing local key storage path.
-- Keep the app pointed at the public Zenith API gateway.
-- Do not add Zenith backend routing, pricing, balance, fallback, or internal API logic here.
-- Do not expose private Zenith infrastructure, internal service URLs, tokens, or local workspace paths in public docs, UI, logs, or release assets.
+- Keep the app pointed at the Zenith API endpoint defined by the project.
+- Keep service behavior in the API; the desktop app configures Codex and displays API responses.
+- Keep user-facing text short and product-focused.
 
 ## Verification
 

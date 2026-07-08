@@ -7,10 +7,10 @@
 - Keep UI text in `src/src/i18n`.
 - Keep React in `src/src` display-only: local state, components, and Tauri command wrappers.
 - Keep API calls, key storage, Codex config writes, validation, formatting, top-up intents, and process control in `src-tauri/src`.
-- Do not add Zenith business logic, backend routing, fallback, pricing, balance math, or internal service topology to this app.
-- Do not expose private Zenith infrastructure, internal service URLs, tokens, workspace paths, or internal error text in UI, logs, docs, updater metadata, or release assets.
-- Treat the API key as a secret. Use the existing key storage path and sanitize user-visible errors.
-- Top-up links must never contain raw API keys.
+- Configure Codex to use `https://api.zenithmarket.dev/v1`.
+- Render state returned by the Zenith API.
+- Use the existing key storage path.
+- Create top-up links through the project helper endpoint.
 
 ## Checks
 
@@ -40,6 +40,6 @@ bun run app:build
 
 ## Contracts
 
-- The app uses the public Zenith API gateway and public helper endpoints only.
-- The app must not call admin/internal Zenith APIs directly.
-- Backend infrastructure changes must remain invisible here unless exposed through stable public API behavior.
+- The app writes Codex config for `https://api.zenithmarket.dev/v1`.
+- The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
+- UI copy should describe Zenith Codex behavior.

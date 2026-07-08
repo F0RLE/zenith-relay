@@ -7,8 +7,8 @@ Desktop app for connecting Codex to Zenith API.
 - Saves your Zenith API key.
 - Writes the Zenith connection into Codex config.
 - Launches Codex from the app.
-- Shows key balance, spending, requests, and token usage.
-- Opens the Telegram bot for balance top-ups without putting raw API keys in links.
+- Shows key balance, spending, requests, and usage history.
+- Opens the Telegram bot for balance top-ups.
 
 Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
 
@@ -22,15 +22,13 @@ The app uses:
 https://api.zenithmarket.dev/v1
 ```
 
-It does not call Zenith admin/internal APIs.
-
 ## Architecture
 
 The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands.
 
 Rust/Tauri owns API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control.
 
-Do not add backend routing, fallback, pricing, or balance rules to this app.
+The app configures Codex to use the project API endpoint and displays API-provided account state.
 
 ## Platforms
 
