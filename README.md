@@ -2,19 +2,19 @@
 
 Desktop app for connecting Codex to Zenith API.
 
-## What It Does
+## Features
 
 - Saves your Zenith API key.
 - Writes the Zenith connection into Codex config.
 - Launches Codex from the app.
-- Shows key balance, spending, requests, and token usage.
+- Shows key balance, spending, requests, and usage history.
 - Opens the Telegram bot for balance top-ups.
 
 Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
 
 Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
 
-## API Gateway
+## API
 
 The app uses:
 
@@ -24,22 +24,15 @@ https://api.zenithmarket.dev/v1
 
 ## Architecture
 
-The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands. Request handling, API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control belong in the Rust backend under `src-tauri/src`.
+The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands.
 
-### Platform Support
+Rust/Tauri owns API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control.
 
-Builds are automatically created for:
-- **Windows**: x64 and ARM64 (EXE portable, Setup installer, MSI)
-- **macOS**: Apple Silicon (ARM64) and Intel (x64) (DMG, .app.tar.gz)
-- **Linux**: x64 and ARM64 (AppImage, DEB, RPM)
+The app configures Codex to use the project API endpoint and displays API-provided account state.
 
-All platforms support automatic signed updates through GitHub Releases.
+## Platforms
 
-## Updates
-
-Zenith Codex checks GitHub Releases on startup. When a new version is available, it downloads and installs signed updates silently in the background, then relaunches automatically.
-
-Updates are verified using signed artifacts from GitHub Releases. The public key is embedded in the app; releases are signed with `TAURI_SIGNING_PRIVATE_KEY` during CI builds.
+GitHub Actions builds Windows, macOS, and Linux artifacts for x64 and ARM64. Releases use the Tauri updater through GitHub Releases.
 
 ## Development
 
@@ -62,14 +55,7 @@ cd src
 bun run verify
 ```
 
-Clean local frontend artifacts:
-
-```bash
-cd src
-bun run clean
-```
-
-Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md). Auto-update details live in [docs/UPDATES.md](docs/UPDATES.md).
+Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

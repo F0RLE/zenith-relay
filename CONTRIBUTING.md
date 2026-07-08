@@ -1,26 +1,30 @@
 # Contributing to Zenith Codex
 
-Use `main` as the active development and stable release branch. Open pull requests into `main` when review is needed; small operational fixes may be committed directly after checks pass.
+Use `main` as the stable branch. Open pull requests into `main` when review is needed.
 
-## Codex-Specific Rules
+## Rules
 
-- This is a Tauri desktop app for local Codex setup
-- Stores user key locally (OS keyring)
-- Configures Codex to use Zenith API
-- Must build for Windows, macOS, Linux, x64, and ARM64
-- Frontend: React + TypeScript + Vite
-- Backend: Tauri + Rust
-- Keep the app pointed at the Zenith gateway. Do not add old upstream provider URLs to the public desktop app
+- This is a Tauri desktop app for local Codex setup.
+- Frontend: React + TypeScript + Vite in `src`.
+- Backend: Tauri + Rust in `src-tauri`.
+- Store user API keys through the existing local key storage path.
+- Keep the app pointed at the Zenith API endpoint defined by the project.
+- Keep service behavior in the API; the desktop app configures Codex and displays API responses.
+- Keep user-facing text short and product-focused.
 
 ## Verification
 
 ```bash
 cd src
-bun run check
-bun run build
+bun run verify
 ```
 
-Full Tauri build is usually verified through GitHub Actions.
+For packaging/updater changes, also verify:
+
+```bash
+cd src
+bun run app:build
+```
 
 ## Development
 
@@ -30,19 +34,14 @@ bun install
 bun run dev  # starts Vite dev server + Tauri
 ```
 
-## Scope
+## Layout
 
-- Frontend code lives in `src/src`
-- Focused React components live in `src/src/components`
-- Tauri/Rust app code lives in `src-tauri/src`
-- Tauri capabilities live in `src-tauri/capabilities`
-- App and installer icons live in `src-tauri/icons`
-- Build helpers live in `.github/tools`
-- Release notes and packaging rules live in `docs`
-
-## Platform Support
-
-See [PLATFORM-SUPPORT.md](PLATFORM-SUPPORT.md) for platform details and signing setup.
+- `src/src` - React UI, components, i18n, Tauri wrappers.
+- `src-tauri/src` - API client, config writes, key storage, launcher, updater hooks.
+- `src-tauri/capabilities` - Tauri permissions.
+- `src-tauri/icons` - app and installer icons.
+- `.github/workflows` - CI builds and releases.
+- `.github/tools` - local/CI helper scripts.
 
 ## Release Process
 
@@ -55,12 +54,6 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-The release workflow creates GitHub Release artifacts for Windows, macOS, and Linux on x64 and ARM64.
+The release workflow creates signed GitHub Release artifacts for Windows, macOS, and Linux on x64 and ARM64.
 
-## Updates
-
-See [docs/UPDATES.md](docs/UPDATES.md) for auto-update system details.
-
-## Boundaries & Architecture
-
-See [AGENTS.md](AGENTS.md) for detailed ownership boundaries and architecture.
+See [AGENTS.md](AGENTS.md) for ownership boundaries.
