@@ -10,6 +10,13 @@
 - Configure Codex to use `https://api.zenithmarket.dev/v1`.
 - Render state returned by the Zenith API.
 - Do not hardcode provider, model, price, routing, or admin assumptions in the desktop UI.
+- Keep public local-pool features local-first. User-owned accounts must stay on
+  the user's device by default and must not be uploaded into Zenith server
+  account-pool.
+- Treat server operator upload as a private/admin capability for Zenith-owned
+  accounts only.
+- Keep Zenith API mode, personal local pool mode, and private operator upload
+  mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
 
@@ -45,3 +52,7 @@ bun run app:build
 - The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
 - Model and balance displays come from Zenith API responses.
 - UI copy should describe Zenith Codex behavior.
+- Product direction for the future open app lives in
+  `docs/product-direction.md`.
+- Personal local-pool account data is local user data. It is not Zenith
+  customer billing state and not server account-pool inventory.
