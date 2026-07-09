@@ -221,6 +221,58 @@ Recommended first routes:
 - `Local Pool` opens account import and local gateway controls.
 - `Operator Upload` appears only for admins.
 
+## Local Pool UI Direction
+
+Cockpit shows useful behavior patterns, but Zenith should use a quieter
+operator-style interface with less empty space, clearer grouping, and Russian /
+English localization from day one.
+
+Main navigation:
+
+1. **Home**: current mode, active endpoint, local gateway state, total accounts,
+   healthy accounts, warnings, and recent usage.
+2. **Sources**: Zenith API preset plus user-added OpenAI-compatible providers.
+   Each row shows name, base URL host, protocol, enabled state, model count,
+   last test, and quick actions.
+3. **Accounts**: personal OAuth/API accounts with email/label, provider,
+   subscription, quota windows, reset time, health, local tags, and actions.
+4. **Pool**: routing strategy, account/source priority, weight, disabled/drain
+   state, model support, cooldowns, and generated local API keys.
+5. **Gateway**: port, localhost/LAN scope, current base URL, generated key,
+   attach/restore buttons for Codex/OpenCode, test request, and logs.
+6. **Usage**: request history, model, source/account, API key label, latency,
+   tokens when available, status, error category, and local estimated cost.
+7. **Settings**: storage paths, language, theme, update channel, imports,
+   exports, backups, and advanced timeout/retry options.
+
+Visual rules for Zenith:
+
+- default to table/list for dense operational data; use cards only for account
+  summaries and repeated source/account items;
+- show quota as compact bars with exact reset text beside them;
+- keep destructive actions behind inline confirmation;
+- put test/start/stop/refresh actions near the object they affect;
+- keep internal Zenith provider routing invisible in public UI;
+- show generic terms such as `source`, `account`, `local gateway`, and
+  `local API key`;
+- do not copy Cockpit images, Chinese text, gradients, or component code.
+
+First desktop layout:
+
+```text
+sidebar: Home / Sources / Accounts / Pool / Gateway / Usage / Settings
+
+top strip:
+mode selector | active endpoint | gateway on/off | health summary
+
+main area:
+selected view list/table | right details drawer for edit/test/logs
+```
+
+For one selected object, use a full-width details view instead of a thin right
+column. The right drawer is only for quick edit/test panels when a list remains
+visible.
+
 ## Import Formats
 
 Support these formats in local/personal mode:
@@ -282,6 +334,10 @@ Translate these ideas into Zenith naming and implementation:
 Do not copy Cockpit identifiers into final UI unless they are generic protocol
 terms. Use `Zenith Local Pool`, `Local Gateway`, `Local API key`, `Accounts`,
 `Quota`, `Health`, `Usage`, and `Sources`.
+
+Backend reference notes are tracked in
+[`local-gateway-architecture.md`](./local-gateway-architecture.md). Build from
+that split instead of recreating Cockpit's large all-in-one local-access module.
 
 First Zenith local server contract:
 
