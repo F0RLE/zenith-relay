@@ -338,6 +338,8 @@ terms. Use `Zenith Local Pool`, `Local Gateway`, `Local API key`, `Accounts`,
 Backend reference notes are tracked in
 [`local-gateway-architecture.md`](./local-gateway-architecture.md). Build from
 that split instead of recreating Cockpit's large all-in-one local-access module.
+Live UI observations are tracked in
+[`cockpit-live-ui-audit.md`](./cockpit-live-ui-audit.md).
 
 First Zenith local server contract:
 
