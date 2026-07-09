@@ -9,6 +9,7 @@
 - Keep API calls, key storage, Codex config writes, validation, formatting, top-up intents, and process control in `src-tauri/src`.
 - Configure Codex to use `https://api.zenithmarket.dev/v1`.
 - Render state returned by the Zenith API.
+- Do not hardcode provider, model, price, routing, or admin assumptions in the desktop UI.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
 
@@ -42,4 +43,5 @@ bun run app:build
 
 - The app writes Codex config for `https://api.zenithmarket.dev/v1`.
 - The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
+- Model and balance displays come from Zenith API responses.
 - UI copy should describe Zenith Codex behavior.
