@@ -16,8 +16,11 @@
 - Local gateway mode should expose a generated local API key and local
   OpenAI-compatible base URL, then configure Codex/OpenCode through reversible
   config attach/restore.
-- A user's Zenith API key may be one personal local-pool source. Treat it as
-  user-owned local configuration, not internal Zenith provider routing.
+- Local provider sources are generic user-owned records: display name, base URL,
+  API key, protocol mode, model filters, priority, and weight.
+- A user's Zenith API key is one preset personal local-pool source. Treat it as
+  user-owned local configuration, not internal Zenith provider routing. Do not
+  hardcode local pool behavior around Zenith API only.
 - Treat server operator upload as a private/admin capability for Zenith-owned
   accounts only.
 - Keep Zenith API mode, personal local pool mode, and private operator upload

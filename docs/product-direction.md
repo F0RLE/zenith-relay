@@ -48,8 +48,10 @@ Allowed:
 - import local `auth.json`;
 - import pasted token JSON;
 - import Sub2API-style JSON for personal accounts;
-- add API keys and custom OpenAI-compatible base URLs;
-- add a Zenith API key as one of the local pool sources;
+- add provider sources with a name, OpenAI-compatible base URL, API key, and
+  protocol mode;
+- use Zenith API as one preset provider source, not as a hardcoded pool
+  dependency;
 - view quota windows, reset times, subscription status, account health, and
   account notes;
 - set local priorities/weights;
@@ -75,7 +77,7 @@ server, not only through direct account switching.
 Target user flow:
 
 ```text
-user accounts + user API keys + optional Zenith API key
+user accounts + provider sources
 -> Zenith Codex local pool
 -> local gateway at http://127.0.0.1:<port>/v1
 -> generated local API key
@@ -83,7 +85,9 @@ user accounts + user API keys + optional Zenith API key
 ```
 
 This lets a user combine several personal accounts and external API keys behind
-one local endpoint. Codex can then be configured as if it were using an API key:
+one local endpoint. A provider source can be Zenith API, OpenRouter, direct
+OpenAI-compatible vendor, a self-hosted gateway, or any compatible endpoint the
+user configures. Codex can then be configured as if it were using one API key:
 
 ```toml
 model_provider = "zenith_local_pool"
@@ -120,10 +124,55 @@ The local gateway needs:
 - local request logs and usage stats;
 - one-click client config attach/restore.
 
-Zenith API can be added as a source in this local pool. In that case the local
-gateway may choose between local user accounts and the user's Zenith API key
-based on local rules. This is still personal routing on the user's device, not
-Zenith server routing.
+### Provider Sources
+
+Local pool sources are editable user-owned records. Zenith API is only one
+default preset.
+
+Provider source fields:
+
+```text
+id
+name
+enabled
+base_url
+api_key
+wire_api: responses | chat_completions
+models: discovered or manual
+allowed_models
+excluded_models
+model_prefix
+supports_vision
+supports_images
+priority
+weight
+last_test_at
+last_test_status
+last_error
+created_at
+updated_at
+```
+
+User actions:
+
+- add provider;
+- edit name, base URL, key, protocol mode, models, priority, weight;
+- test provider with selected model;
+- enable/disable;
+- delete;
+- rotate local stored key value;
+- scope a generated local API key to selected provider sources/accounts.
+
+Zenith provider preset:
+
+```text
+name: Zenith API
+base_url: https://api.zenithmarket.dev/v1
+wire_api: responses
+```
+
+The user still provides their own Zenith API key. The app stores it as personal
+local configuration. It is not internal Zenith provider routing.
 
 ### Operator Server Upload Mode
 

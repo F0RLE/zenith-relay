@@ -14,10 +14,12 @@ managing personal local AI account pools.
 Planned:
 
 - Manage personal local OpenAI/Codex accounts and API keys.
+- Add editable provider sources with name, base URL, protocol mode, and API key.
 - Show quota, reset, subscription, and health state.
 - Run a local gateway for the user's own accounts.
 - Generate local API keys so Codex/OpenCode can use the local gateway.
-- Add a Zenith API key as one local pool source next to personal accounts.
+- Add Zenith API as one preset provider source next to custom providers and
+  personal accounts.
 - Import local `auth.json`, token JSON, and Sub2API-style personal exports.
 - Private operator upload mode for Zenith-owned accounts only.
 
