@@ -49,11 +49,13 @@ Allowed:
 - import pasted token JSON;
 - import Sub2API-style JSON for personal accounts;
 - add API keys and custom OpenAI-compatible base URLs;
+- add a Zenith API key as one of the local pool sources;
 - view quota windows, reset times, subscription status, account health, and
   account notes;
 - set local priorities/weights;
 - disable/drain accounts locally;
 - start/stop a local gateway;
+- generate local API keys for local clients;
 - configure Codex/OpenCode/other compatible clients to use the local gateway.
 
 Rules:
@@ -64,6 +66,64 @@ Rules:
 - local account details are never uploaded to Zenith unless operator mode is
   explicitly enabled and the account is Zenith-owned;
 - public UI copy must not describe Zenith's internal provider routing.
+
+### Personal Local Gateway
+
+The local pool should be exposed to clients through a local OpenAI-compatible
+server, not only through direct account switching.
+
+Target user flow:
+
+```text
+user accounts + user API keys + optional Zenith API key
+-> Zenith Codex local pool
+-> local gateway at http://127.0.0.1:<port>/v1
+-> generated local API key
+-> Codex/OpenCode/client config
+```
+
+This lets a user combine several personal accounts and external API keys behind
+one local endpoint. Codex can then be configured as if it were using an API key:
+
+```toml
+model_provider = "zenith_local_pool"
+
+[model_providers.zenith_local_pool]
+name = "Zenith Local Pool"
+base_url = "http://127.0.0.1:14998/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "zlp_local_generated_key"
+supports_websockets = false
+```
+
+The app should also write/repair the matching local `auth.json` API-key shape
+when needed:
+
+```json
+{
+  "auth_mode": "apikey",
+  "OPENAI_API_KEY": "zlp_local_generated_key"
+}
+```
+
+The local gateway needs:
+
+- port setting;
+- localhost by default;
+- optional LAN scope with explicit warning;
+- generated default key plus named keys;
+- key rotation;
+- per-key allowed models and excluded models;
+- optional model prefix per key;
+- per-key account/source scope;
+- local request logs and usage stats;
+- one-click client config attach/restore.
+
+Zenith API can be added as a source in this local pool. In that case the local
+gateway may choose between local user accounts and the user's Zenith API key
+based on local rules. This is still personal routing on the user's device, not
+Zenith server routing.
 
 ### Operator Server Upload Mode
 
@@ -140,6 +200,59 @@ only for local user traffic:
 4. spread traffic with last-used balancing;
 5. use session affinity only after health and quota gates pass;
 6. never retry a stream after output bytes were sent.
+
+## Cockpit Ideas To Translate
+
+Cockpit local access has a useful product shape for a personal local server.
+Translate these ideas into Zenith naming and implementation:
+
+1. `collection`: enabled state, port, access scope, client base URL host, gateway
+   mode, account ids, local API keys, routing strategy, timeouts, debug logs,
+   session affinity, max retry credentials, and model rules.
+2. Local API keys: default key plus named keys, enabled flag, label, scoped
+   accounts, model prefix, allowed models, excluded models, last-used timestamp,
+   rotate/delete actions.
+3. Routing strategies: `auto`, `single_account`, `quota_high_first`,
+   `quota_low_first`, `plan_high_first`, `plan_low_first`, `expiry_soon_first`,
+   and `custom`.
+4. Custom routing: account priority and weight. Priority decides tier; weight
+   spreads picks inside the same tier.
+5. Account model rules: exclude models per account so one weak account does not
+   remove a model for the whole pool.
+6. Model aliases and model filters: useful for local compatibility, but public
+   Zenith API prices/models still come from Zenith backend.
+7. Profile attach/restore: write local provider config and auth JSON, then keep
+   backup/restore so users can return to previous Codex login/API setup.
+8. Usage stats: totals, accounts, models, API keys, daily/weekly/monthly windows,
+   request logs, latency, tokens, errors, and estimated local cost.
+9. Health state: account available flag, consecutive failures, last success,
+   last failure, model cooldowns, image capability status.
+10. Timeouts and retries: separate open/idle/total stream timeouts, websocket
+    timeouts, upstream send retries, and local test request results.
+
+Do not copy Cockpit identifiers into final UI unless they are generic protocol
+terms. Use `Zenith Local Pool`, `Local Gateway`, `Local API key`, `Accounts`,
+`Quota`, `Health`, `Usage`, and `Sources`.
+
+First Zenith local server contract:
+
+```text
+GET  /v1/models
+POST /v1/responses
+POST /v1/chat/completions
+```
+
+Later:
+
+```text
+POST /v1/images/generations
+POST /v1/images/edits
+POST /v1/messages
+```
+
+The first implementation should prefer `/v1/responses` for Codex. Chat
+completions can proxy custom API-key sources that only support chat completions.
+Anthropic messages adapter comes later.
 
 ## Boundary With `zenith-account-pool`
 

@@ -13,6 +13,11 @@
 - Keep public local-pool features local-first. User-owned accounts must stay on
   the user's device by default and must not be uploaded into Zenith server
   account-pool.
+- Local gateway mode should expose a generated local API key and local
+  OpenAI-compatible base URL, then configure Codex/OpenCode through reversible
+  config attach/restore.
+- A user's Zenith API key may be one personal local-pool source. Treat it as
+  user-owned local configuration, not internal Zenith provider routing.
 - Treat server operator upload as a private/admin capability for Zenith-owned
   accounts only.
 - Keep Zenith API mode, personal local pool mode, and private operator upload
