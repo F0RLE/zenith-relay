@@ -171,3 +171,60 @@ The UI implies these backend contracts:
 
 Do not expose Zenith internal provider routing, upstream price selection, or
 server-side owned account pool behavior through these public local UI contracts.
+
+## Second Visual Pass
+
+Extra screens inspected:
+
+- expanded sidebar;
+- platform dashboard;
+- layout customization modal;
+- app settings: general, network, data management;
+- add Codex account modal;
+- add model provider modal.
+
+Additional useful patterns:
+
+- expanded sidebar with icon plus text is much clearer than icon-only sidebar;
+- platform dashboard works as a high-level health board: summary cards on top,
+  then current/recommended account panels per platform;
+- settings rows with label, short hint, and control aligned on the right are
+  easy to scan;
+- network settings belong under an advanced settings area, not in the main
+  gateway screen;
+- data management screen confirms that backups, export, and import need their
+  own settings section;
+- add-provider form has the right core fields: provider name, base URL,
+  protocol, site, key-page URL, key name, and API key;
+- protocol selection should be explicit at create time because it affects
+  routing and supported endpoints.
+
+Additional problems to avoid:
+
+- icon-only sidebar hides product structure until the user hovers or expands it;
+- dashboard has too many platform tiles for a product focused on Zenith API and
+  local pool;
+- platform layout customization is powerful but too early for first release;
+- add-account modal puts several import modes in one dense surface;
+- sensitive auth helper data appears too openly in import flow;
+- add-provider modal shows a large provider catalog before the user has entered
+  a source, which slows a normal custom-provider setup;
+- fixed modal footer can cover lower form fields when the modal scrolls;
+- provider presets are too numerous and visually equal, so the recommended path
+  is not obvious.
+
+Zenith decisions from this pass:
+
+- use expanded sidebar by default on desktop, collapsible to icon-only;
+- keep `Home` focused on Zenith API status and Local Gateway status, not a
+  multi-platform dashboard;
+- put `Settings` in full-width rows, not cards;
+- keep `Network`, `Backups`, and `Advanced` behind settings tabs;
+- make add-account/import a wizard:
+  `Choose type -> Paste/import/test -> Preview -> Save`;
+- mask sensitive helper data by default and require explicit reveal;
+- make add-source wizard prioritize:
+  `Zenith API preset`, `OpenRouter preset`, `OpenAI-compatible`, `Custom`;
+- move big provider catalogs to searchable presets, not first screen;
+- keep create-source footer visible but never covering fields;
+- show validation and test result before enabling a source in the pool.
