@@ -16,6 +16,7 @@ crates/relay-core/target/
 crates/relay-core/Cargo.lock
 playwright-report/
 test-results/
+src/output/
 
 *.pdb
 *.log

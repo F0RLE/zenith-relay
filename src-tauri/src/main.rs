@@ -46,7 +46,7 @@ const STATS_WATCH_INTERVAL: Duration = Duration::from_secs(15);
 struct UiState {
     provider_active: bool,
     codex_running: bool,
-    saved_api_key: String,
+    has_saved_api_key: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -205,9 +205,9 @@ fn get_state() -> UiState {
     UiState {
         provider_active: provider_has_token(),
         codex_running: is_codex_running(),
-        saved_api_key: load_saved_app_key()
+        has_saved_api_key: load_saved_app_key()
             .or_else(load_api_key_for_launch)
-            .unwrap_or_default(),
+            .is_some_and(|value| !value.trim().is_empty()),
     }
 }
 
@@ -224,6 +224,12 @@ fn get_system_locale() -> Option<String> {
 #[tauri::command]
 async fn get_key_stats(api_key: String) -> Result<KeyStats, String> {
     let api_key = normalize_api_key(&api_key)?;
+    fetch_key_stats(&api_key).await
+}
+
+#[tauri::command]
+async fn get_saved_key_stats() -> Result<KeyStats, String> {
+    let api_key = stored_api_key()?;
     fetch_key_stats(&api_key).await
 }
 
@@ -250,6 +256,15 @@ async fn get_key_usage_history(
     after_id: Option<i64>,
 ) -> Result<UsageLogPage, String> {
     let api_key = normalize_api_key(&api_key)?;
+    fetch_key_usage_history(&api_key, since_id, after_id).await
+}
+
+#[tauri::command]
+async fn get_saved_key_usage_history(
+    since_id: Option<i64>,
+    after_id: Option<i64>,
+) -> Result<UsageLogPage, String> {
+    let api_key = stored_api_key()?;
     fetch_key_usage_history(&api_key, since_id, after_id).await
 }
 
@@ -379,6 +394,23 @@ async fn create_top_up_intent_and_open(
     app: AppHandle,
 ) -> Result<(), String> {
     let api_key = normalize_api_key(&api_key)?;
+    create_top_up_intent(&api_key, amount_cents, app).await
+}
+
+#[tauri::command]
+async fn create_saved_top_up_intent_and_open(
+    amount_cents: i64,
+    app: AppHandle,
+) -> Result<(), String> {
+    let api_key = stored_api_key()?;
+    create_top_up_intent(&api_key, amount_cents, app).await
+}
+
+async fn create_top_up_intent(
+    api_key: &str,
+    amount_cents: i64,
+    app: AppHandle,
+) -> Result<(), String> {
     validate_top_up_amount_cents(amount_cents)?;
 
     let client = reqwest::Client::new();
@@ -400,8 +432,7 @@ async fn create_top_up_intent_and_open(
         .map_err(|err| format!("Top-up intent response is invalid: {err}"))?;
     let start = extract_top_up_start(payload.data)
         .ok_or_else(|| "Top-up intent response is missing a start payload.".to_string())?;
-    let url = telegram_start_url(&start);
-    open_top_up_url(url, app)
+    open_top_up_url(telegram_start_url(&start), app)
 }
 
 #[tauri::command]
@@ -487,6 +518,13 @@ fn normalize_api_key(api_key: &str) -> Result<String, String> {
         return Err("API key is required.".to_string());
     }
     Ok(api_key.to_string())
+}
+
+fn stored_api_key() -> Result<String, String> {
+    let api_key = load_saved_app_key()
+        .or_else(load_api_key_for_launch)
+        .ok_or_else(|| "API key is not configured.".to_string())?;
+    normalize_api_key(&api_key)
 }
 
 async fn api_error_message(response: reqwest::Response, fallback: &str) -> String {
@@ -904,7 +942,7 @@ mod tests {
         extract_top_up_start, extract_top_up_start_from_url, fallback_api_date, format_api_date,
         format_money_microusd, is_allowed_top_up_url, key_stats_from_value,
         sanitize_api_error_message, telegram_start_url, validate_top_up_amount_cents,
-        TopUpIntentData, MAX_TOP_UP_AMOUNT_CENTS,
+        TopUpIntentData, UiState, MAX_TOP_UP_AMOUNT_CENTS,
     };
     use serde_json::json;
 
@@ -919,6 +957,20 @@ mod tests {
         assert!(!is_allowed_top_up_url(
             "tg://resolve?domain=other_bot&start=ztu_0123456789abcdef0123456789abcdef0123"
         ));
+    }
+
+    #[test]
+    fn ui_state_never_serializes_the_saved_api_key() {
+        let value = serde_json::to_value(UiState {
+            provider_active: true,
+            codex_running: false,
+            has_saved_api_key: true,
+        })
+        .unwrap();
+        let rendered = value.to_string();
+        assert_eq!(value["hasSavedApiKey"], true);
+        assert!(!rendered.contains("savedApiKey"));
+        assert!(!rendered.contains("api_key"));
     }
 
     #[test]
@@ -1132,9 +1184,12 @@ fn main() {
             get_platform,
             get_system_locale,
             get_key_stats,
+            get_saved_key_stats,
             get_key_usage_history,
+            get_saved_key_usage_history,
             get_key_usage_version,
             create_top_up_intent_and_open,
+            create_saved_top_up_intent_and_open,
             prepare_top_up_amount,
             save_key,
             reset_key,
@@ -1186,6 +1241,7 @@ fn main() {
             local_pool::commands::profiles::restore_codex_account_profile,
             local_pool::commands::remote_server::connect_remote_server,
             local_pool::commands::remote_server::get_remote_server_state,
+            local_pool::commands::remote_server::get_remote_server_usage,
             local_pool::commands::remote_server::refresh_remote_server_capabilities,
             local_pool::commands::remote_server::disconnect_remote_server,
             local_pool::commands::remote_server::prepare_remote_server_deployment,

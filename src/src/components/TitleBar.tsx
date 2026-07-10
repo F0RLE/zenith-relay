@@ -27,7 +27,9 @@ export function TitleBar({ platform }: TitleBarProps) {
   return (
     <header className={`titlebar titlebar-${platform}`} data-tauri-drag-region>
       {macos ? controls : null}
-      <div className="titlebar-drag" data-tauri-drag-region />
+      <div className="titlebar-drag" data-tauri-drag-region>
+        <strong data-tauri-drag-region>{t("app.label")}</strong>
+      </div>
       {!macos ? controls : null}
     </header>
   );

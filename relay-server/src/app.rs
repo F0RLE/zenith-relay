@@ -208,6 +208,8 @@ impl AppState {
             sources: source_summaries,
             accounts: account_summaries,
             keys: key_summaries,
+            automations: self.store.wake_tasks()?,
+            wake_history: self.store.wake_state()?.history().iter().cloned().collect(),
             warnings,
         })
     }

@@ -119,6 +119,28 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(confirmed.status(), StatusCode::OK);
     let confirmed_text = confirmed.text().await.unwrap();
     assert!(!confirmed_text.contains("synthetic-access-token"));
+    let confirmed_json: Value = serde_json::from_str(&confirmed_text).unwrap();
+    let account_id = confirmed_json["id"].as_str().unwrap();
+    let updated: Value = client
+        .patch(format!("{}/accounts/{account_id}", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"enabled": false, "draining": true, "priority": 25, "weight": 2}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["enabled"], false);
+    assert_eq!(updated["draining"], true);
+    let reenabling = client
+        .patch(format!("{}/accounts/{account_id}", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"enabled": true, "draining": false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reenabling.status(), StatusCode::OK);
 
     let account_response = client
         .post(format!("{}/v1/responses", first.origin))

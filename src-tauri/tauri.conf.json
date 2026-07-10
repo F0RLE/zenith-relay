@@ -15,12 +15,12 @@
       {
         "label": "main",
         "title": "Zenith Relay",
-        "width": 900,
-        "height": 340,
-        "minWidth": 760,
-        "minHeight": 280,
+        "width": 1160,
+        "height": 760,
+        "minWidth": 840,
+        "minHeight": 560,
         "decorations": false,
-        "backgroundColor": "#071018",
+        "backgroundColor": "#f5f7f8",
         "resizable": true,
         "center": true,
         "visible": true

@@ -11,7 +11,7 @@ export type SourceCommandWireApi = "responses" | "chat_completions";
 export type UiState = {
   providerActive: boolean;
   codexRunning: boolean;
-  savedApiKey: string;
+  hasSavedApiKey: boolean;
 };
 
 export type LocalPoolCommandError = {
@@ -347,12 +347,27 @@ export function getKeyStats(apiKey: string) {
   return invoke<KeyStats>("get_key_stats", { apiKey });
 }
 
+export function getSavedKeyStats() {
+  return invoke<KeyStats>("get_saved_key_stats");
+}
+
 export function getKeyUsageHistory(apiKey: string, sinceId?: number, afterId?: number) {
   return invoke<{ usage: UsageLogEntry[]; limit: number; sinceId: number | null }>("get_key_usage_history", {
     apiKey,
     sinceId,
     afterId,
   });
+}
+
+export function getSavedKeyUsageHistory(sinceId?: number, afterId?: number) {
+  return invoke<{ usage: UsageLogEntry[]; limit: number; sinceId: number | null }>("get_saved_key_usage_history", {
+    sinceId: sinceId ?? null,
+    afterId: afterId ?? null,
+  });
+}
+
+export function createSavedTopUpIntentAndOpen(amountCents: number) {
+  return invoke<void>("create_saved_top_up_intent_and_open", { amountCents });
 }
 
 export function getKeyUsageVersion(apiKey: string) {

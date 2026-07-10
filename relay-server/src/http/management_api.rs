@@ -436,6 +436,55 @@ pub async fn confirm_account_import(
     Ok(Json(account_summary(&state, &record)?))
 }
 
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountPatch {
+    label: Option<String>,
+    enabled: Option<bool>,
+    draining: Option<bool>,
+    allowed_models: Option<Vec<String>>,
+    excluded_models: Option<Vec<String>>,
+    priority: Option<i32>,
+    weight: Option<u32>,
+}
+
+pub async fn update_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<AccountPatch>,
+) -> Result<Json<AccountSummary>, ManagementError> {
+    let mut record = find_account(&state, &id)?;
+    let old = record.clone();
+    if let Some(value) = input.label {
+        record.label = clean_label(&value, "account label")?;
+    }
+    if let Some(value) = input.enabled {
+        record.enabled = value;
+    }
+    if let Some(value) = input.draining {
+        record.draining = value;
+    }
+    if let Some(value) = input.allowed_models {
+        record.allowed_models = normalized_values(value);
+    }
+    if let Some(value) = input.excluded_models {
+        record.excluded_models = normalized_values(value);
+    }
+    if let Some(value) = input.priority {
+        record.priority = value;
+    }
+    if let Some(value) = input.weight {
+        record.weight = valid_weight(value)?;
+    }
+    state.store.save_account(&record).map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        let _ = state.store.save_account(&old);
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(account_summary(&state, &record)?))
+}
+
 pub async fn delete_account(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

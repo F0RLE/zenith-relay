@@ -75,6 +75,8 @@ pub async fn get_local_runtime_state(
             .map(local_account_summary)
             .collect::<Result<_, _>>()?,
         keys: snapshot.keys.iter().map(local_key_summary).collect(),
+        automations: snapshot.automations,
+        wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
     })
 }
@@ -183,6 +185,8 @@ mod parity_tests {
             sources: Vec::new(),
             accounts: Vec::new(),
             keys: Vec::new(),
+            automations: Vec::new(),
+            wake_history: Vec::new(),
             warnings: Vec::new(),
         })
         .unwrap();

@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::protocol::{
     negotiate, Capabilities, ClientProtocolRange, HealthResponse, NegotiatedProtocol,
-    RuntimeStateSnapshot,
+    RuntimeStateSnapshot, UsagePage,
 };
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -98,6 +98,16 @@ impl RemoteClient {
 
     pub async fn state(&self) -> Result<RuntimeStateSnapshot, RemoteClientError> {
         self.request(Method::GET, "/state", Option::<&()>::None, true)
+            .await
+    }
+
+    pub async fn usage(&self, page: u32, page_size: u32) -> Result<UsagePage, RemoteClientError> {
+        let path = format!(
+            "/usage?page={}&pageSize={}",
+            page.max(1),
+            page_size.clamp(1, 200)
+        );
+        self.request(Method::GET, &path, Option::<&()>::None, true)
             .await
     }
 

@@ -7,9 +7,11 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
+    "test:unit": "bun test tests/i18n.test.ts",
+    "test:e2e": "playwright test",
     "clean": "bun ../.github/tools/clean.mjs",
     "clean:all": "bun ../.github/tools/clean.mjs --all",
-    "verify": "bun run check && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked",
+    "verify": "bun run check && bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked",
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "app:dev": "bun ../.github/tools/tauri-dev.mjs",
@@ -27,6 +29,7 @@
     "react-i18next": "^17.0.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@tauri-apps/cli": "^2.11.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

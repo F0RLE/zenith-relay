@@ -136,47 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P5: Complete Operational UI
-
-Build only screens required by the working runtime:
-
-1. Overview with mode selector and runtime status.
-2. Connections with Sources, Accounts, Automations, and Remote Server views.
-3. Pool with Candidates, Keys, and Model Rules views.
-4. Gateway with Endpoint, Client Setup, and Diagnostics views.
-5. Usage with request table and detail drawer.
-6. Profiles with attach, restore, backup, and repair.
-7. Settings and Recovery.
-
-Remote Pool setup offers:
-
-- `Connect existing server`;
-- `Deploy new server`.
-
-UI rules:
-
-- seven top-level sidebar items only: Overview, Connections, Pool, Gateway,
-  Usage, Profiles, Settings;
-- default window `1160x760`, minimum `840x560`;
-- system theme by default with neutral light and charcoal dark palettes;
-- one selected record uses a full-width detail view;
-- tables/lists for operational data;
-- quota and reset time are visible together;
-- wake automation shows selected accounts/windows, next eligibility, last
-  result, and history without storing generated text;
-- every mutation has loading, success, failure, and retry state;
-- destructive actions require confirmation;
-- raw secrets are hidden by default;
-- public UI never explains Zenith private routing or owned inventory.
-
-Acceptance:
-
-- every backend command has a reachable UI action;
-- empty states have one primary action;
-- `1160x760` and minimum `840x560` windows have no overlap or clipped controls;
-- Russian and English strings exist for all shipped controls;
-- Playwright screenshots cover the main local and remote flows.
-
 ### P6: Release Verification
 
 Required unit/contract coverage:

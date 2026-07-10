@@ -12,7 +12,7 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
-use zenith_relay_core::protocol::{Capabilities, HealthResponse, RuntimeStateSnapshot};
+use zenith_relay_core::protocol::{Capabilities, HealthResponse, RuntimeStateSnapshot, UsagePage};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +47,7 @@ pub enum RemoteServerAction {
     DeleteSource { id: String },
     PreviewAccountImport,
     ConfirmAccountImport,
+    UpdateAccount { id: String },
     DeleteAccount { id: String },
     CreateKey,
     UpdateKey { id: String },
@@ -146,6 +147,22 @@ pub async fn get_remote_server_state(
         return Ok(None);
     };
     client.state().await.map(Some).map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn get_remote_server_usage(
+    page: Option<u32>,
+    page_size: Option<u32>,
+    state: State<'_, DesktopState>,
+) -> Result<Option<UsagePage>, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Ok(None);
+    };
+    client
+        .usage(page.unwrap_or(1), page_size.unwrap_or(100))
+        .await
+        .map(Some)
+        .map_err(remote_error)
 }
 
 #[tauri::command]
@@ -258,6 +275,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::ConfirmAccountImport => {
             (Method::POST, "/accounts/import/confirm".to_string(), true)
+        }
+        RemoteServerAction::UpdateAccount { id } => {
+            (Method::PATCH, object_path("accounts", id)?, true)
         }
         RemoteServerAction::DeleteAccount { id } => {
             (Method::DELETE, object_path("accounts", id)?, false)

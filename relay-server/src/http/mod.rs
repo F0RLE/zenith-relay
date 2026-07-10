@@ -5,7 +5,7 @@ mod public_api;
 use crate::state::AppState;
 use axum::{
     middleware::from_fn_with_state,
-    routing::{delete, get, patch, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -32,7 +32,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/accounts/import/confirm",
             post(management_api::confirm_account_import),
         )
-        .route("/accounts/{id}", delete(management_api::delete_account))
+        .route(
+            "/accounts/{id}",
+            patch(management_api::update_account).delete(management_api::delete_account),
+        )
         .route(
             "/keys",
             get(management_api::list_keys).post(management_api::create_key),

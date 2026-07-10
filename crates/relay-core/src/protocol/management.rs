@@ -1,6 +1,7 @@
 use super::Capabilities;
 use crate::{
     accounts::AccountAuthState,
+    automations::{WakeHistory, WakeTask},
     quota::{QuotaSnapshot, Subscription},
     WireApi,
 };
@@ -99,6 +100,8 @@ pub struct RuntimeStateSnapshot {
     pub sources: Vec<SourceSummary>,
     pub accounts: Vec<AccountSummary>,
     pub keys: Vec<KeySummary>,
+    pub automations: Vec<WakeTask>,
+    pub wake_history: Vec<WakeHistory>,
     pub warnings: Vec<String>,
 }
 
