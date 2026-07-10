@@ -722,7 +722,7 @@ mod tests {
         ProcessLockConfig {
             wait_timeout_ms: 2_000,
             poll_interval_ms: 5,
-            stale_after_ms: 50,
+            stale_after_ms: 5_000,
         }
     }
 
