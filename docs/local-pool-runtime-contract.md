@@ -495,7 +495,7 @@ Verification:
 Dedupe key:
 
 ```text
-task_id + account_id + window_kind + full_transition_fingerprint
+account_id + window_kind + full_transition_fingerprint
 ```
 
 Natural client usage wins. If the account served a normal request after the

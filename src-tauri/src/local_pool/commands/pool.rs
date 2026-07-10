@@ -25,6 +25,7 @@ pub struct UpdateGatewayKeyInput {
     key_id: String,
     label: String,
     source_ids: Option<Vec<String>>,
+    account_ids: Option<Vec<String>>,
     #[serde(default)]
     allowed_models: Vec<String>,
     #[serde(default)]
@@ -44,6 +45,7 @@ pub struct UpdateRoutingInput {
 pub async fn create_local_gateway_key(
     label: String,
     source_ids: Option<Vec<String>>,
+    account_ids: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
     model_prefix: Option<String>,
@@ -63,6 +65,7 @@ pub async fn create_local_gateway_key(
         enabled: true,
         secret_ref: secret_ref.clone(),
         source_ids,
+        account_ids,
         allowed_models: allowed_models.unwrap_or_default(),
         excluded_models: excluded_models.unwrap_or_default(),
         model_prefix,
@@ -107,6 +110,7 @@ pub async fn update_local_gateway_key(
         enabled: current.enabled,
         secret_ref: current.secret_ref,
         source_ids: input.source_ids,
+        account_ids: input.account_ids,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
         model_prefix: input.model_prefix,
@@ -257,6 +261,15 @@ fn validate_key_record(
             ));
         }
     }
+    if let Some(account_ids) = &key.account_ids {
+        let store = state.store()?;
+        if account_ids.iter().any(|id| store.account(id).is_none()) {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "local key scope contains an unknown account",
+            ));
+        }
+    }
     if secret_store::load(&key.secret_ref)?.is_none() && state.store()?.key(&key.id).is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::NotFound,
@@ -266,7 +279,7 @@ fn validate_key_record(
     if require_usable_scope && !has_usable_source(state, key)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "local key must include at least one enabled, non-draining source",
+            "local key must include at least one enabled, non-draining candidate",
         ));
     }
     Ok(())
@@ -287,6 +300,25 @@ pub(super) fn has_usable_source(
             && !source.draining
             && secret_store::load(&source.secret_ref)?.is_some()
         {
+            return Ok(true);
+        }
+    }
+    for account in store.accounts() {
+        let scoped = key
+            .account_ids
+            .as_ref()
+            .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id));
+        if !scoped || !account.account.enabled || account.account.draining {
+            continue;
+        }
+        let mut secrets_available = !account.account.secret_refs.is_empty();
+        for secret_ref in &account.account.secret_refs {
+            if secret_store::load(secret_ref)?.is_none() {
+                secrets_available = false;
+                break;
+            }
+        }
+        if secrets_available {
             return Ok(true);
         }
     }

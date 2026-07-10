@@ -136,38 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P3: OpenAI/Codex OAuth Accounts And Quota
-
-Add user-owned account capacity after the generic scheduler works.
-
-Implement:
-
-1. OAuth browser login with manual callback fallback.
-2. Local Codex `auth.json` import.
-3. Token JSON and refresh-token import with preview/confirm.
-4. Stable identity and duplicate update rules.
-5. One token refresh authority with per-account lock.
-6. Quota/subscription refresh with normalized windows and reset times.
-7. Reauth, access-token-only, expired, checkpoint, captcha, and blocked states.
-8. OAuth account executor for `/v1/responses`.
-9. Account health, model cooldown, affinity, and usage capture.
-10. Quota wake tasks with account/window selection, cycle dedupe, minimal
-    request policy, countdown verification, and execution history.
-
-OAuth accounts and API sources enter the same `RuntimeCandidate` list. No
-account-only scheduler is allowed.
-
-Acceptance:
-
-- two OAuth accounts and one API source can share one endpoint;
-- default explicit priorities can place OAuth accounts before paid API sources;
-- exhausted/reauth accounts are skipped before scoring;
-- concurrent requests do not refresh one token twice;
-- quota and reset state survive app restart;
-- a fully restored quota window can start one verified countdown without a
-  duplicate request when normal client traffic already started it;
-- deleting an account clears scopes, affinity, cooldown, and profile bindings.
-
 ### P4: Remote Pool Runtime
 
 Move the proven pool runtime to a user-managed server.

@@ -1,3 +1,5 @@
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 const KEYRING_SERVICE: &str = "Zenith Relay";
 const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
 const KEYRING_USER: &str = "api-key";
@@ -28,6 +30,7 @@ pub fn delete_previous_codex_auth() -> Result<(), String> {
 }
 
 pub fn save_named_secret(user: &str, value: &str) -> Result<(), String> {
+    let _guard = keyring_guard()?;
     keyring_entry_for(user)
         .set_password(value)
         .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
@@ -38,6 +41,7 @@ pub fn load_named_secret(user: &str) -> Option<String> {
 }
 
 pub fn load_named_secret_result(user: &str) -> Result<Option<String>, String> {
+    let _guard = keyring_guard()?;
     if let Some(value) = load_from_service(KEYRING_SERVICE, user)? {
         return Ok(Some(value));
     }
@@ -55,9 +59,18 @@ pub fn load_named_secret_result(user: &str) -> Result<Option<String>, String> {
 }
 
 pub fn delete_named_secret_result(user: &str) -> Result<(), String> {
+    let _guard = keyring_guard()?;
     let current = delete_from_service(KEYRING_SERVICE, user);
     let legacy = delete_from_service(LEGACY_KEYRING_SERVICE, user);
     current.and(legacy)
+}
+
+fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
+    static KEYRING_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    KEYRING_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "Хранилище секретов заблокировано после внутренней ошибки".to_string())
 }
 
 fn keyring_entry_for(user: &str) -> keyring::Entry {

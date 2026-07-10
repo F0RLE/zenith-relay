@@ -1,5 +1,6 @@
 use crate::{
     local_pool::{
+        commands::accounts::prepare_account_credentials,
         error::{CommandError, ErrorCode, LocalPoolError},
         profiles::codex,
         state::DesktopState,
@@ -7,6 +8,7 @@ use crate::{
     },
     platform::default_codex_home,
 };
+use std::path::PathBuf;
 use tauri::State;
 
 #[tauri::command]
@@ -26,7 +28,7 @@ pub async fn attach_codex_to_local_gateway(
     if !key.enabled || !super::pool::has_usable_source(&state, &key)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "local key is not available for any enabled source",
+            "local key is not available for any enabled candidate",
         )
         .into());
     }
@@ -45,4 +47,70 @@ pub async fn attach_codex_to_local_gateway(
 pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn attach_codex_to_account(
+    account_id: String,
+    profile_dir: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<codex::ProfileBinding, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let profile_dir = resolve_profile_dir(profile_dir)?;
+    let prepared = prepare_account_credentials(&state, &account_id).await?;
+    codex::attach_account(
+        &profile_dir,
+        &state.profile_backup_root(),
+        &account_id,
+        prepared.tokens(),
+        prepared.provider_account_id(),
+    )
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn list_codex_account_bindings(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<codex::ProfileBinding>, CommandError> {
+    codex::account_bindings(&state.profile_backup_root()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn restore_codex_account_profile(
+    profile_dir: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<Option<codex::ProfileBinding>, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let profile_dir = resolve_profile_dir(profile_dir)?;
+    codex::restore_account_profile(&profile_dir, &state.profile_backup_root()).map_err(Into::into)
+}
+
+fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandError> {
+    let Some(profile_dir) = profile_dir else {
+        return Ok(default_codex_home());
+    };
+    let profile_dir = profile_dir.trim();
+    if profile_dir.is_empty() || profile_dir.chars().any(char::is_control) {
+        return Err(LocalPoolError::new(ErrorCode::InvalidState, "profile path is invalid").into());
+    }
+    let path = PathBuf::from(profile_dir);
+    if !path.is_absolute() {
+        return Err(
+            LocalPoolError::new(ErrorCode::InvalidState, "profile path must be absolute").into(),
+        );
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("failed to access profile path: {error}"),
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "profile path is not a directory",
+        )
+        .into());
+    }
+    Ok(canonical)
 }

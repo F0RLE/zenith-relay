@@ -1,12 +1,17 @@
 use crate::platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use zenith_relay_core::WireApi;
+use std::collections::{BTreeMap, HashSet};
+use zenith_relay_core::{
+    accounts::AccountRecord,
+    automations::{WakeAutomationState, WakeHistory, WakeTask},
+    WireApi,
+};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
+pub const MAX_LOCAL_ACCOUNTS: usize = 512;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +85,8 @@ pub struct LocalGatewayKeyRecord {
     #[serde(default)]
     pub source_ids: Option<Vec<String>>,
     #[serde(default)]
+    pub account_ids: Option<Vec<String>>,
+    #[serde(default)]
     pub allowed_models: Vec<String>,
     #[serde(default)]
     pub excluded_models: Vec<String>,
@@ -87,6 +94,53 @@ pub struct LocalGatewayKeyRecord {
     pub model_prefix: Option<String>,
     pub created_at: String,
     pub last_used_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAccountRecord {
+    pub account: AccountRecord,
+    pub wire_api: WireApi,
+    pub models: Vec<String>,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub excluded_models: Vec<String>,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(default = "default_weight")]
+    pub weight: u32,
+    #[serde(default)]
+    pub cooldowns: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+}
+
+impl LocalAccountRecord {
+    pub fn normalize(&mut self) {
+        self.account.label = self.account.label.trim().to_string();
+        self.models = normalized_values(std::mem::take(&mut self.models));
+        self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
+        self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
+        self.weight = self.weight.max(1);
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRecords {
+    pub tasks: Vec<WakeTask>,
+    pub state: WakeAutomationState,
+}
+
+impl Default for AutomationRecords {
+    fn default() -> Self {
+        Self {
+            tasks: Vec::new(),
+            state: WakeAutomationState::new(1_024, 256)
+                .expect("static wake automation bounds are valid"),
+        }
+    }
 }
 
 impl Default for GatewaySettings {
@@ -136,6 +190,7 @@ impl LocalGatewayKeyRecord {
     pub fn normalize(&mut self) {
         self.label = self.label.trim().to_string();
         self.source_ids = self.source_ids.take().map(normalized_values);
+        self.account_ids = self.account_ids.take().map(normalized_values);
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
         self.model_prefix = self
@@ -188,7 +243,10 @@ pub struct LocalPoolSnapshot {
     pub platform: &'static str,
     pub capabilities: PlatformCapabilities,
     pub sources: Vec<ProviderSourceRecord>,
+    pub accounts: Vec<LocalAccountRecord>,
     pub keys: Vec<LocalGatewayKeyRecord>,
+    pub automations: Vec<WakeTask>,
+    pub wake_history: Vec<WakeHistory>,
     pub warnings: Vec<String>,
 }
 
@@ -224,6 +282,7 @@ mod tests {
             enabled: true,
             secret_ref: "key:key_1".into(),
             source_ids: Some(vec![" source_1 ".into(), "SOURCE_1".into()]),
+            account_ids: Some(vec![" account_1 ".into(), "ACCOUNT_1".into()]),
             allowed_models: vec![" gpt-test ".into()],
             excluded_models: Vec::new(),
             model_prefix: Some(" /team/ ".into()),
@@ -233,10 +292,13 @@ mod tests {
         key.normalize();
         assert_eq!(key.label, "Scoped");
         assert_eq!(key.source_ids, Some(vec!["source_1".into()]));
+        assert_eq!(key.account_ids, Some(vec!["account_1".into()]));
         assert_eq!(key.model_prefix.as_deref(), Some("team"));
 
         key.source_ids = Some(Vec::new());
+        key.account_ids = Some(Vec::new());
         key.normalize();
         assert_eq!(key.source_ids, Some(Vec::new()));
+        assert_eq!(key.account_ids, Some(Vec::new()));
     }
 }

@@ -11,7 +11,7 @@ pub async fn start_local_gateway(
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
     let _mutation = state.setup_guard().await;
-    let runtime = runtime_from_store(&state)?;
+    let runtime = runtime_from_store(&state).await?;
     let port = state.store()?.gateway().port;
     state.gateway.start(runtime, port).await?;
     let enable_result = { state.store()?.set_gateway_enabled(true) };
@@ -40,7 +40,7 @@ pub async fn start_if_enabled(state: &DesktopState) -> Result<(), LocalPoolError
     if enabled {
         state
             .gateway
-            .start(runtime_from_store(state)?, port)
+            .start(runtime_from_store(state).await?, port)
             .await?;
     }
     Ok(())

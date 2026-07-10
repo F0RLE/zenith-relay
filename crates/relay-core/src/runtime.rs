@@ -1,3 +1,6 @@
+use crate::accounts::{
+    TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter, TokenRefreshAdapter,
+};
 use crate::sources::normalized_base_url;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
@@ -45,6 +48,57 @@ impl RuntimeSource {
     }
 }
 
+#[derive(Clone)]
+pub struct RuntimeAccount {
+    pub id: String,
+    pub source_id: String,
+    pub chatgpt_account_id: String,
+    pub responses_url: String,
+    pub models: Vec<String>,
+    pub enabled: bool,
+    pub draining: bool,
+    pub priority: i32,
+    pub weight: u32,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub health: CandidateHealth,
+    pub quota: CandidateQuota,
+    pub last_used_at_ms: Option<u64>,
+    pub cooldowns: BTreeMap<String, u64>,
+    pub consecutive_failures: u32,
+}
+
+impl fmt::Debug for RuntimeAccount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeAccount")
+            .field("id", &self.id)
+            .field("source_id", &self.source_id)
+            .field("chatgpt_account_id", &"[redacted]")
+            .field("responses_url", &redacted_runtime_url(&self.responses_url))
+            .field("models", &self.models)
+            .field("enabled", &self.enabled)
+            .field("draining", &self.draining)
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .field("allowed_models", &self.allowed_models)
+            .field("excluded_models", &self.excluded_models)
+            .field("health", &self.health)
+            .field("quota", &self.quota)
+            .field("last_used_at_ms", &self.last_used_at_ms)
+            .field("cooldowns", &self.cooldowns)
+            .field("consecutive_failures", &self.consecutive_failures)
+            .finish()
+    }
+}
+
+pub struct RuntimeAccountAuth {
+    pub token_authority: Arc<TokenAuthority>,
+    pub refresh_adapter: Arc<dyn TokenRefreshAdapter>,
+    pub persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
+    pub refresh_skew_ms: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeLocalKey {
     pub key: LocalGatewayKey,
@@ -64,6 +118,31 @@ impl RuntimeLocalKey {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeMixedLocalKey {
+    pub key: LocalGatewayKey,
+    pub enabled: bool,
+    pub source_ids: Option<Vec<String>>,
+    pub account_ids: Option<Vec<String>>,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub model_prefix: Option<String>,
+}
+
+impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
+    fn from(key: RuntimeLocalKey) -> Self {
+        Self {
+            key: key.key,
+            enabled: key.enabled,
+            source_ids: key.source_ids,
+            account_ids: None,
+            allowed_models: key.allowed_models,
+            excluded_models: key.excluded_models,
+            model_prefix: key.model_prefix,
         }
     }
 }
@@ -90,6 +169,7 @@ pub struct GatewayRuntime {
     pub(crate) bounded_client: reqwest::Client,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceExecutor>,
+    accounts: BTreeMap<String, AccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     registry: ModelRegistry,
@@ -114,6 +194,42 @@ pub(crate) struct SourceExecutor {
     models_url: Url,
     source_authorization: HeaderValue,
     configured_models: BTreeSet<String>,
+}
+
+struct AccountExecutor {
+    id: String,
+    source_id: String,
+    chatgpt_account_id: HeaderValue,
+    responses_url: Url,
+    configured_models: BTreeSet<String>,
+    token_authority: Arc<TokenAuthority>,
+    refresh_adapter: Arc<dyn TokenRefreshAdapter>,
+    persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
+    refresh_skew_ms: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct ExecutorRoute {
+    pub(crate) candidate_id: String,
+    pub(crate) source_id: String,
+    pub(crate) account_id: Option<String>,
+    pub(crate) wire_api: WireApi,
+    pub(crate) upstream_url: Url,
+    pub(crate) source_model: String,
+}
+
+pub(crate) struct PreparedAuthorization {
+    pub(crate) authorization: HeaderValue,
+    pub(crate) chatgpt_account_id: Option<HeaderValue>,
+    pub(crate) originator: Option<HeaderValue>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutorPrepareError {
+    Authentication,
+    Persistence,
+    Transient,
+    InvalidCredential,
 }
 
 struct RuntimeKey {
@@ -142,6 +258,35 @@ impl GatewayRuntime {
     pub fn from_pool(
         sources: Vec<RuntimeSource>,
         keys: Vec<RuntimeLocalKey>,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            Vec::new(),
+            keys.into_iter().map(Into::into).collect(),
+            None,
+            options,
+            usage,
+        )
+    }
+
+    pub fn from_mixed_pool(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: RuntimeAccountAuth,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(sources, accounts, keys, Some(account_auth), options, usage)
+    }
+
+    fn build(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: Option<RuntimeAccountAuth>,
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
@@ -210,6 +355,77 @@ impl GatewayRuntime {
             source_executors.insert(source.source.id, executor);
         }
 
+        let mut account_executors = BTreeMap::new();
+        if !accounts.is_empty() && account_auth.is_none() {
+            return Err(Error::Validation(
+                "OAuth accounts require token authority adapters".to_string(),
+            ));
+        }
+        for account in accounts {
+            require_runtime_value("account candidate id", &account.id)?;
+            require_runtime_value("account source id", &account.source_id)?;
+            require_runtime_value("ChatGPT account id", &account.chatgpt_account_id)?;
+            if account.weight == 0 {
+                return Err(Error::Validation(
+                    "account weight must be at least one".to_string(),
+                ));
+            }
+            if source_executors.contains_key(&account.id)
+                || account_executors.contains_key(&account.id)
+            {
+                return Err(Error::Validation(
+                    "runtime candidate ids must be unique".to_string(),
+                ));
+            }
+            let responses_url = normalized_responses_url(&account.responses_url)?;
+            let mut chatgpt_account_id = HeaderValue::from_str(&account.chatgpt_account_id)
+                .map_err(|_| {
+                    Error::Validation(
+                        "ChatGPT account id contains invalid header characters".to_string(),
+                    )
+                })?;
+            chatgpt_account_id.set_sensitive(true);
+            let models = normalized_set(account.models.iter());
+            let candidate = RuntimeCandidate {
+                id: account.id.clone(),
+                kind: CandidateKind::OAuthAccount,
+                source_id: account.source_id.clone(),
+                account_id: Some(account.id.clone()),
+                protocol: WireApi::Responses,
+                enabled: account.enabled,
+                draining: account.draining,
+                priority: account.priority,
+                weight: account.weight,
+                models: models.clone(),
+                model_rules: model_rules(account.allowed_models, account.excluded_models),
+                health: account.health,
+                quota: account.quota,
+                cooldowns: account.cooldowns,
+                last_used_at: account.last_used_at_ms,
+                consecutive_failures: account.consecutive_failures,
+                secret_available: true,
+            };
+            let auth = account_auth
+                .as_ref()
+                .expect("account auth was validated above");
+            registry.replace(candidate.id.clone(), models.iter());
+            scheduler.upsert(candidate);
+            account_executors.insert(
+                account.id.clone(),
+                AccountExecutor {
+                    id: account.id,
+                    source_id: account.source_id,
+                    chatgpt_account_id,
+                    responses_url,
+                    configured_models: models,
+                    token_authority: auth.token_authority.clone(),
+                    refresh_adapter: auth.refresh_adapter.clone(),
+                    persistence_adapter: auth.persistence_adapter.clone(),
+                    refresh_skew_ms: auth.refresh_skew_ms,
+                },
+            );
+        }
+
         let mut runtime_keys = Vec::new();
         let mut key_ids = HashSet::new();
         for key in keys {
@@ -225,7 +441,7 @@ impl GatewayRuntime {
                 secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
                 scope: CandidateScope {
                     source_ids: key.source_ids.map(|ids| normalized_set(ids.iter())),
-                    account_ids: None,
+                    account_ids: key.account_ids.map(|ids| normalized_set(ids.iter())),
                     model_rules: ModelRules::default(),
                 },
                 model_rules: model_rules(key.allowed_models, key.excluded_models),
@@ -233,9 +449,9 @@ impl GatewayRuntime {
             });
         }
 
-        if source_executors.is_empty() {
+        if source_executors.is_empty() && account_executors.is_empty() {
             return Err(Error::Validation(
-                "at least one provider source is required".to_string(),
+                "at least one provider source or OAuth account is required".to_string(),
             ));
         }
         if !runtime_keys.iter().any(|key| key.enabled) {
@@ -256,7 +472,7 @@ impl GatewayRuntime {
         });
         if !has_usable_key {
             return Err(Error::Validation(
-                "no enabled local key can reach an eligible Responses source".to_string(),
+                "no enabled local key can reach an eligible Responses candidate".to_string(),
             ));
         }
 
@@ -265,6 +481,7 @@ impl GatewayRuntime {
             bounded_client,
             discovery_client,
             sources: source_executors,
+            accounts: account_executors,
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
             registry,
@@ -367,8 +584,66 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn source(&self, candidate_id: &str) -> Option<&SourceExecutor> {
-        self.sources.get(candidate_id)
+    pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
+        if let Some(source) = self.sources.get(candidate_id) {
+            let source_model = source.canonical_model(model)?;
+            return Some(ExecutorRoute {
+                candidate_id: source.id.clone(),
+                source_id: source.id.clone(),
+                account_id: None,
+                wire_api: source.wire_api,
+                upstream_url: source.endpoint(source.wire_api)?.clone(),
+                source_model,
+            });
+        }
+        let account = self.accounts.get(candidate_id)?;
+        let source_model = account.canonical_model(model)?;
+        Some(ExecutorRoute {
+            candidate_id: account.id.clone(),
+            source_id: account.source_id.clone(),
+            account_id: Some(account.id.clone()),
+            wire_api: WireApi::Responses,
+            upstream_url: account.responses_url.clone(),
+            source_model,
+        })
+    }
+
+    pub(crate) async fn prepare_authorization(
+        &self,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        if let Some(source) = self.sources.get(candidate_id) {
+            return Ok(PreparedAuthorization {
+                authorization: source.source_authorization(),
+                chatgpt_account_id: None,
+                originator: None,
+            });
+        }
+        let account = self
+            .accounts
+            .get(candidate_id)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        let prepared = account
+            .token_authority
+            .prepare_and_persist(
+                &account.id,
+                now_ms,
+                account.refresh_skew_ms,
+                account.refresh_adapter.as_ref(),
+                account.persistence_adapter.as_ref(),
+            )
+            .await
+            .map_err(classify_token_authority_error)?;
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token()))
+                .map_err(|_| ExecutorPrepareError::InvalidCredential)?;
+        authorization.set_sensitive(true);
+        Ok(PreparedAuthorization {
+            authorization,
+            chatgpt_account_id: Some(account.chatgpt_account_id.clone()),
+            originator: Some(HeaderValue::from_static("codex_cli_rs")),
+        })
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
@@ -470,11 +745,24 @@ impl SourceExecutor {
     }
 }
 
+impl AccountExecutor {
+    fn canonical_model(&self, model: &str) -> Option<String> {
+        self.configured_models
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(model))
+            .cloned()
+    }
+}
+
 impl fmt::Debug for GatewayRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GatewayRuntime")
             .field("source_ids", &self.sources.keys().collect::<Vec<_>>())
+            .field(
+                "account_candidate_ids",
+                &self.accounts.keys().collect::<Vec<_>>(),
+            )
             .field("local_key_count", &self.keys.len())
             .field("max_retry_candidates", &self.max_retry_candidates)
             .field("affinity_enabled", &self.affinity_enabled)
@@ -592,6 +880,73 @@ fn normalize_prefix(prefix: Option<String>) -> Option<String> {
     prefix
         .map(|value| value.trim().trim_matches('/').to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn normalized_responses_url(value: &str) -> Result<Url> {
+    let url = Url::parse(value.trim())
+        .map_err(|_| Error::Validation("account Responses URL is invalid".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(Error::Validation(
+            "account Responses URL must use HTTP or HTTPS".to_string(),
+        ));
+    }
+    if url.scheme() == "http" && !is_loopback_url(&url) {
+        return Err(Error::Validation(
+            "unencrypted account Responses URLs are allowed only on loopback".to_string(),
+        ));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Error::Validation(
+            "account Responses URL must not contain credentials, query, or fragment".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
+fn redacted_runtime_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value) else {
+        return "[invalid]".to_string();
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    url.host().is_some_and(|host| match host {
+        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+    })
+}
+
+fn require_runtime_value(name: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        Err(Error::Validation(format!("{name} must not be empty")))
+    } else {
+        Ok(())
+    }
+}
+
+fn classify_token_authority_error(error: TokenAuthorityError) -> ExecutorPrepareError {
+    match error {
+        TokenAuthorityError::AccessTokenExpired
+        | TokenAuthorityError::RequiresReauth(_)
+        | TokenAuthorityError::AccountNotFound
+        | TokenAuthorityError::InvalidAccountId => ExecutorPrepareError::Authentication,
+        TokenAuthorityError::PersistenceRequired | TokenAuthorityError::PersistenceFailed(_) => {
+            ExecutorPrepareError::Persistence
+        }
+        TokenAuthorityError::RefreshFailed(_)
+        | TokenAuthorityError::InvalidCapacity
+        | TokenAuthorityError::CapacityReached => ExecutorPrepareError::Transient,
+    }
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {

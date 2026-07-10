@@ -1,4 +1,4 @@
-use crate::runtime::AuthenticatedKey;
+use crate::runtime::{AuthenticatedKey, ExecutorPrepareError, ExecutorRoute};
 use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -24,7 +24,7 @@ const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
-type CompletionCallback = Arc<dyn Fn(&UsageEvent) + Send + Sync>;
+type CompletionCallback = Arc<dyn Fn(&mut UsageEvent) + Send + Sync>;
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
@@ -197,16 +197,14 @@ async fn execute_request(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(source) = runtime.source(&selected.candidate_id) else {
+        let Some(route) = runtime.executor_route(&selected.candidate_id, &resolved_model) else {
             continue;
         };
-        let Some(source_model) = source.canonical_model(&resolved_model) else {
-            continue;
-        };
+        let source_model = route.source_model.clone();
         let responses_via_chat =
-            wire_api == WireApi::Responses && source.wire_api == WireApi::ChatCompletions;
+            wire_api == WireApi::Responses && route.wire_api == WireApi::ChatCompletions;
         let chat_via_responses =
-            wire_api == WireApi::ChatCompletions && source.wire_api == WireApi::Responses;
+            wire_api == WireApi::ChatCompletions && route.wire_api == WireApi::Responses;
         let request_body = if responses_via_chat {
             match translate_responses_request(&request, &source_model, false) {
                 Ok(body) => body,
@@ -243,50 +241,68 @@ async fn execute_request(
 
         // ponytail: cross-protocol streams are buffered into one terminal SSE sequence; add delta translation when adapter TTFT matters.
         let upstream_stream = stream && !responses_via_chat && !chat_via_responses;
-        let Some(upstream_url) = source.endpoint(source.wire_api) else {
-            unreachable!("request object was validated before execution")
-        };
-
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
+        let prepared = match runtime
+            .prepare_authorization(&route.candidate_id, now_ms())
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let failure = AttemptFailure::prepare(error);
+                let state = apply_cooldown(&runtime, &route.candidate_id, "*", failure.cooldown_ms);
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
+        };
         let client = if upstream_stream {
             &runtime.client
         } else {
             &runtime.bounded_client
         };
-        let upstream = client
-            .post(upstream_url.clone())
-            .header(AUTHORIZATION, source.source_authorization())
-            .header(CONTENT_TYPE, "application/json")
-            .body(request_body)
-            .send()
-            .await;
+        let mut upstream_request = client
+            .post(route.upstream_url.clone())
+            .header(AUTHORIZATION, prepared.authorization)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(account_id) = prepared.chatgpt_account_id {
+            upstream_request = upstream_request.header("ChatGPT-Account-Id", account_id);
+        }
+        if let Some(originator) = prepared.originator {
+            upstream_request = upstream_request.header("originator", originator);
+        }
+        let upstream = upstream_request.body(request_body).send().await;
         let upstream = match upstream {
             Ok(upstream) => upstream,
             Err(_) => {
                 let failure = AttemptFailure::transport();
-                emit_usage(
-                    &runtime,
-                    usage_event(
-                        &request_id,
-                        attempt,
-                        &key.id,
-                        &source.id,
-                        &requested_model,
-                        &source_model,
-                        source.wire_api,
-                        false,
-                        failure.status.as_u16(),
-                        Some(failure.category.to_string()),
-                        started.elapsed().as_millis() as u64,
-                    ),
+                let state =
+                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
                 );
-                runtime.record_failure(&source.id);
-                runtime.set_cooldown(
-                    &source.id,
-                    "*",
-                    now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
-                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
                 last_failure = Some(failure);
                 continue;
             }
@@ -301,31 +317,26 @@ async fn execute_request(
                     crate::runtime::MAX_NON_STREAM_BODY_BYTES,
                 )
                 .await;
-                emit_usage(
+                let state = apply_status_cooldown(
                     &runtime,
-                    usage_event(
-                        &request_id,
-                        attempt,
-                        &key.id,
-                        &source.id,
-                        &requested_model,
-                        &source_model,
-                        source.wire_api,
-                        false,
-                        status.as_u16(),
-                        Some("upstream_status".to_string()),
-                        started.elapsed().as_millis() as u64,
-                    ),
-                );
-                let failures = runtime.record_failure(&source.id);
-                apply_status_cooldown(
-                    &runtime,
-                    &source.id,
+                    &route.candidate_id,
                     &source_model,
                     status,
                     &response_headers,
-                    failures,
                 );
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    status.as_u16(),
+                    Some("upstream_status".to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
                 last_failure = Some(AttemptFailure::status(status));
                 continue;
             }
@@ -337,10 +348,8 @@ async fn execute_request(
                     &request_id,
                     attempt,
                     &key.id,
-                    &source.id,
+                    &route,
                     &requested_model,
-                    &source_model,
-                    source.wire_api,
                     false,
                     status.as_u16(),
                     Some("upstream_status".to_string()),
@@ -361,32 +370,25 @@ async fn execute_request(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-                    emit_usage(
-                        &runtime,
-                        usage_event(
-                            &request_id,
-                            attempt,
-                            &key.id,
-                            &source.id,
-                            &requested_model,
-                            &source_model,
-                            source.wire_api,
-                            false,
-                            StatusCode::BAD_GATEWAY.as_u16(),
-                            Some(if too_large {
-                                "upstream_body_too_large".to_string()
-                            } else {
-                                "upstream_body".to_string()
-                            }),
-                            started.elapsed().as_millis() as u64,
-                        ),
+                    let state =
+                        apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                    let mut event = usage_event(
+                        &request_id,
+                        attempt,
+                        &key.id,
+                        &route,
+                        &requested_model,
+                        false,
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        Some(if too_large {
+                            "upstream_body_too_large".to_string()
+                        } else {
+                            "upstream_body".to_string()
+                        }),
+                        started.elapsed().as_millis() as u64,
                     );
-                    runtime.record_failure(&source.id);
-                    runtime.set_cooldown(
-                        &source.id,
-                        "*",
-                        now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
-                    );
+                    apply_failure_state(&mut event, state);
+                    emit_usage(&runtime, event);
                     last_failure = Some(AttemptFailure::body());
                     continue;
                 }
@@ -395,28 +397,25 @@ async fn execute_request(
                 match translate_chat_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        emit_usage(
+                        let state = apply_cooldown(
                             &runtime,
-                            usage_event(
-                                &request_id,
-                                attempt,
-                                &key.id,
-                                &source.id,
-                                &requested_model,
-                                &source_model,
-                                source.wire_api,
-                                false,
-                                failure.status.as_u16(),
-                                Some(failure.category.to_string()),
-                                started.elapsed().as_millis() as u64,
-                            ),
-                        );
-                        runtime.record_failure(&source.id);
-                        runtime.set_cooldown(
-                            &source.id,
+                            &route.candidate_id,
                             &source_model,
-                            now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
+                            TRANSIENT_COOLDOWN_MS,
                         );
+                        let mut event = usage_event(
+                            &request_id,
+                            attempt,
+                            &key.id,
+                            &route,
+                            &requested_model,
+                            false,
+                            failure.status.as_u16(),
+                            Some(failure.category.to_string()),
+                            started.elapsed().as_millis() as u64,
+                        );
+                        apply_failure_state(&mut event, state);
+                        emit_usage(&runtime, event);
                         last_failure = Some(failure);
                         continue;
                     }
@@ -425,28 +424,25 @@ async fn execute_request(
                 match translate_responses_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        emit_usage(
+                        let state = apply_cooldown(
                             &runtime,
-                            usage_event(
-                                &request_id,
-                                attempt,
-                                &key.id,
-                                &source.id,
-                                &requested_model,
-                                &source_model,
-                                source.wire_api,
-                                false,
-                                failure.status.as_u16(),
-                                Some(failure.category.to_string()),
-                                started.elapsed().as_millis() as u64,
-                            ),
-                        );
-                        runtime.record_failure(&source.id);
-                        runtime.set_cooldown(
-                            &source.id,
+                            &route.candidate_id,
                             &source_model,
-                            now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
+                            TRANSIENT_COOLDOWN_MS,
                         );
+                        let mut event = usage_event(
+                            &request_id,
+                            attempt,
+                            &key.id,
+                            &route,
+                            &requested_model,
+                            false,
+                            failure.status.as_u16(),
+                            Some(failure.category.to_string()),
+                            started.elapsed().as_millis() as u64,
+                        );
+                        apply_failure_state(&mut event, state);
+                        emit_usage(&runtime, event);
                         last_failure = Some(failure);
                         continue;
                     }
@@ -454,23 +450,22 @@ async fn execute_request(
             } else {
                 bytes
             };
+            runtime.record_success(&route.candidate_id, &source_model, now_ms());
             let mut event = usage_event(
                 &request_id,
                 attempt,
                 &key.id,
-                &source.id,
+                &route,
                 &requested_model,
-                &source_model,
-                source.wire_api,
                 true,
                 status.as_u16(),
                 None,
                 started.elapsed().as_millis() as u64,
             );
+            event.consecutive_failures = Some(0);
             populate_tokens(&mut event, &bytes);
             emit_usage(&runtime, event);
-            runtime.record_success(&source.id, &source_model, now_ms());
-            runtime.bind_affinity(affinity_key.as_deref(), &source.id, now_ms());
+            runtime.bind_affinity(affinity_key.as_deref(), &route.candidate_id, now_ms());
             if stream {
                 let body = match wire_api {
                     WireApi::Responses => completed_sse(&bytes),
@@ -485,7 +480,7 @@ async fn execute_request(
         match bootstrap_stream(upstream).await {
             Ok((headers, first, remaining)) => {
                 let completion_runtime = runtime.clone();
-                let completion_source = source.id.clone();
+                let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
                 let completion_affinity = affinity_key.clone();
                 let completion: CompletionCallback = Arc::new(move |event| {
@@ -495,18 +490,20 @@ async fn execute_request(
                             &completion_model,
                             now_ms(),
                         );
+                        event.consecutive_failures = Some(0);
                         completion_runtime.bind_affinity(
                             completion_affinity.as_deref(),
                             &completion_source,
                             now_ms(),
                         );
                     } else if event.error_category.as_deref() != Some("client_cancelled") {
-                        completion_runtime.record_failure(&completion_source);
-                        completion_runtime.set_cooldown(
+                        let state = apply_cooldown(
+                            &completion_runtime,
                             &completion_source,
                             &completion_model,
-                            now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
+                            TRANSIENT_COOLDOWN_MS,
                         );
+                        apply_failure_state(event, state);
                     }
                 });
                 let combined =
@@ -518,10 +515,8 @@ async fn execute_request(
                         &request_id,
                         attempt,
                         &key.id,
-                        &source.id,
+                        &route,
                         &requested_model,
-                        &source_model,
-                        source.wire_api,
                         true,
                         status.as_u16(),
                         None,
@@ -533,28 +528,25 @@ async fn execute_request(
                 return proxy_response(status, &headers, Body::from_stream(usage_stream));
             }
             Err(failure) => {
-                emit_usage(
+                let state = apply_cooldown(
                     &runtime,
-                    usage_event(
-                        &request_id,
-                        attempt,
-                        &key.id,
-                        &source.id,
-                        &requested_model,
-                        &source_model,
-                        source.wire_api,
-                        false,
-                        failure.status.as_u16(),
-                        Some(failure.category.to_string()),
-                        started.elapsed().as_millis() as u64,
-                    ),
-                );
-                runtime.record_failure(&source.id);
-                runtime.set_cooldown(
-                    &source.id,
+                    &route.candidate_id,
                     &source_model,
-                    now_ms().saturating_add(TRANSIENT_COOLDOWN_MS),
+                    TRANSIENT_COOLDOWN_MS,
                 );
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
                 last_failure = Some(failure);
             }
         }
@@ -1177,6 +1169,13 @@ struct AttemptFailure {
     status: StatusCode,
     category: &'static str,
     message: &'static str,
+    cooldown_ms: u64,
+}
+
+struct FailureState {
+    cooldown_scope: String,
+    retry_at_ms: u64,
+    consecutive_failures: u32,
 }
 
 impl AttemptFailure {
@@ -1185,6 +1184,7 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_transport",
             message: "upstream request failed",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
         }
     }
 
@@ -1193,6 +1193,7 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_error",
             message: "upstream response failed",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
         }
     }
 
@@ -1201,6 +1202,7 @@ impl AttemptFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message: "request cannot be translated for an eligible source",
+            cooldown_ms: 0,
         }
     }
 
@@ -1209,6 +1211,7 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_translation",
             message: "upstream response could not be translated",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
         }
     }
 
@@ -1217,6 +1220,7 @@ impl AttemptFailure {
             status,
             category: "upstream_status",
             message: "all eligible upstream sources failed",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
         }
     }
 
@@ -1225,6 +1229,7 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message: "upstream stream failed before the first event",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
         }
     }
 
@@ -1233,6 +1238,32 @@ impl AttemptFailure {
             status: StatusCode::SERVICE_UNAVAILABLE,
             category: "no_eligible_source",
             message: "no eligible source is available for this model",
+            cooldown_ms: 0,
+        }
+    }
+
+    fn prepare(error: ExecutorPrepareError) -> Self {
+        match error {
+            ExecutorPrepareError::Authentication | ExecutorPrepareError::InvalidCredential => {
+                Self {
+                    status: StatusCode::UNAUTHORIZED,
+                    category: "account_auth",
+                    message: "account authorization is unavailable",
+                    cooldown_ms: 30 * 60_000,
+                }
+            }
+            ExecutorPrepareError::Persistence => Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                category: "account_token_persistence",
+                message: "refreshed account authorization could not be persisted",
+                cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            },
+            ExecutorPrepareError::Transient => Self {
+                status: StatusCode::BAD_GATEWAY,
+                category: "account_refresh",
+                message: "account authorization refresh failed",
+                cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            },
         }
     }
 }
@@ -1258,8 +1289,8 @@ fn apply_status_cooldown(
     model: &str,
     status: StatusCode,
     headers: &reqwest::header::HeaderMap,
-    consecutive_failures: u32,
-) {
+) -> FailureState {
+    let consecutive_failures = runtime.record_failure(candidate_id);
     let now_system = SystemTime::now();
     let now = now_system
         .duration_since(UNIX_EPOCH)
@@ -1278,7 +1309,35 @@ fn apply_status_cooldown(
         ),
         _ => ("*", TRANSIENT_COOLDOWN_MS),
     };
-    runtime.set_cooldown(candidate_id, scope, now.saturating_add(duration_ms));
+    let retry_at_ms = now.saturating_add(duration_ms);
+    runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    FailureState {
+        cooldown_scope: scope.to_string(),
+        retry_at_ms,
+        consecutive_failures,
+    }
+}
+
+fn apply_cooldown(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    duration_ms: u64,
+) -> FailureState {
+    let consecutive_failures = runtime.record_failure(candidate_id);
+    let retry_at_ms = now_ms().saturating_add(duration_ms);
+    runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    FailureState {
+        cooldown_scope: scope.to_string(),
+        retry_at_ms,
+        consecutive_failures,
+    }
+}
+
+fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {
+    event.cooldown_scope = Some(state.cooldown_scope);
+    event.retry_at_ms = Some(state.retry_at_ms);
+    event.consecutive_failures = Some(state.consecutive_failures);
 }
 
 fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Option<u64> {
@@ -1437,10 +1496,8 @@ fn usage_event(
     request_id: &str,
     attempt: u16,
     local_key_id: &str,
-    source_id: &str,
+    route: &ExecutorRoute,
     requested_model: &str,
-    resolved_model: &str,
-    wire_api: WireApi,
     success: bool,
     http_status: u16,
     error_category: Option<String>,
@@ -1450,13 +1507,18 @@ fn usage_event(
         request_id: request_id.to_string(),
         attempt,
         local_key_id: local_key_id.to_string(),
-        source_id: source_id.to_string(),
+        source_id: route.source_id.clone(),
+        candidate_id: Some(route.candidate_id.clone()),
+        account_id: route.account_id.clone(),
         requested_model: Some(requested_model.to_string()),
-        resolved_model: Some(resolved_model.to_string()),
-        wire_api,
+        resolved_model: Some(route.source_model.clone()),
+        wire_api: route.wire_api,
         success,
         http_status,
         error_category,
+        cooldown_scope: None,
+        retry_at_ms: None,
+        consecutive_failures: None,
         latency_ms,
         ttft_ms: None,
         input_tokens: None,
@@ -1537,7 +1599,7 @@ impl<S> UsageStream<S> {
             event.error_category = Some(category.to_string());
         }
         event.latency_ms = self.started.elapsed().as_millis() as u64;
-        (self.completion)(&event);
+        (self.completion)(&mut event);
         emit_callback(&self.callback, event);
     }
 
@@ -1772,12 +1834,17 @@ mod tests {
                 attempt: 1,
                 local_key_id: "key".into(),
                 source_id: "source".into(),
+                candidate_id: Some("source".into()),
+                account_id: None,
                 requested_model: Some("model".into()),
                 resolved_model: Some("model".into()),
                 wire_api: crate::WireApi::Responses,
                 success: true,
                 http_status: 200,
                 error_category: None,
+                cooldown_scope: None,
+                retry_at_ms: None,
+                consecutive_failures: Some(0),
                 latency_ms: 0,
                 ttft_ms: None,
                 input_tokens: None,

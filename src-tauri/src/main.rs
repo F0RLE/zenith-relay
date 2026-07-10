@@ -1095,6 +1095,7 @@ fn main() {
             let relay_state = local_pool::initialize(&handle)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(relay_state);
+            local_pool::background::start(handle.clone());
             let startup_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let state = startup_handle.state::<local_pool::DesktopState>();
@@ -1146,6 +1147,28 @@ fn main() {
             local_pool::commands::connections::delete_local_source,
             local_pool::commands::connections::rotate_local_source_key,
             local_pool::commands::connections::test_local_source,
+            local_pool::commands::accounts::start_local_account_import,
+            local_pool::commands::accounts::resume_local_account_import,
+            local_pool::commands::accounts::prepare_local_account_import,
+            local_pool::commands::accounts::cancel_local_account_import,
+            local_pool::commands::accounts::confirm_local_account_import,
+            local_pool::commands::accounts::update_local_account,
+            local_pool::commands::accounts::set_local_account_enabled,
+            local_pool::commands::accounts::set_local_account_draining,
+            local_pool::commands::accounts::delete_local_account,
+            local_pool::commands::accounts::refresh_local_account_quota,
+            local_pool::commands::accounts::refresh_all_local_account_quotas,
+            local_pool::commands::oauth::start_codex_oauth,
+            local_pool::commands::oauth::resume_codex_oauth,
+            local_pool::commands::oauth::get_codex_oauth_status,
+            local_pool::commands::oauth::submit_codex_oauth_callback,
+            local_pool::commands::oauth::cancel_codex_oauth,
+            local_pool::commands::oauth::complete_codex_oauth,
+            local_pool::commands::automations::create_quota_wake_automation,
+            local_pool::commands::automations::update_quota_wake_automation,
+            local_pool::commands::automations::set_quota_wake_automation_enabled,
+            local_pool::commands::automations::delete_quota_wake_automation,
+            local_pool::commands::automations::run_due_quota_wake_confirmations,
             local_pool::commands::pool::create_local_gateway_key,
             local_pool::commands::pool::update_local_gateway_key,
             local_pool::commands::pool::set_local_gateway_key_enabled,
@@ -1156,7 +1179,10 @@ fn main() {
             local_pool::commands::gateway::stop_local_gateway,
             local_pool::commands::usage::get_local_usage,
             local_pool::commands::profiles::attach_codex_to_local_gateway,
-            local_pool::commands::profiles::restore_codex_profile
+            local_pool::commands::profiles::restore_codex_profile,
+            local_pool::commands::profiles::attach_codex_to_account,
+            local_pool::commands::profiles::list_codex_account_bindings,
+            local_pool::commands::profiles::restore_codex_account_profile
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Relay");

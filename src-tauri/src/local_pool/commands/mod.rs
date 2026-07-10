@@ -1,11 +1,21 @@
+pub(crate) mod accounts;
+pub(crate) mod automations;
 pub(crate) mod connections;
 pub(crate) mod gateway;
+pub(crate) mod oauth;
 pub(crate) mod pool;
 pub(crate) mod profiles;
 pub(crate) mod state;
 pub(crate) mod usage;
 
 use super::{
+    accounts::{
+        authority::{CredentialPersistence, StoredRefreshAdapter},
+        credentials::CredentialStore,
+        oauth::CodexOAuthClient,
+        records::{candidate_health, candidate_quota, CODEX_RESPONSES_URL},
+        NativeSecretBackend,
+    },
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalGatewayKeyRecord, ProviderSourceRecord},
     state::DesktopState,
@@ -13,15 +23,16 @@ use super::{
 };
 use std::{sync::Arc, time::Duration};
 use zenith_relay_core::{
-    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
-    RuntimeSource,
+    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeAccount,
+    RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
 };
 
-fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
-    let (source_records, key_records, settings) = {
+async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
+    let (source_records, account_records, key_records, settings) = {
         let store = state.store()?;
         (
             store.sources().to_vec(),
+            store.accounts().to_vec(),
             store.keys().to_vec(),
             store.gateway().clone(),
         )
@@ -49,23 +60,91 @@ fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
             last_used_at_ms: source.last_used_at.as_deref().and_then(timestamp_ms),
         });
     }
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let authority = state.token_authority();
+    let mut accounts = Vec::new();
+    for account in account_records {
+        let Some(secret) = credentials
+            .load(&account.account.id)
+            .map_err(account_credential_error)?
+        else {
+            continue;
+        };
+        let Some(chatgpt_account_id) = secret.provider_account_id() else {
+            continue;
+        };
+        authority
+            .register(
+                &account.account.id,
+                secret.to_token_set().map_err(account_credential_error)?,
+                account.account.auth_state,
+            )
+            .await
+            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        let health = candidate_health(&account.account);
+        let quota = candidate_quota(&account.account.quota, current_time_ms());
+        accounts.push(RuntimeAccount {
+            id: account.account.id,
+            source_id: account.account.source_id,
+            chatgpt_account_id: chatgpt_account_id.to_string(),
+            responses_url: CODEX_RESPONSES_URL.to_string(),
+            models: account.models,
+            enabled: account.account.enabled,
+            draining: account.account.draining,
+            priority: account.priority,
+            weight: account.weight,
+            allowed_models: account.allowed_models,
+            excluded_models: account.excluded_models,
+            health,
+            quota,
+            last_used_at_ms: account.account.last_used_at_ms,
+            cooldowns: account.cooldowns,
+            consecutive_failures: account.consecutive_failures,
+        });
+    }
     let mut keys = Vec::new();
     for key in key_records {
         let Some(secret) = secret_store::load(&key.secret_ref)? else {
             continue;
         };
-        keys.push(RuntimeLocalKey {
+        keys.push(RuntimeMixedLocalKey {
             key: LocalGatewayKey { id: key.id, secret },
             enabled: key.enabled,
             source_ids: key.source_ids,
+            account_ids: key.account_ids,
             allowed_models: key.allowed_models,
             excluded_models: key.excluded_models,
             model_prefix: key.model_prefix,
         });
     }
-    GatewayRuntime::from_pool(
+    let oauth = Arc::new(
+        CodexOAuthClient::new()
+            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
+    );
+    let refresh = Arc::new(
+        StoredRefreshAdapter::new(state.root.clone(), credentials.clone(), oauth, 60_000).map_err(
+            |error| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    format!("failed to initialize account refresh locks: {error:?}"),
+                )
+            },
+        )?,
+    );
+    let persistence = Arc::new(CredentialPersistence::new(
+        credentials,
+        state.account_metadata_sink(),
+    ));
+    GatewayRuntime::from_mixed_pool(
         sources,
+        accounts,
         keys,
+        RuntimeAccountAuth {
+            token_authority: authority,
+            refresh_adapter: refresh,
+            persistence_adapter: persistence,
+            refresh_skew_ms: 60_000,
+        },
         GatewayRuntimeOptions {
             max_retry_candidates: usize::from(settings.max_retry_candidates),
             session_affinity_ttl: settings
@@ -85,6 +164,16 @@ fn timestamp_ms(value: &str) -> Option<u64> {
         .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
 }
 
+fn current_time_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
+}
+
+fn account_credential_error(
+    error: super::accounts::credentials::CredentialError,
+) -> LocalPoolError {
+    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
+}
+
 async fn sync_records_or_rollback(
     state: &DesktopState,
     old_sources: Vec<ProviderSourceRecord>,
@@ -92,6 +181,19 @@ async fn sync_records_or_rollback(
 ) -> Result<()> {
     restart_or_rollback(state, || {
         state.store()?.replace_records(old_sources, old_keys)
+    })
+    .await
+}
+
+async fn sync_accounts_or_rollback(
+    state: &DesktopState,
+    old_accounts: Vec<super::models::LocalAccountRecord>,
+    old_keys: Vec<LocalGatewayKeyRecord>,
+) -> Result<()> {
+    restart_or_rollback(state, || {
+        state
+            .store()?
+            .replace_accounts_and_keys(old_accounts, old_keys)
     })
     .await
 }
@@ -119,7 +221,7 @@ async fn restart_or_rollback(
         return Ok(());
     };
     let mut rollback = Some(rollback);
-    let runtime = match runtime_from_store(state) {
+    let runtime = match runtime_from_store(state).await {
         Ok(runtime) => runtime,
         Err(error) => {
             apply_rollback(state, rollback.take().unwrap()).await?;
@@ -130,7 +232,7 @@ async fn restart_or_rollback(
     state.gateway.stop().await;
     if let Err(error) = state.gateway.start(runtime, address.port()).await {
         apply_rollback(state, rollback.take().unwrap()).await?;
-        let old_runtime = match runtime_from_store(state) {
+        let old_runtime = match runtime_from_store(state).await {
             Ok(runtime) => runtime,
             Err(restore) => {
                 return Err(fail_closed(

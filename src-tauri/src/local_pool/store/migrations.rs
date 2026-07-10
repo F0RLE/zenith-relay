@@ -1,7 +1,7 @@
 use super::settings_store::{load_json, save_json};
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
-    models::{StoreMetadata, CURRENT_SCHEMA_VERSION},
+    models::{AutomationRecords, StoreMetadata, CURRENT_SCHEMA_VERSION},
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -18,6 +18,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         None if gateway_path.exists() => StoreMetadata { schema_version: 0 },
         None => {
             migrate_v1_to_v2(root)?;
+            migrate_v3_to_v4(root)?;
             let metadata = StoreMetadata::default();
             save_json(&metadata_path, &metadata)?;
             return Ok(metadata);
@@ -44,6 +45,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 0 => migrate_v0_to_v1(root, &gateway_path)?,
                 1 => migrate_v1_to_v2(root)?,
                 2 => migrate_v2_to_v3(root, &gateway_path)?,
+                3 => migrate_v3_to_v4(root)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -63,6 +65,20 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v3_to_v4(root: &Path) -> Result<()> {
+    let records = root.join("records");
+    fs::create_dir_all(&records).map_err(io_error)?;
+    let accounts_path = records.join("accounts.json");
+    if !accounts_path.exists() {
+        save_json(&accounts_path, &Vec::<Value>::new())?;
+    }
+    let automations_path = records.join("automations.json");
+    if !automations_path.exists() {
+        save_json(&automations_path, &AutomationRecords::default())?;
+    }
+    migrate_record_defaults(root, "keys.json", &[("accountIds", Value::Null)])
 }
 
 fn migrate_v2_to_v3(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -200,6 +216,11 @@ fn backup_settings(root: &Path, schema_version: u32) -> Result<PathBuf> {
         (root.join("settings").join("gateway.json"), "gateway.json"),
         (root.join("records").join("sources.json"), "sources.json"),
         (root.join("records").join("keys.json"), "keys.json"),
+        (root.join("records").join("accounts.json"), "accounts.json"),
+        (
+            root.join("records").join("automations.json"),
+            "automations.json",
+        ),
     ] {
         backup_file(
             &source,
@@ -216,6 +237,11 @@ fn restore_settings(root: &Path, backup: &Path) -> Result<()> {
         (root.join("settings").join("gateway.json"), "gateway.json"),
         (root.join("records").join("sources.json"), "sources.json"),
         (root.join("records").join("keys.json"), "keys.json"),
+        (root.join("records").join("accounts.json"), "accounts.json"),
+        (
+            root.join("records").join("automations.json"),
+            "automations.json",
+        ),
     ] {
         restore_file(
             &backup.join(name),
@@ -353,7 +379,10 @@ mod tests {
         let root = temp_root();
         write_v2_store(&root);
 
-        assert_eq!(migrate(&root).unwrap().schema_version, 3);
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
         let gateway: Value = load_json(&root.join("settings").join("gateway.json"))
             .unwrap()
             .unwrap();
@@ -368,6 +397,9 @@ mod tests {
         assert_eq!(sources[0]["draining"], false);
         assert!(sources[0]["lastUsedAt"].is_null());
         assert!(keys[0]["sourceIds"].is_null());
+        assert!(keys[0]["accountIds"].is_null());
+        assert!(root.join("records").join("accounts.json").exists());
+        assert!(root.join("records").join("automations.json").exists());
         assert!(root
             .join("backups")
             .join("migrations")
@@ -375,6 +407,59 @@ mod tests {
             .unwrap()
             .next()
             .is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v3_store_with_account_and_automation_records() {
+        let root = temp_root();
+        write_v3_store(&root);
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let keys: Value = load_json(&root.join("records").join("keys.json"))
+            .unwrap()
+            .unwrap();
+        let automations: AutomationRecords =
+            load_json(&root.join("records").join("automations.json"))
+                .unwrap()
+                .unwrap();
+        assert!(keys[0]["accountIds"].is_null());
+        assert!(root.join("records").join("accounts.json").exists());
+        assert!(automations.tasks.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_v4_write_restores_every_v3_file_and_removes_new_files() {
+        let root = temp_root();
+        write_v3_store(&root);
+        let paths = [
+            root.join("metadata.json"),
+            root.join("settings").join("gateway.json"),
+            root.join("records").join("sources.json"),
+            root.join("records").join("keys.json"),
+        ];
+        let before = paths
+            .iter()
+            .map(fs::read)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        fs::create_dir(root.join("records").join("automations.tmp")).unwrap();
+
+        assert!(migrate(&root).is_err());
+        for (path, expected) in paths.iter().zip(before) {
+            assert_eq!(
+                fs::read(path).unwrap(),
+                expected,
+                "{} changed",
+                path.display()
+            );
+        }
+        assert!(!root.join("records").join("accounts.json").exists());
+        assert!(!root.join("records").join("automations.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -458,6 +543,17 @@ mod tests {
                 "createdAt": "2026-07-10T00:00:00Z",
                 "lastUsedAt": null
             })],
+        )
+        .unwrap();
+    }
+
+    fn write_v3_store(root: &Path) {
+        write_v2_store(root);
+        let gateway_path = root.join("settings").join("gateway.json");
+        migrate_v2_to_v3(root, &gateway_path).unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 3 },
         )
         .unwrap();
     }

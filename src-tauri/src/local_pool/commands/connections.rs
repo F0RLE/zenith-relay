@@ -412,6 +412,7 @@ mod tests {
             enabled: true,
             secret_ref: "key:key_1".into(),
             source_ids: Some(vec!["source_1".into()]),
+            account_ids: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,

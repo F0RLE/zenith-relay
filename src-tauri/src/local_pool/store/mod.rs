@@ -10,7 +10,10 @@ use self::{
 };
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
-    models::{GatewaySettings, LocalGatewayKeyRecord, ProviderSourceRecord, StoreMetadata},
+    models::{
+        AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
+        ProviderSourceRecord, StoreMetadata, MAX_LOCAL_ACCOUNTS,
+    },
 };
 use std::{
     fs,
@@ -22,7 +25,9 @@ pub struct LocalPoolStore {
     metadata: StoreMetadata,
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
+    accounts: Vec<LocalAccountRecord>,
     keys: Vec<LocalGatewayKeyRecord>,
+    automations: AutomationRecords,
 }
 
 impl LocalPoolStore {
@@ -58,13 +63,23 @@ impl LocalPoolStore {
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         let sources = load_record_file(&root, "sources.json")?;
+        let accounts = load_record_file(&root, "accounts.json")?;
+        if accounts.len() > MAX_LOCAL_ACCOUNTS {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
+            ));
+        }
         let keys = load_record_file(&root, "keys.json")?;
+        let automations = load_value_file(&root, "automations.json")?;
         Ok(Self {
             root,
             metadata,
             gateway,
             sources,
+            accounts,
             keys,
+            automations,
         })
     }
 
@@ -84,12 +99,26 @@ impl LocalPoolStore {
         &self.keys
     }
 
+    pub fn accounts(&self) -> &[LocalAccountRecord] {
+        &self.accounts
+    }
+
+    pub fn automations(&self) -> &AutomationRecords {
+        &self.automations
+    }
+
     pub fn source(&self, id: &str) -> Option<&ProviderSourceRecord> {
         self.sources.iter().find(|source| source.id == id)
     }
 
     pub fn key(&self, id: &str) -> Option<&LocalGatewayKeyRecord> {
         self.keys.iter().find(|key| key.id == id)
+    }
+
+    pub fn account(&self, id: &str) -> Option<&LocalAccountRecord> {
+        self.accounts
+            .iter()
+            .find(|account| account.account.id == id)
     }
 
     pub fn upsert_source(&mut self, source: ProviderSourceRecord) -> Result<()> {
@@ -112,39 +141,138 @@ impl LocalPoolStore {
         self.replace_records(self.sources.clone(), next)
     }
 
+    pub fn upsert_account(&mut self, account: LocalAccountRecord) -> Result<()> {
+        let mut next = self.accounts.clone();
+        if let Some(current) = next
+            .iter_mut()
+            .find(|current| current.account.id == account.account.id)
+        {
+            *current = account;
+        } else {
+            next.push(account);
+        }
+        self.replace_accounts_and_keys(next, self.keys.clone())
+    }
+
     pub fn replace_records(
         &mut self,
         sources: Vec<ProviderSourceRecord>,
         keys: Vec<LocalGatewayKeyRecord>,
     ) -> Result<()> {
-        let sources_changed = sources != self.sources;
-        let keys_changed = keys != self.keys;
-        if !sources_changed && !keys_changed {
+        self.replace_all_records(
+            sources,
+            self.accounts.clone(),
+            keys,
+            self.automations.clone(),
+        )
+    }
+
+    pub fn replace_accounts_and_keys(
+        &mut self,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+    ) -> Result<()> {
+        self.replace_all_records(
+            self.sources.clone(),
+            accounts,
+            keys,
+            self.automations.clone(),
+        )
+    }
+
+    pub fn replace_automations(&mut self, automations: AutomationRecords) -> Result<()> {
+        self.replace_all_records(
+            self.sources.clone(),
+            self.accounts.clone(),
+            self.keys.clone(),
+            automations,
+        )
+    }
+
+    pub fn replace_account_state(
+        &mut self,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        automations: AutomationRecords,
+    ) -> Result<()> {
+        self.replace_all_records(self.sources.clone(), accounts, keys, automations)
+    }
+
+    fn replace_all_records(
+        &mut self,
+        sources: Vec<ProviderSourceRecord>,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        automations: AutomationRecords,
+    ) -> Result<()> {
+        if accounts.len() > MAX_LOCAL_ACCOUNTS {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
+            ));
+        }
+        let changed = RecordChanges {
+            sources: sources != self.sources,
+            accounts: accounts != self.accounts,
+            keys: keys != self.keys,
+            automations: automations != self.automations,
+        };
+        if !changed.any() {
             return Ok(());
         }
 
-        let sources_path = self.root.join("records").join("sources.json");
-        let keys_path = self.root.join("records").join("keys.json");
-        if sources_changed {
-            save_json(&sources_path, &sources)?;
-        }
-        if keys_changed {
-            if let Err(error) = save_json(&keys_path, &keys) {
-                if sources_changed {
-                    if let Err(rollback) = save_json(&sources_path, &self.sources) {
-                        return Err(LocalPoolError::new(
-                            ErrorCode::RecoveryRequired,
-                            format!(
-                                "{error}; failed to restore source records after key write failure: {rollback}"
-                            ),
-                        ));
-                    }
-                }
-                return Err(error);
+        let records = self.root.join("records");
+        let sources_path = records.join("sources.json");
+        let accounts_path = records.join("accounts.json");
+        let keys_path = records.join("keys.json");
+        let automations_path = records.join("automations.json");
+
+        let write_result = (|| {
+            if changed.sources {
+                save_json(&sources_path, &sources)?;
             }
+            if changed.accounts {
+                save_json(&accounts_path, &accounts)?;
+            }
+            if changed.keys {
+                save_json(&keys_path, &keys)?;
+            }
+            if changed.automations {
+                save_json(&automations_path, &automations)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = write_result {
+            if let Err(rollback) = self.restore_record_files(&changed) {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("{error}; failed to restore local records: {rollback}"),
+                ));
+            }
+            return Err(error);
         }
+
         self.sources = sources;
+        self.accounts = accounts;
         self.keys = keys;
+        self.automations = automations;
+        Ok(())
+    }
+
+    fn restore_record_files(&self, changed: &RecordChanges) -> Result<()> {
+        let records = self.root.join("records");
+        if changed.sources {
+            save_json(&records.join("sources.json"), &self.sources)?;
+        }
+        if changed.accounts {
+            save_json(&records.join("accounts.json"), &self.accounts)?;
+        }
+        if changed.keys {
+            save_json(&records.join("keys.json"), &self.keys)?;
+        }
+        if changed.automations {
+            save_json(&records.join("automations.json"), &self.automations)?;
+        }
         Ok(())
     }
 
@@ -160,16 +288,36 @@ impl LocalPoolStore {
         Ok(())
     }
 
-    pub fn touch_usage(&mut self, key_id: &str, source_id: &str, at: String) -> Result<()> {
+    pub fn touch_usage(
+        &mut self,
+        key_id: &str,
+        source_id: &str,
+        account_id: Option<&str>,
+        at: String,
+    ) -> Result<()> {
         let mut sources = self.sources.clone();
         let mut keys = self.keys.clone();
         if let Some(source) = sources.iter_mut().find(|source| source.id == source_id) {
             source.last_used_at = Some(at.clone());
         }
         if let Some(key) = keys.iter_mut().find(|key| key.id == key_id) {
-            key.last_used_at = Some(at);
+            key.last_used_at = Some(at.clone());
         }
-        self.replace_records(sources, keys)
+        let mut accounts = self.accounts.clone();
+        if let (Some(account_id), Some(last_used_at_ms)) = (
+            account_id,
+            chrono::DateTime::parse_from_rfc3339(&at)
+                .ok()
+                .and_then(|value| u64::try_from(value.timestamp_millis()).ok()),
+        ) {
+            if let Some(account) = accounts
+                .iter_mut()
+                .find(|account| account.account.id == account_id)
+            {
+                account.account.last_used_at_ms = Some(last_used_at_ms);
+            }
+        }
+        self.replace_all_records(sources, accounts, keys, self.automations.clone())
     }
 
     pub fn set_gateway_enabled(&mut self, enabled: bool) -> Result<()> {
@@ -181,6 +329,20 @@ impl LocalPoolStore {
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RecordChanges {
+    sources: bool,
+    accounts: bool,
+    keys: bool,
+    automations: bool,
+}
+
+impl RecordChanges {
+    fn any(self) -> bool {
+        self.sources || self.accounts || self.keys || self.automations
     }
 }
 
@@ -209,14 +371,46 @@ fn load_record_file<T: serde::de::DeserializeOwned + serde::Serialize>(
     }
 }
 
+fn load_value_file<T>(root: &Path, name: &str) -> Result<T>
+where
+    T: Default + serde::de::DeserializeOwned + serde::Serialize,
+{
+    let path = root.join("records").join(name);
+    match load_json(&path) {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => {
+            let value = T::default();
+            save_json(&path, &value)?;
+            Ok(value)
+        }
+        Err(error) => {
+            let quarantined = quarantine::move_file(root, &path)?;
+            Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!(
+                    "invalid record file was moved to {}: {error}",
+                    quarantined.display()
+                ),
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::{
         env,
         sync::atomic::{AtomicU64, Ordering},
     };
-    use zenith_relay_core::WireApi;
+    use zenith_relay_core::{
+        accounts::{
+            AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
+        },
+        quota::{QuotaSnapshot, Subscription},
+        WireApi,
+    };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -234,7 +428,10 @@ mod tests {
     fn fresh_store_is_versioned_and_restart_safe() {
         let root = temp_root();
         let store = LocalPoolStore::open(root.clone()).unwrap();
-        assert_eq!(store.metadata().schema_version, 3);
+        assert_eq!(
+            store.metadata().schema_version,
+            crate::local_pool::models::CURRENT_SCHEMA_VERSION
+        );
         assert_eq!(store.gateway().port, 14998);
         drop(store);
         assert_eq!(
@@ -286,6 +483,7 @@ mod tests {
                 enabled: true,
                 secret_ref: "key:key_1".into(),
                 source_ids: None,
+                account_ids: None,
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
                 model_prefix: None,
@@ -331,6 +529,7 @@ mod tests {
             enabled: true,
             secret_ref: "key:key_1".into(),
             source_ids: Some(vec![source.id.clone()]),
+            account_ids: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
@@ -381,6 +580,7 @@ mod tests {
             enabled: true,
             secret_ref: "key:key_1".into(),
             source_ids: None,
+            account_ids: None,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
@@ -406,5 +606,72 @@ mod tests {
                 .unwrap();
         assert_eq!(persisted[0].name, "Before");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn store_rejects_the_513th_account_without_changing_persisted_state() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let accounts = (0..MAX_LOCAL_ACCOUNTS)
+            .map(|index| account_record(&format!("account-{index}")))
+            .collect::<Vec<_>>();
+        store
+            .replace_accounts_and_keys(accounts.clone(), Vec::new())
+            .unwrap();
+
+        let mut overflow = accounts;
+        overflow.push(account_record("account-overflow"));
+        let error = store
+            .replace_accounts_and_keys(overflow, Vec::new())
+            .unwrap_err();
+        assert!(matches!(error.code, ErrorCode::InvalidState));
+        assert_eq!(store.accounts().len(), MAX_LOCAL_ACCOUNTS);
+        drop(store);
+        assert_eq!(
+            LocalPoolStore::open(root.clone()).unwrap().accounts().len(),
+            MAX_LOCAL_ACCOUNTS
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn account_record(id: &str) -> LocalAccountRecord {
+        LocalAccountRecord {
+            account: AccountRecord {
+                id: id.into(),
+                label: id.into(),
+                identity: AccountIdentity::from_hashed_parts(
+                    "openai",
+                    "chatgpt.com/backend-api/codex",
+                    &format!("identity-{id}"),
+                    &format!("secret-{id}"),
+                    "default",
+                    None,
+                )
+                .unwrap(),
+                auth_mode: AccountAuthMode::OAuth,
+                auth_state: AccountAuthState::Active,
+                health: AccountHealthState::Healthy,
+                source_id: "openai_codex".into(),
+                secret_refs: vec![format!("account:{id}")],
+                subscription: Subscription::default(),
+                quota: QuotaSnapshot::default(),
+                token_generation: 1,
+                token_updated_at_ms: Some(1),
+                tags: BTreeSet::new(),
+                enabled: true,
+                draining: false,
+                created_at_ms: 1,
+                last_used_at_ms: None,
+                last_error_code: None,
+            },
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+        }
     }
 }

@@ -11,12 +11,22 @@ pub struct UsageEvent {
     pub attempt: u16,
     pub local_key_id: String,
     pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: WireApi,
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consecutive_failures: Option<u32>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,

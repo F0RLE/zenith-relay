@@ -8,9 +8,10 @@ tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = "0.22"
 chrono = "0.4"
-keyring = "3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -26,6 +27,15 @@ toml_edit = "0.25.12"
 url = "2"
 uuid = { version = "1.23.4", features = ["v4"] }
 zenith-relay-core = { path = "../crates/relay-core" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [profile.release]
 strip = true
