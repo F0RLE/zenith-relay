@@ -750,6 +750,6 @@ notes = "manual token zrk_customer_secret and sk-secret"
             .duration_since(UNIX_EPOCH)
             .expect("time")
             .as_nanos();
-        std::env::temp_dir().join(format!("zenith-codex-{name}-{timestamp}"))
+        std::env::temp_dir().join(format!("zenith-relay-{name}-{timestamp}"))
     }
 }

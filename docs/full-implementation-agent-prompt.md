@@ -1,6 +1,6 @@
 # Zenith Relay Full Implementation Agent Prompt
 
-Use this prompt in a fresh Codex task rooted at the `zenith-codex` repository.
+Use this prompt in a fresh Codex task rooted at the `zenith-relay` repository.
 
 ```text
 Implement Zenith Relay completely, end to end. Do not stop after analysis,
@@ -21,8 +21,8 @@ Before changing code:
    - the owning architecture/UX document for the active phase from
      `docs/README.md`
 4. Run the current baseline checks before implementation.
-5. Keep the public product name `Zenith Relay`. The repository/package may
-   remain `zenith-codex` until a rename is separately approved.
+5. Use `Zenith Relay` as the public product name and `zenith-relay` as the
+   repository, desktop package, binary, release asset, and GitHub slug.
 
 Product objective:
 

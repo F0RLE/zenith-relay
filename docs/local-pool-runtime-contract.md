@@ -1,9 +1,9 @@
-# Zenith Codex Local Pool Runtime Contract
+# Zenith Relay Local Pool Runtime Contract
 
 ## Purpose
 
 This document turns local pool research into buildable runtime contracts for
-Zenith Codex. It covers account login, API-key source login, local gateway
+Zenith Relay. It covers account login, API-key source login, local gateway
 usage, account selection, quota use, and profile switching.
 
 Public UI must stay neutral. Use `source`, `account`, `local gateway`, `local
@@ -28,7 +28,7 @@ source/account by local policy.
 
 ### Remote Pool
 
-User connects Zenith Codex to a server they own. The server exposes the same
+User connects Zenith Relay to a server they own. The server exposes the same
 personal-pool management protocol as the desktop local runtime, but stores
 secrets and executes requests on that server.
 
@@ -45,7 +45,7 @@ Use cases:
 user wants pool on a VPS
 user wants the pool to keep working when desktop is closed
 user wants several local clients to use one personal endpoint
-user wants to manage server accounts from Zenith Codex UI
+user wants to manage server accounts from Zenith Relay UI
 ```
 
 Rules:

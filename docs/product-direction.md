@@ -1,8 +1,8 @@
-# Zenith Codex Product Direction
+# Zenith Relay Product Direction
 
 ## Goal
 
-Zenith Codex should become an open desktop app for:
+Zenith Relay should become an open desktop app for:
 
 1. buying and using Zenith API access;
 2. managing a user's own local AI accounts and API keys;
@@ -38,7 +38,7 @@ profile attach/restore
 
 Target differences:
 
-- Desktop Local Gateway runs inside Zenith Codex on the user's computer. It is
+- Desktop Local Gateway runs inside Zenith Relay on the user's computer. It is
   best for personal use, quick setup, Codex/OpenCode attach, and localhost/LAN
   access. It works only while the app/computer is running.
 - Remote Pool Server is a user-managed service reached through the same public
@@ -55,7 +55,7 @@ Target differences:
 Recommended package split:
 
 ```text
-zenith-codex desktop app
+zenith-relay desktop app
 -> manage local runtime
 -> manage user self-host runtime over public protocol
 -> optionally deploy/update Remote Pool Server
@@ -133,7 +133,7 @@ Target user flow:
 
 ```text
 user accounts + provider sources
--> Zenith Codex local pool
+-> Zenith Relay local pool
 -> local gateway at http://127.0.0.1:<port>/v1
 -> generated local API key
 -> Codex/OpenCode/client config

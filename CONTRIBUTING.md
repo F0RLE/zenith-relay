@@ -1,4 +1,4 @@
-# Contributing to Zenith Codex
+# Contributing to Zenith Relay
 
 Use `main` as the stable branch. Open pull requests into `main` when review is needed.
 

@@ -4,7 +4,7 @@ use crate::local_pool::{
     models::{StoreMetadata, CURRENT_SCHEMA_VERSION},
 };
 use chrono::Utc;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -141,6 +141,7 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
     use std::{
         env,
         sync::atomic::{AtomicU64, Ordering},

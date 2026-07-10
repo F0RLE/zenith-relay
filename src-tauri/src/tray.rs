@@ -49,7 +49,7 @@ pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()
 
     let icon = Image::from_bytes(include_bytes!("../icons/32x32.png"))?;
     TrayIconBuilder::new()
-        .tooltip("Zenith Codex")
+        .tooltip("Zenith Relay")
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(true)

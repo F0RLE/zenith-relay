@@ -1,8 +1,8 @@
-# Zenith Codex Local Gateway Architecture
+# Zenith Relay Local Gateway Architecture
 
 ## Scope
 
-These notes define Zenith Codex local gateway behavior and local pool
+These notes define Zenith Relay local gateway behavior and local pool
 requirements. They are product and architecture notes only. Use original Zenith
 implementation, UI copy, assets, provider records, and naming.
 
@@ -79,7 +79,7 @@ Rules:
    disable the matching UI when unavailable.
 
 ```text
-zenith-codex/
+zenith-relay/
   src-tauri/
     src/
       local_pool/
@@ -171,7 +171,7 @@ deployment material.
 Frontend split:
 
 ```text
-zenith-codex/
+zenith-relay/
   src/
     src/
       features/

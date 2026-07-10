@@ -5742,7 +5742,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zenith-codex"
+name = "zenith-relay"
 version = "1.0.5"
 dependencies = [
  "chrono",

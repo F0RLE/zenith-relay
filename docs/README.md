@@ -1,4 +1,4 @@
-# Zenith Codex Documentation
+# Zenith Relay Documentation
 
 Read documents by ownership instead of reading every file as one specification.
 

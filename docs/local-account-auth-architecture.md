@@ -1,9 +1,9 @@
-# Zenith Codex Local Account/Auth Architecture
+# Zenith Relay Local Account/Auth Architecture
 
 ## Scope
 
 This document defines account, auth, import, quota, and profile-projection
-contracts for Zenith Codex local pool. It is internal planning material. Public
+contracts for Zenith Relay local pool. It is internal planning material. Public
 UI and public docs must use only Zenith terms: `account`, `source`, `local
 gateway`, `local API key`, `quota`, `health`, and `profile`.
 

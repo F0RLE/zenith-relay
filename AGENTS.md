@@ -63,7 +63,7 @@ bun run app:build
 - The app writes Codex config for `https://api.zenithmarket.dev/v1`.
 - The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
 - Model and balance displays come from Zenith API responses.
-- UI copy should describe Zenith Codex behavior.
+- UI copy should describe Zenith Relay behavior.
 - Product direction for the future open app lives in
   `docs/product-direction.md`.
 - Personal local-pool account data is local user data. It is not Zenith

@@ -77,33 +77,33 @@ function Add-Platform {
   }
 }
 
-Add-Platform "darwin-aarch64" "zenith-codex-macos-arm64" "Zenith Codex.app.tar.gz" "Zenith.Codex_aarch64.app.tar.gz"
+Add-Platform "darwin-aarch64" "zenith-relay-macos-arm64" "Zenith Relay.app.tar.gz" "Zenith.Relay_aarch64.app.tar.gz"
 $platforms["darwin-aarch64-app"] = $platforms["darwin-aarch64"]
 
-Add-Platform "darwin-x86_64" "zenith-codex-macos-intel" "Zenith Codex.app.tar.gz" "Zenith.Codex_x64.app.tar.gz"
+Add-Platform "darwin-x86_64" "zenith-relay-macos-intel" "Zenith Relay.app.tar.gz" "Zenith.Relay_x64.app.tar.gz"
 $platforms["darwin-x86_64-app"] = $platforms["darwin-x86_64"]
 
-Add-Platform "linux-aarch64" "zenith-codex-linux-arm64" "Zenith Codex_${version}_aarch64.AppImage" "Zenith.Codex_${version}_aarch64.AppImage"
+Add-Platform "linux-aarch64" "zenith-relay-linux-arm64" "Zenith Relay_${version}_aarch64.AppImage" "Zenith.Relay_${version}_aarch64.AppImage"
 $platforms["linux-aarch64-appimage"] = $platforms["linux-aarch64"]
-Add-Platform "linux-aarch64-deb" "zenith-codex-linux-arm64" "Zenith Codex_${version}_arm64.deb" "Zenith.Codex_${version}_arm64.deb"
-Add-Platform "linux-aarch64-rpm" "zenith-codex-linux-arm64" "Zenith Codex-${version}-1.aarch64.rpm" "Zenith.Codex-${version}-1.aarch64.rpm"
+Add-Platform "linux-aarch64-deb" "zenith-relay-linux-arm64" "Zenith Relay_${version}_arm64.deb" "Zenith.Relay_${version}_arm64.deb"
+Add-Platform "linux-aarch64-rpm" "zenith-relay-linux-arm64" "Zenith Relay-${version}-1.aarch64.rpm" "Zenith.Relay-${version}-1.aarch64.rpm"
 
-Add-Platform "linux-x86_64" "zenith-codex-linux-x64" "Zenith Codex_${version}_amd64.AppImage" "Zenith.Codex_${version}_amd64.AppImage"
+Add-Platform "linux-x86_64" "zenith-relay-linux-x64" "Zenith Relay_${version}_amd64.AppImage" "Zenith.Relay_${version}_amd64.AppImage"
 $platforms["linux-x86_64-appimage"] = $platforms["linux-x86_64"]
-Add-Platform "linux-x86_64-deb" "zenith-codex-linux-x64" "Zenith Codex_${version}_amd64.deb" "Zenith.Codex_${version}_amd64.deb"
-Add-Platform "linux-x86_64-rpm" "zenith-codex-linux-x64" "Zenith Codex-${version}-1.x86_64.rpm" "Zenith.Codex-${version}-1.x86_64.rpm"
+Add-Platform "linux-x86_64-deb" "zenith-relay-linux-x64" "Zenith Relay_${version}_amd64.deb" "Zenith.Relay_${version}_amd64.deb"
+Add-Platform "linux-x86_64-rpm" "zenith-relay-linux-x64" "Zenith Relay-${version}-1.x86_64.rpm" "Zenith.Relay-${version}-1.x86_64.rpm"
 
-Add-Platform "windows-aarch64" "zenith-codex-windows-arm64" "Zenith Codex_${version}_arm64_en-US.msi" "Zenith.Codex_${version}_arm64_en-US.msi"
+Add-Platform "windows-aarch64" "zenith-relay-windows-arm64" "Zenith Relay_${version}_arm64_en-US.msi" "Zenith.Relay_${version}_arm64_en-US.msi"
 $platforms["windows-aarch64-msi"] = $platforms["windows-aarch64"]
-Add-Platform "windows-aarch64-nsis" "zenith-codex-windows-arm64" "Zenith Codex_${version}_arm64-setup.exe" "Zenith.Codex_${version}_arm64-setup.exe"
+Add-Platform "windows-aarch64-nsis" "zenith-relay-windows-arm64" "Zenith Relay_${version}_arm64-setup.exe" "Zenith.Relay_${version}_arm64-setup.exe"
 
-Add-Platform "windows-x86_64" "zenith-codex-windows-x64" "Zenith Codex_${version}_x64_en-US.msi" "Zenith.Codex_${version}_x64_en-US.msi"
+Add-Platform "windows-x86_64" "zenith-relay-windows-x64" "Zenith Relay_${version}_x64_en-US.msi" "Zenith.Relay_${version}_x64_en-US.msi"
 $platforms["windows-x86_64-msi"] = $platforms["windows-x86_64"]
-Add-Platform "windows-x86_64-nsis" "zenith-codex-windows-x64" "Zenith Codex_${version}_x64-setup.exe" "Zenith.Codex_${version}_x64-setup.exe"
+Add-Platform "windows-x86_64-nsis" "zenith-relay-windows-x64" "Zenith Relay_${version}_x64-setup.exe" "Zenith.Relay_${version}_x64-setup.exe"
 
 $latest = [ordered]@{
   version = $version
-  notes = "Zenith Codex $version"
+  notes = "Zenith Relay $version"
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
   platforms = $platforms
 }

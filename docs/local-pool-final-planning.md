@@ -1,6 +1,6 @@
 # Local Pool Implementation Roadmap
 
-This file contains unfinished implementation work for the public Zenith Codex
+This file contains unfinished implementation work for the public Zenith Relay
 personal pool. Completed work is removed after verification.
 
 Canonical specifications:
@@ -46,7 +46,7 @@ The server keeps working when the desktop app is closed.
 
 ## Boundary
 
-Public Zenith Codex owns:
+Public Zenith Relay owns:
 
 - user-owned accounts and API-key sources;
 - local and user-managed remote pool configuration;
@@ -270,7 +270,7 @@ server and are not downloaded back to the app.
 
 Acceptance:
 
-- remote request works while Zenith Codex is closed;
+- remote request works while Zenith Relay is closed;
 - local and remote targets return the same public state shape;
 - unsupported server actions are disabled from capabilities;
 - token is pinned to the configured origin and never follows a cross-host

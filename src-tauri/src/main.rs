@@ -1134,7 +1134,7 @@ fn main() {
             local_pool::commands::get_local_pool_state
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build Zenith Codex");
+        .expect("failed to build Zenith Relay");
 
     app.run(|app_handle, event| {
         if let RunEvent::ExitRequested { api, code, .. } = event {

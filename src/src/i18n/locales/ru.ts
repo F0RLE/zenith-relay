@@ -1,6 +1,6 @@
 export const ru = {
   app: {
-    label: "Zenith Codex",
+    label: "Zenith Relay",
   },
   window: {
     minimize: "Свернуть",

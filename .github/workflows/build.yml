@@ -81,8 +81,8 @@ jobs:
 
           | Architecture | Windows | Ubuntu | macOS |
           |---|---|---|---|
-          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-x64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-x64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-macos-intel.dmg) |
-          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-arm64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-windows-arm64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-codex-macos-arm64.dmg) |
+          | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
+          | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
 
           Windows: use **Setup** for normal installation and auto-updates, or **EXE** for a portable launch.
           "@
@@ -118,19 +118,19 @@ jobs:
           Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
             Where-Object { $file = $_; $patterns | Where-Object { $file.Name -like $_ } } |
             Copy-Item -Destination artifacts
-          if ($env:RUNNER_OS -eq "Windows" -and (Test-Path "src-tauri/target/release/zenith-codex.exe")) {
-            Copy-Item "src-tauri/target/release/zenith-codex.exe" "artifacts/zenith-codex-${{ matrix.name }}.exe"
-            Copy-First "*.msi" "artifacts/zenith-codex-${{ matrix.name }}.msi"
-            Copy-First "*setup.exe" "artifacts/zenith-codex-${{ matrix.name }}-setup.exe"
+          if ($env:RUNNER_OS -eq "Windows" -and (Test-Path "src-tauri/target/release/zenith-relay.exe")) {
+            Copy-Item "src-tauri/target/release/zenith-relay.exe" "artifacts/zenith-relay-${{ matrix.name }}.exe"
+            Copy-First "*.msi" "artifacts/zenith-relay-${{ matrix.name }}.msi"
+            Copy-First "*setup.exe" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe"
           }
           if ($env:RUNNER_OS -eq "macOS") {
-            Copy-First "*.dmg" "artifacts/zenith-codex-${{ matrix.name }}.dmg"
-            Copy-First "*.app.tar.gz" "artifacts/zenith-codex-${{ matrix.name }}.app.tar.gz"
+            Copy-First "*.dmg" "artifacts/zenith-relay-${{ matrix.name }}.dmg"
+            Copy-First "*.app.tar.gz" "artifacts/zenith-relay-${{ matrix.name }}.app.tar.gz"
           }
           if ($env:RUNNER_OS -eq "Linux") {
-            Copy-First "*.AppImage" "artifacts/zenith-codex-${{ matrix.name }}.AppImage"
-            Copy-First "*.deb" "artifacts/zenith-codex-${{ matrix.name }}.deb"
-            Copy-First "*.rpm" "artifacts/zenith-codex-${{ matrix.name }}.rpm"
+            Copy-First "*.AppImage" "artifacts/zenith-relay-${{ matrix.name }}.AppImage"
+            Copy-First "*.deb" "artifacts/zenith-relay-${{ matrix.name }}.deb"
+            Copy-First "*.rpm" "artifacts/zenith-relay-${{ matrix.name }}.rpm"
           }
       - name: Upload stable release assets
         if: startsWith(github.ref, 'refs/tags/')
@@ -140,9 +140,9 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME > $null 2>&1
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Codex $env:GITHUB_REF_NAME" --notes-file release-notes.md
+            gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md
           }
-          Get-ChildItem "artifacts/zenith-codex-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |
+          Get-ChildItem "artifacts/zenith-relay-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |
             ForEach-Object { gh release upload $env:GITHUB_REF_NAME $_.FullName --clobber }
       - name: Update stable release notes
         if: startsWith(github.ref, 'refs/tags/')
@@ -152,7 +152,7 @@ jobs:
         run: gh release edit $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --notes-file release-notes.md
       - uses: actions/upload-artifact@v7
         with:
-          name: zenith-codex-${{ matrix.name }}
+          name: zenith-relay-${{ matrix.name }}
           path: artifacts/*
           if-no-files-found: error
 

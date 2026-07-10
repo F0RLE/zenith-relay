@@ -1,4 +1,4 @@
-# Zenith Codex
+# Zenith Relay
 
 Desktop app for connecting Codex to Zenith API and, in future releases,
 managing personal local AI account pools.

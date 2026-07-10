@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Zenith Codex",
+  "productName": "Zenith Relay",
   "version": "1.0.5",
   "identifier": "com.zenith.codex",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Zenith Codex",
+        "title": "Zenith Relay",
         "width": 900,
         "height": 340,
         "minWidth": 760,
@@ -52,7 +52,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRGQkQyM0UwQzdFQzU2ODgKUldTSVZ1ekg0Q085VDRCRFcyWURGTGdsVHdDVTVJa1lmRmpMTGh3bXdLd0N4MmdaMEpkc2c2dzAK",
       "endpoints": [
-        "https://github.com/F0RLE/zenith-codex/releases/latest/download/latest.json"
+        "https://github.com/F0RLE/zenith-relay/releases/latest/download/latest.json"
       ]
     }
   }

@@ -20,17 +20,20 @@ module.
 | Item | Name | Notes |
 | --- | --- | --- |
 | Public product | `Zenith Relay` | Used in UI and public documentation |
-| Current repository | `zenith-codex` | Keep until a separate repository rename is approved |
-| Current desktop package/binary | `zenith-codex` | Keep existing updater and release compatibility |
+| Repository | `zenith-relay` | Local folder and GitHub slug |
+| Desktop package/binary | `zenith-relay` | Cargo, Bun, and release artifact base name |
+| Tauri bundle identifier | `com.zenith.codex` | Kept for in-place upgrades of existing installations |
 | React product feature | `relay` | Lives under `src/src/features/relay` |
 | Desktop personal-pool adapter | `local_pool` | Existing Rust module under `src-tauri/src/local_pool` |
 | Shared runtime crate | `zenith-relay-core` | Directory `crates/relay-core` |
 | Self-host server package/binary | `zenith-relay-server` | Directory `relay-server` |
 | Stable desktop data folder | `local-pool` | Do not rename without a data migration |
 
-The public product name does not require an immediate repository, bundle id,
-updater URL, executable, or data-directory rename. Those are release migrations
-and must not be mixed into runtime implementation.
+The repository, package, executable, updater URL, and public labels use the new
+name. The existing Tauri bundle identifier and `local-pool` data directory stay
+stable so current installations and local state continue to upgrade in place.
+The keyring adapter reads the old service namespace once, migrates the secret
+to `Zenith Relay`, and then removes the old entry.
 
 ## Ownership Boundaries
 
@@ -71,7 +74,7 @@ Hard rules:
 ## Target Repository Tree
 
 ```text
-zenith-codex/
+zenith-relay/
   AGENTS.md
   CONTRIBUTING.md
   LICENSE

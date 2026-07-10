@@ -1,6 +1,6 @@
 export const en = {
   app: {
-    label: "Zenith Codex",
+    label: "Zenith Relay",
   },
   window: {
     minimize: "Minimize",

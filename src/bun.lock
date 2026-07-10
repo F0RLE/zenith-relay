@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "zenith-codex",
+      "name": "zenith-relay",
       "dependencies": {
         "@tauri-apps/api": "^2.9.0",
         "@tauri-apps/plugin-process": "^2.3.1",

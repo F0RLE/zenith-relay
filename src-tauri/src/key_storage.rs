@@ -1,4 +1,5 @@
-const KEYRING_SERVICE: &str = "Zenith Codex";
+const KEYRING_SERVICE: &str = "Zenith Relay";
+const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
 const KEYRING_USER: &str = "api-key";
 const PREVIOUS_AUTH_USER: &str = "previous-codex-auth-json";
 
@@ -33,17 +34,37 @@ pub fn save_named_secret(user: &str, value: &str) -> Result<(), String> {
 }
 
 pub fn load_named_secret(user: &str) -> Option<String> {
-    keyring_entry_for(user)
-        .get_password()
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
+    if let Some(value) = load_from_service(KEYRING_SERVICE, user) {
+        return Some(value);
+    }
+
+    let value = load_from_service(LEGACY_KEYRING_SERVICE, user)?;
+    if keyring_entry_for_service(KEYRING_SERVICE, user)
+        .set_password(&value)
+        .is_ok()
+    {
+        let _ = keyring_entry_for_service(LEGACY_KEYRING_SERVICE, user).delete_credential();
+    }
+    Some(value)
 }
 
 pub fn delete_named_secret(user: &str) {
     let _ = keyring_entry_for(user).delete_credential();
+    let _ = keyring_entry_for_service(LEGACY_KEYRING_SERVICE, user).delete_credential();
 }
 
 fn keyring_entry_for(user: &str) -> keyring::Entry {
-    keyring::Entry::new(KEYRING_SERVICE, user).expect("valid keyring service and user")
+    keyring_entry_for_service(KEYRING_SERVICE, user)
+}
+
+fn keyring_entry_for_service(service: &str, user: &str) -> keyring::Entry {
+    keyring::Entry::new(service, user).expect("valid keyring service and user")
+}
+
+fn load_from_service(service: &str, user: &str) -> Option<String> {
+    keyring_entry_for_service(service, user)
+        .get_password()
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
