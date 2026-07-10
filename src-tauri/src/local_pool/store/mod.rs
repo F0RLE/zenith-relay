@@ -99,9 +99,7 @@ impl LocalPoolStore {
         } else {
             next.push(source);
         }
-        save_json(&self.root.join("records").join("sources.json"), &next)?;
-        self.sources = next;
-        Ok(())
+        self.replace_records(next, self.keys.clone())
     }
 
     pub fn upsert_key(&mut self, key: LocalGatewayKeyRecord) -> Result<()> {
@@ -111,17 +109,73 @@ impl LocalPoolStore {
         } else {
             next.push(key);
         }
-        save_json(&self.root.join("records").join("keys.json"), &next)?;
-        self.keys = next;
+        self.replace_records(self.sources.clone(), next)
+    }
+
+    pub fn replace_records(
+        &mut self,
+        sources: Vec<ProviderSourceRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+    ) -> Result<()> {
+        let sources_changed = sources != self.sources;
+        let keys_changed = keys != self.keys;
+        if !sources_changed && !keys_changed {
+            return Ok(());
+        }
+
+        let sources_path = self.root.join("records").join("sources.json");
+        let keys_path = self.root.join("records").join("keys.json");
+        if sources_changed {
+            save_json(&sources_path, &sources)?;
+        }
+        if keys_changed {
+            if let Err(error) = save_json(&keys_path, &keys) {
+                if sources_changed {
+                    if let Err(rollback) = save_json(&sources_path, &self.sources) {
+                        return Err(LocalPoolError::new(
+                            ErrorCode::RecoveryRequired,
+                            format!(
+                                "{error}; failed to restore source records after key write failure: {rollback}"
+                            ),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        }
+        self.sources = sources;
+        self.keys = keys;
         Ok(())
+    }
+
+    pub fn replace_gateway(&mut self, gateway: GatewaySettings) -> Result<()> {
+        if gateway == self.gateway {
+            return Ok(());
+        }
+        gateway
+            .validate()
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        save_json(&self.root.join("settings").join("gateway.json"), &gateway)?;
+        self.gateway = gateway;
+        Ok(())
+    }
+
+    pub fn touch_usage(&mut self, key_id: &str, source_id: &str, at: String) -> Result<()> {
+        let mut sources = self.sources.clone();
+        let mut keys = self.keys.clone();
+        if let Some(source) = sources.iter_mut().find(|source| source.id == source_id) {
+            source.last_used_at = Some(at.clone());
+        }
+        if let Some(key) = keys.iter_mut().find(|key| key.id == key_id) {
+            key.last_used_at = Some(at);
+        }
+        self.replace_records(sources, keys)
     }
 
     pub fn set_gateway_enabled(&mut self, enabled: bool) -> Result<()> {
         let mut next = self.gateway.clone();
         next.enabled = enabled;
-        save_json(&self.root.join("settings").join("gateway.json"), &next)?;
-        self.gateway = next;
-        Ok(())
+        self.replace_gateway(next)
     }
 
     #[allow(dead_code)]
@@ -180,7 +234,7 @@ mod tests {
     fn fresh_store_is_versioned_and_restart_safe() {
         let root = temp_root();
         let store = LocalPoolStore::open(root.clone()).unwrap();
-        assert_eq!(store.metadata().schema_version, 2);
+        assert_eq!(store.metadata().schema_version, 3);
         assert_eq!(store.gateway().port, 14998);
         drop(store);
         assert_eq!(
@@ -210,10 +264,16 @@ mod tests {
                 id: "source_1".into(),
                 name: "Synthetic".into(),
                 enabled: true,
+                draining: false,
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
                 wire_api: WireApi::Responses,
                 models: vec!["gpt-test".into()],
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                priority: 0,
+                weight: 1,
+                last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
                 last_error: None,
@@ -225,6 +285,10 @@ mod tests {
                 label: "Default".into(),
                 enabled: true,
                 secret_ref: "key:key_1".into(),
+                source_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
                 created_at: "2026-07-10T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -236,6 +300,111 @@ mod tests {
         assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
         let records = fs::read_to_string(root.join("records").join("sources.json")).unwrap();
         assert!(!records.contains("upstream-secret"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_and_key_scope_changes_are_written_together() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let source = ProviderSourceRecord {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: "source:source_1".into(),
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        };
+        let key = LocalGatewayKeyRecord {
+            id: "key_1".into(),
+            label: "Scoped".into(),
+            enabled: true,
+            secret_ref: "key:key_1".into(),
+            source_ids: Some(vec![source.id.clone()]),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            created_at: "2026-07-10T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        store
+            .replace_records(vec![source], vec![key.clone()])
+            .unwrap();
+        let mut unavailable_key = key;
+        unavailable_key.source_ids = Some(Vec::new());
+        store
+            .replace_records(Vec::new(), vec![unavailable_key])
+            .unwrap();
+        drop(store);
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert!(reopened.sources().is_empty());
+        assert_eq!(reopened.keys()[0].source_ids, Some(Vec::new()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_key_write_restores_source_file_and_memory() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let source = ProviderSourceRecord {
+            id: "source_1".into(),
+            name: "Before".into(),
+            enabled: true,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: "source:source_1".into(),
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        };
+        let key = LocalGatewayKeyRecord {
+            id: "key_1".into(),
+            label: "Before".into(),
+            enabled: true,
+            secret_ref: "key:key_1".into(),
+            source_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            created_at: "2026-07-10T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        store
+            .replace_records(vec![source.clone()], vec![key.clone()])
+            .unwrap();
+        fs::create_dir(root.join("records").join("keys.tmp")).unwrap();
+        let mut changed_source = source;
+        changed_source.name = "After".into();
+        let mut changed_key = key;
+        changed_key.label = "After".into();
+
+        assert!(store
+            .replace_records(vec![changed_source], vec![changed_key])
+            .is_err());
+        assert_eq!(store.sources()[0].name, "Before");
+        let persisted: Vec<ProviderSourceRecord> =
+            load_json(&root.join("records").join("sources.json"))
+                .unwrap()
+                .unwrap();
+        assert_eq!(persisted[0].name, "Before");
         fs::remove_dir_all(root).unwrap();
     }
 }

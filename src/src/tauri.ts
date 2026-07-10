@@ -5,6 +5,8 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 
 export type Platform = "windows" | "macos" | "linux";
+export type PersistedSourceWireApi = "responses" | "chat_completions" | "messages";
+export type SourceCommandWireApi = "responses" | "chat_completions";
 
 export type UiState = {
   providerActive: boolean;
@@ -30,10 +32,16 @@ export type ProviderSourceRecord = {
   id: string;
   name: string;
   enabled: boolean;
+  draining: boolean;
   baseUrl: string;
   secretRef: string;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: PersistedSourceWireApi;
   models: string[];
+  allowedModels: string[];
+  excludedModels: string[];
+  priority: number;
+  weight: number;
+  lastUsedAt: string | null;
   lastTestAt: string | null;
   lastTestStatus: string | null;
   lastError: string | null;
@@ -44,6 +52,10 @@ export type LocalGatewayKeyRecord = {
   label: string;
   enabled: boolean;
   secretRef: string;
+  sourceIds: string[] | null;
+  allowedModels: string[];
+  excludedModels: string[];
+  modelPrefix: string | null;
   createdAt: string;
   lastUsedAt: string | null;
 };
@@ -52,6 +64,7 @@ export type LocalUsageLog = {
   id: number;
   createdAt: string;
   requestId: string;
+  attempt: number;
   localKeyId: string;
   sourceId: string;
   requestedModel: string | null;
@@ -78,6 +91,9 @@ export type LocalPoolState = {
     bindScope: "localhost";
     port: number;
     clientHost: "localhost" | "127.0.0.1";
+    maxRetryCandidates: number;
+    sessionAffinity: boolean;
+    sessionAffinityTtlSeconds: number;
   };
   platform: Platform;
   capabilities: {
@@ -179,8 +195,13 @@ export function createLocalSource(input: {
   name: string;
   baseUrl: string;
   apiKey: string;
-  wireApi?: "responses";
+  wireApi?: SourceCommandWireApi;
   models?: string[];
+  draining?: boolean;
+  allowedModels?: string[];
+  excludedModels?: string[];
+  priority?: number;
+  weight?: number;
 }) {
   return invoke<ProviderSourceRecord>("create_local_source", { input });
 }
@@ -189,8 +210,77 @@ export function testLocalSource(sourceId: string) {
   return invoke<ProviderSourceRecord>("test_local_source", { sourceId });
 }
 
-export function createLocalGatewayKey(label: string) {
-  return invoke<{ key: LocalGatewayKeyRecord; secret: string }>("create_local_gateway_key", { label });
+export function updateLocalSource(input: {
+  sourceId: string;
+  name: string;
+  baseUrl: string;
+  wireApi: SourceCommandWireApi;
+  models: string[];
+  draining: boolean;
+  allowedModels: string[];
+  excludedModels: string[];
+  priority: number;
+  weight: number;
+}) {
+  return invoke<LocalPoolState>("update_local_source", { input });
+}
+
+export function setLocalSourceEnabled(sourceId: string, enabled: boolean) {
+  return invoke<LocalPoolState>("set_local_source_enabled", { sourceId, enabled });
+}
+
+export function deleteLocalSource(sourceId: string) {
+  return invoke<LocalPoolState>("delete_local_source", { sourceId });
+}
+
+export function rotateLocalSourceKey(sourceId: string, apiKey: string) {
+  return invoke<LocalPoolState>("rotate_local_source_key", { sourceId, apiKey });
+}
+
+export function createLocalGatewayKey(
+  label: string,
+  policy: {
+    sourceIds?: string[] | null;
+    allowedModels?: string[];
+    excludedModels?: string[];
+    modelPrefix?: string | null;
+  } = {},
+) {
+  return invoke<{ key: LocalGatewayKeyRecord; secret: string }>("create_local_gateway_key", {
+    label,
+    ...policy,
+  });
+}
+
+export function updateLocalGatewayKey(input: {
+  keyId: string;
+  label: string;
+  sourceIds: string[] | null;
+  allowedModels: string[];
+  excludedModels: string[];
+  modelPrefix: string | null;
+}) {
+  return invoke<LocalPoolState>("update_local_gateway_key", { input });
+}
+
+export function setLocalGatewayKeyEnabled(keyId: string, enabled: boolean) {
+  return invoke<LocalPoolState>("set_local_gateway_key_enabled", { keyId, enabled });
+}
+
+export function deleteLocalGatewayKey(keyId: string) {
+  return invoke<LocalPoolState>("delete_local_gateway_key", { keyId });
+}
+
+export function rotateLocalGatewayKey(keyId: string) {
+  return invoke<{ key: LocalGatewayKeyRecord; secret: string }>("rotate_local_gateway_key", { keyId });
+}
+
+export function updateLocalRouting(input: {
+  maxRetryCandidates: number;
+  sessionAffinity: boolean;
+  sessionAffinityTtlSeconds: number;
+}) {
+  return invoke<LocalPoolState>("update_local_routing", { input });
 }
 
 export function startLocalGateway() {

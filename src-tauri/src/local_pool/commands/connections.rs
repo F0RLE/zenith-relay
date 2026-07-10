@@ -1,16 +1,18 @@
-use super::core_error;
+use super::{core_error, restart_after_secret_change, sync_records_or_rollback};
 use crate::local_pool::{
-    error::{CommandError, ErrorCode, LocalPoolError},
-    models::{LocalGatewayKeyRecord, ProviderSourceRecord},
+    error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+    models::{LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
     store::secret_store,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use serde::Deserialize;
+use std::collections::HashSet;
 use tauri::State;
 use uuid::Uuid;
-use zenith_relay_core::{GatewayRuntime, LocalGatewayKey, ProviderSource, WireApi};
+use zenith_relay_core::{discover_source_models, ProviderSource, WireApi};
+
+type CommandResult<T> = std::result::Result<T, CommandError>;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,26 +24,43 @@ pub struct CreateSourceInput {
     wire_api: WireApi,
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    draining: bool,
+    #[serde(default)]
+    allowed_models: Vec<String>,
+    #[serde(default)]
+    excluded_models: Vec<String>,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default = "default_weight")]
+    weight: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GeneratedLocalKey {
-    pub key: LocalGatewayKeyRecord,
-    pub secret: String,
+pub struct UpdateSourceInput {
+    source_id: String,
+    name: String,
+    base_url: String,
+    wire_api: WireApi,
+    models: Vec<String>,
+    #[serde(default)]
+    draining: bool,
+    #[serde(default)]
+    allowed_models: Vec<String>,
+    #[serde(default)]
+    excluded_models: Vec<String>,
+    priority: i32,
+    weight: u32,
 }
 
 #[tauri::command]
 pub async fn create_local_source(
     input: CreateSourceInput,
     state: State<'_, DesktopState>,
-) -> Result<ProviderSourceRecord, CommandError> {
-    let _setup = state.setup_guard().await;
-    if !state.store()?.sources().is_empty() {
-        return Err(
-            LocalPoolError::new(ErrorCode::Conflict, "a local source already exists").into(),
-        );
-    }
+) -> CommandResult<ProviderSourceRecord> {
+    let _mutation = state.setup_guard().await;
+    ensure_supported_wire_api(input.wire_api)?;
     let id = format!("source_{}", Uuid::new_v4().simple());
     let secret_ref = format!("source:{id}");
     let mut runtime_source = ProviderSource {
@@ -53,16 +72,9 @@ pub async fn create_local_source(
         models: input.models,
     };
     runtime_source.validate().map_err(core_error)?;
-    let runtime = GatewayRuntime::new(
-        runtime_source.clone(),
-        LocalGatewayKey {
-            id: "discovery".into(),
-            secret: "discovery-only-local-key".into(),
-        },
-        Arc::new(|_| {}),
-    )
-    .map_err(core_error)?;
-    runtime_source.models = runtime.discover_models().await.map_err(core_error)?;
+    runtime_source.models = discover_source_models(&runtime_source)
+        .await
+        .map_err(core_error)?;
     if runtime_source.models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -71,29 +83,35 @@ pub async fn create_local_source(
         .into());
     }
 
-    secret_store::save(&secret_ref, &runtime_source.api_key)?;
-    let record = ProviderSourceRecord {
+    let mut record = ProviderSourceRecord {
         id,
         name: runtime_source.name,
         enabled: true,
+        draining: input.draining,
         base_url: runtime_source.base_url,
         secret_ref: secret_ref.clone(),
         wire_api: runtime_source.wire_api,
         models: runtime_source.models,
+        allowed_models: input.allowed_models,
+        excluded_models: input.excluded_models,
+        priority: input.priority,
+        weight: input.weight,
+        last_used_at: None,
         last_test_at: Some(Utc::now().to_rfc3339()),
         last_test_status: Some("ok".into()),
         last_error: None,
     };
+    record.normalize();
+    let (old_sources, old_keys) = current_records(&state)?;
+    secret_store::save(&secret_ref, &runtime_source.api_key)?;
     if let Err(error) = state.store()?.upsert_source(record.clone()) {
-        if let Err(cleanup_error) = secret_store::delete(&secret_ref) {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!(
-                    "{}; source secret cleanup failed: {}",
-                    error.message, cleanup_error.message
-                ),
-            )
-            .into());
+        cleanup_created_secret(&secret_ref, &error)?;
+        return Err(error.into());
+    }
+    if let Err(error) = sync_records_or_rollback(&state, old_sources, old_keys).await {
+        let source_was_rolled_back = state.store()?.source(&record.id).is_none();
+        if source_was_rolled_back {
+            cleanup_created_secret(&secret_ref, &error)?;
         }
         return Err(error.into());
     }
@@ -101,34 +119,176 @@ pub async fn create_local_source(
 }
 
 #[tauri::command]
-pub async fn test_local_source(
+pub async fn update_local_source(
+    input: UpdateSourceInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let current = state
+        .store()?
+        .source(&input.source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    let mut updated = ProviderSourceRecord {
+        id: current.id.clone(),
+        name: input.name,
+        enabled: current.enabled,
+        draining: input.draining,
+        base_url: input.base_url,
+        secret_ref: current.secret_ref.clone(),
+        wire_api: input.wire_api,
+        models: input.models,
+        allowed_models: input.allowed_models,
+        excluded_models: input.excluded_models,
+        priority: input.priority,
+        weight: input.weight,
+        last_used_at: current.last_used_at,
+        last_test_at: current.last_test_at,
+        last_test_status: current.last_test_status,
+        last_error: current.last_error,
+    };
+    updated.normalize();
+    validate_source_record(&updated)?;
+    let (old_sources, old_keys) = current_records(&state)?;
+    state.store()?.upsert_source(updated)?;
+    sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_source_enabled(
+    source_id: String,
+    enabled: bool,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let mut source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    if source.enabled == enabled {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    if enabled {
+        validate_source_record(&source)?;
+    }
+    let (old_sources, old_keys) = current_records(&state)?;
+    source.enabled = enabled;
+    state.store()?.upsert_source(source)?;
+    sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn delete_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
-) -> Result<ProviderSourceRecord, CommandError> {
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
     let source = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    let old_secret = secret_store::load(&source.secret_ref)?;
+    let (old_sources, old_keys) = current_records(&state)?;
+    let sources = old_sources
+        .iter()
+        .filter(|candidate| candidate.id != source_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut keys = old_keys.clone();
+    prune_key_source_scopes(&mut keys, &sources);
+    state.store()?.replace_records(sources, keys)?;
+    sync_records_or_rollback(&state, old_sources.clone(), old_keys.clone()).await?;
+
+    if let Err(cleanup) = secret_store::delete(&source.secret_ref) {
+        if let Some(secret) = old_secret {
+            secret_store::save(&source.secret_ref, &secret).map_err(|restore| {
+                LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("{cleanup}; failed to restore source secret: {restore}"),
+                )
+            })?;
+            let (deleted_sources, deleted_keys) = current_records(&state)?;
+            let restore_records = { state.store()?.replace_records(old_sources, old_keys) };
+            if let Err(restore) = restore_records {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("{cleanup}; failed to restore deleted source records: {restore}"),
+                )
+                .into());
+            }
+            if let Err(restore) =
+                sync_records_or_rollback(&state, deleted_sources, deleted_keys).await
+            {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("{cleanup}; failed to restore gateway after source cleanup: {restore}"),
+                )
+                .into());
+            }
+        }
+        return Err(cleanup.into());
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn rotate_local_source_key(
+    source_id: String,
+    api_key: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    ensure_supported_wire_api(source.wire_api)?;
+    let api_key = api_key.trim().to_string();
+    ProviderSource {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        base_url: source.base_url.clone(),
+        api_key: api_key.clone(),
+        wire_api: source.wire_api,
+        models: source.models.clone(),
+    }
+    .validate()
+    .map_err(core_error)?;
+    let old_secret = secret_store::load(&source.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    secret_store::save(&source.secret_ref, &api_key)?;
+    restart_after_secret_change(&state, &source.secret_ref, &old_secret).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn test_local_source(
+    source_id: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProviderSourceRecord> {
+    let _mutation = state.setup_guard().await;
+    let source = state
+        .store()?
+        .source(&source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    ensure_supported_wire_api(source.wire_api)?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    let runtime = GatewayRuntime::new(
-        ProviderSource {
-            id: source.id.clone(),
-            name: source.name.clone(),
-            base_url: source.base_url.clone(),
-            api_key,
-            wire_api: source.wire_api,
-            models: source.models.clone(),
-        },
-        LocalGatewayKey {
-            id: "discovery".into(),
-            secret: "discovery-only-local-key".into(),
-        },
-        Arc::new(|_| {}),
-    )
-    .map_err(core_error)?;
-    let models = match runtime.discover_models().await {
+    let runtime_source = ProviderSource {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        base_url: source.base_url.clone(),
+        api_key,
+        wire_api: source.wire_api,
+        models: source.models.clone(),
+    };
+    let models = match discover_source_models(&runtime_source).await {
         Ok(models) => models,
         Err(error) => {
             let error = core_error(error);
@@ -140,61 +300,137 @@ pub async fn test_local_source(
             return Err(error.into());
         }
     };
+    if models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "source did not expose any configured models",
+        )
+        .into());
+    }
+    let runtime_changed = source.models != models;
     let mut updated = source;
     updated.models = models;
     updated.last_test_at = Some(Utc::now().to_rfc3339());
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
+    updated.normalize();
+    let (old_sources, old_keys) = current_records(&state)?;
     state.store()?.upsert_source(updated.clone())?;
+    if runtime_changed {
+        sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    }
     Ok(updated)
 }
 
-#[tauri::command]
-pub async fn create_local_gateway_key(
-    label: String,
-    state: State<'_, DesktopState>,
-) -> Result<GeneratedLocalKey, CommandError> {
-    let _setup = state.setup_guard().await;
-    if !state.store()?.keys().is_empty() {
-        return Err(
-            LocalPoolError::new(ErrorCode::Conflict, "a local gateway key already exists").into(),
-        );
+fn validate_source_record(source: &ProviderSourceRecord) -> LocalResult<()> {
+    ensure_supported_wire_api(source.wire_api)?;
+    let api_key = secret_store::load(&source.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    if source.models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "source must expose at least one model",
+        ));
     }
-    let id = format!("key_{}", Uuid::new_v4().simple());
-    let secret = format!("zlr_{}", Uuid::new_v4().simple());
-    let secret_ref = format!("key:{id}");
-    secret_store::save(&secret_ref, &secret)?;
-    let record = LocalGatewayKeyRecord {
-        id,
-        label: if label.trim().is_empty() {
-            "Default".into()
-        } else {
-            label.trim().to_string()
-        },
-        enabled: true,
-        secret_ref: secret_ref.clone(),
-        created_at: Utc::now().to_rfc3339(),
-        last_used_at: None,
-    };
-    if let Err(error) = state.store()?.upsert_key(record.clone()) {
-        if let Err(cleanup_error) = secret_store::delete(&secret_ref) {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!(
-                    "{}; local key secret cleanup failed: {}",
-                    error.message, cleanup_error.message
-                ),
-            )
-            .into());
-        }
-        return Err(error.into());
+    ProviderSource {
+        id: source.id.clone(),
+        name: source.name.clone(),
+        base_url: source.base_url.clone(),
+        api_key,
+        wire_api: source.wire_api,
+        models: source.models.clone(),
     }
-    Ok(GeneratedLocalKey {
-        key: record,
-        secret,
+    .validate()
+    .map_err(core_error)
+}
+
+fn ensure_supported_wire_api(wire_api: WireApi) -> LocalResult<()> {
+    if matches!(wire_api, WireApi::Messages) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "messages wire API is not supported by the local runtime",
+        ));
+    }
+    Ok(())
+}
+
+fn current_records(
+    state: &DesktopState,
+) -> LocalResult<(
+    Vec<ProviderSourceRecord>,
+    Vec<crate::local_pool::models::LocalGatewayKeyRecord>,
+)> {
+    let store = state.store()?;
+    Ok((store.sources().to_vec(), store.keys().to_vec()))
+}
+
+fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
+    secret_store::delete(secret_ref).map_err(|cleanup| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "{}; secret cleanup failed: {}",
+                cause.message, cleanup.message
+            ),
+        )
     })
 }
 
 fn responses_wire_api() -> WireApi {
     WireApi::Responses
+}
+
+fn default_weight() -> u32 {
+    1
+}
+
+fn prune_key_source_scopes(
+    keys: &mut [crate::local_pool::models::LocalGatewayKeyRecord],
+    sources: &[ProviderSourceRecord],
+) {
+    let valid_ids = sources
+        .iter()
+        .map(|source| source.id.as_str())
+        .collect::<HashSet<_>>();
+    for key in keys {
+        if let Some(source_ids) = &mut key.source_ids {
+            source_ids.retain(|id| valid_ids.contains(id.as_str()));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_pool::models::LocalGatewayKeyRecord;
+
+    #[test]
+    fn deleting_source_keeps_explicit_empty_scope_unavailable() {
+        let mut keys = [LocalGatewayKeyRecord {
+            id: "key_1".into(),
+            label: "Scoped".into(),
+            enabled: true,
+            secret_ref: "key:key_1".into(),
+            source_ids: Some(vec!["source_1".into()]),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            created_at: "2026-07-10T00:00:00Z".into(),
+            last_used_at: None,
+        }];
+        prune_key_source_scopes(&mut keys, &[]);
+        assert_eq!(keys[0].source_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn messages_wire_api_is_rejected_at_the_desktop_boundary() {
+        assert!(ensure_supported_wire_api(WireApi::Responses).is_ok());
+        assert!(ensure_supported_wire_api(WireApi::ChatCompletions).is_ok());
+        assert!(matches!(
+            ensure_supported_wire_api(WireApi::Messages)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidState
+        ));
+    }
 }

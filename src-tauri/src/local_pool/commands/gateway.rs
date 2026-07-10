@@ -10,6 +10,7 @@ use tauri::State;
 pub async fn start_local_gateway(
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
     let runtime = runtime_from_store(&state)?;
     let port = state.store()?.gateway().port;
     state.gateway.start(runtime, port).await?;
@@ -25,6 +26,7 @@ pub async fn start_local_gateway(
 pub async fn stop_local_gateway(
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
     state.store()?.set_gateway_enabled(false)?;
     state.gateway.stop().await;
     state.snapshot().await.map_err(Into::into)

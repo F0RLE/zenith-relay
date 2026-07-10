@@ -1,10 +1,19 @@
+pub mod catalog;
 mod error;
 pub mod gateway;
 mod runtime;
+pub mod scheduler;
 pub mod sources;
 pub mod usage;
 
+pub use catalog::{ModelRegistry, ModelRules};
 pub use error::{Error, Result};
-pub use runtime::GatewayRuntime;
+pub use runtime::{
+    discover_source_models, GatewayRuntime, GatewayRuntimeOptions, RuntimeLocalKey, RuntimeSource,
+};
+pub use scheduler::{
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, PoolScheduler,
+    RuntimeCandidate, Selection, SelectionRequest,
+};
 pub use sources::{LocalGatewayKey, ProviderSource, WireApi};
 pub use usage::{UsageCallback, UsageEvent};

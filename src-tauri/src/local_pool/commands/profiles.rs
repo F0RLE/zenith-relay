@@ -10,10 +10,11 @@ use crate::{
 use tauri::State;
 
 #[tauri::command]
-pub fn attach_codex_to_local_gateway(
+pub async fn attach_codex_to_local_gateway(
     key_id: String,
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
     let (key, port) = {
         let store = state.store()?;
         let key = store
@@ -22,6 +23,13 @@ pub fn attach_codex_to_local_gateway(
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key not found"))?;
         (key, store.gateway().port)
     };
+    if !key.enabled || !super::pool::has_usable_source(&state, &key)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "local key is not available for any enabled source",
+        )
+        .into());
+    }
     let secret = secret_store::load(&key.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key secret is missing"))?;
     codex::attach(
@@ -34,6 +42,7 @@ pub fn attach_codex_to_local_gateway(
 }
 
 #[tauri::command]
-pub fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
     codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
 }

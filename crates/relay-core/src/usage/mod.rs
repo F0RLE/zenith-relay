@@ -8,6 +8,7 @@ pub type UsageCallback = Arc<dyn Fn(UsageEvent) + Send + Sync>;
 #[serde(rename_all = "camelCase")]
 pub struct UsageEvent {
     pub request_id: String,
+    pub attempt: u16,
     pub local_key_id: String,
     pub source_id: String,
     pub requested_model: Option<String>,

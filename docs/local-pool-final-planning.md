@@ -136,34 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P2: Unified Multi-Source Scheduler
-
-Extend the same vertical to multiple candidates.
-
-Implement:
-
-- multiple API-key sources;
-- normalized `RuntimeCandidate`;
-- priority, weight, enable/disable, and drain;
-- model allow/exclude rules;
-- local-key candidate/model scopes;
-- hard health and cooldown filters;
-- least-recently-used spread;
-- pre-stream fallback;
-- `/v1/models` built from current candidate capabilities;
-- request logs by model, source/account, local key, status, latency, and tokens.
-
-Add `chat_completions` through an executor adapter only after the Responses path
-passes. Both protocols remain candidates in the same scheduler.
-
-Acceptance:
-
-- one request can fall back from a failed candidate to another;
-- disabled, cooled, scoped-out, or unsupported candidates are never called;
-- candidate selection is deterministic in tests;
-- a model remains usable while at least one eligible candidate supports it;
-- stream fallback cannot duplicate output.
-
 ### P3: OpenAI/Codex OAuth Accounts And Quota
 
 Add user-owned account capacity after the generic scheduler works.

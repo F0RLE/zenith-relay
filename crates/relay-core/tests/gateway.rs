@@ -14,7 +14,9 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
-use zenith_relay_core::{GatewayRuntime, LocalGatewayKey, ProviderSource, UsageEvent, WireApi};
+use zenith_relay_core::{
+    discover_source_models, GatewayRuntime, LocalGatewayKey, ProviderSource, UsageEvent, WireApi,
+};
 
 const LOCAL_KEY: &str = "local-test-key";
 const SOURCE_KEY: &str = "upstream-test-key";
@@ -79,18 +81,17 @@ async fn non_local_host_stops_before_auth_and_upstream_execution() {
 #[tokio::test]
 async fn models_are_discovered_and_filtered_with_the_source_credential() {
     let (upstream, state) = spawn_upstream().await;
-    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
-
-    let response = reqwest::Client::new()
-        .get(format!("{}/v1/models", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value = response.json().await.unwrap();
-    assert_eq!(body["data"].as_array().unwrap().len(), 1);
-    assert_eq!(body["data"][0]["id"], "gpt-test");
+    let models = discover_source_models(&ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic upstream".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: vec!["gpt-test".into()],
+    })
+    .await
+    .unwrap();
+    assert_eq!(models, ["gpt-test"]);
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -104,24 +105,16 @@ async fn models_are_discovered_and_filtered_with_the_source_credential() {
 #[tokio::test]
 async fn model_discovery_rejects_a_bad_source_key() {
     let (upstream, _) = spawn_upstream().await;
-    let runtime = GatewayRuntime::new(
-        ProviderSource {
-            id: "source-1".into(),
-            name: "Synthetic upstream".into(),
-            base_url: format!("{}/v1", upstream.base_url),
-            api_key: "wrong-source-key".into(),
-            wire_api: WireApi::Responses,
-            models: vec!["gpt-test".into()],
-        },
-        LocalGatewayKey {
-            id: "key-1".into(),
-            secret: LOCAL_KEY.into(),
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-
-    assert!(runtime.discover_models().await.is_err());
+    assert!(discover_source_models(&ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic upstream".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: "wrong-source-key".into(),
+        wire_api: WireApi::Responses,
+        models: vec!["gpt-test".into()],
+    })
+    .await
+    .is_err());
 }
 
 #[tokio::test]
@@ -137,24 +130,16 @@ async fn model_discovery_rejects_an_oversized_body() {
         }),
     ))
     .await;
-    let runtime = GatewayRuntime::new(
-        ProviderSource {
-            id: "source-1".into(),
-            name: "Synthetic upstream".into(),
-            base_url: format!("{}/v1", upstream.base_url),
-            api_key: SOURCE_KEY.into(),
-            wire_api: WireApi::Responses,
-            models: vec![],
-        },
-        LocalGatewayKey {
-            id: "key-1".into(),
-            secret: LOCAL_KEY.into(),
-        },
-        Arc::new(|_| {}),
-    )
-    .unwrap();
-
-    assert!(runtime.discover_models().await.is_err());
+    assert!(discover_source_models(&ProviderSource {
+        id: "source-1".into(),
+        name: "Synthetic upstream".into(),
+        base_url: format!("{}/v1", upstream.base_url),
+        api_key: SOURCE_KEY.into(),
+        wire_api: WireApi::Responses,
+        models: vec![],
+    })
+    .await
+    .is_err());
 }
 
 #[tokio::test]
