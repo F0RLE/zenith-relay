@@ -27,6 +27,8 @@
   mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
+- Treat `docs/project-structure.md` as the canonical source for target paths,
+  package names, and module ownership. Do not invent parallel module trees.
 
 ## Checks
 
@@ -51,6 +53,8 @@ bun run app:build
 - `src-tauri/src`: Rust/Tauri backend, API client, config writes, key storage, launcher, updater hooks.
 - `src-tauri/capabilities`: Tauri permissions.
 - `src-tauri/icons`: app and installer icons.
+- `crates/relay-core`: planned shared local/server runtime logic.
+- `relay-server`: planned standalone user-managed server package.
 - `.github/workflows`: CI builds and releases.
 - `.github/tools`: local/CI build helpers.
 

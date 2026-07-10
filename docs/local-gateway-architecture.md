@@ -40,9 +40,13 @@ Avoid:
 
 ## Zenith Module Split
 
-Implement new local-pool code under the real Tauri backend path. Do not create
-another top-level Rust project and do not put local-pool runtime code into the
-React frontend.
+Exact repository paths and package names are owned by
+[project-structure.md](project-structure.md). The trees in this section explain
+module responsibilities only; `project-structure.md` wins if a path differs.
+
+Keep desktop adapters under the real Tauri backend path and never put runtime
+logic into the React frontend. Reusable local/server behavior belongs in
+`crates/relay-core`; the only standalone runtime package is `relay-server`.
 
 Design the runtime around a shared core plus target adapters:
 

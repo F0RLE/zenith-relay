@@ -5,6 +5,7 @@ Read documents by ownership instead of reading every file as one specification.
 | Document | Owns |
 | --- | --- |
 | [product-direction.md](product-direction.md) | Product modes, public/private boundary, and user-facing scope |
+| [project-structure.md](project-structure.md) | Canonical repository tree, package names, module ownership, tests, and runtime data paths |
 | [local-pool-final-planning.md](local-pool-final-planning.md) | Unfinished implementation order and release gates |
 | [local-pool-runtime-contract.md](local-pool-runtime-contract.md) | Local/server runtime targets, public self-host protocol, gateway and failure contracts |
 | [local-account-auth-architecture.md](local-account-auth-architecture.md) | Account/source import, OAuth, tokens, quota, profiles, backups, and repair |
@@ -18,8 +19,9 @@ Read documents by ownership instead of reading every file as one specification.
 For implementation:
 
 1. `product-direction.md`;
-2. `local-pool-final-planning.md`;
-3. only the owning architecture/UX document for the current phase.
+2. `project-structure.md`;
+3. `local-pool-final-planning.md`;
+4. only the owning architecture/UX document for the current phase.
 
 For review:
 
@@ -38,5 +40,7 @@ For review:
 - User-owned server accounts stay on the server selected by that user.
 - Exact DTOs and commands belong to architecture/runtime specs, not every
   product document.
+- Exact repository paths and package names belong only to
+  `project-structure.md`.
 - Exact controls and visual behavior belong to `app-ux-flow-spec.md`.
 - Completed roadmap tasks are removed; Git and tests keep history.

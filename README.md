@@ -68,12 +68,14 @@ Source layout:
 
 - `src` - React/Vite frontend package.
 - `src-tauri` - Rust/Tauri backend and desktop packaging.
-- planned local-pool backend code lives under `src-tauri/src/local_pool`.
-- planned local-pool frontend code lives under `src/src/features/local-pool`.
+- `src-tauri/src/local_pool` - desktop personal-pool adapters and storage.
+- `src/src/features/relay` - target Zenith Relay frontend feature.
+- `crates/relay-core` - target shared local/server runtime crate.
+- `relay-server` - target standalone user-managed server package.
 - `.github/tools` - local and CI build helpers.
 
 The canonical future tree is documented in
-[docs/local-gateway-architecture.md](docs/local-gateway-architecture.md#zenith-module-split).
+[docs/project-structure.md](docs/project-structure.md).
 
 Verify before release:
 

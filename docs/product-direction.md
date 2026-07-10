@@ -66,8 +66,9 @@ public personal-pool server package
 -> no Zenith private backend authority
 ```
 
-The server package/repository decision is part of P4 in
-[local-pool-final-planning.md](local-pool-final-planning.md).
+The public server package lives in this repository under `relay-server`, while
+shared local/server runtime logic lives under `crates/relay-core`. Exact paths
+are defined in [project-structure.md](project-structure.md).
 
 ## Product Modes
 

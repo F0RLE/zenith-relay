@@ -16,6 +16,7 @@ Before changing code:
    changes; never reset, checkout, or rewrite unrelated work.
 3. Read in this order:
    - `docs/product-direction.md`
+   - `docs/project-structure.md`
    - `docs/local-pool-final-planning.md`
    - the owning architecture/UX document for the active phase from
      `docs/README.md`
@@ -50,6 +51,8 @@ Hard boundaries:
   upstream.
 - Keep business/runtime logic in Rust. React renders typed commands and state;
   it does not read secrets or edit client files directly.
+- Follow `docs/project-structure.md` for exact paths and package names. Do not
+  invent a second tree or commit empty scaffolding.
 - Use append-only migrations and preserve existing profile backups.
 - No Windows-only paths or behavior in shared code.
 

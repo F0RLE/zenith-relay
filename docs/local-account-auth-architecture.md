@@ -11,8 +11,13 @@ Do not expose private operational details in public surfaces.
 
 ## Backend Split
 
-Keep account/auth logic under `src-tauri/src/local_pool/` and separate from
-local gateway routing:
+Exact repository paths and package names are owned by
+[project-structure.md](project-structure.md). This section owns account/auth
+responsibilities, not the canonical tree.
+
+Keep desktop account/auth adapters under `src-tauri/src/local_pool/`. Reusable
+credential, token, quota, and candidate behavior belongs in
+`crates/relay-core`; keep both separate from gateway route orchestration:
 
 ```text
 local_pool/
