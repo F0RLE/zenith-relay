@@ -28,10 +28,12 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-audit
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
+      - run: cargo audit --file relay-server/Cargo.lock
 
   binary:
     needs: check
@@ -65,6 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/build-push-action@v7
         with:

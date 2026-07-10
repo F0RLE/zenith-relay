@@ -1,6 +1,7 @@
 # P0 Baseline
 
-Verified on 2026-07-10 from `codex/local-pool-product-modes` before local-pool implementation.
+Verified on 2026-07-10 from the work branch later renamed to
+`relay/local-pool-product-modes`, before local-pool implementation.
 
 ## Checks
 

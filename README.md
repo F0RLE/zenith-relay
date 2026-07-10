@@ -1,60 +1,37 @@
 # Zenith Relay
 
-Desktop app for connecting Codex to Zenith API and, in future releases,
-managing personal local AI account pools.
+Zenith Relay is a Tauri desktop application for routing a user's own accounts
+and compatible APIs through one OpenAI-compatible endpoint.
 
-## Features
+## Runtime Modes
 
-- Saves your Zenith API key.
-- Writes the Zenith connection into Codex config.
-- Launches Codex from the app.
-- Shows key balance, spending, requests, and usage history.
-- Opens the Telegram bot for balance top-ups.
+- **This computer** runs a private loopback endpoint from the desktop app.
+- **My server** manages the same personal pool on a server controlled by the
+  user, so requests continue while the desktop is closed.
+- **Ready API** connects Codex to Zenith API and shows balance, usage, and
+  top-up actions without exposing the saved key to the frontend.
 
-Planned:
+Personal pool features include OAuth accounts, compatible API sources, quota
+windows and reset times, a shared scheduler, local client keys, model rules,
+usage diagnostics, quota-wake automation, profile backup/restore, and RU/EN UI.
 
-- Manage personal local OpenAI/Codex accounts and API keys.
-- Add editable provider sources with name, base URL, protocol mode, and API key.
-- Show quota, reset, subscription, and health state.
-- Run a local gateway for the user's own accounts.
-- Generate local API keys so Codex/OpenCode can use the local gateway.
-- Add Zenith API as one preset provider source next to custom providers and
-  personal accounts.
-- Import local `auth.json`, token JSON, and compatible personal account exports.
+The public app never contains Zenith private selling-pool inventory, billing,
+provider economy, or internal routing policy. User credentials stay in the
+device secret store or encrypted vault on the server selected by that user.
 
-Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+## Components
 
-Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+- `src` - React/Vite frontend and Playwright tests.
+- `src-tauri` - Rust/Tauri desktop host, OS secret storage, OAuth, local
+  endpoint, client profiles, and remote management client.
+- `crates/relay-core` - shared scheduler, gateway, quota, automation, protocol,
+  usage, and redaction logic.
+- `relay-server` - standalone encrypted user-managed runtime.
+- `docs` - product, architecture, runtime, UX, and active release gates.
 
-## API
-
-The app uses:
-
-```text
-https://api.zenithmarket.dev/v1
-```
-
-## Architecture
-
-The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands.
-
-Rust/Tauri owns API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control.
-
-The app configures Codex to use the project API endpoint and displays API-provided account state.
-
-Future local-pool features are local-first. User-owned accounts stay on the
-user's device by default and are not uploaded into Zenith infrastructure.
-Internal Zenith backend capacity and routing remain outside this public app.
-
-Start with the [documentation map](docs/README.md). Product scope lives in
-[docs/product-direction.md](docs/product-direction.md), the active build order
-in [docs/local-pool-final-planning.md](docs/local-pool-final-planning.md), and
-the detailed future UI in
-[docs/app-ux-flow-spec.md](docs/app-ux-flow-spec.md).
-
-## Platforms
-
-GitHub Actions builds Windows, macOS, and Linux artifacts for x64 and ARM64. Releases use the Tauri updater through GitHub Releases.
+Start with the [documentation map](docs/README.md). Exact paths and ownership
+live in [project-structure.md](docs/project-structure.md); unfinished release
+work lives in [local-pool-final-planning.md](docs/local-pool-final-planning.md).
 
 ## Development
 
@@ -64,27 +41,41 @@ bun install
 bun run app:dev
 ```
 
-Source layout:
-
-- `src` - React/Vite frontend package.
-- `src-tauri` - Rust/Tauri backend and desktop packaging.
-- `src-tauri/src/local_pool` - desktop personal-pool adapters and storage.
-- `src/src/features/relay` - target Zenith Relay frontend feature.
-- `crates/relay-core` - target shared local/server runtime crate.
-- `relay-server` - target standalone user-managed server package.
-- `.github/tools` - local and CI build helpers.
-
-The canonical future tree is documented in
-[docs/project-structure.md](docs/project-structure.md).
-
-Verify before release:
+Verification:
 
 ```bash
 cd src
 bun run verify
+bun run test:e2e
+bun run app:build
 ```
 
-Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md).
+Run the user-managed server:
+
+```bash
+cargo run --manifest-path relay-server/Cargo.toml --release
+```
+
+See [relay-server/README.md](relay-server/README.md) for encrypted deployment,
+backup, and restore instructions.
+
+## Platforms
+
+The release workflow builds Windows x64/ARM64, macOS Intel/Apple Silicon, and
+Linux x64/ARM64. Release artifacts include portable/setup/MSI packages on
+Windows, app/DMG packages on macOS, and AppImage/DEB/RPM packages on Linux.
+
+## Zenith API
+
+The recommended Ready API preset is:
+
+```text
+https://api.zenithmarket.dev/v1
+```
+
+Telegram top-up bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+
+Public API documentation: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
 
 ## License
 
