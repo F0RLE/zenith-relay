@@ -5,7 +5,11 @@ use std::fmt::{self, Display};
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Io,
+    Conflict,
+    GatewayUnavailable,
     InvalidState,
+    NotFound,
+    ProfileRestoreBlocked,
     RecoveryRequired,
     SecretStoreUnavailable,
     UnsupportedSchema,

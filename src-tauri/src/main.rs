@@ -554,13 +554,12 @@ fn contains_only_safe_public_support_links(message: &str) -> bool {
         let candidate = word.trim_matches(|character: char| {
             matches!(character, '.' | ',' | ';' | ':' | ')' | ']' | '}')
         });
-        if candidate.starts_with("http://")
+        if (candidate.starts_with("http://")
             || candidate.starts_with("https://")
-            || candidate.starts_with("tg://")
+            || candidate.starts_with("tg://"))
+            && !is_safe_public_support_link(candidate)
         {
-            if !is_safe_public_support_link(candidate) {
-                return false;
-            }
+            return false;
         }
     }
     true
@@ -899,6 +898,7 @@ fn is_valid_top_up_start(start: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
         extract_top_up_start, extract_top_up_start_from_url, fallback_api_date, format_api_date,
@@ -1092,6 +1092,14 @@ fn main() {
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle().clone();
+            let relay_state = local_pool::initialize(&handle)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            app.manage(relay_state);
+            let startup_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = startup_handle.state::<local_pool::DesktopState>();
+                let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
+            });
             let _ = ensure_provider_on_launch();
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
@@ -1131,7 +1139,15 @@ fn main() {
             reset_key,
             launch_saved_codex,
             open_top_up_url,
-            local_pool::commands::get_local_pool_state
+            local_pool::commands::state::get_local_pool_state,
+            local_pool::commands::connections::create_local_source,
+            local_pool::commands::connections::test_local_source,
+            local_pool::commands::connections::create_local_gateway_key,
+            local_pool::commands::gateway::start_local_gateway,
+            local_pool::commands::gateway::stop_local_gateway,
+            local_pool::commands::usage::get_local_usage,
+            local_pool::commands::profiles::attach_codex_to_local_gateway,
+            local_pool::commands::profiles::restore_codex_profile
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Relay");

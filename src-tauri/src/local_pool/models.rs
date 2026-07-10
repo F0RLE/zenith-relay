@@ -1,7 +1,8 @@
 use crate::platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
+use zenith_relay_core::WireApi;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,6 +32,32 @@ pub struct GatewaySettings {
     pub bind_scope: BindScope,
     pub port: u16,
     pub client_host: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSourceRecord {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub secret_ref: String,
+    pub wire_api: WireApi,
+    pub models: Vec<String>,
+    pub last_test_at: Option<String>,
+    pub last_test_status: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalGatewayKeyRecord {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+    pub secret_ref: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
 }
 
 impl Default for GatewaySettings {
@@ -71,6 +98,8 @@ pub struct LocalPoolSnapshot {
     pub gateway: GatewaySettings,
     pub platform: &'static str,
     pub capabilities: PlatformCapabilities,
+    pub sources: Vec<ProviderSourceRecord>,
+    pub keys: Vec<LocalGatewayKeyRecord>,
     pub warnings: Vec<String>,
 }
 
@@ -80,8 +109,10 @@ mod tests {
 
     #[test]
     fn gateway_validation_rejects_privileged_port_and_remote_host() {
-        let mut settings = GatewaySettings::default();
-        settings.port = 443;
+        let mut settings = GatewaySettings {
+            port: 443,
+            ..GatewaySettings::default()
+        };
         assert!(settings.validate().is_err());
 
         settings.port = DEFAULT_GATEWAY_PORT;

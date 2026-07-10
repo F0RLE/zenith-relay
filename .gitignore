@@ -13,6 +13,7 @@ src-tauri/target/
 src-tauri/gen/
 relay-server/target/
 crates/relay-core/target/
+crates/relay-core/Cargo.lock
 playwright-report/
 test-results/
 

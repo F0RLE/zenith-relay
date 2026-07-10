@@ -136,42 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P1: One Source, One Local Endpoint
-
-Build the smallest working vertical:
-
-```text
-add one API-key source
--> store secret locally
--> start localhost gateway
--> GET /v1/models
--> POST /v1/responses
--> one real request
--> one usage record
-```
-
-Implement:
-
-- one generic OpenAI-compatible API source;
-- explicit `base_url`, key, protocol, and model list;
-- generated local pool key;
-- localhost-only gateway;
-- source test;
-- redacted request/error log;
-- start, stop, and state snapshot;
-- one-click Codex profile attach and restore using existing safe backup logic.
-
-Do not build OAuth, multiple strategies, LAN access, remote deploy, or a large
-screen set in this phase.
-
-Acceptance:
-
-- Codex can use the local endpoint through one generated key;
-- upstream receives only its own source credential;
-- invalid local key fails before upstream execution;
-- restart preserves source settings and secret reference;
-- restore returns Codex to the previous login/API configuration.
-
 ### P2: Unified Multi-Source Scheduler
 
 Extend the same vertical to multiple candidates.

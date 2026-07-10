@@ -17,6 +17,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         Some(metadata) => metadata,
         None if gateway_path.exists() => StoreMetadata { schema_version: 0 },
         None => {
+            migrate_v1_to_v2(root)?;
             let metadata = StoreMetadata::default();
             save_json(&metadata_path, &metadata)?;
             return Ok(metadata);
@@ -41,6 +42,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         while metadata.schema_version < CURRENT_SCHEMA_VERSION {
             match metadata.schema_version {
                 0 => migrate_v0_to_v1(root, &gateway_path)?,
+                1 => migrate_v1_to_v2(root)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -60,6 +62,19 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v1_to_v2(root: &Path) -> Result<()> {
+    let records = root.join("records");
+    fs::create_dir_all(&records).map_err(io_error)?;
+    fs::create_dir_all(root.join("telemetry")).map_err(io_error)?;
+    for name in ["sources.json", "keys.json"] {
+        let path = records.join(name);
+        if !path.exists() {
+            save_json(&path, &Vec::<Value>::new())?;
+        }
+    }
+    Ok(())
 }
 
 fn migrate_v0_to_v1(root: &Path, path: &Path) -> Result<()> {
@@ -108,25 +123,50 @@ fn backup_settings(root: &Path, schema_version: u32) -> Result<PathBuf> {
         Utc::now().format("%Y%m%d%H%M%S%3f")
     ));
     fs::create_dir_all(&target).map_err(io_error)?;
-    copy_if_exists(&root.join("metadata.json"), &target.join("metadata.json"))?;
-    copy_if_exists(
+    backup_file(
+        &root.join("metadata.json"),
+        &target.join("metadata.json"),
+        &target.join("metadata.missing"),
+    )?;
+    backup_file(
         &root.join("settings").join("gateway.json"),
         &target.join("gateway.json"),
+        &target.join("gateway.missing"),
     )?;
     Ok(target)
 }
 
 fn restore_settings(root: &Path, backup: &Path) -> Result<()> {
-    copy_if_exists(&backup.join("metadata.json"), &root.join("metadata.json"))?;
-    copy_if_exists(
+    restore_file(
+        &backup.join("metadata.json"),
+        &backup.join("metadata.missing"),
+        &root.join("metadata.json"),
+    )?;
+    restore_file(
         &backup.join("gateway.json"),
+        &backup.join("gateway.missing"),
         &root.join("settings").join("gateway.json"),
     )
 }
 
-fn copy_if_exists(source: &Path, target: &Path) -> Result<()> {
+fn backup_file(source: &Path, target: &Path, missing_marker: &Path) -> Result<()> {
     if !source.exists() {
+        fs::write(missing_marker, b"").map_err(io_error)?;
         return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    fs::copy(source, target).map(|_| ()).map_err(io_error)
+}
+
+fn restore_file(source: &Path, missing_marker: &Path, target: &Path) -> Result<()> {
+    if missing_marker.exists() {
+        return match fs::remove_file(target) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(error)),
+        };
     }
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(io_error)?;
@@ -184,6 +224,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(gateway["clientHost"], "127.0.0.1");
+        assert!(root.join("records").join("sources.json").exists());
         assert!(root
             .join("backups")
             .join("migrations")
@@ -206,6 +247,27 @@ mod tests {
         .unwrap();
         let error = migrate(&root).unwrap_err();
         assert!(matches!(error.code, ErrorCode::UnsupportedSchema));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_migration_restores_absent_metadata_and_legacy_gateway() {
+        let root = temp_root();
+        let gateway_path = root.join("settings").join("gateway.json");
+        save_json(
+            &gateway_path,
+            &Value::Object(Map::from_iter([
+                ("enabled".to_string(), Value::Bool(false)),
+                ("port".to_string(), Value::from(14998)),
+            ])),
+        )
+        .unwrap();
+        fs::write(root.join("records"), "blocks records directory").unwrap();
+
+        assert!(migrate(&root).is_err());
+        assert!(!root.join("metadata.json").exists());
+        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        assert!(gateway.get("clientHost").is_none());
         fs::remove_dir_all(root).unwrap();
     }
 }

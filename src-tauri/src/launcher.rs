@@ -24,10 +24,10 @@ pub fn launch_codex() -> String {
 
     #[cfg(target_os = "windows")]
     {
-        return match start_detached(PathBuf::from("codex")) {
+        match start_detached(PathBuf::from("codex")) {
             Ok(_) => "Codex запущен.".to_string(),
             Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        };
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -35,18 +35,18 @@ pub fn launch_codex() -> String {
         if Command::new("open").args(["-a", "Codex"]).spawn().is_ok() {
             return "Codex запущен.".to_string();
         }
-        return match start_detached(PathBuf::from("codex")) {
+        match start_detached(PathBuf::from("codex")) {
             Ok(_) => "Codex запущен.".to_string(),
             Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        };
+        }
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return match start_detached(PathBuf::from("codex")) {
+        match start_detached(PathBuf::from("codex")) {
             Ok(_) => "Codex запущен.".to_string(),
             Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        };
+        }
     }
 }
 
@@ -84,7 +84,7 @@ fn start_detached(path: PathBuf) -> Result<(), String> {
         if let Some(api_key) = load_api_key_for_launch() {
             command.env("OPENAI_API_KEY", api_key);
         }
-        return command.spawn().map(|_| ()).map_err(|err| err.to_string());
+        command.spawn().map(|_| ()).map_err(|err| err.to_string())
     }
 
     #[cfg(not(target_os = "windows"))]

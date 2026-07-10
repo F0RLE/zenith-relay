@@ -13,8 +13,58 @@ export type UiState = {
 };
 
 export type LocalPoolCommandError = {
-  code: "io" | "invalid_state" | "recovery_required" | "secret_store_unavailable" | "unsupported_schema";
+  code:
+    | "conflict"
+    | "gateway_unavailable"
+    | "io"
+    | "invalid_state"
+    | "not_found"
+    | "profile_restore_blocked"
+    | "recovery_required"
+    | "secret_store_unavailable"
+    | "unsupported_schema";
   message: string;
+};
+
+export type ProviderSourceRecord = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  baseUrl: string;
+  secretRef: string;
+  wireApi: "responses" | "chat_completions" | "messages";
+  models: string[];
+  lastTestAt: string | null;
+  lastTestStatus: string | null;
+  lastError: string | null;
+};
+
+export type LocalGatewayKeyRecord = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  secretRef: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+export type LocalUsageLog = {
+  id: number;
+  createdAt: string;
+  requestId: string;
+  localKeyId: string;
+  sourceId: string;
+  requestedModel: string | null;
+  resolvedModel: string | null;
+  wireApi: string;
+  success: boolean;
+  httpStatus: number;
+  errorCategory: string | null;
+  latencyMs: number;
+  ttftMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
 };
 
 export type LocalPoolState = {
@@ -38,6 +88,8 @@ export type LocalPoolState = {
     autostart: boolean;
     backgroundRuntime: boolean;
   };
+  sources: ProviderSourceRecord[];
+  keys: LocalGatewayKeyRecord[];
   warnings: string[];
 };
 
@@ -121,6 +173,44 @@ export function getState() {
 
 export function getLocalPoolState() {
   return invoke<LocalPoolState>("get_local_pool_state");
+}
+
+export function createLocalSource(input: {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  wireApi?: "responses";
+  models?: string[];
+}) {
+  return invoke<ProviderSourceRecord>("create_local_source", { input });
+}
+
+export function testLocalSource(sourceId: string) {
+  return invoke<ProviderSourceRecord>("test_local_source", { sourceId });
+}
+
+export function createLocalGatewayKey(label: string) {
+  return invoke<{ key: LocalGatewayKeyRecord; secret: string }>("create_local_gateway_key", { label });
+}
+
+export function startLocalGateway() {
+  return invoke<LocalPoolState>("start_local_gateway");
+}
+
+export function stopLocalGateway() {
+  return invoke<LocalPoolState>("stop_local_gateway");
+}
+
+export function getLocalUsage(limit = 100) {
+  return invoke<LocalUsageLog[]>("get_local_usage", { limit });
+}
+
+export function attachCodexToLocalGateway(keyId: string) {
+  return invoke<void>("attach_codex_to_local_gateway", { keyId });
+}
+
+export function restoreCodexProfile() {
+  return invoke<void>("restore_codex_profile");
 }
 
 export function getPlatform() {

@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { BarChart3, CreditCard, History, Settings } from "lucide-react";
+import { BarChart3, Cloud, CreditCard, History, Laptop, Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -7,6 +7,7 @@ import { StatsGrid } from "./components/StatsGrid";
 import { TitleBar } from "./components/TitleBar";
 import { Toolbar } from "./components/Toolbar";
 import { TopUpPanel } from "./components/TopUpPanel";
+import { LocalPoolWorkspace } from "./features/relay/LocalPoolWorkspace";
 import {
   createTopUpIntentAndOpen,
   getKeyStats,
@@ -35,6 +36,7 @@ const initialState: UiState = {
   savedApiKey: "",
 };
 type AppTab = "stats" | "history" | "topUp" | "settings";
+type AppMode = "readyApi" | "localPool";
 const initialTopUpAmount: PreparedTopUpAmount = {
   amountCents: 0,
   amountUsd: 0,
@@ -57,6 +59,7 @@ export function App() {
   const [topUpAmount, setTopUpAmount] = useState("25");
   const [preparedTopUpAmount, setPreparedTopUpAmount] = useState(initialTopUpAmount);
   const [activeTab, setActiveTab] = useState<AppTab>("stats");
+  const [appMode, setAppMode] = useState<AppMode>("readyApi");
   const [history, setHistory] = useState<UsageLogEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(false);
@@ -290,79 +293,106 @@ export function App() {
     <main className={`app platform-${platform}`} aria-label={t("app.label")}>
       <TitleBar platform={platform} />
       <section className="panel">
-        <Toolbar
-          apiKey={apiKey}
-          canLaunch={canLaunch}
-          canSave={canSave}
-          codexRunning={state.codexRunning}
-          keyVisible={keyVisible}
-          saved={saveButtonSaved}
-          onApiKeyChange={(value) => {
-            setApiKey(value);
-            setSaved(false);
-          }}
-          onKeyVisibleChange={setKeyVisible}
-          onLaunch={handleLaunch}
-          onSubmit={handleSave}
-        />
-
-        <nav className="tabs" aria-label={t("tabs.label")}>
-          <TabButton
-            active={activeTab === "stats"}
-            icon={<BarChart3 aria-hidden />}
-            label={t("tabs.stats")}
-            onClick={() => setActiveTab("stats")}
-          />
-          <TabButton
-            active={activeTab === "history"}
-            icon={<History aria-hidden />}
-            label={t("tabs.history")}
-            onClick={() => setActiveTab("history")}
-          />
-          <TabButton
-            active={activeTab === "topUp"}
-            icon={<CreditCard aria-hidden />}
-            label={t("tabs.topUp")}
-            onClick={() => setActiveTab("topUp")}
-          />
-          <TabButton
-            active={activeTab === "settings"}
-            icon={<Settings aria-hidden />}
-            label={t("tabs.settings")}
-            onClick={() => setActiveTab("settings")}
-          />
+        <nav className="mode-switch" aria-label={t("modes.label")}>
+          <button
+            className={appMode === "readyApi" ? "active" : ""}
+            type="button"
+            aria-pressed={appMode === "readyApi"}
+            onClick={() => setAppMode("readyApi")}
+          >
+            <Cloud aria-hidden />
+            <span>{t("modes.readyApi")}</span>
+          </button>
+          <button
+            className={appMode === "localPool" ? "active" : ""}
+            type="button"
+            aria-pressed={appMode === "localPool"}
+            onClick={() => setAppMode("localPool")}
+          >
+            <Laptop aria-hidden />
+            <span>{t("modes.localPool")}</span>
+          </button>
         </nav>
 
-        <section className="tab-content">
-          {activeTab === "stats" ? <StatsGrid keyStats={keyStats} /> : null}
-          {activeTab === "history" ? (
-            <HistoryPanel
-              entries={history}
-              error={historyError}
-              loading={historyLoading}
-              canLoadMore={historyCanLoadMore}
-              onLoadLatest={() => refreshHistory()}
-              onLoadMore={() => refreshHistory(undefined, history[history.length - 1]?.id)}
+        {appMode === "readyApi" ? (
+          <div className="ready-api-workspace">
+            <Toolbar
+              apiKey={apiKey}
+              canLaunch={canLaunch}
+              canSave={canSave}
+              codexRunning={state.codexRunning}
+              keyVisible={keyVisible}
+              saved={saveButtonSaved}
+              onApiKeyChange={(value) => {
+                setApiKey(value);
+                setSaved(false);
+              }}
+              onKeyVisibleChange={setKeyVisible}
+              onLaunch={handleLaunch}
+              onSubmit={handleSave}
             />
-          ) : null}
-          {activeTab === "topUp" ? (
-            <TopUpPanel
-              amount={topUpAmount}
-              disabled={!hasStatsKey}
-              error={topUpError}
-              loading={topUpLoading}
-              preparedAmount={preparedTopUpAmount}
-              onAmountChange={handleTopUpAmountChange}
-              onTopUp={handleTopUp}
-            />
-          ) : null}
-          {activeTab === "settings" ? (
-            <SettingsPanel
-              canReset={canReset}
-              onReset={handleReset}
-            />
-          ) : null}
-        </section>
+
+            <nav className="tabs" aria-label={t("tabs.label")}>
+              <TabButton
+                active={activeTab === "stats"}
+                icon={<BarChart3 aria-hidden />}
+                label={t("tabs.stats")}
+                onClick={() => setActiveTab("stats")}
+              />
+              <TabButton
+                active={activeTab === "history"}
+                icon={<History aria-hidden />}
+                label={t("tabs.history")}
+                onClick={() => setActiveTab("history")}
+              />
+              <TabButton
+                active={activeTab === "topUp"}
+                icon={<CreditCard aria-hidden />}
+                label={t("tabs.topUp")}
+                onClick={() => setActiveTab("topUp")}
+              />
+              <TabButton
+                active={activeTab === "settings"}
+                icon={<Settings aria-hidden />}
+                label={t("tabs.settings")}
+                onClick={() => setActiveTab("settings")}
+              />
+            </nav>
+
+            <section className="tab-content">
+              {activeTab === "stats" ? <StatsGrid keyStats={keyStats} /> : null}
+              {activeTab === "history" ? (
+                <HistoryPanel
+                  entries={history}
+                  error={historyError}
+                  loading={historyLoading}
+                  canLoadMore={historyCanLoadMore}
+                  onLoadLatest={() => refreshHistory()}
+                  onLoadMore={() => refreshHistory(undefined, history[history.length - 1]?.id)}
+                />
+              ) : null}
+              {activeTab === "topUp" ? (
+                <TopUpPanel
+                  amount={topUpAmount}
+                  disabled={!hasStatsKey}
+                  error={topUpError}
+                  loading={topUpLoading}
+                  preparedAmount={preparedTopUpAmount}
+                  onAmountChange={handleTopUpAmountChange}
+                  onTopUp={handleTopUp}
+                />
+              ) : null}
+              {activeTab === "settings" ? (
+                <SettingsPanel
+                  canReset={canReset}
+                  onReset={handleReset}
+                />
+              ) : null}
+            </section>
+          </div>
+        ) : (
+          <LocalPoolWorkspace />
+        )}
       </section>
     </main>
   );

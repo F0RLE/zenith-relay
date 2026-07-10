@@ -1,5 +1,5 @@
 use crate::{
-    key_storage::{delete_named_secret, load_named_secret, save_named_secret},
+    key_storage::{delete_named_secret_result, load_named_secret_result, save_named_secret},
     local_pool::error::{ErrorCode, LocalPoolError, Result},
 };
 
@@ -18,12 +18,13 @@ pub fn save(secret_ref: &str, value: &str) -> Result<()> {
 }
 
 pub fn load(secret_ref: &str) -> Result<Option<String>> {
-    Ok(load_named_secret(&keyring_user(secret_ref)?))
+    load_named_secret_result(&keyring_user(secret_ref)?)
+        .map_err(|err| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, err))
 }
 
 pub fn delete(secret_ref: &str) -> Result<()> {
-    delete_named_secret(&keyring_user(secret_ref)?);
-    Ok(())
+    delete_named_secret_result(&keyring_user(secret_ref)?)
+        .map_err(|err| LocalPoolError::new(ErrorCode::SecretStoreUnavailable, err))
 }
 
 fn keyring_user(secret_ref: &str) -> Result<String> {
