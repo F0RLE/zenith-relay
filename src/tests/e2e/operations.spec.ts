@@ -15,6 +15,21 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(page.getByLabel(/Callback URL/)).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
+  await page.getByRole("tab", { name: "Automations" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+  const automation = page.getByRole("dialog", { name: "Edit automation" });
+  await automation.getByLabel("Secondary").uncheck();
+  await automation.getByLabel("Account selection").selectOption("account_ids");
+  await automation.getByLabel("Personal Plus").check();
+  await automation.getByLabel("Model policy").selectOption("explicit");
+  await automation.getByRole("combobox", { name: "Model", exact: true }).selectOption("gpt-5.4-mini");
+  await automation.getByRole("button", { name: "Save" }).click();
+  const automationRow = page.getByRole("row").filter({ hasText: "Start quota countdown" });
+  await expect(automationRow).toContainText("Personal Plus");
+  await expect(automationRow).toContainText("Primary");
+  await expect(automationRow).not.toContainText("Secondary");
+  await expect(automationRow).toContainText("gpt-5.4-mini");
+
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Personal Plus" }).click();
   await page.getByRole("button", { name: "Save policy" }).click();

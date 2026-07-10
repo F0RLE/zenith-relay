@@ -70,9 +70,9 @@ export type WakeTask = {
   id: string;
   name: string;
   enabled: boolean;
-  accountSelector: { kind: "all_eligible" | "account_ids" | "tags"; accountIds?: string[]; tags?: string[] };
+  accountSelector: { kind: "all_eligible" } | { kind: "account_ids" | "tags"; values: string[] };
   windowKinds: Array<"primary" | "secondary">;
-  modelPolicy: { kind: "lightest_supported" | "explicit"; modelId?: string };
+  modelPolicy: { kind: "lightest_supported" } | { kind: "explicit"; value: string };
   trigger: { kind: "quota_full" };
   executionPolicy: "automatic" | "require_confirmation";
   jitterSeconds: number;
