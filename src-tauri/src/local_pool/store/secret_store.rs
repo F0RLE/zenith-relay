@@ -91,12 +91,13 @@ mod tests {
     #[test]
     fn production_length_account_secret_round_trips() {
         let secret_ref = format!("account:codex:account_{}", uuid::Uuid::new_v4().simple());
-        save(&secret_ref, "synthetic-secret").unwrap();
-        assert_eq!(
-            load(&secret_ref).unwrap().as_deref(),
-            Some("synthetic-secret")
-        );
+        let secret = format!("{{\"tokens\":\"{}\"}}", "synthetic-secret".repeat(384));
+        assert!(secret.len() >= 5 * 1024);
+
+        save(&secret_ref, &secret).unwrap();
+        assert_eq!(load(&secret_ref).unwrap().as_deref(), Some(secret.as_str()));
         delete(&secret_ref).unwrap();
+        assert!(load(&secret_ref).unwrap().is_none());
     }
 
     #[test]
