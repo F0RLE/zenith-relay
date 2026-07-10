@@ -7,12 +7,67 @@ Zenith Codex should become an open desktop app for:
 1. buying and using Zenith API access;
 2. managing a user's own local AI accounts and API keys;
 3. combining those local accounts into a personal pool;
-4. showing quota, subscription, reset, health, and usage state;
-5. privately uploading Zenith-owned operator accounts into the server
-   account-pool when operator mode is enabled.
+4. running that personal pool either on the user's computer or on the user's
+   own server;
+5. showing quota, subscription, reset, health, and usage state.
 
-The public app can be useful for normal users without exposing Zenith's internal
-provider routing or owned server account pool.
+The public app can be useful for normal users without exposing Zenith internal
+backend operations.
+
+## Dual Runtime Target
+
+The personal pool has two public runtime targets:
+
+```text
+Desktop Local Gateway
+Remote Pool Server
+```
+
+They share the same public objects:
+
+```text
+sources
+accounts
+local API keys
+gateway settings
+routing policy
+model visibility
+quota/health/usage
+profile attach/restore
+```
+
+Target differences:
+
+- Desktop Local Gateway runs inside Zenith Codex on the user's computer. It is
+  best for personal use, quick setup, Codex/OpenCode attach, and localhost/LAN
+  access. It works only while the app/computer is running.
+- Remote Pool Server is a user-managed service reached through the same public
+  personal-pool protocol. The user either connects an existing compatible
+  server or deploys the Zenith personal-pool server, then manages both through
+  the same UI. It stores that user's encrypted secrets on that server and keeps
+  serving while the desktop app is closed.
+- Zenith API mode remains separate: normal paid Zenith API requests go to
+  `https://api.zenithmarket.dev/v1`.
+- Zenith private owned-account infrastructure is not this public server. Public
+  self-host code must not include Zenith internal routing, billing, inventory,
+  provider economy, or admin policy.
+
+Recommended package split:
+
+```text
+zenith-codex desktop app
+-> manage local runtime
+-> manage user self-host runtime over public protocol
+-> optionally deploy/update Remote Pool Server
+
+public personal-pool server package
+-> public self-host server for user-owned accounts/sources
+-> same protocol as desktop local gateway management
+-> no Zenith private backend authority
+```
+
+The server package/repository decision is part of P4 in
+[local-pool-final-planning.md](local-pool-final-planning.md).
 
 ## Product Modes
 
@@ -35,9 +90,9 @@ Owned by Zenith backend:
 - top-up intents.
 
 The desktop app renders API responses and creates top-up links. It must not
-duplicate pricing, routing, provider, or margin logic.
+duplicate Zenith backend business logic.
 
-### Personal Local Pool Mode
+### Local Pool Mode
 
 Public open-app feature. User adds their own accounts/API keys locally and can
 use them through a local gateway started by the app.
@@ -47,7 +102,7 @@ Allowed:
 - add OpenAI/Codex OAuth accounts;
 - import local `auth.json`;
 - import pasted token JSON;
-- import Sub2API-style JSON for personal accounts;
+- import compatible OAuth/account export JSON for personal accounts;
 - add provider sources with a name, OpenAI-compatible base URL, API key, and
   protocol mode;
 - use Zenith API as one preset provider source, not as a hardcoded pool
@@ -65,11 +120,10 @@ Rules:
 - user-owned accounts stay on the user's device by default;
 - the personal pool is only for that user's own traffic;
 - local pool usage must not affect Zenith backend billing;
-- local account details are never uploaded to Zenith unless operator mode is
-  explicitly enabled and the account is Zenith-owned;
-- public UI copy must not describe Zenith's internal provider routing.
+- local account details are never uploaded to Zenith by public app flows;
+- public UI copy must not describe Zenith internal backend operations.
 
-### Personal Local Gateway
+### Local Gateway
 
 The local pool should be exposed to clients through a local OpenAI-compatible
 server, not only through direct account switching.
@@ -124,6 +178,42 @@ The local gateway needs:
 - local request logs and usage stats;
 - one-click client config attach/restore.
 
+Management should be command-first inside the desktop app. Optional local HTTP
+management is advanced, localhost-only by default, protected by a separate
+management key, and never part of public customer API.
+
+### Remote Pool Mode
+
+Public open-app feature. User runs the same personal pool on a server they
+control. This is one mode with two setup paths:
+
+```text
+Connect existing server
+Deploy new server
+```
+
+Allowed:
+
+- connect any compatible server by URL and access token;
+- deploy the Zenith personal-pool server, then connect through the same flow;
+- read capabilities and protocol version;
+- import or upload the user's own accounts/sources through preview/confirm;
+- start/stop or restart gateway when the server supports it;
+- view server-side quota, health, usage, request logs, and local API keys;
+- rotate server local API keys;
+- export a redacted support bundle;
+- detach the app without stopping the server.
+
+Rules:
+
+- the server is user-managed unless explicitly branded as Zenith API;
+- server secrets stay on that user-managed server;
+- the app can help deploy/update the server, but it must show server owner,
+  host, version, and health clearly;
+- no public self-host endpoint receives Zenith customer billing authority;
+- no public self-host endpoint exposes Zenith private routing or provider
+  economy logic.
+
 ### Provider Sources
 
 Local pool sources are editable user-owned records. Zenith API is only one
@@ -172,201 +262,38 @@ wire_api: responses
 ```
 
 The user still provides their own Zenith API key. The app stores it as personal
-local configuration. It is not internal Zenith provider routing.
+local configuration. It is not Zenith backend execution config.
 
-### Operator Server Upload Mode
+## Public Experience
 
-Private admin mode for Zenith operations. This mode is hidden from normal users
-and can be enabled only by an operator/admin build flag or signed admin login.
+The app uses a compact operational layout with Russian and English localization.
+Users choose a mode, connect an account/source/server, and then manage only the
+objects available in that mode.
 
-Purpose:
+Public UI uses neutral terms such as `source`, `account`, `local gateway`,
+`local API key`, `quota`, `health`, and `usage`. It never describes Zenith
+internal capacity, provider economy, or backend execution policy.
 
-```text
-operator computer
--> capture/login/import Zenith-owned account
--> preview identity/quota/subscription
--> upload selected credential bundle
--> zenith-account-pool server
--> encrypted secret ref
--> server-side quota refresh and execution
-```
+Canonical details:
 
-Rules:
+- screens, navigation, design, states, and buttons:
+  [app-ux-flow-spec.md](app-ux-flow-spec.md);
+- account login, import formats, quota, profiles, and repair:
+  [local-account-auth-architecture.md](local-account-auth-architecture.md);
+- storage, scheduler, execution, telemetry, and Tauri module split:
+  [local-gateway-architecture.md](local-gateway-architecture.md);
+- local/server protocol and failure contracts:
+  [local-pool-runtime-contract.md](local-pool-runtime-contract.md);
+- unfinished implementation order:
+  [local-pool-final-planning.md](local-pool-final-planning.md).
 
-- only Zenith-owned accounts are allowed;
-- customer-owned accounts must not be uploaded into Zenith server pool;
-- upload uses short-lived import sessions;
-- server validates, encrypts, and deduplicates before account becomes routable;
-- `access_token` only imports are admin-test only until refresh path is proven;
-- unknown quota is never public-routable;
-- server execution must not depend on the operator computer staying online.
+## Boundary With Zenith Backend
 
-## First Public UX
+Zenith backend capacity, routing, cost, and inventory stay outside this public
+desktop app. Personal local pool is not a backend provider and must not mirror
+server execution policy.
 
-Use a compact operational layout, not a marketing page:
-
-1. **Connect**: choose Zenith API, Local Pool, or Operator Upload if enabled.
-2. **Accounts**: list accounts with email/label, provider, auth mode, health,
-   quota windows, reset time, subscription, last used, and tags.
-3. **Pool**: local routing strategy, priorities, disabled/draining state,
-   model support, cooldowns, and local gateway status.
-4. **Usage**: recent requests, latency, token usage when available, account
-   chosen locally, and errors.
-5. **Settings**: local gateway port, client config targets, import/export,
-   language, update channel.
-
-Recommended first routes:
-
-- `Zenith API` opens the existing key/balance/top-up flow.
-- `Local Pool` opens account import and local gateway controls.
-- `Operator Upload` appears only for admins.
-
-## Local Pool UI Direction
-
-Cockpit shows useful behavior patterns, but Zenith should use a quieter
-operator-style interface with less empty space, clearer grouping, and Russian /
-English localization from day one.
-
-Main navigation:
-
-1. **Home**: current mode, active endpoint, local gateway state, total accounts,
-   healthy accounts, warnings, and recent usage.
-2. **Sources**: Zenith API preset plus user-added OpenAI-compatible providers.
-   Each row shows name, base URL host, protocol, enabled state, model count,
-   last test, and quick actions.
-3. **Accounts**: personal OAuth/API accounts with email/label, provider,
-   subscription, quota windows, reset time, health, local tags, and actions.
-4. **Pool**: routing strategy, account/source priority, weight, disabled/drain
-   state, model support, cooldowns, and generated local API keys.
-5. **Gateway**: port, localhost/LAN scope, current base URL, generated key,
-   attach/restore buttons for Codex/OpenCode, test request, and logs.
-6. **Usage**: request history, model, source/account, API key label, latency,
-   tokens when available, status, error category, and local estimated cost.
-7. **Settings**: storage paths, language, theme, update channel, imports,
-   exports, backups, and advanced timeout/retry options.
-
-Visual rules for Zenith:
-
-- default to table/list for dense operational data; use cards only for account
-  summaries and repeated source/account items;
-- show quota as compact bars with exact reset text beside them;
-- keep destructive actions behind inline confirmation;
-- put test/start/stop/refresh actions near the object they affect;
-- keep internal Zenith provider routing invisible in public UI;
-- show generic terms such as `source`, `account`, `local gateway`, and
-  `local API key`;
-- do not copy Cockpit images, Chinese text, gradients, or component code.
-
-First desktop layout:
-
-```text
-sidebar: Home / Sources / Accounts / Pool / Gateway / Usage / Settings
-
-top strip:
-mode selector | active endpoint | gateway on/off | health summary
-
-main area:
-selected view list/table | right details drawer for edit/test/logs
-```
-
-For one selected object, use a full-width details view instead of a thin right
-column. The right drawer is only for quick edit/test panels when a list remains
-visible.
-
-## Import Formats
-
-Support these formats in local/personal mode:
-
-1. OAuth browser login with manual callback fallback.
-2. Local Codex `auth.json`.
-3. Pasted JSON with `id_token`, `access_token`, optional `refresh_token`.
-4. Nested `tokens` JSON.
-5. `refresh_token` only, exchanged before use.
-6. `access_token` only, marked degraded/no refresh.
-7. Sub2API-style OpenAI OAuth export.
-8. API key plus optional custom base URL.
-
-Operator upload should accept only normalized Zenith import bundles or raw JSON
-after preview. Raw secrets must never be logged.
-
-## Local Scheduler
-
-Personal local pool should use the same concepts as the server account-pool, but
-only for local user traffic:
-
-1. filter disabled, draining, login-required, captcha/checkpoint, expired,
-   cooldown, quota-exhausted, unsupported-model accounts;
-2. prefer healthy known quota;
-3. use priority/weight only after hard filters;
-4. spread traffic with last-used balancing;
-5. use session affinity only after health and quota gates pass;
-6. never retry a stream after output bytes were sent.
-
-## Cockpit Ideas To Translate
-
-Cockpit local access has a useful product shape for a personal local server.
-Translate these ideas into Zenith naming and implementation:
-
-1. `collection`: enabled state, port, access scope, client base URL host, gateway
-   mode, account ids, local API keys, routing strategy, timeouts, debug logs,
-   session affinity, max retry credentials, and model rules.
-2. Local API keys: default key plus named keys, enabled flag, label, scoped
-   accounts, model prefix, allowed models, excluded models, last-used timestamp,
-   rotate/delete actions.
-3. Routing strategies: `auto`, `single_account`, `quota_high_first`,
-   `quota_low_first`, `plan_high_first`, `plan_low_first`, `expiry_soon_first`,
-   and `custom`.
-4. Custom routing: account priority and weight. Priority decides tier; weight
-   spreads picks inside the same tier.
-5. Account model rules: exclude models per account so one weak account does not
-   remove a model for the whole pool.
-6. Model aliases and model filters: useful for local compatibility, but public
-   Zenith API prices/models still come from Zenith backend.
-7. Profile attach/restore: write local provider config and auth JSON, then keep
-   backup/restore so users can return to previous Codex login/API setup.
-8. Usage stats: totals, accounts, models, API keys, daily/weekly/monthly windows,
-   request logs, latency, tokens, errors, and estimated local cost.
-9. Health state: account available flag, consecutive failures, last success,
-   last failure, model cooldowns, image capability status.
-10. Timeouts and retries: separate open/idle/total stream timeouts, websocket
-    timeouts, upstream send retries, and local test request results.
-
-Do not copy Cockpit identifiers into final UI unless they are generic protocol
-terms. Use `Zenith Local Pool`, `Local Gateway`, `Local API key`, `Accounts`,
-`Quota`, `Health`, `Usage`, and `Sources`.
-
-Backend reference notes are tracked in
-[`local-gateway-architecture.md`](./local-gateway-architecture.md). Build from
-that split instead of recreating Cockpit's large all-in-one local-access module.
-Live UI observations are tracked in
-[`cockpit-live-ui-audit.md`](./cockpit-live-ui-audit.md).
-
-First Zenith local server contract:
-
-```text
-GET  /v1/models
-POST /v1/responses
-POST /v1/chat/completions
-```
-
-Later:
-
-```text
-POST /v1/images/generations
-POST /v1/images/edits
-POST /v1/messages
-```
-
-The first implementation should prefer `/v1/responses` for Codex. Chat
-completions can proxy custom API-key sources that only support chat completions.
-Anthropic messages adapter comes later.
-
-## Boundary With `zenith-account-pool`
-
-`zenith-account-pool` remains an internal server backend for Zenith-owned
-capacity. It is not the public personal pool backend.
-
-Shared ideas:
+The public app may use generic local concepts:
 
 - account model;
 - quota windows;
@@ -377,52 +304,67 @@ Shared ideas:
 - import preview;
 - scheduler gates.
 
-Different storage:
+Storage:
 
 - personal local pool stores user-owned accounts locally;
-- server account-pool stores only Zenith-owned accounts with encrypted secret
-  references.
+- Zenith backend inventory is not represented in public app storage.
 
-Different billing:
+Billing:
 
 - Zenith API mode bills through gateway;
-- personal local pool has no Zenith customer debit;
-- operator server pool is internal cost only, never public billing.
+- personal local pool has no Zenith customer debit.
 
 ## Open Source Rule
 
 The public app can be open-source under the existing project license. Internal
-operator upload endpoints, production server secrets, and Zenith routing
-configuration must stay out of public UI defaults and docs.
+admin endpoints, production server secrets, and Zenith backend configuration
+must stay out of public UI defaults and docs.
 
-Cockpit/Sub2API are references for user expectations and import shapes only.
-Do not copy their code, UI text, assets, prices, or provider catalog into
-Zenith.
+Compatible import shapes are allowed only as user-owned local import formats.
+Zenith must use its own implementation, UI text, assets, prices, and provider
+records.
 
-## Implementation Order
+## Implementation
 
-1. Document product modes and boundaries.
-2. Add local account model in the Tauri app without server upload.
-3. Add import preview for local `auth.json`, token JSON, and Sub2API-style JSON.
-4. Add quota/subscription refresh for local OpenAI/Codex accounts.
-5. Add local gateway skeleton, disabled by default.
-6. Add local scheduler with priority/weight and quota gates.
-7. Add usage/health diagnostics.
-8. Add private operator upload mode after `zenith-account-pool` import sessions
-   exist.
-9. Add Claude/Gemini only after OpenAI/Codex is stable and each family has
-   proven auth, quota, executor, usage capture, and failure handling.
+The unfinished work order is
+[local-pool-final-planning.md](local-pool-final-planning.md). Exact backend
+modules remain in
+[local-gateway-architecture.md](local-gateway-architecture.md), account/auth
+behavior in
+[local-account-auth-architecture.md](local-account-auth-architecture.md), UI in
+[app-ux-flow-spec.md](app-ux-flow-spec.md), and runtime/self-host contracts in
+[local-pool-runtime-contract.md](local-pool-runtime-contract.md).
 
-## Open Questions
+Do not add a second implementation checklist to this product document.
 
-1. Local gateway protocol order: `/v1/responses` first, then chat completions,
-   then Anthropic messages adapter?
-2. Should the public app include cloud sync of user-owned accounts? Default
-   answer: no, local only, because secrets and policy risk are high.
-3. Should users be able to export to Sub2API format? Default answer: import
-   first, export later.
-4. Which platforms get local gateway first: Windows only, or Windows/macOS/Linux
-   together?
-5. Should operator upload live in the same binary behind admin login, or in a
-   separate internal build? Default answer: same codebase, hidden by signed
-   admin capability.
+## Product Decisions And Deferred Research
+
+Decisions for first implementation:
+
+1. Local gateway protocol order:
+   - ship `/v1/responses` first;
+   - add `/v1/chat/completions` adapter after Responses path works;
+   - add Anthropic `/v1/messages` only after OpenAI/Codex local path, streaming,
+     usage capture, and translator tests are stable.
+2. User-owned cloud sync:
+   - no cloud sync in MVP;
+   - user-owned accounts, provider keys, OAuth tokens, and local API keys stay
+     local by default;
+   - any future sync needs a separate encryption, consent, recovery, and threat
+     model pass.
+3. Compatible account bundle export:
+   - import first;
+   - redacted config export allowed;
+   - raw secret export is not part of MVP and must require explicit reveal,
+     encryption, and warning if added later.
+4. Platform order:
+   - keep Windows/macOS/Linux as target product shape because release workflow
+     already builds all three;
+   - first live gateway validation may happen on Windows, then macOS/Linux must
+     pass before public release claims cross-platform support.
+Deferred research:
+
+- exact Claude/Gemini local account support after OpenAI/Codex is stable;
+- optional sidecar runtime only if Rust/Tauri gateway isolation is not enough;
+- optional compatible bundle export after import, backup, redaction, and local
+  store migration are proven.

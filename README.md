@@ -20,8 +20,7 @@ Planned:
 - Generate local API keys so Codex/OpenCode can use the local gateway.
 - Add Zenith API as one preset provider source next to custom providers and
   personal accounts.
-- Import local `auth.json`, token JSON, and Sub2API-style personal exports.
-- Private operator upload mode for Zenith-owned accounts only.
+- Import local `auth.json`, token JSON, and compatible personal account exports.
 
 Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
 
@@ -44,11 +43,14 @@ Rust/Tauri owns API calls, response normalization, validation, formatting, top-u
 The app configures Codex to use the project API endpoint and displays API-provided account state.
 
 Future local-pool features are local-first. User-owned accounts stay on the
-user's device by default and are not uploaded into Zenith's server account-pool.
-Zenith's server account-pool is for Zenith-owned capacity only.
+user's device by default and are not uploaded into Zenith infrastructure.
+Internal Zenith backend capacity and routing remain outside this public app.
 
-See [docs/product-direction.md](docs/product-direction.md) for the planned
-product boundary.
+Start with the [documentation map](docs/README.md). Product scope lives in
+[docs/product-direction.md](docs/product-direction.md), the active build order
+in [docs/local-pool-final-planning.md](docs/local-pool-final-planning.md), and
+the detailed future UI in
+[docs/app-ux-flow-spec.md](docs/app-ux-flow-spec.md).
 
 ## Platforms
 
@@ -66,7 +68,12 @@ Source layout:
 
 - `src` - React/Vite frontend package.
 - `src-tauri` - Rust/Tauri backend and desktop packaging.
+- planned local-pool backend code lives under `src-tauri/src/local_pool`.
+- planned local-pool frontend code lives under `src/src/features/local-pool`.
 - `.github/tools` - local and CI build helpers.
+
+The canonical future tree is documented in
+[docs/local-gateway-architecture.md](docs/local-gateway-architecture.md#zenith-module-split).
 
 Verify before release:
 
