@@ -136,24 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P0: Baseline Verification
-
-Before new pool code:
-
-1. Inspect the current `zenith-codex` branch and dirty worktree.
-2. Run existing app checks.
-3. Verify the shipped Zenith API key, stats, history, top-up, config,
-   backup, and restore flows.
-4. Remove already completed roadmap findings instead of reimplementing them.
-5. Fix only confirmed current regressions that block the new mode.
-
-Acceptance:
-
-- `cd src && bun run check`;
-- `cd src && bun run build`;
-- existing Zenith API mode remains unchanged;
-- a written baseline lists only currently reproducible blockers.
-
 ### P1: One Source, One Local Endpoint
 
 Build the smallest working vertical:

@@ -12,6 +12,35 @@ export type UiState = {
   savedApiKey: string;
 };
 
+export type LocalPoolCommandError = {
+  code: "io" | "invalid_state" | "recovery_required" | "secret_store_unavailable" | "unsupported_schema";
+  message: string;
+};
+
+export type LocalPoolState = {
+  schemaVersion: number;
+  runtimeTarget: {
+    kind: "local";
+    connected: boolean;
+  };
+  gateway: {
+    enabled: boolean;
+    bindScope: "localhost";
+    port: number;
+    clientHost: "localhost" | "127.0.0.1";
+  };
+  platform: Platform;
+  capabilities: {
+    nativeSecretStorage: boolean;
+    oauthBrowser: boolean;
+    processDetection: boolean;
+    folderOpen: boolean;
+    autostart: boolean;
+    backgroundRuntime: boolean;
+  };
+  warnings: string[];
+};
+
 export type KeyStats = {
   maskedKey: string;
   label: string | null;
@@ -88,6 +117,10 @@ export type PreparedTopUpAmount = {
 
 export function getState() {
   return invoke<UiState>("get_state");
+}
+
+export function getLocalPoolState() {
+  return invoke<LocalPoolState>("get_local_pool_state");
 }
 
 export function getPlatform() {

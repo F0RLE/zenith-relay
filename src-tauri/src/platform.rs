@@ -1,4 +1,17 @@
+use serde::Serialize;
 use std::{env, path::PathBuf};
+use tauri::{AppHandle, Manager};
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlatformCapabilities {
+    pub native_secret_storage: bool,
+    pub oauth_browser: bool,
+    pub process_detection: bool,
+    pub folder_open: bool,
+    pub autostart: bool,
+    pub background_runtime: bool,
+}
 
 pub fn platform_name() -> &'static str {
     if cfg!(target_os = "windows") {
@@ -39,5 +52,26 @@ pub fn default_codex_home() -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".codex")
+    }
+}
+
+pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|err| format!("failed to resolve app data directory: {err}"))
+}
+
+pub fn local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app_data_dir(app)?.join("local-pool"))
+}
+
+pub fn capabilities() -> PlatformCapabilities {
+    PlatformCapabilities {
+        native_secret_storage: true,
+        oauth_browser: true,
+        process_detection: true,
+        folder_open: true,
+        autostart: false,
+        background_runtime: false,
     }
 }

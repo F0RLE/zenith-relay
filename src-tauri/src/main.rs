@@ -4,6 +4,7 @@ mod codex_config;
 mod files;
 mod key_storage;
 mod launcher;
+mod local_pool;
 mod platform;
 mod tray;
 
@@ -1129,7 +1130,8 @@ fn main() {
             save_key,
             reset_key,
             launch_saved_codex,
-            open_top_up_url
+            open_top_up_url,
+            local_pool::commands::get_local_pool_state
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Codex");
