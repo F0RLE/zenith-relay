@@ -1141,6 +1141,7 @@ fn main() {
             launch_saved_codex,
             open_top_up_url,
             local_pool::commands::state::get_local_pool_state,
+            local_pool::commands::state::get_local_runtime_state,
             local_pool::commands::connections::create_local_source,
             local_pool::commands::connections::update_local_source,
             local_pool::commands::connections::set_local_source_enabled,
@@ -1182,7 +1183,13 @@ fn main() {
             local_pool::commands::profiles::restore_codex_profile,
             local_pool::commands::profiles::attach_codex_to_account,
             local_pool::commands::profiles::list_codex_account_bindings,
-            local_pool::commands::profiles::restore_codex_account_profile
+            local_pool::commands::profiles::restore_codex_account_profile,
+            local_pool::commands::remote_server::connect_remote_server,
+            local_pool::commands::remote_server::get_remote_server_state,
+            local_pool::commands::remote_server::refresh_remote_server_capabilities,
+            local_pool::commands::remote_server::disconnect_remote_server,
+            local_pool::commands::remote_server::prepare_remote_server_deployment,
+            local_pool::commands::remote_server::execute_remote_server_action
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Zenith Relay");

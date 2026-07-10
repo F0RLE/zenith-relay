@@ -136,51 +136,6 @@ Retry rules:
 
 ## Work Order
 
-### P4: Remote Pool Runtime
-
-Move the proven pool runtime to a user-managed server.
-
-Do not reuse private `zenith-account-pool`.
-
-Server MVP:
-
-- one standalone server package;
-- single binary first;
-- Docker Compose after the binary works;
-- SQLite;
-- encrypted secret store;
-- background quota/health refresh;
-- public `/v1/models` and `/v1/responses`;
-- management health, capabilities, state, sources, accounts, keys, and usage;
-- one management token and one or more pool request keys;
-- backup and restore instructions.
-
-Desktop flow:
-
-```text
-Connect existing server
--> enter URL and token
--> test origin and capabilities
--> manage through RemoteRuntimeAdapter
-
-Deploy new server
--> generate config/install instructions
--> user deploys
--> continue through the same connect flow
-```
-
-The desktop must not remain online after import. Confirmed secrets live on the
-server and are not downloaded back to the app.
-
-Acceptance:
-
-- remote request works while Zenith Relay is closed;
-- local and remote targets return the same public state shape;
-- unsupported server actions are disabled from capabilities;
-- token is pinned to the configured origin and never follows a cross-host
-  redirect;
-- disconnect removes the local connection token but does not stop the server.
-
 ### P5: Complete Operational UI
 
 Build only screens required by the working runtime:

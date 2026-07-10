@@ -3,6 +3,7 @@ pub mod automations;
 pub mod catalog;
 mod error;
 pub mod gateway;
+pub mod protocol;
 pub mod quota;
 mod runtime;
 pub mod scheduler;

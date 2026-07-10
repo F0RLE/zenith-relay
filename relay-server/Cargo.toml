@@ -1,0 +1,32 @@
+[package]
+name = "zenith-relay-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "0.22"
+chacha20poly1305 = "0.10.1"
+futures-util = "0.3"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["util"] }
+url = "2"
+uuid = { version = "1.23.4", features = ["v4"] }
+zenith-relay-core = { path = "../crates/relay-core" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+incremental = false

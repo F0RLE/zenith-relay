@@ -5,6 +5,7 @@ mod error;
 mod host;
 mod models;
 mod profiles;
+mod remote;
 mod state;
 mod store;
 

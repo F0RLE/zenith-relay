@@ -1,7 +1,7 @@
 mod migrations;
 mod quarantine;
 pub mod secret_store;
-mod settings_store;
+pub(crate) mod settings_store;
 pub mod telemetry_db;
 
 use self::{

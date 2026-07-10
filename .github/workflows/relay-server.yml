@@ -1,0 +1,75 @@
+name: Relay Server
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, relay/local-pool-product-modes]
+    paths:
+      - "crates/relay-core/**"
+      - "relay-server/**"
+      - ".github/workflows/relay-server.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/relay-core/**"
+      - "relay-server/**"
+      - ".github/workflows/relay-server.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
+      - run: cargo check --manifest-path relay-server/Cargo.toml --locked
+      - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path relay-server/Cargo.toml --locked
+
+  binary:
+    needs: check
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-latest
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --manifest-path relay-server/Cargo.toml --release --locked
+      - run: |
+          mkdir -p artifacts
+          cp relay-server/target/release/zenith-relay-server artifacts/zenith-relay-server-${{ matrix.name }}
+          sha256sum artifacts/zenith-relay-server-${{ matrix.name }} > artifacts/zenith-relay-server-${{ matrix.name }}.sha256
+      - uses: actions/upload-artifact@v7
+        with:
+          name: zenith-relay-server-${{ matrix.name }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  container:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: relay-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: zenith-relay-server:test
