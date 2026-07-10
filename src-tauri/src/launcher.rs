@@ -1,4 +1,7 @@
-use std::{ffi::OsStr, path::PathBuf, process::Command, thread, time::Duration};
+use std::{path::PathBuf, process::Command, thread, time::Duration};
+
+#[cfg(target_os = "windows")]
+use std::ffi::OsStr;
 
 use crate::codex_config::load_api_key_for_launch;
 use sysinfo::{ProcessesToUpdate, System};
