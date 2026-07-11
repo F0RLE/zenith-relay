@@ -12,8 +12,10 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use chrono::DateTime;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -26,11 +28,14 @@ use zenith_relay_core::{
         AccountSummary, ApiError, ErrorEnvelope, HealthResponse, KeySummary, RuntimeStateSnapshot,
         SourceSummary, UsagePage,
     },
-    quota::QuotaSnapshot,
+    quota::{QuotaSnapshot, Subscription, SubscriptionInput},
     ProviderSource, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
+const MAX_IMPORT_BYTES: usize = 1024 * 1024;
+const MAX_IMPORT_ITEMS: usize = 256;
+const MAX_IMPORT_DEPTH: usize = 32;
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
@@ -236,6 +241,8 @@ pub struct AccountImportInput {
     refresh_token: Option<String>,
     id_token: Option<String>,
     expires_at_ms: Option<u64>,
+    plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
     chatgpt_account_id: String,
     responses_url: Option<String>,
     #[serde(default)]
@@ -261,16 +268,30 @@ pub struct AccountImportPreview {
     models: Vec<String>,
     auth_state: AccountAuthState,
     expires_at_ms: Option<u64>,
+    plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
     allowed_models: Vec<String>,
     excluded_models: Vec<String>,
     priority: i32,
     weight: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    batch_session_id: Option<String>,
 }
 
 pub async fn preview_account_import(
     State(state): State<Arc<AppState>>,
     Json(input): Json<AccountImportInput>,
 ) -> Result<(StatusCode, Json<AccountImportPreview>), ManagementError> {
+    cleanup_expired_imports(&state)?;
+    let preview = prepare_account_import(&state, input, None)?;
+    Ok((StatusCode::CREATED, Json(preview)))
+}
+
+fn prepare_account_import(
+    state: &AppState,
+    input: AccountImportInput,
+    batch_session_id: Option<&str>,
+) -> Result<AccountImportPreview, ManagementError> {
     validate_secret(&input.access_token, "access token")?;
     if let Some(value) = input.refresh_token.as_deref() {
         validate_secret(value, "refresh token")?;
@@ -278,7 +299,31 @@ pub async fn preview_account_import(
     if let Some(value) = input.id_token.as_deref() {
         validate_secret(value, "ID token")?;
     }
-    let label = clean_label(&input.label, "account label")?;
+    let label = redact_import_label(
+        clean_label(&input.label, "account label")?,
+        &[
+            Some(input.access_token.as_str()),
+            input.refresh_token.as_deref(),
+            input.id_token.as_deref(),
+            Some(input.chatgpt_account_id.as_str()),
+        ],
+    );
+    let plan_type = input
+        .plan_type
+        .as_deref()
+        .filter(|value| {
+            !contains_sensitive(
+                value,
+                &[
+                    Some(input.access_token.as_str()),
+                    input.refresh_token.as_deref(),
+                    input.id_token.as_deref(),
+                    Some(input.chatgpt_account_id.as_str()),
+                ],
+            )
+        })
+        .map(str::to_string)
+        .and_then(safe_plan_type);
     let chatgpt_account_id = clean_identifier(&input.chatgpt_account_id, "account id")?;
     let responses_url = validate_account_responses_url(input.responses_url.as_deref())?;
     let identity_hint = identity_hint(&chatgpt_account_id);
@@ -319,10 +364,13 @@ pub async fn preview_account_import(
         models: normalized_values(input.models),
         auth_state,
         expires_at_ms: credential.expires_at_ms,
+        plan_type,
+        subscription_active_until_ms: input.subscription_active_until_ms,
         allowed_models: normalized_values(input.allowed_models),
         excluded_models: normalized_values(input.excluded_models),
         priority: input.priority,
         weight: valid_weight(input.weight)?,
+        batch_session_id: batch_session_id.map(str::to_string),
     };
     state
         .vault
@@ -345,7 +393,500 @@ pub async fn preview_account_import(
         let _ = state.vault.delete(&pending.secret_ref);
         return Err(store_error(error));
     }
-    Ok((StatusCode::CREATED, Json(preview)))
+    Ok(preview)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportPreviewInput {
+    content: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportSession {
+    session_id: String,
+    prepared: bool,
+    preview: BatchImportPreview,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchImportPreview {
+    format: String,
+    rows: Vec<BatchImportRow>,
+    warnings: Vec<BatchImportWarning>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchImportRow {
+    item_id: String,
+    label: String,
+    identity: String,
+    auth_mode: String,
+    source_name: String,
+    quota_status: String,
+    status: String,
+    plan: Option<String>,
+    default_selected: bool,
+    selectable: bool,
+    existing: bool,
+    warnings: Vec<BatchImportWarning>,
+    error: Option<BatchImportIssue>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchImportWarning {
+    code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct BatchImportIssue {
+    code: String,
+    message: String,
+}
+
+pub async fn preview_account_batch_import(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<BatchImportPreviewInput>,
+) -> Result<(StatusCode, Json<BatchImportSession>), ManagementError> {
+    cleanup_expired_imports(&state)?;
+    let (format, values, warnings) = parse_batch_import(&input.content)?;
+    let session_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
+    let mut rows = Vec::with_capacity(values.len());
+    for (ordinal, value) in values.into_iter().enumerate() {
+        let row = match normalize_batch_account(value) {
+            Ok(input) => match prepare_account_import(&state, input, Some(&session_id)) {
+                Ok(preview) => BatchImportRow {
+                    item_id: preview.session_id.clone(),
+                    label: preview.label,
+                    identity: preview.identity_hint,
+                    auth_mode: "imported_token".to_string(),
+                    source_name: "OpenAI".to_string(),
+                    quota_status: "skipped".to_string(),
+                    status: if preview.duplicate_account_id.is_some() {
+                        "existing".to_string()
+                    } else {
+                        "ready".to_string()
+                    },
+                    plan: preview.plan_type,
+                    default_selected: preview.duplicate_account_id.is_none(),
+                    selectable: true,
+                    existing: preview.duplicate_account_id.is_some(),
+                    warnings: Vec::new(),
+                    error: None,
+                },
+                Err(error) => invalid_batch_row(ordinal, error.code, error.message),
+            },
+            Err((code, message)) => invalid_batch_row(ordinal, code, message),
+        };
+        rows.push(row);
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(BatchImportSession {
+            session_id,
+            prepared: true,
+            preview: BatchImportPreview {
+                format,
+                rows,
+                warnings,
+            },
+        }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportConfirmInput {
+    session_id: String,
+    selected_item_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchImportConfirmResponse {
+    session_id: String,
+    results: Vec<BatchImportResult>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchImportResult {
+    item_id: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<BatchImportIssue>,
+}
+
+pub async fn confirm_account_batch_import(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<BatchImportConfirmInput>,
+) -> Result<Json<BatchImportConfirmResponse>, ManagementError> {
+    if !valid_generated_id(&input.session_id, "batch_") {
+        return Err(ManagementError::validation(
+            "import_session_invalid",
+            "batch import session is invalid",
+        ));
+    }
+    if input.selected_item_ids.is_empty() || input.selected_item_ids.len() > MAX_IMPORT_ITEMS {
+        return Err(ManagementError::validation(
+            "import_selection_invalid",
+            "import selection must contain between 1 and 256 items",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut results = Vec::with_capacity(input.selected_item_ids.len());
+    for item_id in input.selected_item_ids {
+        if !seen.insert(item_id.clone()) {
+            continue;
+        }
+        let result =
+            match confirm_one_account_import(&state, &item_id, Some(&input.session_id)).await {
+                Ok(_) => BatchImportResult {
+                    item_id,
+                    status: "succeeded".to_string(),
+                    error: None,
+                },
+                Err(error) => BatchImportResult {
+                    item_id,
+                    status: "failed".to_string(),
+                    error: Some(BatchImportIssue {
+                        code: error.code,
+                        message: error.message,
+                    }),
+                },
+            };
+        results.push(result);
+    }
+    Ok(Json(BatchImportConfirmResponse {
+        session_id: input.session_id,
+        results,
+    }))
+}
+
+fn parse_batch_import(
+    content: &str,
+) -> Result<(String, Vec<Value>, Vec<BatchImportWarning>), ManagementError> {
+    if content.trim().is_empty() {
+        return Err(ManagementError::validation(
+            "import_empty",
+            "import input is empty",
+        ));
+    }
+    if content.len() > MAX_IMPORT_BYTES {
+        return Err(ManagementError::validation(
+            "import_too_large",
+            "import input exceeds the size limit",
+        ));
+    }
+    let parsed = serde_json::from_str::<Value>(content);
+    let (format, values, mut warnings) = match parsed {
+        Ok(value) => {
+            ensure_import_depth(&value, 0)?;
+            match value {
+                Value::Array(values) => ("json_array".to_string(), values, Vec::new()),
+                Value::Object(mut object) => {
+                    if let Some(Value::Array(accounts)) = object.remove("accounts") {
+                        let version = object
+                            .get("version")
+                            .and_then(|value| {
+                                value.as_u64().or_else(|| value.as_str()?.parse().ok())
+                            })
+                            .unwrap_or(1);
+                        if version != 1 {
+                            return Err(ManagementError::validation(
+                                "unsupported_bundle_version",
+                                "portable account bundle version is unsupported",
+                            ));
+                        }
+                        let mut warnings = Vec::new();
+                        for (key, code) in [
+                            ("proxies", "proxies_ignored"),
+                            ("sources", "sources_ignored"),
+                        ] {
+                            let count = object.get(key).map(container_count).unwrap_or(0);
+                            if count > 0 {
+                                warnings.push(BatchImportWarning {
+                                    code: code.to_string(),
+                                    count: Some(count),
+                                });
+                            }
+                        }
+                        ("portable_account_bundle".to_string(), accounts, warnings)
+                    } else {
+                        (
+                            "json_object".to_string(),
+                            vec![Value::Object(object)],
+                            Vec::new(),
+                        )
+                    }
+                }
+                _ => {
+                    return Err(ManagementError::validation(
+                        "import_unsupported",
+                        "import input must contain JSON objects",
+                    ));
+                }
+            }
+        }
+        Err(_) => {
+            let mut values = Vec::new();
+            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                let value: Value = serde_json::from_str(line).map_err(|_| {
+                    ManagementError::validation("import_malformed", "import JSON is malformed")
+                })?;
+                ensure_import_depth(&value, 0)?;
+                values.push(value);
+            }
+            ("json_lines".to_string(), values, Vec::new())
+        }
+    };
+    if values.is_empty() || values.len() > MAX_IMPORT_ITEMS {
+        return Err(ManagementError::validation(
+            "import_item_count",
+            "import must contain between 1 and 256 items",
+        ));
+    }
+    warnings.shrink_to_fit();
+    Ok((format, values, warnings))
+}
+
+fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, String)> {
+    if let Ok(input) = serde_json::from_value::<AccountImportInput>(value.clone()) {
+        return Ok(input);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_import("unsupported_value", "import item must be a JSON object"))?;
+    let credentials = object
+        .get("credentials")
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    let tokens = credentials
+        .get("tokens")
+        .and_then(Value::as_object)
+        .or_else(|| object.get("tokens").and_then(Value::as_object));
+    let access_token = import_string(
+        object,
+        credentials,
+        tokens,
+        &["access_token", "accessToken"],
+    )
+    .ok_or_else(|| {
+        invalid_import(
+            "missing_credentials",
+            "account import requires an access token",
+        )
+    })?;
+    let chatgpt_account_id = import_string(
+        object,
+        credentials,
+        tokens,
+        &[
+            "chatgpt_account_id",
+            "chatgptAccountId",
+            "account_id",
+            "accountId",
+        ],
+    )
+    .ok_or_else(|| {
+        invalid_import(
+            "missing_account_id",
+            "account import requires an account id",
+        )
+    })?;
+    let label = import_string(object, credentials, tokens, &["label", "name"])
+        .unwrap_or_else(|| "Imported account".to_string());
+    let refresh_token = import_string(
+        object,
+        credentials,
+        tokens,
+        &["refresh_token", "refreshToken"],
+    );
+    let id_token = import_string(object, credentials, tokens, &["id_token", "idToken"]);
+    let expires_at_ms = import_timestamp_ms(
+        object,
+        credentials,
+        &["expires_at_ms", "expiresAtMs", "expires_at", "expiresAt"],
+    );
+    let plan_type = import_string(
+        object,
+        credentials,
+        tokens,
+        &[
+            "chatgpt_plan_type",
+            "chatgptPlanType",
+            "plan_type",
+            "planType",
+            "plan",
+        ],
+    )
+    .filter(|value| {
+        ![
+            Some(access_token.as_str()),
+            refresh_token.as_deref(),
+            id_token.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|secret| secret == value)
+    })
+    .and_then(safe_plan_type);
+    Ok(AccountImportInput {
+        label,
+        access_token,
+        refresh_token,
+        id_token,
+        expires_at_ms,
+        plan_type,
+        subscription_active_until_ms: import_timestamp_ms(
+            object,
+            credentials,
+            &["subscription_expires_at", "subscriptionExpiresAt"],
+        ),
+        chatgpt_account_id,
+        responses_url: import_string(
+            object,
+            credentials,
+            tokens,
+            &["responses_url", "responsesUrl"],
+        ),
+        models: import_strings(object, "models"),
+        allowed_models: import_strings(object, "allowedModels")
+            .into_iter()
+            .chain(import_strings(object, "allowed_models"))
+            .collect(),
+        excluded_models: import_strings(object, "excludedModels")
+            .into_iter()
+            .chain(import_strings(object, "excluded_models"))
+            .collect(),
+        priority: object
+            .get("priority")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or_default(),
+        weight: object
+            .get("weight")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or_else(default_weight),
+    })
+}
+
+fn import_string(
+    root: &Map<String, Value>,
+    credentials: &Map<String, Value>,
+    tokens: Option<&Map<String, Value>>,
+    names: &[&str],
+) -> Option<String> {
+    [Some(root), Some(credentials), tokens]
+        .into_iter()
+        .flatten()
+        .find_map(|object| {
+            names.iter().find_map(|name| {
+                object
+                    .get(*name)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            })
+        })
+}
+
+fn import_timestamp_ms(
+    root: &Map<String, Value>,
+    credentials: &Map<String, Value>,
+    names: &[&str],
+) -> Option<u64> {
+    [root, credentials].into_iter().find_map(|object| {
+        names.iter().find_map(|name| {
+            let value = object.get(*name)?;
+            let timestamp = value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .map(|value| {
+                    if value < 10_000_000_000 {
+                        value.saturating_mul(1_000)
+                    } else {
+                        value
+                    }
+                });
+            timestamp.or_else(|| {
+                let millis = DateTime::parse_from_rfc3339(value.as_str()?.trim())
+                    .ok()?
+                    .timestamp_millis();
+                u64::try_from(millis).ok()
+            })
+        })
+    })
+}
+
+fn import_strings(root: &Map<String, Value>, name: &str) -> Vec<String> {
+    root.get(name)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ensure_import_depth(value: &Value, depth: usize) -> Result<(), ManagementError> {
+    if depth > MAX_IMPORT_DEPTH {
+        return Err(ManagementError::validation(
+            "import_too_deep",
+            "import JSON is too deeply nested",
+        ));
+    }
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .try_for_each(|value| ensure_import_depth(value, depth + 1)),
+        Value::Object(values) => values
+            .values()
+            .try_for_each(|value| ensure_import_depth(value, depth + 1)),
+        _ => Ok(()),
+    }
+}
+
+fn container_count(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.len(),
+        Value::Object(values) => values.len(),
+        Value::Null => 0,
+        _ => 1,
+    }
+}
+
+fn invalid_import(code: &str, message: &str) -> (String, String) {
+    (code.to_string(), message.to_string())
+}
+
+fn invalid_batch_row(ordinal: usize, code: String, message: String) -> BatchImportRow {
+    BatchImportRow {
+        item_id: format!("invalid_{ordinal}"),
+        label: format!("Item {}", ordinal + 1),
+        identity: "••••".to_string(),
+        auth_mode: "unknown".to_string(),
+        source_name: "import".to_string(),
+        quota_status: "skipped".to_string(),
+        status: "invalid".to_string(),
+        plan: None,
+        default_selected: false,
+        selectable: false,
+        existing: false,
+        warnings: Vec::new(),
+        error: Some(BatchImportIssue { code, message }),
+    }
 }
 
 #[derive(Deserialize)]
@@ -358,15 +899,31 @@ pub async fn confirm_account_import(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ConfirmImportInput>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
+    confirm_one_account_import(&state, &input.session_id, None)
+        .await
+        .map(Json)
+}
+
+async fn confirm_one_account_import(
+    state: &Arc<AppState>,
+    session_id: &str,
+    batch_session_id: Option<&str>,
+) -> Result<AccountSummary, ManagementError> {
+    if !valid_generated_id(session_id, "import_") {
+        return Err(ManagementError::validation(
+            "import_session_invalid",
+            "account import session is invalid",
+        ));
+    }
     let pending = state
         .store
-        .pending_import(&input.session_id)
+        .pending_import(session_id)
         .map_err(store_error)?
         .ok_or_else(|| {
             ManagementError::not_found("import_not_found", "import session not found")
         })?;
     if now_ms().saturating_sub(pending.created_at_ms) > 30 * 60 * 1_000 {
-        let _ = state.store.delete_pending_import(&input.session_id);
+        let _ = state.store.delete_pending_import(session_id);
         let _ = state.vault.delete(&pending.secret_ref);
         return Err(ManagementError::validation(
             "import_expired",
@@ -377,12 +934,32 @@ pub async fn confirm_account_import(
         serde_json::from_str(&pending.preview_json).map_err(|_| {
             ManagementError::internal("preview_invalid", "stored import preview is invalid")
         })?;
+    if preview.batch_session_id.as_deref() != batch_session_id {
+        return Err(ManagementError::not_found(
+            "import_not_found",
+            "import session not found",
+        ));
+    }
     let existing = state
         .store
         .accounts()
         .map_err(store_error)?
         .into_iter()
         .find(|record| record.id == preview.account_id);
+    let subscription =
+        if preview.plan_type.is_some() || preview.subscription_active_until_ms.is_some() {
+            Subscription::normalize(SubscriptionInput {
+                plan_type: preview.plan_type.clone(),
+                active_until_ms: preview.subscription_active_until_ms,
+                forbidden: false,
+                observed_at_ms: now_ms(),
+            })
+        } else {
+            existing
+                .as_ref()
+                .map(|value| value.subscription.clone())
+                .unwrap_or_default()
+        };
     let record = ServerAccountRecord {
         id: preview.account_id.clone(),
         label: preview.label,
@@ -398,10 +975,7 @@ pub async fn confirm_account_import(
         excluded_models: preview.excluded_models,
         priority: preview.priority,
         weight: preview.weight,
-        subscription: existing
-            .as_ref()
-            .map(|value| value.subscription.clone())
-            .unwrap_or_default(),
+        subscription,
         quota: existing
             .as_ref()
             .map(|value| value.quota.clone())
@@ -426,14 +1000,57 @@ pub async fn confirm_account_import(
     }
     state
         .store
-        .delete_pending_import(&input.session_id)
+        .delete_pending_import(session_id)
         .map_err(store_error)?;
     if let Some(previous) = existing {
         if previous.secret_ref != record.secret_ref {
             let _ = state.vault.delete(&previous.secret_ref);
         }
     }
-    Ok(Json(account_summary(&state, &record)?))
+    account_summary(state, &record)
+}
+
+fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
+    let cutoff = now_ms().saturating_sub(30 * 60 * 1_000);
+    for secret_ref in state
+        .store
+        .delete_pending_imports_before(cutoff)
+        .map_err(store_error)?
+    {
+        let _ = state.vault.delete(&secret_ref);
+    }
+    Ok(())
+}
+
+fn valid_generated_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn safe_plan_type(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then(|| value.to_ascii_lowercase())
+}
+
+fn redact_import_label(value: String, sensitive: &[Option<&str>]) -> String {
+    if contains_sensitive(&value, sensitive) {
+        "Imported account".to_string()
+    } else {
+        value
+    }
+}
+
+fn contains_sensitive(value: &str, sensitive: &[Option<&str>]) -> bool {
+    sensitive
+        .iter()
+        .flatten()
+        .any(|secret| secret.len() >= 4 && value.contains(secret))
 }
 
 #[derive(Default, Deserialize)]

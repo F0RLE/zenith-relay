@@ -199,3 +199,36 @@ test("remote trust and deployment secrets require explicit actions", async ({ pa
   await expect(page.getByLabel("Vault key")).toHaveAttribute("type", "password");
   await expect(page.getByText("These values are shown once.")).toBeVisible();
 });
+
+test("remote bulk import previews portable content and confirms selected rows", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import account" });
+  const content = JSON.stringify({ version: 1, accounts: [{ name: "Portable account" }] });
+  await dialog.getByLabel("Account import data").fill(content);
+  await dialog.getByRole("button", { name: "Preview import" }).click();
+  const imported = dialog.getByLabel("Select Imported account for import");
+  const existing = dialog.getByLabel("Select Existing account for import");
+  await expect(imported).toBeChecked();
+  await expect(existing).not.toBeChecked();
+  await imported.uncheck();
+  await existing.check();
+  await dialog.getByRole("button", { name: "Import 1 account(s)" }).click();
+  await expect(dialog).toBeHidden();
+
+  const actions = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__;
+    return calls
+      .filter((call) => call.command === "execute_remote_server_action")
+      .map((call) => call.args.input);
+  });
+  expect(actions).toEqual([
+    { action: { type: "preview_account_batch_import" }, payload: { content } },
+    {
+      action: { type: "confirm_account_batch_import" },
+      payload: { sessionId: "remote_import", selectedItemIds: ["import_fedcba9876543210"] },
+    },
+  ]);
+});

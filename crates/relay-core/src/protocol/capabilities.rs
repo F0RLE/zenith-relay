@@ -7,6 +7,7 @@ pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Feature {
     Accounts,
+    AccountBatchImport,
     Sources,
     Quota,
     Models,
@@ -23,6 +24,7 @@ impl Feature {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Accounts => "accounts",
+            Self::AccountBatchImport => "account_batch_import",
             Self::Sources => "sources",
             Self::Quota => "quota",
             Self::Models => "models",
@@ -75,6 +77,7 @@ impl Capabilities {
     ) -> Self {
         let features = [
             Feature::Accounts,
+            Feature::AccountBatchImport,
             Feature::Sources,
             Feature::Quota,
             Feature::Models,

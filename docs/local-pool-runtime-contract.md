@@ -210,6 +210,7 @@ Stable feature names:
 
 ```text
 accounts
+account_batch_import
 sources
 quota
 models
@@ -230,6 +231,8 @@ GET  /state
 GET  /accounts
 POST /accounts/import/preview
 POST /accounts/import/confirm
+POST /accounts/import/batch/preview
+POST /accounts/import/batch/confirm
 DELETE /accounts/{id}
 GET  /sources
 POST /sources
@@ -247,6 +250,13 @@ DELETE /wake-tasks/{id}
 POST /wake-tasks/{id}/test
 GET  /wake-history
 ```
+
+`account_batch_import` accepts a bounded JSON object, JSON array, JSON Lines,
+or portable version-1 object with an `accounts[]` array. Preview responses are
+redacted and return independently selectable item IDs. Confirm requires the
+batch session ID plus `selectedItemIds`; item IDs cannot be confirmed from a
+different batch. Proxy and source records in a portable bundle are reported as
+ignored and are never ingested by account import.
 
 Optional proxy endpoints:
 

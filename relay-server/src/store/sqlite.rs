@@ -147,6 +147,30 @@ impl Store {
             > 0)
     }
 
+    pub fn delete_pending_imports_before(&self, cutoff_ms: u64) -> Result<Vec<String>, String> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let secret_refs = {
+            let mut statement = transaction
+                .prepare("SELECT secret_ref FROM pending_imports WHERE created_at_ms < ?1")
+                .map_err(db_error)?;
+            let rows = statement
+                .query_map([cutoff_ms.min(i64::MAX as u64) as i64], |row| row.get(0))
+                .map_err(db_error)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(db_error)?;
+            rows
+        };
+        transaction
+            .execute(
+                "DELETE FROM pending_imports WHERE created_at_ms < ?1",
+                [cutoff_ms.min(i64::MAX as u64) as i64],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(secret_refs)
+    }
+
     pub fn wake_tasks(&self) -> Result<Vec<WakeTask>, String> {
         let connection = self.lock()?;
         let mut statement = connection

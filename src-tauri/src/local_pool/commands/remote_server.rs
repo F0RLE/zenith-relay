@@ -47,6 +47,8 @@ pub enum RemoteServerAction {
     DeleteSource { id: String },
     PreviewAccountImport,
     ConfirmAccountImport,
+    PreviewAccountBatchImport,
+    ConfirmAccountBatchImport,
     UpdateAccount { id: String },
     DeleteAccount { id: String },
     CreateKey,
@@ -276,6 +278,16 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::ConfirmAccountImport => {
             (Method::POST, "/accounts/import/confirm".to_string(), true)
         }
+        RemoteServerAction::PreviewAccountBatchImport => (
+            Method::POST,
+            "/accounts/import/batch/preview".to_string(),
+            true,
+        ),
+        RemoteServerAction::ConfirmAccountBatchImport => (
+            Method::POST,
+            "/accounts/import/batch/confirm".to_string(),
+            true,
+        ),
         RemoteServerAction::UpdateAccount { id } => {
             (Method::PATCH, object_path("accounts", id)?, true)
         }

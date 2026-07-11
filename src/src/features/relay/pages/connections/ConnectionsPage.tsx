@@ -30,6 +30,7 @@ export function ConnectionsPage() {
   const [editingAutomation, setEditingAutomation] = useState<WakeTask | null>(null);
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
+  const canImportAccounts = mode !== "remote" || supports("account_batch_import");
 
   useEffect(() => {
     setView(mode === "zenith" ? "api" : "accounts");
@@ -66,6 +67,7 @@ export function ConnectionsPage() {
           : readyState?.providerActive ? t("readyApi.topUp") : t("readyApi.connect");
 
   const primaryAction = () => {
+    if (view === "accounts" && !canImportAccounts) return;
     if (view === "remote" && runtime) {
       void perform("remote-refresh", relayCommands.refreshRemoteCapabilities, "feedback.refreshed");
       return;
@@ -93,11 +95,11 @@ export function ConnectionsPage() {
         actions={
           <>
             {view === "accounts" && mode !== "zenith" ? (
-              <Button variant="secondary" icon={<Download aria-hidden />} onClick={() => setDialog("import")}>
+              <Button variant="secondary" icon={<Download aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={() => setDialog("import")}>
                 {t("connections.import")}
               </Button>
             ) : null}
-            <Button variant="primary" icon={view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} onClick={primaryAction}>
+            <Button variant="primary" icon={view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
               {primaryLabel}
             </Button>
           </>
@@ -113,7 +115,7 @@ export function ConnectionsPage() {
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onAdd={() => setDialog("source")} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable query={query} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} canImport={canImportAccounts} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onAdd={() => { setEditingAutomation(null); setDialog("automation"); }} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
@@ -164,11 +166,11 @@ function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => vo
   );
 }
 
-function AccountsTable({ query, onImport, onSignIn }: { query: string; onImport: () => void; onSignIn: () => void }) {
+function AccountsTable({ query, canImport, onImport, onSignIn }: { query: string; canImport: boolean; onImport: () => void; onSignIn: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   if (!runtime?.accounts.length) {
-    return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
+    return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
   const accounts = runtime.accounts.filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models));
   if (!accounts.length) return <NoResults />;
@@ -346,16 +348,12 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
       else if (!ok) setCommandFailed(true);
       return;
     }
-    const result: { current: Record<string, unknown> | null } = { current: null };
+    const result: { current: ImportSession | null } = { current: null };
     const ok = await perform("import-preview", async () => {
-      const payload = JSON.parse(content);
-      result.current = await relayCommands.remoteAction({ type: "preview_account_import" }, payload) as Record<string, unknown>;
+      result.current = await relayCommands.remoteAction({ type: "preview_account_batch_import" }, { content }) as ImportSession;
     });
-    const value = result.current;
-    if (ok && value) {
-      const existing = Boolean(value.duplicateAccountId);
-      acceptSession({ sessionId: String(value.sessionId), prepared: true, preview: { format: "portable", rows: [{ itemId: String(value.accountId), label: String(value.label), identity: String(value.identityHint), authMode: "oauth", sourceName: "OpenAI", quotaStatus: "unknown", status: existing ? "existing" : "ready", defaultSelected: !existing, selectable: true, existing, warnings: [] }], warnings: [] } });
-    } else if (!ok) setCommandFailed(true);
+    if (ok && result.current) acceptSession(result.current);
+    else if (!ok) setCommandFailed(true);
   };
   const resume = async () => {
     const result: { current: ImportSession | null } = { current: null };
@@ -384,8 +382,22 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
       onClose();
       return;
     }
-    const ok = await perform("import-confirm", () => relayCommands.remoteAction({ type: "confirm_account_import" }, { sessionId: session.sessionId }), "feedback.accountAdded");
-    if (ok) onClose();
+    const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
+    const ok = await perform("import-confirm", async () => {
+      result.current = await relayCommands.remoteAction(
+        { type: "confirm_account_batch_import" },
+        { sessionId: session.sessionId, selectedItemIds: selected },
+      ) as Awaited<ReturnType<typeof relayCommands.confirmImport>>;
+    }, "feedback.accountAdded");
+    if (!ok) {
+      setCommandFailed(true);
+      return;
+    }
+    const failures = (result.current?.results ?? [])
+      .filter((item) => item.status === "failed")
+      .map((item) => ({ itemId: item.itemId, code: item.error?.code ?? "unknown" }));
+    if (failures.length) setCompleted(failures);
+    else onClose();
   };
   const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
     ? current.filter((id) => id !== itemId)

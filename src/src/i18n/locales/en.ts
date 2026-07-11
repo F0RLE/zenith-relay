@@ -452,6 +452,7 @@ const relayEn = {
     disconnectConfirm: "Disconnect this server from the desktop? The server will keep running.",
     version: "Version",
     capabilities: "Capabilities",
+    capabilityUnavailable: "The connected server does not support this action.",
     publicUrl: "Public server URL",
     allowInsecure: "Allow this unencrypted HTTP connection.",
     confirmIdentityChange: "Trust this server if its saved identity has changed.",

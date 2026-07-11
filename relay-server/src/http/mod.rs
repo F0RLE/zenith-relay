@@ -33,6 +33,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(management_api::confirm_account_import),
         )
         .route(
+            "/accounts/import/batch/preview",
+            post(management_api::preview_account_batch_import),
+        )
+        .route(
+            "/accounts/import/batch/confirm",
+            post(management_api::confirm_account_batch_import),
+        )
+        .route(
             "/accounts/{id}",
             patch(management_api::update_account).delete(management_api::delete_account),
         )

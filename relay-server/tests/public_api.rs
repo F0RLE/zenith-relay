@@ -216,6 +216,322 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     upstream_task.abort();
 }
 
+#[tokio::test]
+async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let content = json!({
+        "version": 1,
+        "proxies": [{"password": "synthetic-proxy-secret-never-import"}],
+        "sources": [{"apiKey": "synthetic-source-secret-never-import"}],
+        "accounts": [
+            {
+                "name": "Portable first",
+                "platform": "openai",
+                "type": "oauth",
+                "credentials": {
+                    "access_token": "synthetic-batch-access-one",
+                    "refresh_token": "synthetic-batch-refresh-one",
+                    "account_id": "synthetic-batch-account-one",
+                    "expires_at": "2026-08-10T00:00:00Z",
+                    "plan_type": "plus",
+                    "subscription_expires_at": "2026-09-10T00:00:00Z"
+                },
+                "models": ["gpt-test"]
+            },
+            {
+                "name": "Portable second",
+                "tokens": {
+                    "accessToken": "synthetic-batch-access-two",
+                    "refreshToken": "synthetic-batch-refresh-two",
+                    "chatgptAccountId": "synthetic-batch-account-two"
+                },
+                "models": ["gpt-test"]
+            }
+        ]
+    })
+    .to_string();
+
+    let preview_response = client
+        .post(format!("{}/accounts/import/batch/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"content": content}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview_response.status(), StatusCode::CREATED);
+    let preview_text = preview_response.text().await.unwrap();
+    for secret in [
+        "synthetic-batch-access-one",
+        "synthetic-batch-refresh-one",
+        "synthetic-batch-access-two",
+        "synthetic-batch-refresh-two",
+        "synthetic-proxy-secret-never-import",
+        "synthetic-source-secret-never-import",
+    ] {
+        assert!(!preview_text.contains(secret));
+    }
+    let preview: Value = serde_json::from_str(&preview_text).unwrap();
+    assert_eq!(preview["preview"]["format"], "portable_account_bundle");
+    assert_eq!(preview["preview"]["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(preview["preview"]["rows"][0]["plan"], "plus");
+    assert_eq!(preview["preview"]["warnings"][0]["code"], "proxies_ignored");
+    assert_eq!(preview["preview"]["warnings"][1]["code"], "sources_ignored");
+    let batch_id = preview["sessionId"].as_str().unwrap();
+    let rows = preview["preview"]["rows"].as_array().unwrap();
+    let first_item_id = rows[0]["itemId"].as_str().unwrap();
+    let second_item_id = rows[1]["itemId"].as_str().unwrap();
+
+    let first_confirm: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": batch_id, "selectedItemIds": [first_item_id]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first_confirm["sessionId"], batch_id);
+    assert_eq!(first_confirm["results"][0]["status"], "succeeded");
+    assert_eq!(server.state.store.accounts().unwrap().len(), 1);
+    let first_account = server.state.store.accounts().unwrap().remove(0);
+    assert_eq!(
+        first_account.subscription.plan_type.as_deref(),
+        Some("plus")
+    );
+    assert!(first_account.subscription.active_until_ms.is_some());
+    let credential: Value = serde_json::from_str(
+        &server
+            .state
+            .vault
+            .load(&first_account.secret_ref)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(credential["expiresAtMs"]
+        .as_u64()
+        .is_some_and(|value| value > 1_000_000_000_000));
+
+    let second_confirm: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": batch_id, "selectedItemIds": [second_item_id]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second_confirm["results"][0]["status"], "succeeded");
+    assert_eq!(server.state.store.accounts().unwrap().len(), 2);
+
+    let database = std::fs::read(root.path().join("relay.sqlite")).unwrap();
+    let database = String::from_utf8_lossy(&database);
+    assert!(!database.contains("synthetic-proxy-secret-never-import"));
+    assert!(!database.contains("synthetic-source-secret-never-import"));
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn batch_import_handles_arrays_json_lines_invalid_rows_and_duplicates() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let valid = json!({
+        "label": "Array account",
+        "accessToken": "synthetic-array-access",
+        "refreshToken": "synthetic-array-refresh",
+        "chatgptAccountId": "synthetic-array-account",
+        "models": ["gpt-test"]
+    });
+    let preview = batch_preview(
+        &client,
+        &server.origin,
+        json!([
+            valid,
+            {"name": "invalid-row-marker"},
+            {
+                "name": "synthetic-label-secret",
+                "accessToken": "synthetic-label-secret",
+                "chatgptAccountId": "synthetic-label-account",
+                "planType": "synthetic-label-secret"
+            }
+        ])
+        .to_string(),
+    )
+    .await;
+    assert_eq!(preview["preview"]["format"], "json_array");
+    assert_eq!(preview["preview"]["rows"][0]["status"], "ready");
+    assert_eq!(preview["preview"]["rows"][1]["status"], "invalid");
+    assert_eq!(
+        preview["preview"]["rows"][1]["error"]["code"],
+        "missing_credentials"
+    );
+    assert!(!preview.to_string().contains("invalid-row-marker"));
+    assert!(!preview.to_string().contains("synthetic-label-secret"));
+    assert_eq!(preview["preview"]["rows"][2]["label"], "Imported account");
+    assert!(preview["preview"]["rows"][2]["plan"].is_null());
+
+    let batch_id = preview["sessionId"].as_str().unwrap();
+    let item_id = preview["preview"]["rows"][0]["itemId"].as_str().unwrap();
+    let confirmed = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": batch_id, "selectedItemIds": [item_id]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(confirmed.status(), StatusCode::OK);
+
+    let duplicate = batch_preview(
+        &client,
+        &server.origin,
+        json!({
+            "label": "Duplicate account",
+            "accessToken": "synthetic-duplicate-access",
+            "chatgptAccountId": "synthetic-array-account"
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(duplicate["preview"]["rows"][0]["status"], "existing");
+    assert_eq!(duplicate["preview"]["rows"][0]["defaultSelected"], false);
+
+    let json_lines = [
+        json!({"label":"Line one","accessToken":"synthetic-line-access-one","chatgptAccountId":"synthetic-line-account-one"}).to_string(),
+        json!({"label":"Line two","accessToken":"synthetic-line-access-two","chatgptAccountId":"synthetic-line-account-two"}).to_string(),
+    ]
+    .join("\n");
+    let lines_preview = batch_preview(&client, &server.origin, json_lines).await;
+    assert_eq!(lines_preview["preview"]["format"], "json_lines");
+    assert_eq!(
+        lines_preview["preview"]["rows"].as_array().unwrap().len(),
+        2
+    );
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn batch_import_enforces_size_count_depth_and_batch_ownership() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let oversized = "x".repeat(1024 * 1024 + 1);
+    assert_batch_error(&client, &server.origin, oversized, "import_too_large").await;
+    let too_many = Value::Array((0..257).map(|_| json!({})).collect()).to_string();
+    assert_batch_error(&client, &server.origin, too_many, "import_item_count").await;
+    let mut deep = json!({});
+    for _ in 0..34 {
+        deep = json!({"nested": deep});
+    }
+    assert_batch_error(&client, &server.origin, deep.to_string(), "import_too_deep").await;
+
+    let first = batch_preview(
+        &client,
+        &server.origin,
+        json!({"accessToken":"synthetic-owned-one","chatgptAccountId":"synthetic-owned-account-one"}).to_string(),
+    )
+    .await;
+    let second = batch_preview(
+        &client,
+        &server.origin,
+        json!({"accessToken":"synthetic-owned-two","chatgptAccountId":"synthetic-owned-account-two"}).to_string(),
+    )
+    .await;
+    let response: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sessionId": first["sessionId"],
+            "selectedItemIds": [second["preview"]["rows"][0]["itemId"]]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["results"][0]["status"], "failed");
+    assert_eq!(response["results"][0]["error"]["code"], "import_not_found");
+    assert!(server.state.store.accounts().unwrap().is_empty());
+
+    let abandoned = batch_preview(
+        &client,
+        &server.origin,
+        json!({"accessToken":"synthetic-abandoned","chatgptAccountId":"synthetic-abandoned-account"}).to_string(),
+    )
+    .await;
+    let abandoned_id = abandoned["preview"]["rows"][0]["itemId"].as_str().unwrap();
+    let mut pending = server
+        .state
+        .store
+        .pending_import(abandoned_id)
+        .unwrap()
+        .unwrap();
+    pending.created_at_ms = 1;
+    let abandoned_secret_ref = pending.secret_ref.clone();
+    server.state.store.save_pending_import(&pending).unwrap();
+    assert!(server
+        .state
+        .vault
+        .load(&abandoned_secret_ref)
+        .unwrap()
+        .is_some());
+    let _ = batch_preview(
+        &client,
+        &server.origin,
+        json!({"accessToken":"synthetic-cleanup-trigger","chatgptAccountId":"synthetic-cleanup-trigger-account"}).to_string(),
+    )
+    .await;
+    assert!(server
+        .state
+        .store
+        .pending_import(abandoned_id)
+        .unwrap()
+        .is_none());
+    assert!(server
+        .state
+        .vault
+        .load(&abandoned_secret_ref)
+        .unwrap()
+        .is_none());
+    server.task.abort();
+}
+
+async fn batch_preview(client: &reqwest::Client, origin: &str, content: String) -> Value {
+    let response = client
+        .post(format!("{origin}/accounts/import/batch/preview"))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"content": content}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    response.json().await.unwrap()
+}
+
+async fn assert_batch_error(
+    client: &reqwest::Client,
+    origin: &str,
+    content: String,
+    expected_code: &str,
+) {
+    let response = client
+        .post(format!("{origin}/accounts/import/batch/preview"))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"content": content}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], expected_code);
+}
+
 struct RunningServer {
     origin: String,
     state: Arc<AppState>,
