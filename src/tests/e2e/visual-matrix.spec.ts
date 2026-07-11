@@ -103,14 +103,14 @@ for (const viewport of viewports) {
   });
 
   test(`account actions ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveCount(5);
+    await expect(menu.getByRole("menuitem")).toHaveCount(4);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -134,12 +134,12 @@ for (const viewport of viewports) {
   });
 
   test(`account selection ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.locator(".relay-sidebar nav button").nth(1).click();
     await page.getByLabel("Выбрать Personal Plus").check();
-    await expect(page.getByRole("button", { name: "Запустить выбранную" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Экспортировать выбранные (1)" })).toBeVisible();
     await expect(page.locator(".account-command-context > span")).toHaveText("Выбрано: 1");
     await page.screenshot({ path: `output/playwright/account-selection-ru-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".account-command-bar").evaluate((bar) => {
@@ -155,20 +155,21 @@ for (const viewport of viewports) {
   });
 
   test(`account identity ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.locator(".relay-sidebar nav button").nth(1).click();
     await page.getByRole("button", { name: "Показать имя полностью" }).click();
-    const identity = page.getByText("person@example.test");
-    await expect(identity).toBeVisible();
+    const identity = page.locator(".account-card").first().locator(".account-identity > strong");
+    await expect(identity).toHaveText("person@example.test");
+    await expect(page.locator(".account-card").first().getByText("Personal Plus", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Скрыть полное имя" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/account-identity-ru-${viewport.width}x${viewport.height}.png` });
     expect(await identity.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   });
 
   test(`multiple accounts ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true, accountCount: 3 });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.locator(".relay-sidebar nav button").nth(1).click();
@@ -188,6 +189,10 @@ for (const viewport of viewports) {
       const identity = item.querySelector<HTMLElement>(".account-identity")?.getBoundingClientRect();
       const facts = item.querySelector<HTMLElement>(".account-facts")?.getBoundingClientRect();
       return Boolean(identity && facts && Math.abs(identity.top - facts.top) <= 1 && Math.abs(identity.height - facts.height) <= 1);
+    }))).toBe(true);
+    expect(await cards.evaluateAll((items) => items.every((item) => {
+      const facts = [...item.querySelectorAll<HTMLElement>(".account-facts > div")].map((fact) => fact.getBoundingClientRect().width);
+      return facts.length === 2 && Math.abs(facts[0] - facts[1]) <= 1;
     }))).toBe(true);
     expect(await page.locator(".account-facts span").evaluateAll((labels) => labels.every((label) => label.scrollWidth <= label.clientWidth))).toBe(true);
   });
@@ -209,13 +214,7 @@ for (const viewport of viewports) {
       const first = item.parentElement?.firstElementChild?.getBoundingClientRect();
       return Boolean(first && Math.abs(current.left - first.left) <= 1 && Math.abs(current.width - item.parentElement!.getBoundingClientRect().width) <= 1);
     })).toBe(true);
-    await page.locator(".quota-display-menu summary").click();
-    const menu = page.locator(".quota-display-menu > div");
-    await expect(menu).toBeVisible();
+    await expect(page.locator(".quota-display-menu")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/quota-windows-${viewport.width}x${viewport.height}.png` });
-    expect(await menu.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-    })).toBe(true);
   });
 }

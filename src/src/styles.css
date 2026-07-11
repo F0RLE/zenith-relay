@@ -2827,20 +2827,12 @@ textarea {
 
 .gateway-sections > section:first-child {
   margin-top: 16px;
-  padding: 16px;
-  border: 1px solid var(--relay-border);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
-}
-
-.gateway-sections > section:first-child h2 {
-  margin-bottom: 0;
 }
 
 .endpoint-line {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
   gap: 8px;
   padding: 10px 10px 10px 12px;
   border: 1px solid var(--relay-border);
@@ -3265,9 +3257,9 @@ textarea {
 .account-card-main {
   min-height: 60px;
   display: grid;
-  grid-template-columns: auto minmax(180px, 1.2fr) minmax(290px, 1fr) auto;
+  grid-template-columns: auto minmax(140px, 1fr) minmax(210px, 0.9fr) auto;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   padding: 10px 12px;
 }
 
@@ -3278,9 +3270,10 @@ textarea {
 .account-identity {
   min-width: 0;
   min-height: 42px;
-  display: grid;
-  grid-template-rows: 18px 24px;
-  align-content: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
 }
 
 .account-identity > strong {
@@ -3292,6 +3285,14 @@ textarea {
   line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.account-identity > strong.revealed {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  line-height: 16px;
+  text-overflow: clip;
+  white-space: normal;
 }
 
 .account-identity > div {
@@ -3327,46 +3328,10 @@ textarea {
 .account-health.warning { color: var(--relay-warning); }
 .account-health.error { color: var(--relay-error); }
 
-.account-card .account-identity small {
-  min-width: 0;
-  flex: 0 1 auto;
-  display: block;
-  overflow: hidden;
-  font-size: 11px;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-card .account-identity small.revealed {
-  overflow: visible;
-  overflow-wrap: anywhere;
-  text-overflow: clip;
-  white-space: normal;
-}
-
-.account-identity > div .relay-icon-button {
-  width: 24px;
-  min-height: 24px;
-  flex: 0 0 24px;
-  border-color: var(--relay-border);
-  background: var(--relay-surface);
-}
-
-.account-identity > div .relay-icon-button:hover {
-  border-color: var(--relay-border-strong);
-  background: var(--relay-subtle);
-}
-
-.account-identity > div .relay-icon-button svg {
-  width: 14px;
-  height: 14px;
-}
-
 .account-facts {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(88px, 0.8fr) minmax(160px, 1.2fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
 }
 
@@ -3376,14 +3341,7 @@ textarea {
   display: grid;
   grid-template-rows: 16px 24px;
   align-content: center;
-  padding: 0 9px;
-}
-
-.account-facts > div:first-child {
-  padding-left: 0;
-}
-
-.account-facts > div + div {
+  padding: 0 7px;
   border-left: 1px solid var(--relay-border);
 }
 
@@ -3419,17 +3377,32 @@ textarea {
 
 .account-facts .relay-status {
   overflow: hidden;
+  gap: 3px;
   font-size: 11px;
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.account-facts .relay-status svg {
+  width: 12px;
+  height: 12px;
+}
+
 .account-row-action-list {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 4px;
+  gap: 6px;
+}
+
+.account-row-action-list .relay-icon-button {
+  flex: 0 0 34px;
+}
+
+.account-row-action-list .relay-icon-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .account-card-quota {
@@ -3581,82 +3554,6 @@ textarea {
   border-top: 1px solid var(--relay-border);
   border-radius: 0 0 5px 5px;
   color: var(--relay-error);
-}
-
-.quota-display-menu {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.quota-display-menu summary {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
-  color: var(--relay-text);
-  cursor: pointer;
-  list-style: none;
-}
-
-.quota-display-menu summary::-webkit-details-marker {
-  display: none;
-}
-
-.quota-display-menu summary:hover,
-.quota-display-menu[open] summary {
-  border-color: var(--relay-border-strong);
-  background: var(--relay-subtle);
-}
-
-.quota-display-menu summary svg {
-  width: 16px;
-  height: 16px;
-}
-
-.quota-display-menu > div {
-  position: absolute;
-  z-index: 30;
-  top: 40px;
-  right: 0;
-  width: 220px;
-  display: grid;
-  gap: 8px;
-  padding: 11px;
-  border: 1px solid var(--relay-border-strong);
-  border-radius: 7px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow);
-}
-
-.quota-display-menu strong {
-  color: var(--relay-text);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.quota-display-menu label,
-.quota-visibility-options label {
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: var(--relay-secondary);
-  cursor: pointer;
-}
-
-.quota-display-menu label:has(input:disabled),
-.quota-visibility-options label:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.65;
-}
-
-.quota-visibility-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 16px;
 }
 
 .warning-box {

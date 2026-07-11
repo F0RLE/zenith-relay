@@ -25,11 +25,6 @@ export type QuotaSnapshot = {
   error: { code: string; observedAtMs: number } | null;
 };
 
-export type QuotaWindowVisibility = {
-  primary: boolean;
-  secondary: boolean;
-};
-
 export type SourceSummary = {
   id: string;
   name: string;

@@ -240,16 +240,28 @@ test("account export supports bulk copy and per-account download", async ({ page
   ]);
 });
 
-test("secondary account actions stay in the row menu", async ({ page }) => {
+test("frequent account actions stay in the row and secondary actions stay in the menu", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const actions = page.locator(".account-card").first().locator(".account-row-action-list");
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual([
+    "Actions",
+    "Show full identity",
+    "Refresh quota",
+    "Launch in Codex",
+  ]);
   await page.locator(".account-card .account-row-menu summary").click();
   const menu = page.getByRole("menu");
-  await expect(menu.getByRole("menuitem", { name: "Refresh quota" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Refresh quota" })).toHaveCount(0);
+  await expect(menu.getByRole("menuitem", { name: "Export Personal Plus" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Drain" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+  await page.locator(".account-card .account-row-menu summary").click();
+  await page.getByRole("button", { name: "Refresh quota" }).click();
+  const refreshCall = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "refresh_local_account_quota"));
+  expect(refreshCall?.args).toEqual({ accountId: "account_synthetic" });
 });
 
 test("account identity reveal is explicit and reversible", async ({ page }) => {
@@ -257,11 +269,14 @@ test("account identity reveal is explicit and reversible", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
-  await expect(page.getByText("ac••••42")).toBeVisible();
+  const identity = page.locator(".account-card").first().locator(".account-identity > strong");
+  await expect(identity).toHaveText("Personal Plus");
+  await expect(page.getByText("ac••••42")).toHaveCount(0);
   await page.getByRole("button", { name: "Show full identity" }).click();
-  await expect(page.getByText("person@example.test")).toBeVisible();
+  await expect(identity).toHaveText("person@example.test");
+  await expect(page.locator(".account-card").first().getByText("Personal Plus", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Hide full identity" }).click();
-  await expect(page.getByText("ac••••42")).toBeVisible();
+  await expect(identity).toHaveText("Personal Plus");
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.find((item) => item.command === "reveal_local_account_identity"));
   expect(call?.args).toEqual({ accountId: "account_synthetic" });
@@ -278,26 +293,22 @@ test("remote account identity reveal uses the negotiated server capability", asy
   expect(call?.args).toEqual({ accountId: "account_synthetic" });
 });
 
-test("selected account launch and quota window preferences are explicit", async ({ page }) => {
+test("row launch is direct and all reported quota windows stay visible", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   await expect(page.getByRole("button", { name: "Launch selected" })).toHaveCount(0);
-  await page.locator(".quota-display-menu summary").click();
-  const quotaMenu = page.locator(".quota-display-menu > div");
-  await expect(quotaMenu.getByLabel("5 hours")).toBeChecked();
-  await expect(quotaMenu.getByLabel("Weekly")).toBeChecked();
-  await quotaMenu.getByLabel("Weekly").uncheck();
-  await expect(page.locator(".account-list .quota-meter")).toHaveCount(1);
-  expect(await page.evaluate(() => localStorage.getItem("relay.quota.secondary"))).toBe("0");
-
-  await page.getByLabel("Select Personal Plus").check();
   await expect(page.locator(".quota-display-menu")).toHaveCount(0);
-  const launch = page.getByRole("button", { name: "Launch selected" });
+  await expect(page.locator(".account-list .quota-meter")).toHaveCount(2);
+  const launch = page.getByRole("button", { name: "Launch in Codex" });
   await expect(launch).toBeEnabled();
   await launch.click();
   await expect(page.getByText("Client launched.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Appearance", exact: true }).click();
+  await expect(page.getByText("Visible quota windows")).toHaveCount(0);
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "launch_codex_account"));
   expect(call?.args).toEqual({ accountId: "account_synthetic" });

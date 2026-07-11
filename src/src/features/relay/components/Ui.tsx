@@ -2,7 +2,7 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleAlert, CircleHelp, Copy, Eye, EyeOff, Loader2, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { QuotaSnapshot, QuotaWindow, QuotaWindowVisibility } from "../api/types";
+import type { QuotaSnapshot, QuotaWindow } from "../api/types";
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
@@ -71,15 +71,14 @@ export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null
   return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{percent}%</strong></div><div className="quota-track" aria-label={`${resolvedLabel} ${percent}%`}><span style={{ width: `${percent}%` }} /></div></div>;
 }
 
-export function QuotaStack({ snapshot, visibility }: { snapshot: QuotaSnapshot; visibility: QuotaWindowVisibility }) {
+export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
   const { t } = useTranslation();
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => snapshot[kind] ? [{ id: kind, label: "", window: snapshot[kind] }] : []),
     ...(snapshot.supplemental ?? []),
   ];
   if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} /></div>;
-  const windows = reported.filter((item) => visibility[item.window.kind]);
-  return <div className="quota-stack">{windows.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} />)}</div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} />)}</div>;
 }
 
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
