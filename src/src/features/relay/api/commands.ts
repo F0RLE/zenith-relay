@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   ConfirmAccountImportResponse,
   GatewayDiagnostic,
+  HistoryRepairPreview,
+  HistoryRepairResult,
   ImportSession,
   KeySummary,
   LocalUsage,
@@ -12,6 +14,7 @@ import type {
   RemoteUsagePage,
   RuntimeSnapshot,
   SupportExportContext,
+  SupportBundlePreview,
   UsageExportRow,
   WakeTask,
 } from "./types";
@@ -72,6 +75,9 @@ export const relayCommands = {
   restoreCodex: () => invoke("restore_codex_profile"),
   restoreOpenCode: () => invoke("restore_opencode_profile"),
   openCodeProfileState: () => invoke<OpenCodeProfileState>("get_opencode_profile_state"),
+  previewHistoryRepair: (profileDirs: string[], targetProvider: "openai" | "zenith_relay_local") => invoke<HistoryRepairPreview>("preview_codex_history_repair", { input: { profileDirs, targetProvider } }),
+  applyHistoryRepair: (sessionId: string) => invoke<HistoryRepairResult>("apply_codex_history_repair", { sessionId }),
+  rollbackHistoryRepair: (backupId: string) => invoke<{ backupId: string; filesRestored: number }>("rollback_codex_history_repair", { backupId }),
   attachCodexAccount: (accountId: string, profileDir?: string) => invoke("attach_codex_to_account", { accountId, profileDir: profileDir || null }),
   profileBindings: () => invoke<ProfileBinding[]>("list_codex_account_bindings"),
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
@@ -79,6 +85,7 @@ export const relayCommands = {
   resetLocalData: () => invoke("reset_local_pool_data"),
   exportUsage: (rows: UsageExportRow[]) => invoke<string>("export_usage", { rows }),
   exportSupportBundle: (context: SupportExportContext) => invoke<string>("export_support_bundle", { context }),
+  previewSupportBundle: (context: SupportExportContext) => invoke<SupportBundlePreview>("preview_support_bundle", { context }),
 
   connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),
   disconnectRemote: () => invoke("disconnect_remote_server"),

@@ -199,9 +199,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "attach_codex_to_account":
           case "restore_codex_account_profile": return null;
           case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
+          case "preview_codex_history_repair": return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: "zenith_relay_local", profileCount: 1, rolloutFileCount: 2, rolloutRecordCount: 2, sqliteRowCount: 1, codexRunning: false, expiresAtMs: Date.now() + 60_000 };
+          case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };
+          case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
           case "open_relay_folder": return null;
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
+          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 4, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
           case "list_codex_account_bindings": return populated ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };

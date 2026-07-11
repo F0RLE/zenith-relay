@@ -245,3 +245,39 @@ export type OpenCodeProfileState = {
   changed: boolean;
   configPath: string;
 };
+
+export type HistoryRepairPreview = {
+  sessionId: string;
+  targetProvider: "openai" | "zenith_relay_local";
+  profileCount: number;
+  rolloutFileCount: number;
+  rolloutRecordCount: number;
+  sqliteRowCount: number;
+  codexRunning: boolean;
+  expiresAtMs: number;
+};
+
+export type HistoryRepairResult = {
+  backupId: string;
+  backupPath: string;
+  rolloutRecordsChanged: number;
+  sqliteRowsChanged: number;
+};
+
+export type SupportBundlePreview = {
+  bundle: {
+    generatedAt: string;
+    appVersion: string;
+    platform: string;
+    mode: "local" | "remote" | "zenith";
+    schemaVersion: number | null;
+    gatewayRunning: boolean;
+    sourceCount: number;
+    accountCount: number;
+    keyCount: number;
+    automationCount: number;
+    usageCount: number;
+    warningCount: number;
+  };
+  excluded: string[];
+};

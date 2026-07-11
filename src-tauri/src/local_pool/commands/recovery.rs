@@ -33,7 +33,7 @@ pub struct UsageExportRow {
     error_category: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SupportBundle {
     generated_at: String,
@@ -70,6 +70,13 @@ pub struct SupportContext {
     automation_count: usize,
     usage_count: usize,
     warning_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupportBundlePreview {
+    bundle: SupportBundle,
+    excluded: [&'static str; 5],
 }
 
 #[tauri::command]
@@ -154,7 +161,26 @@ pub fn export_support_bundle(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<String, CommandError> {
-    let bundle = SupportBundle {
+    let bundle = support_bundle(context);
+    write_export("support", &bundle, &app, &state)
+}
+
+#[tauri::command]
+pub fn preview_support_bundle(context: SupportContext) -> SupportBundlePreview {
+    SupportBundlePreview {
+        bundle: support_bundle(context),
+        excluded: [
+            "secrets",
+            "prompts",
+            "responses",
+            "raw_identities",
+            "raw_headers",
+        ],
+    }
+}
+
+fn support_bundle(context: SupportContext) -> SupportBundle {
+    SupportBundle {
         generated_at: chrono::Utc::now().to_rfc3339(),
         app_version: env!("CARGO_PKG_VERSION"),
         platform: crate::platform::platform_name(),
@@ -167,8 +193,7 @@ pub fn export_support_bundle(
         automation_count: context.automation_count,
         usage_count: context.usage_count,
         warning_count: context.warning_count,
-    };
-    write_export("support", &bundle, &app, &state)
+    }
 }
 
 fn write_export(
@@ -242,5 +267,29 @@ mod tests {
         assert!(invalid_export_row(&row));
         row.connection = "x".repeat(MAX_EXPORT_TEXT + 1);
         assert!(invalid_export_row(&row));
+    }
+
+    #[test]
+    fn support_preview_contains_only_redacted_aggregate_fields() {
+        let preview = preview_support_bundle(SupportContext {
+            mode: SupportMode::Local,
+            schema_version: Some(4),
+            gateway_running: true,
+            source_count: 1,
+            account_count: 2,
+            key_count: 1,
+            automation_count: 1,
+            usage_count: 5,
+            warning_count: 0,
+        });
+        let encoded = serde_json::to_string(&preview).unwrap();
+        assert!(encoded.contains("raw_identities"));
+        for secret in [
+            "synthetic-access-token",
+            "private prompt",
+            "generated response",
+        ] {
+            assert!(!encoded.contains(secret));
+        }
     }
 }

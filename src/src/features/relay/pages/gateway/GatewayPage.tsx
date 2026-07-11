@@ -3,8 +3,8 @@ import { ClipboardCheck, Copy, Play, RefreshCw, RotateCw, Save, Square, Wrench }
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
-import type { GatewayDiagnostic } from "../../api/types";
-import { Button, EmptyState, PageHeader, StatusBadge, Tabs, copyText } from "../../components/Ui";
+import type { GatewayDiagnostic, SupportBundlePreview } from "../../api/types";
+import { Button, Dialog, EmptyState, PageHeader, StatusBadge, Tabs, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "endpoint" | "clients" | "diagnostics";
@@ -34,11 +34,20 @@ function ClientSetup({ endpoint }: { endpoint: string }) {
 }
 
 function Diagnostics({ running }: { running: boolean }) {
-  const { t } = useTranslation(); const { mode, runtime, localUsage, remoteUsage, readyUsage, perform, busy } = useRelayState(); const [result, setResult] = useState<GatewayDiagnostic | null>(null);
+  const { t } = useTranslation(); const { mode, runtime, localUsage, remoteUsage, readyUsage, perform, busy } = useRelayState(); const [result, setResult] = useState<GatewayDiagnostic | null>(null); const [supportPreview, setSupportPreview] = useState<SupportBundlePreview | null>(null);
   const supportContext = { mode, schemaVersion: runtime?.schemaVersion ?? null, gatewayRunning: Boolean(runtime?.gateway.running), sourceCount: runtime?.sources.length ?? 0, accountCount: runtime?.accounts.length ?? 0, keyCount: runtime?.keys.length ?? 0, automationCount: runtime?.automations.length ?? 0, usageCount: mode === "local" ? localUsage.length : mode === "remote" ? remoteUsage.length : readyUsage.length, warningCount: runtime?.warnings.length ?? 0 };
   const run = (stream: boolean) => perform(stream ? "diagnostics-stream" : "diagnostics", async () => { if (mode === "local") setResult(await relayCommands.diagnoseGateway(stream)); else if (mode === "remote") await relayCommands.refreshRemoteCapabilities(); else await getSavedKeyStats(); }, "feedback.checked");
   const healthDisabled = mode === "remote" ? !runtime : !running;
   const streamDisabled = !running || mode !== "local";
   const streamReason = !running ? t("gateway.startForDiagnostics") : mode === "remote" ? t("gateway.remoteStreamUnsupported") : mode === "zenith" ? t("gateway.readyStreamUnsupported") : undefined;
-  return <div className="diagnostics-list"><section><Wrench aria-hidden /><div><strong>{t("gateway.endpointHealth")}</strong><span>{result && !result.stream ? t("gateway.diagnosticResult", { model: result.model, latency: result.latencyMs }) : running ? t("common.ready") : t("common.offline")}</span></div><Button variant="secondary" busy={busy === "diagnostics"} disabled={healthDisabled} title={healthDisabled ? t("gateway.startForDiagnostics") : undefined} onClick={() => run(false)}>{t("common.run")}</Button></section><section><RefreshCw aria-hidden /><div><strong>{t("gateway.streamTest")}</strong><span>{result?.stream ? t("gateway.diagnosticResult", { model: result.model, latency: result.latencyMs }) : t("gateway.streamHint")}</span></div><Button variant="secondary" busy={busy === "diagnostics-stream"} disabled={streamDisabled} title={streamReason} onClick={() => run(true)}>{t("common.run")}</Button></section><section><ClipboardCheck aria-hidden /><div><strong>{t("gateway.supportBundle")}</strong><span>{t("gateway.redactedLogs")}</span></div><Button variant="secondary" busy={busy === "support-export"} onClick={() => perform("support-export", () => relayCommands.exportSupportBundle(supportContext), "feedback.exported")}>{t("common.export")}</Button></section></div>;
+  const previewSupport = async () => {
+    let preview: SupportBundlePreview | null = null;
+    const ok = await perform("support-preview", async () => { preview = await relayCommands.previewSupportBundle(supportContext); });
+    if (ok) setSupportPreview(preview);
+  };
+  const exportSupport = async () => {
+    const ok = await perform("support-export", () => relayCommands.exportSupportBundle(supportContext), "feedback.exported");
+    if (ok) setSupportPreview(null);
+  };
+  return <><div className="diagnostics-list"><section><Wrench aria-hidden /><div><strong>{t("gateway.endpointHealth")}</strong><span>{result && !result.stream ? t("gateway.diagnosticResult", { model: result.model, latency: result.latencyMs }) : running ? t("common.ready") : t("common.offline")}</span></div><Button variant="secondary" busy={busy === "diagnostics"} disabled={healthDisabled} title={healthDisabled ? t("gateway.startForDiagnostics") : undefined} onClick={() => run(false)}>{t("common.run")}</Button></section><section><RefreshCw aria-hidden /><div><strong>{t("gateway.streamTest")}</strong><span>{result?.stream ? t("gateway.diagnosticResult", { model: result.model, latency: result.latencyMs }) : t("gateway.streamHint")}</span></div><Button variant="secondary" busy={busy === "diagnostics-stream"} disabled={streamDisabled} title={streamReason} onClick={() => run(true)}>{t("common.run")}</Button></section><section><ClipboardCheck aria-hidden /><div><strong>{t("gateway.supportBundle")}</strong><span>{t("gateway.redactedLogs")}</span></div><Button variant="secondary" busy={busy === "support-preview"} onClick={previewSupport}>{t("gateway.previewSupport")}</Button></section></div>{supportPreview ? <Dialog title={t("gateway.supportPreviewTitle")} onClose={() => setSupportPreview(null)} footer={<><Button variant="secondary" onClick={() => setSupportPreview(null)}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "support-export"} onClick={exportSupport}>{t("common.export")}</Button></>}><p>{t("gateway.supportPreviewHint")}</p><dl className="detail-list"><div><dt>{t("common.mode")}</dt><dd>{t(`modes.${supportPreview.bundle.mode}`)}</dd></div><div><dt>{t("gateway.schemaVersion")}</dt><dd>{supportPreview.bundle.schemaVersion ?? t("common.unknown")}</dd></div><div><dt>{t("gateway.sourceCount")}</dt><dd>{supportPreview.bundle.sourceCount}</dd></div><div><dt>{t("gateway.accountCount")}</dt><dd>{supportPreview.bundle.accountCount}</dd></div><div><dt>{t("gateway.keyCount")}</dt><dd>{supportPreview.bundle.keyCount}</dd></div><div><dt>{t("gateway.automationCount")}</dt><dd>{supportPreview.bundle.automationCount}</dd></div><div><dt>{t("gateway.usageCount")}</dt><dd>{supportPreview.bundle.usageCount}</dd></div><div><dt>{t("gateway.warningCount")}</dt><dd>{supportPreview.bundle.warningCount}</dd></div></dl><strong>{t("gateway.excludedData")}</strong><ul>{supportPreview.excluded.map((item) => <li key={item}>{t(`gateway.excluded.${item}`)}</li>)}</ul></Dialog> : null}</>;
 }

@@ -155,12 +155,22 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Support bundle preview" })).toContainText("Raw account identities");
   await page.getByRole("button", { name: "Export", exact: true }).click();
 
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
   await expect(page.getByRole("row").filter({ hasText: "OpenCode" })).toBeVisible();
   await page.getByRole("tab", { name: "Backups" }).click();
   await page.getByRole("button", { name: "Open folder" }).click();
+  await page.getByRole("tab", { name: "Repair" }).click();
+  await page.getByRole("button", { name: "Preview repair" }).click();
+  await expect(page.getByText("2", { exact: true }).first()).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Apply repair" }).click();
+  await expect(page.getByText("History repaired")).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "Roll back repair" }).click();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Storage", exact: true }).click();
@@ -170,7 +180,7 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   await page.getByRole("button", { name: "Reset local pool data" }).click();
 
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands).toEqual(expect.arrayContaining(["export_usage", "export_support_bundle", "open_relay_folder"]));
+  expect(commands).toEqual(expect.arrayContaining(["export_usage", "preview_support_bundle", "export_support_bundle", "open_relay_folder", "preview_codex_history_repair", "apply_codex_history_repair", "rollback_codex_history_repair"]));
   expect(commands).not.toContain("reset_local_pool_data");
 });
 

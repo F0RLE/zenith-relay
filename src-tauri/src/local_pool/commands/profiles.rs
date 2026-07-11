@@ -3,12 +3,13 @@ use crate::{
     local_pool::{
         commands::accounts::prepare_account_credentials,
         error::{CommandError, ErrorCode, LocalPoolError},
-        profiles::{codex, opencode},
+        profiles::{codex, opencode, repair},
         state::DesktopState,
         store::secret_store,
     },
     platform::{default_codex_home, default_opencode_auth, default_opencode_config},
 };
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -142,6 +143,56 @@ pub fn list_codex_account_bindings(
     codex::account_bindings(&state.profile_backup_root()).map_err(Into::into)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RepairPreviewInput {
+    profile_dirs: Vec<String>,
+    target_provider: repair::TargetProvider,
+}
+
+#[tauri::command]
+pub fn preview_codex_history_repair(
+    input: RepairPreviewInput,
+    state: State<'_, DesktopState>,
+) -> Result<repair::RepairPreview, CommandError> {
+    let profiles = if input.profile_dirs.is_empty() {
+        vec![resolve_profile_dir(None)?]
+    } else {
+        input
+            .profile_dirs
+            .into_iter()
+            .map(|path| resolve_profile_dir(Some(path)))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    repair::preview(
+        state.root(),
+        &profiles,
+        input.target_provider,
+        crate::launcher::is_codex_running(),
+    )
+    .map_err(repair_error)
+}
+
+#[tauri::command]
+pub async fn apply_codex_history_repair(
+    session_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<repair::RepairResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    ensure_codex_stopped()?;
+    repair::apply(state.root(), &state.profile_backup_root(), &session_id).map_err(repair_error)
+}
+
+#[tauri::command]
+pub async fn rollback_codex_history_repair(
+    backup_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<repair::RollbackResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    ensure_codex_stopped()?;
+    repair::rollback(&state.profile_backup_root(), &backup_id).map_err(repair_error)
+}
+
 #[tauri::command]
 pub async fn restore_codex_account_profile(
     profile_dir: Option<String>,
@@ -180,6 +231,21 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
         .into());
     }
     Ok(canonical)
+}
+
+fn repair_error(error: String) -> CommandError {
+    LocalPoolError::new(ErrorCode::RecoveryRequired, error).into()
+}
+
+fn ensure_codex_stopped() -> Result<(), CommandError> {
+    if crate::launcher::is_codex_running() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "close all Codex instances before changing history",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn now_ms() -> u64 {
