@@ -15,7 +15,7 @@ use zenith_relay_core::{
     GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 2;
+pub const SERVER_SCHEMA_VERSION: u32 = 3;
 pub const MAX_SERVER_ACCOUNTS: usize = 512;
 
 #[derive(Clone, Deserialize, Serialize)]

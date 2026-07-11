@@ -56,7 +56,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/keys/{id}/rotate", post(management_api::rotate_key))
         .route("/quota", get(management_api::quota))
         .route("/models", get(management_api::models))
-        .route("/usage", get(management_api::usage))
+        .route(
+            "/usage",
+            get(management_api::usage).delete(management_api::clear_usage),
+        )
+        .route("/diagnostics", post(management_api::diagnose_gateway))
         .route("/gateway/start", post(management_api::start_gateway))
         .route("/gateway/stop", post(management_api::stop_gateway))
         .route(

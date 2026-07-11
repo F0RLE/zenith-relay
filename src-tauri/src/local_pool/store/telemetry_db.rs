@@ -254,11 +254,15 @@ mod tests {
             total_tokens: Some(5),
         };
         TelemetryDb::open(&path).unwrap().record(&event).unwrap();
-        let logs = TelemetryDb::open(&path).unwrap().list(10).unwrap();
+        let database = TelemetryDb::open(&path).unwrap();
+        let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
+        database.clear().unwrap();
+        assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
+        drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
 

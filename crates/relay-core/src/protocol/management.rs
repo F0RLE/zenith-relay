@@ -136,6 +136,43 @@ pub struct UsagePage {
     pub total_pages: u32,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageRange {
+    Daily,
+    Weekly,
+    Monthly,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageQuery {
+    #[serde(default)]
+    pub page: u32,
+    #[serde(default)]
+    pub page_size: u32,
+    pub range: Option<UsageRange>,
+    pub from_ms: Option<u64>,
+    pub to_ms: Option<u64>,
+    pub model_query: Option<String>,
+    pub source_or_account_query: Option<String>,
+    pub local_key_query: Option<String>,
+    pub wire_api: Option<WireApi>,
+    pub success: Option<bool>,
+    pub error_category: Option<String>,
+    pub request_id_query: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GatewayDiagnostic {
+    pub stream: bool,
+    pub model: String,
+    pub latency_ms: u64,
+    pub bytes_received: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiError {

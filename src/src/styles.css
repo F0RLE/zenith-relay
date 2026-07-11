@@ -2654,6 +2654,78 @@ textarea {
   border-radius: 6px;
 }
 
+.usage-filters {
+  flex-wrap: wrap;
+  padding: 10px 0;
+}
+
+.usage-filters input,
+.usage-filters select {
+  width: min(170px, 100%);
+}
+
+.usage-overflow {
+  position: relative;
+}
+
+.usage-overflow summary {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 6px;
+  background: var(--relay-surface);
+  cursor: pointer;
+  list-style: none;
+}
+
+.usage-overflow summary::-webkit-details-marker {
+  display: none;
+}
+
+.usage-overflow summary svg {
+  width: 16px;
+  height: 16px;
+}
+
+.usage-overflow > div {
+  position: absolute;
+  z-index: 20;
+  top: 36px;
+  right: 0;
+  min-width: 160px;
+  padding: 4px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-surface);
+  box-shadow: 0 8px 24px rgba(24, 32, 38, 0.16);
+}
+
+.usage-overflow button {
+  width: 100%;
+  min-height: 32px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--relay-error);
+  text-align: left;
+  cursor: pointer;
+}
+
+.usage-overflow button:disabled {
+  color: var(--relay-text-muted);
+  cursor: not-allowed;
+}
+
+.usage-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+}
+
 .settings-layout {
   display: grid;
   grid-template-columns: 180px minmax(0, 760px);

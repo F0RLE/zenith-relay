@@ -1,6 +1,9 @@
 use crate::state::{GatewayKeyRecord, ServerAccountRecord, SourceRecord, SERVER_SCHEMA_VERSION};
 use fs2::FileExt;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
+    TransactionBehavior,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,7 +16,7 @@ use std::{
 };
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
-    protocol::{UsagePage, UsageSummary},
+    protocol::{UsagePage, UsageQuery, UsageSummary},
     UsageEvent, WireApi,
 };
 
@@ -27,6 +30,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "002_migration_ledger",
         sql: include_str!("../../migrations/002_migration_ledger.sql"),
+    },
+    Migration {
+        version: 3,
+        name: "003_usage_query_indexes",
+        sql: include_str!("../../migrations/003_usage_query_indexes.sql"),
     },
 ];
 
@@ -318,25 +326,33 @@ impl Store {
         Ok(())
     }
 
-    pub fn usage_page(&self, page: u32, page_size: u32) -> Result<UsagePage, String> {
-        let page = page.max(1);
-        let page_size = page_size.clamp(1, 200);
+    pub fn usage_page(&self, query: &UsageQuery) -> Result<UsagePage, String> {
+        let page = query.page.max(1);
+        let page_size = if query.page_size == 0 {
+            50
+        } else {
+            query.page_size.clamp(1, 200)
+        };
         let connection = self.lock()?;
+        let (where_sql, values) = usage_filter(query);
+        let count_sql = format!("SELECT COUNT(*) FROM usage_events{where_sql}");
         let total = connection
-            .query_row("SELECT COUNT(*) FROM usage_events", [], |row| {
+            .query_row(&count_sql, params_from_iter(values.iter()), |row| {
                 row.get::<_, i64>(0)
             })
             .map_err(db_error)?
             .max(0) as u64;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
-        let mut statement = connection
-            .prepare(
-                "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, output_tokens, total_tokens, created_at_ms\
-                 FROM usage_events ORDER BY id DESC LIMIT ?1 OFFSET ?2",
-            )
-            .map_err(db_error)?;
+        let sql = format!(
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, output_tokens, total_tokens, created_at_ms \
+             FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+        );
+        let mut statement = connection.prepare(&sql).map_err(db_error)?;
+        let mut page_values = values;
+        page_values.push(SqlValue::Integer(i64::from(page_size)));
+        page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
         let rows = statement
-            .query_map(params![i64::from(page_size), offset as i64], |row| {
+            .query_map(params_from_iter(page_values.iter()), |row| {
                 let wire_api: String = row.get(7)?;
                 Ok(UsageSummary {
                     id: row.get(0)?,
@@ -371,6 +387,12 @@ impl Store {
             page_size,
             total_pages,
         })
+    }
+
+    pub fn clear_usage(&self) -> Result<usize, String> {
+        self.lock()?
+            .execute("DELETE FROM usage_events", [])
+            .map_err(db_error)
     }
 
     pub fn backup_to(&self, destination: &Path) -> Result<(), String> {
@@ -456,6 +478,68 @@ impl Store {
             .lock()
             .map_err(|_| "SQLite lock poisoned".to_string())
     }
+}
+
+fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    if let Some(value) = query.from_ms {
+        clauses.push("created_at_ms >= ?");
+        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+    }
+    if let Some(value) = query.to_ms {
+        clauses.push("created_at_ms <= ?");
+        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+    }
+    if let Some(value) = query.model_query.as_deref() {
+        clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");
+        let value = SqlValue::Text(like_pattern(value));
+        values.push(value.clone());
+        values.push(value);
+    }
+    if let Some(value) = query.source_or_account_query.as_deref() {
+        clauses.push("candidate_hint LIKE ? ESCAPE '\\'");
+        values.push(SqlValue::Text(like_pattern(value)));
+    }
+    if let Some(value) = query.local_key_query.as_deref() {
+        clauses.push("local_key_id LIKE ? ESCAPE '\\'");
+        values.push(SqlValue::Text(like_pattern(value)));
+    }
+    if let Some(value) = query.wire_api {
+        clauses.push("wire_api = ?");
+        values.push(SqlValue::Text(wire_api_name(value).to_string()));
+    }
+    if let Some(value) = query.success {
+        clauses.push("success = ?");
+        values.push(SqlValue::Integer(i64::from(value)));
+    }
+    if let Some(value) = query.error_category.as_deref() {
+        clauses.push("error_category = ?");
+        values.push(SqlValue::Text(value.to_string()));
+    }
+    if let Some(value) = query.request_id_query.as_deref() {
+        clauses.push("request_id LIKE ? ESCAPE '\\'");
+        values.push(SqlValue::Text(like_pattern(value)));
+    }
+    let sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    (sql, values)
+}
+
+fn like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('%');
+    for character in value.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('%');
+    escaped
 }
 
 fn read_schema_version(connection: &Connection) -> Result<u32, String> {
@@ -728,7 +812,7 @@ mod tests {
         assert!(first.gateway_enabled().unwrap());
         assert_eq!(
             first.metadata("schema_version").unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
         drop(first);
         let second = Store::open(path).unwrap();
@@ -747,7 +831,7 @@ mod tests {
         assert_eq!(store.server_id().unwrap(), "stable-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
         let ledger = {
             let connection = store.lock().unwrap();
@@ -766,7 +850,8 @@ mod tests {
             ledger,
             vec![
                 (1, "001_init".to_string()),
-                (2, "002_migration_ledger".to_string())
+                (2, "002_migration_ledger".to_string()),
+                (3, "003_usage_query_indexes".to_string())
             ]
         );
         drop(store);
@@ -820,13 +905,13 @@ mod tests {
             )
             .unwrap();
         drop(connection);
-        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:2\n").unwrap();
+        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:3\n").unwrap();
 
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(store.server_id().unwrap(), "original-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
         assert!(!sibling_path(&path, ".migration-in-progress").exists());
         drop(store);
@@ -840,10 +925,73 @@ mod tests {
         create_v1_database(&path, "live-server-id");
         let before = fs::read(&path).unwrap();
         fs::write(sibling_path(&path, ".pre-migration"), b"not a database").unwrap();
-        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:2\n").unwrap();
+        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:3\n").unwrap();
 
         assert!(Store::open(path.clone()).is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_filters_paginate_escape_wildcards_and_clear() {
+        use zenith_relay_core::protocol::UsageRange;
+
+        let root = test_root("usage-query");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        for (index, success, model, error) in [
+            (1, true, "gpt-test", None),
+            (2, false, "gpt%literal", Some("quota_exhausted")),
+            (3, true, "gpt-test", None),
+        ] {
+            store
+                .record_usage(
+                    &UsageEvent {
+                        request_id: format!("req_{index}"),
+                        attempt: 1,
+                        local_key_id: "key_alpha".to_string(),
+                        source_id: "source_alpha".to_string(),
+                        candidate_id: Some("source_alpha".to_string()),
+                        account_id: None,
+                        requested_model: Some(model.to_string()),
+                        resolved_model: Some(model.to_string()),
+                        wire_api: WireApi::Responses,
+                        success,
+                        http_status: if success { 200 } else { 429 },
+                        error_category: error.map(str::to_string),
+                        cooldown_scope: None,
+                        retry_at_ms: None,
+                        consecutive_failures: None,
+                        latency_ms: 10,
+                        ttft_ms: None,
+                        input_tokens: Some(1),
+                        output_tokens: Some(1),
+                        total_tokens: Some(2),
+                    },
+                    2_000 + index,
+                )
+                .unwrap();
+        }
+
+        let page = store
+            .usage_page(&UsageQuery {
+                page: 1,
+                page_size: 1,
+                range: Some(UsageRange::Custom),
+                from_ms: Some(2_000),
+                to_ms: Some(3_000),
+                model_query: Some("%".to_string()),
+                success: Some(false),
+                error_category: Some("quota_exhausted".to_string()),
+                request_id_query: Some("req_2".to_string()),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.total_pages, 1);
+        assert_eq!(page.events[0].request_id, "req_2");
+        assert_eq!(store.clear_usage().unwrap(), 3);
+        assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 0);
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 

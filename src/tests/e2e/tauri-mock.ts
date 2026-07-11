@@ -8,6 +8,7 @@ export type MockOptions = {
   populated?: boolean;
   importResult?: "success" | "item_failure" | "not_found";
   remoteConnected?: boolean;
+  remoteFeatures?: string[];
 };
 
 export async function installTauriMock(page: Page, options: MockOptions = {}) {
@@ -101,10 +102,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks"] };
 
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
-    const remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
+    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
+    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
     let readyKey = "zrk_synthetic_ready_key";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
@@ -136,7 +137,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_local_runtime_state": return structuredClone(localRuntime);
           case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
           case "get_local_usage": return structuredClone(localUsage);
-          case "get_remote_server_usage": return { events: structuredClone(remoteUsage), total: remoteUsage.length, page: 1, pageSize: 100, totalPages: 1 };
+          case "get_remote_server_usage": {
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.candidateHint.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0 };
+          }
           case "create_local_source": localRuntime.sources = [source]; return structuredClone(source);
           case "update_local_source": return structuredClone(localRuntime);
           case "rotate_local_source_key": return structuredClone(localRuntime);
@@ -185,6 +190,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "diagnose_local_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 321, bytesReceived: 64 };
+          case "diagnose_remote_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 345, bytesReceived: 72 };
           case "create_quota_wake_automation": Object.assign(automation, args.input); localRuntime.automations = [automation]; return structuredClone(localRuntime);
           case "update_quota_wake_automation": Object.assign(automation, args.input); return structuredClone(localRuntime);
           case "set_quota_wake_automation_enabled": automation.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
@@ -204,6 +210,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
           case "open_relay_folder": return null;
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
+          case "clear_local_usage": localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
           case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 4, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
@@ -241,6 +248,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "confirm_account_batch_import") return { sessionId: "remote_import", results: [] };
       if (type === "test_source") return structuredClone(source);
       if (type === "test_wake_task") return { taskId: String(input.action?.id), status: "ready", eligibleAccounts: 1 };
+      if (type === "clear_usage") { remoteUsage = []; return null; }
       return null;
     }
 

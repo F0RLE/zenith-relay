@@ -264,3 +264,51 @@ test("remote bulk import previews portable content and confirms selected rows", 
     { action: { type: "test_source", id: "source_synthetic" }, payload: null },
   ]);
 });
+
+test("remote diagnostics, server-side usage filters, and clear logs use managed commands", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
+  await page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" }).click();
+  await expect(page.getByText(/gpt-5.4-mini completed in 345 ms/)).toBeVisible();
+  const diagnosticCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { stream?: boolean } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "diagnose_remote_gateway").map((call) => call.args.stream));
+  expect(diagnosticCalls).toEqual([false, true]);
+
+  await page.reload();
+  await expect(page.getByText("https://relay.example.invalid/v1").first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("textbox", { name: "Model" }).fill("gpt-5.4");
+  await page.getByRole("textbox", { name: "Request ID" }).fill("req_synthetic_remote");
+  await expect(page.getByText("req_synthetic_remote")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelQuery?: string; requestIdQuery?: string } } }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "get_remote_server_usage" && call.args.input?.modelQuery === "gpt-5.4" && call.args.input?.requestIdQuery === "req_synthetic_remote"))).toBe(true);
+  await page.getByLabel("Actions").click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("menuitem", { name: "Clear logs" }).click();
+  await expect(page.getByText("Request logs cleared.")).toBeVisible();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.some((call) => call.command === "get_remote_server_state")).toBe(true);
+  expect(calls.find((call) => call.command === "get_remote_server_usage" && (call.args.input as { modelQuery?: string } | undefined)?.modelQuery === "gpt-5.4")?.args.input).toMatchObject({ modelQuery: "gpt-5.4", requestIdQuery: "req_synthetic_remote" });
+  expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args).toMatchObject({ input: { action: { type: "clear_usage" } } });
+});
+
+test("remote capability omissions disable or hide unsupported operations", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteFeatures: ["accounts"] });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Restart endpoint" })).toBeDisabled();
+  await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await expect(page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" })).toBeDisabled();
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Keys" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Model Rules" })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect(page.getByText("The connected server does not support this action.")).toBeVisible();
+});

@@ -3,9 +3,10 @@ use reqwest::{header::LOCATION, Method};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientProtocolRange, HealthResponse, NegotiatedProtocol,
-    RuntimeStateSnapshot, UsagePage,
+    negotiate, Capabilities, ClientProtocolRange, GatewayDiagnostic, HealthResponse,
+    NegotiatedProtocol, RuntimeStateSnapshot, UsagePage, UsageQuery, UsageRange,
 };
+use zenith_relay_core::WireApi;
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -101,14 +102,20 @@ impl RemoteClient {
             .await
     }
 
-    pub async fn usage(&self, page: u32, page_size: u32) -> Result<UsagePage, RemoteClientError> {
-        let path = format!(
-            "/usage?page={}&pageSize={}",
-            page.max(1),
-            page_size.clamp(1, 200)
-        );
+    pub async fn usage(&self, query: &UsageQuery) -> Result<UsagePage, RemoteClientError> {
+        let path = usage_path(query);
         self.request(Method::GET, &path, Option::<&()>::None, true)
             .await
+    }
+
+    pub async fn diagnose(&self, stream: bool) -> Result<GatewayDiagnostic, RemoteClientError> {
+        self.request(
+            Method::POST,
+            "/diagnostics",
+            Some(&serde_json::json!({ "stream": stream })),
+            true,
+        )
+        .await
     }
 
     pub async fn mutate(
@@ -182,6 +189,90 @@ impl RemoteClient {
     }
 }
 
+fn usage_path(query: &UsageQuery) -> String {
+    let mut parameters = url::form_urlencoded::Serializer::new(String::new());
+    parameters.append_pair("page", &query.page.max(1).to_string());
+    parameters.append_pair(
+        "pageSize",
+        &if query.page_size == 0 {
+            50
+        } else {
+            query.page_size.clamp(1, 200)
+        }
+        .to_string(),
+    );
+    if let Some(value) = query.range {
+        parameters.append_pair("range", usage_range_name(value));
+    }
+    append_number(&mut parameters, "fromMs", query.from_ms);
+    append_number(&mut parameters, "toMs", query.to_ms);
+    append_text(&mut parameters, "modelQuery", query.model_query.as_deref());
+    append_text(
+        &mut parameters,
+        "sourceOrAccountQuery",
+        query.source_or_account_query.as_deref(),
+    );
+    append_text(
+        &mut parameters,
+        "localKeyQuery",
+        query.local_key_query.as_deref(),
+    );
+    if let Some(value) = query.wire_api {
+        parameters.append_pair("wireApi", wire_api_name(value));
+    }
+    if let Some(value) = query.success {
+        parameters.append_pair("success", if value { "true" } else { "false" });
+    }
+    append_text(
+        &mut parameters,
+        "errorCategory",
+        query.error_category.as_deref(),
+    );
+    append_text(
+        &mut parameters,
+        "requestIdQuery",
+        query.request_id_query.as_deref(),
+    );
+    format!("/usage?{}", parameters.finish())
+}
+
+fn append_text(
+    parameters: &mut url::form_urlencoded::Serializer<'_, String>,
+    name: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.filter(|value| !value.is_empty()) {
+        parameters.append_pair(name, value);
+    }
+}
+
+fn append_number(
+    parameters: &mut url::form_urlencoded::Serializer<'_, String>,
+    name: &str,
+    value: Option<u64>,
+) {
+    if let Some(value) = value {
+        parameters.append_pair(name, &value.to_string());
+    }
+}
+
+fn usage_range_name(value: UsageRange) -> &'static str {
+    match value {
+        UsageRange::Daily => "daily",
+        UsageRange::Weekly => "weekly",
+        UsageRange::Monthly => "monthly",
+        UsageRange::Custom => "custom",
+    }
+}
+
+fn wire_api_name(value: WireApi) -> &'static str {
+    match value {
+        WireApi::Responses => "responses",
+        WireApi::ChatCompletions => "chat_completions",
+        WireApi::Messages => "messages",
+    }
+}
+
 fn validate_token(token: &str) -> Result<(), RemoteClientError> {
     if token.len() < 24
         || token.len() > 8 * 1024
@@ -196,10 +287,15 @@ fn validate_token(token: &str) -> Result<(), RemoteClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{http::header::AUTHORIZATION, response::Redirect, routing::get, Router};
+    use axum::{
+        http::{header::AUTHORIZATION, Uri},
+        response::Redirect,
+        routing::get,
+        Json, Router,
+    };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
 
     #[tokio::test]
@@ -234,6 +330,40 @@ mod tests {
             Err(RemoteClientError::RedirectRejected)
         ));
         assert_eq!(received.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn usage_query_values_are_encoded_and_cannot_add_parameters() {
+        let observed = Arc::new(Mutex::new(String::new()));
+        let request_uri = observed.clone();
+        let server = spawn(Router::new().route(
+            "/usage",
+            get(move |uri: Uri| {
+                let request_uri = request_uri.clone();
+                async move {
+                    *request_uri.lock().unwrap() = uri.to_string();
+                    Json(serde_json::json!({
+                        "events": [], "total": 0, "page": 1, "pageSize": 25, "totalPages": 0
+                    }))
+                }
+            }),
+        ))
+        .await;
+        let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+        client
+            .usage(&UsageQuery {
+                page: 1,
+                page_size: 25,
+                model_query: Some("gpt test&success=false".to_string()),
+                success: Some(true),
+                ..UsageQuery::default()
+            })
+            .await
+            .unwrap();
+        let uri = observed.lock().unwrap().clone();
+        assert!(uri.contains("modelQuery=gpt+test%26success%3Dfalse"));
+        assert!(uri.contains("success=true"));
+        assert!(!uri.contains("modelQuery=gpt+test&success=false"));
     }
 
     async fn spawn(router: Router) -> String {

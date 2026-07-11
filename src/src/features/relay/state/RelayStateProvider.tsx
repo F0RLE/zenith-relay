@@ -1,8 +1,8 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats, getSavedKeyUsageHistory, getState, KeyStats, UiState, UsageLogEntry } from "../../../tauri";
 import { relayCommands } from "../api/commands";
-import type { LocalUsage, PageId, RelayMode, RemoteUsage, RuntimeSnapshot } from "../api/types";
+import type { LocalUsage, PageId, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
 
@@ -14,6 +14,8 @@ type RelayContextValue = {
   runtime: RuntimeSnapshot | null;
   localUsage: LocalUsage[];
   remoteUsage: RemoteUsage[];
+  remoteUsagePage: RemoteUsagePage | null;
+  loadRemoteUsage: (query: RemoteUsageQuery) => Promise<void>;
   readyState: UiState | null;
   readyStats: KeyStats | null;
   readyUsage: UsageLogEntry[];
@@ -41,6 +43,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [localUsage, setLocalUsage] = useState<LocalUsage[]>([]);
   const [remoteUsage, setRemoteUsage] = useState<RemoteUsage[]>([]);
+  const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const [readyState, setReadyState] = useState<UiState | null>(null);
   const [readyStats, setReadyStats] = useState<KeyStats | null>(null);
   const [readyUsage, setReadyUsage] = useState<UsageLogEntry[]>([]);
@@ -50,6 +53,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
+  const remoteUsageRequest = useRef(0);
 
   const refresh = useCallback(async () => {
     if (mode === "local") {
@@ -60,22 +64,25 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       setRuntime(snapshot);
       setLocalUsage(usage);
       setRemoteUsage([]);
+      setRemoteUsagePage(null);
       return;
     }
     if (mode === "remote") {
       const [snapshot, usage] = await Promise.all([
         relayCommands.remoteState(),
-        relayCommands.remoteUsage().catch(() => null),
+        relayCommands.remoteUsage({ page: 1, pageSize: 50 }).catch(() => null),
       ]);
       setRuntime(snapshot);
       setLocalUsage([]);
       setRemoteUsage(usage?.events ?? []);
+      setRemoteUsagePage(usage);
       return;
     }
     const state = await getState();
     setReadyState(state);
     setRuntime(null);
     setRemoteUsage([]);
+    setRemoteUsagePage(null);
     if (state.hasSavedApiKey) {
       const [stats, history] = await Promise.all([
         getSavedKeyStats().catch(() => null),
@@ -88,6 +95,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       setReadyUsage([]);
     }
   }, [mode]);
+
+  const loadRemoteUsage = useCallback(async (query: RemoteUsageQuery) => {
+    const request = ++remoteUsageRequest.current;
+    const usage = await relayCommands.remoteUsage(query);
+    if (request !== remoteUsageRequest.current) return;
+    setRemoteUsage(usage?.events ?? []);
+    setRemoteUsagePage(usage);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -159,6 +174,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     runtime,
     localUsage,
     remoteUsage,
+    remoteUsagePage,
+    loadRemoteUsage,
     readyState,
     readyStats,
     readyUsage,
@@ -175,7 +192,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     compact,
     setCompact,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
+  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

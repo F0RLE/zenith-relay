@@ -116,6 +116,7 @@ export type LocalUsage = {
   accountId?: string | null;
   requestedModel: string | null;
   resolvedModel: string | null;
+  wireApi: "responses" | "chat_completions" | "messages";
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
@@ -164,6 +165,7 @@ export type RemoteUsage = {
   candidateHint: string;
   requestedModel: string | null;
   resolvedModel: string | null;
+  wireApi: "responses" | "chat_completions" | "messages";
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
@@ -172,6 +174,21 @@ export type RemoteUsage = {
   outputTokens: number | null;
   totalTokens: number | null;
   createdAtMs: number;
+};
+
+export type RemoteUsageQuery = {
+  page?: number;
+  pageSize?: number;
+  range?: "daily" | "weekly" | "monthly" | "custom";
+  fromMs?: number;
+  toMs?: number;
+  modelQuery?: string;
+  sourceOrAccountQuery?: string;
+  localKeyQuery?: string;
+  wireApi?: "responses" | "chat_completions" | "messages";
+  success?: boolean;
+  errorCategory?: string;
+  requestIdQuery?: string;
 };
 
 export type RemoteUsagePage = {

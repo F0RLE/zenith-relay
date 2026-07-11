@@ -12,7 +12,9 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::State;
-use zenith_relay_core::protocol::{Capabilities, HealthResponse, RuntimeStateSnapshot, UsagePage};
+use zenith_relay_core::protocol::{
+    Capabilities, GatewayDiagnostic, HealthResponse, RuntimeStateSnapshot, UsagePage, UsageQuery,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +64,7 @@ pub enum RemoteServerAction {
     UpdateWakeTask { id: String },
     DeleteWakeTask { id: String },
     TestWakeTask { id: String },
+    ClearUsage,
 }
 
 #[derive(Deserialize)]
@@ -154,18 +157,30 @@ pub async fn get_remote_server_state(
 
 #[tauri::command]
 pub async fn get_remote_server_usage(
-    page: Option<u32>,
-    page_size: Option<u32>,
+    input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<Option<UsagePage>, CommandError> {
     let Some((_, client)) = active_client(&state)? else {
         return Ok(None);
     };
     client
-        .usage(page.unwrap_or(1), page_size.unwrap_or(100))
+        .usage(&input.unwrap_or_default())
         .await
         .map(Some)
         .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn diagnose_remote_gateway(
+    stream: bool,
+    state: State<'_, DesktopState>,
+) -> Result<GatewayDiagnostic, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    client.diagnose(stream).await.map_err(remote_error)
 }
 
 #[tauri::command]
@@ -322,6 +337,7 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
             format!("{}/test", object_path("wake-tasks", id)?),
             false,
         ),
+        RemoteServerAction::ClearUsage => (Method::DELETE, "/usage".to_string(), false),
     };
     Ok(request)
 }

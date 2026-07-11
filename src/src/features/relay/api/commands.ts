@@ -12,6 +12,7 @@ import type {
   ProfileBinding,
   RemoteTarget,
   RemoteUsagePage,
+  RemoteUsageQuery,
   RuntimeSnapshot,
   SupportExportContext,
   SupportBundlePreview,
@@ -22,8 +23,10 @@ import type {
 export const relayCommands = {
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
-  remoteUsage: (page = 1, pageSize = 100) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { page, pageSize }),
+  remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
   localUsage: (limit = 100) => invoke<LocalUsage[]>("get_local_usage", { limit }),
+  clearLocalUsage: () => invoke("clear_local_usage"),
+  diagnoseRemoteGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_remote_gateway", { stream }),
 
   createSource: (input: Record<string, unknown>) => invoke("create_local_source", { input }),
   updateSource: (input: Record<string, unknown>) => invoke("update_local_source", { input }),

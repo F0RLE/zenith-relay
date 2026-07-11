@@ -11,3 +11,8 @@ pub fn get_local_usage(
         .list(limit.unwrap_or(100))
         .map_err(Into::into)
 }
+
+#[tauri::command]
+pub fn clear_local_usage(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    state.telemetry.clear().map_err(Into::into)
+}

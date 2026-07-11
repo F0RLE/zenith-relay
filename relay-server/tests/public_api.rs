@@ -1,7 +1,11 @@
 use axum::{
+    body::{to_bytes, Body},
     extract::Request,
-    http::{header::AUTHORIZATION, StatusCode},
-    response::IntoResponse,
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        StatusCode,
+    },
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -101,6 +105,56 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.text().await.unwrap().contains("response-test"));
+
+    let streamed = client
+        .post(format!("{}/v1/responses", first.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({"model":"gpt-test","input":"synthetic stream","stream":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streamed.status(), StatusCode::OK);
+    assert_eq!(
+        streamed
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+    assert!(streamed
+        .text()
+        .await
+        .unwrap()
+        .contains("response.completed"));
+
+    let diagnostic: Value = client
+        .post(format!("{}/diagnostics", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"stream": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(diagnostic["stream"], true);
+    assert_eq!(diagnostic["model"], "gpt-test");
+
+    let usage: Value = client
+        .get(format!(
+            "{}/usage?page=1&pageSize=1&range=daily&modelQuery=gpt-test&success=true",
+            first.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(usage["total"].as_u64().is_some_and(|total| total >= 2));
+    assert_eq!(usage["events"].as_array().unwrap().len(), 1);
+    assert!(usage["totalPages"].as_u64().is_some_and(|pages| pages >= 2));
 
     let preview: Value = client
         .post(format!("{}/accounts/import/preview", first.origin))
@@ -258,6 +312,54 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
             .status(),
         StatusCode::OK
     );
+    let reopened_stream = client
+        .post(format!("{}/v1/responses", second.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({"model":"gpt-test","input":"after desktop reopen","stream":true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reopened_stream.status(), StatusCode::OK);
+    assert!(reopened_stream
+        .text()
+        .await
+        .unwrap()
+        .contains("response.completed"));
+    let reopened_usage: Value = client
+        .get(format!(
+            "{}/usage?page=1&pageSize=50&success=true",
+            second.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(reopened_usage["total"]
+        .as_u64()
+        .is_some_and(|total| total >= 4));
+    assert_eq!(
+        client
+            .delete(format!("{}/usage", second.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let cleared: Value = client
+        .get(format!("{}/usage", second.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cleared["total"], 0);
 
     let database = std::fs::read(root.path().join("relay.sqlite")).unwrap();
     assert!(!String::from_utf8_lossy(&database).contains("synthetic-upstream-api-key"));
@@ -647,7 +749,7 @@ async fn models_response(request: Request) -> impl IntoResponse {
     Json(json!({"data":[{"id":"gpt-test"}]}))
 }
 
-async fn upstream_response(request: Request) -> impl IntoResponse {
+async fn upstream_response(request: Request) -> Response {
     assert_eq!(
         request
             .headers()
@@ -655,6 +757,18 @@ async fn upstream_response(request: Request) -> impl IntoResponse {
             .and_then(|value| value.to_str().ok()),
         Some("Bearer synthetic-upstream-api-key")
     );
+    let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+    let stream = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false);
+    if stream {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from("data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+            .unwrap();
+    }
     (
         StatusCode::OK,
         Json(json!({
@@ -665,9 +779,10 @@ async fn upstream_response(request: Request) -> impl IntoResponse {
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         })),
     )
+        .into_response()
 }
 
-async fn account_response(request: Request) -> impl IntoResponse {
+async fn account_response(request: Request) -> Response {
     assert_eq!(
         request
             .headers()
@@ -682,6 +797,18 @@ async fn account_response(request: Request) -> impl IntoResponse {
             .and_then(|value| value.to_str().ok()),
         Some("synthetic-chatgpt-account-id")
     );
+    let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+    let stream = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| value.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false);
+    if stream {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from("data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+            .unwrap();
+    }
     (
         StatusCode::OK,
         Json(json!({
@@ -692,4 +819,5 @@ async fn account_response(request: Request) -> impl IntoResponse {
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         })),
     )
+        .into_response()
 }
