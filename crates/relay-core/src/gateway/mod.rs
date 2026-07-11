@@ -205,6 +205,7 @@ async fn execute_request(
             wire_api == WireApi::Responses && route.wire_api == WireApi::ChatCompletions;
         let chat_via_responses =
             wire_api == WireApi::ChatCompletions && route.wire_api == WireApi::Responses;
+        let account_route = route.account_id.is_some();
         let request_body = if responses_via_chat {
             match translate_responses_request(&request, &source_model, false) {
                 Ok(body) => body,
@@ -215,6 +216,13 @@ async fn execute_request(
             }
         } else if chat_via_responses {
             match translate_chat_request(&request, &source_model, false) {
+                Ok(body) if account_route => match normalize_account_request_body(&body) {
+                    Ok(body) => body,
+                    Err(failure) => {
+                        last_failure = Some(failure);
+                        continue;
+                    }
+                },
                 Ok(body) => body,
                 Err(failure) => {
                     last_failure = Some(failure);
@@ -227,6 +235,9 @@ async fn execute_request(
                 unreachable!("request object was validated before execution")
             };
             object.insert("model".to_string(), Value::String(source_model.clone()));
+            if account_route {
+                normalize_account_request(object);
+            }
             match serde_json::to_vec(&upstream_request) {
                 Ok(body) => body,
                 Err(_) => {
@@ -393,6 +404,36 @@ async fn execute_request(
                     continue;
                 }
             };
+            let bytes = if account_route {
+                match completed_account_response(&bytes) {
+                    Ok(bytes) => bytes,
+                    Err(failure) => {
+                        let state = apply_cooldown(
+                            &runtime,
+                            &route.candidate_id,
+                            &source_model,
+                            TRANSIENT_COOLDOWN_MS,
+                        );
+                        let mut event = usage_event(
+                            &request_id,
+                            attempt,
+                            &key.id,
+                            &route,
+                            &requested_model,
+                            false,
+                            failure.status.as_u16(),
+                            Some(failure.category.to_string()),
+                            started.elapsed().as_millis() as u64,
+                        );
+                        apply_failure_state(&mut event, state);
+                        emit_usage(&runtime, event);
+                        last_failure = Some(failure);
+                        continue;
+                    }
+                }
+            } else {
+                bytes
+            };
             let bytes = if responses_via_chat {
                 match translate_chat_response(&bytes) {
                     Ok(bytes) => bytes,
@@ -474,6 +515,9 @@ async fn execute_request(
                 };
                 return proxy_sse_response(status, &response_headers, Body::from(body));
             }
+            if account_route {
+                return proxy_json_response(status, &response_headers, Body::from(bytes));
+            }
             return proxy_response(status, &response_headers, Body::from(bytes));
         }
 
@@ -525,7 +569,7 @@ async fn execute_request(
                     started,
                     completion,
                 );
-                return proxy_response(status, &headers, Body::from_stream(usage_stream));
+                return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
             Err(failure) => {
                 let state = apply_cooldown(
@@ -814,6 +858,29 @@ fn translate_chat_request(
         );
     }
     serde_json::to_vec(&Value::Object(translated)).map_err(|_| AttemptFailure::invalid_request())
+}
+
+fn normalize_account_request_body(body: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
+    let mut request =
+        serde_json::from_slice::<Value>(body).map_err(|_| AttemptFailure::invalid_request())?;
+    let object = request
+        .as_object_mut()
+        .ok_or_else(AttemptFailure::invalid_request)?;
+    normalize_account_request(object);
+    serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())
+}
+
+fn normalize_account_request(object: &mut serde_json::Map<String, Value>) {
+    object.insert("store".to_string(), Value::Bool(false));
+    object.insert("stream".to_string(), Value::Bool(true));
+    object.remove("max_output_tokens");
+    if let Some(Value::String(text)) = object.get("input") {
+        let text = text.clone();
+        object.insert(
+            "input".to_string(),
+            json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
+        );
+    }
 }
 
 fn translate_chat_message_content(content: &Value) -> Result<Value, AttemptFailure> {
@@ -1491,6 +1558,21 @@ fn proxy_sse_response(
     response
 }
 
+fn proxy_json_response(
+    status: reqwest::StatusCode,
+    upstream_headers: &reqwest::header::HeaderMap,
+    body: Body,
+) -> Response<Body> {
+    let mut response = Response::builder().status(status).body(body).unwrap();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if let Some(value) = upstream_headers.get(CACHE_CONTROL.as_str()) {
+        response.headers_mut().insert(CACHE_CONTROL, value.clone());
+    }
+    response
+}
+
 #[allow(clippy::too_many_arguments)]
 fn usage_event(
     request_id: &str,
@@ -1720,6 +1802,8 @@ struct TerminalEvent {
     valid: bool,
     outcome: Option<TerminalOutcome>,
     usage: Option<Value>,
+    response: Option<Value>,
+    output_item: Option<Value>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1762,6 +1846,8 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             valid: true,
             outcome: Some(TerminalOutcome::Success),
             usage: None,
+            response: None,
+            output_item: None,
         };
     }
     let Ok(value) = serde_json::from_slice::<Value>(&data) else {
@@ -1783,12 +1869,57 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
                 .and_then(|response| response.get("usage"))
         })
         .cloned();
+    let response = value.get("response").cloned();
+    let output_item = (value.get("type").and_then(Value::as_str)
+        == Some("response.output_item.done"))
+    .then(|| value.get("item").cloned())
+    .flatten();
     TerminalEvent {
         has_data: true,
         valid: true,
         outcome,
         usage,
+        response,
+        output_item,
     }
+}
+
+fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
+    if serde_json::from_slice::<Value>(bytes).is_ok() {
+        return Ok(bytes.to_vec());
+    }
+    let mut offset = 0;
+    let mut output = Vec::new();
+    while let Some(end) = sse_event_end(&bytes[offset..]) {
+        let terminal = parse_sse_event(&bytes[offset..offset + end]);
+        if terminal.has_data && !terminal.valid {
+            return Err(AttemptFailure::stream("stream_invalid"));
+        }
+        if let Some(item) = terminal.output_item {
+            output.push(item);
+        }
+        match terminal.outcome {
+            Some(TerminalOutcome::Failure) => {
+                return Err(AttemptFailure::stream("upstream_terminal"));
+            }
+            Some(TerminalOutcome::Success) => {
+                if let Some(mut response) = terminal.response {
+                    if response
+                        .get("output")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    {
+                        response["output"] = Value::Array(output);
+                    }
+                    return serde_json::to_vec(&response)
+                        .map_err(|_| AttemptFailure::stream("stream_invalid"));
+                }
+            }
+            None => {}
+        }
+        offset += end;
+    }
+    Err(AttemptFailure::stream("stream_incomplete"))
 }
 
 fn now_ms() -> u64 {

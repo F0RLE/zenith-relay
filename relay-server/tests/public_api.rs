@@ -798,26 +798,14 @@ async fn account_response(request: Request) -> Response {
         Some("synthetic-chatgpt-account-id")
     );
     let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
-    let stream = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|value| value.get("stream").and_then(Value::as_bool))
-        .unwrap_or(false);
-    if stream {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/event-stream")
-            .body(Body::from("data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
-            .unwrap();
-    }
-    (
-        StatusCode::OK,
-        Json(json!({
-            "id":"account-response-test",
-            "object":"response",
-            "model":"gpt-test",
-            "output":[],
-            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
-        })),
-    )
-        .into_response()
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["store"], false);
+    assert!(body["input"].is_array());
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response-test\",\"object\":\"response\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ))
+        .unwrap()
 }

@@ -180,9 +180,7 @@ pub async fn diagnose_local_gateway(
             )
             .into());
         }
-    } else if !serde_json::from_slice::<serde_json::Value>(&body)
-        .is_ok_and(|value| value.is_object() && value.get("error").is_none())
-    {
+    } else if !valid_diagnostic_response(&body) {
         return Err(LocalPoolError::new(
             ErrorCode::GatewayUnavailable,
             "request diagnostic returned invalid JSON",
@@ -250,6 +248,12 @@ fn valid_model_id(value: &str) -> bool {
         && !value.chars().any(char::is_whitespace)
 }
 
+fn valid_diagnostic_response(body: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
+        value.is_object() && value.get("error").is_none_or(serde_json::Value::is_null)
+    })
+}
+
 fn status_error(stage: &str, status: StatusCode) -> CommandError {
     LocalPoolError::new(
         ErrorCode::GatewayUnavailable,
@@ -273,5 +277,14 @@ mod tests {
         assert!(!valid_model_id("gpt test"));
         assert!(!valid_model_id("gpt\nsecret"));
         assert!(!valid_model_id(&"x".repeat(257)));
+    }
+
+    #[test]
+    fn diagnostic_accepts_nullable_error_but_rejects_error_objects() {
+        assert!(valid_diagnostic_response(br#"{"error":null,"output":[]}"#));
+        assert!(valid_diagnostic_response(br#"{"output":[]}"#));
+        assert!(!valid_diagnostic_response(
+            br#"{"error":{"message":"failed"}}"#
+        ));
     }
 }

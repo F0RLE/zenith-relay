@@ -33,6 +33,7 @@ struct ObservedRequest {
     authorization: Option<String>,
     chatgpt_account_id: Option<String>,
     originator: Option<String>,
+    body: Value,
 }
 
 #[derive(Clone)]
@@ -154,6 +155,10 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
         Some("provider-account-private")
     );
     assert_eq!(requests[0].originator.as_deref(), Some("codex_cli_rs"));
+    assert_eq!(requests[0].body["store"], false);
+    assert_eq!(requests[0].body["stream"], true);
+    assert!(requests[0].body["input"].is_array());
+    assert!(requests[0].body.get("max_output_tokens").is_none());
     drop(requests);
 
     let events = events.lock().unwrap();
@@ -163,6 +168,52 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("provider-account-private"));
     assert!(!serialized.contains("account-access"));
+}
+
+#[tokio::test]
+async fn account_non_stream_client_buffers_codex_stream_response() {
+    let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
+        StreamChunk::Data(
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"early-response\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+        ),
+        StreamChunk::Data(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+        ),
+        StreamChunk::Data(
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response\",\"object\":\"response\",\"model\":\"gpt-p3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ),
+        StreamChunk::Data("data: [DONE]\n\n"),
+    ])])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["id"], "account-response");
+    assert_eq!(body["output"][0]["type"], "message");
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].body["store"], false);
+    assert_eq!(requests[0].body["stream"], true);
+    assert!(requests[0].body["input"].is_array());
+    assert!(requests[0].body.get("max_output_tokens").is_none());
+    drop(requests);
+    let events = events.lock().unwrap();
+    assert!(events[0].success);
+    assert_eq!(events[0].total_tokens, Some(2));
 }
 
 #[tokio::test]
@@ -525,6 +576,10 @@ async fn account_stream_never_falls_back_after_first_event() {
 
     let response = request(&gateway, true).await;
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
     let _ = response.bytes().await;
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(account_state.requests.lock().unwrap().len(), 1);
@@ -691,12 +746,13 @@ async fn spawn(app: Router) -> TestServer {
 async fn upstream(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
-    _body: Bytes,
+    body: Bytes,
 ) -> Response<Body> {
     state.requests.lock().unwrap().push(ObservedRequest {
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
+        body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     match state
         .replies
@@ -724,7 +780,6 @@ async fn upstream(
             });
             Response::builder()
                 .status(StatusCode::OK)
-                .header(CONTENT_TYPE, "text/event-stream")
                 .body(Body::from_stream(chunks))
                 .unwrap()
         }
@@ -755,7 +810,12 @@ async fn request(gateway: &TestServer, stream: bool) -> reqwest::Response {
     reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": MODEL, "input": "hello", "stream": stream}))
+        .json(&json!({
+            "model": MODEL,
+            "input": "hello",
+            "stream": stream,
+            "max_output_tokens": 16
+        }))
         .send()
         .await
         .unwrap()
