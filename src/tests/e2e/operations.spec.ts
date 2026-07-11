@@ -65,6 +65,12 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Client Setup" }).click();
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
+  await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
+  await expect(page.getByText(/gpt-5.4-mini completed in 321 ms/)).toBeVisible();
+  await page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" }).click();
+  const diagnosticCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { stream?: boolean } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "diagnose_local_gateway").map((call) => call.args.stream));
+  expect(diagnosticCalls).toEqual([false, true]);
 });
 
 test("import failures remain actionable without reusing a consumed session", async ({ page }) => {

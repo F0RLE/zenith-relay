@@ -149,6 +149,13 @@ export type SupportExportContext = {
   warningCount: number;
 };
 
+export type GatewayDiagnostic = {
+  stream: boolean;
+  model: string;
+  latencyMs: number;
+  bytesReceived: number;
+};
+
 export type RemoteUsage = {
   id: number;
   requestId: string;

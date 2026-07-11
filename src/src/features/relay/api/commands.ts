@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ConfirmAccountImportResponse,
+  GatewayDiagnostic,
   ImportSession,
   LocalUsage,
   OAuthFlow,
@@ -52,6 +53,7 @@ export const relayCommands = {
   deleteKey: (keyId: string) => invoke("delete_local_gateway_key", { keyId }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),
+  diagnoseGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_local_gateway", { stream }),
 
   createAutomation: (input: Record<string, unknown>) => invoke("create_quota_wake_automation", { input }),
   updateAutomation: (taskId: string, input: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input }),

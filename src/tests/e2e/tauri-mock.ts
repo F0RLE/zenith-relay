@@ -175,6 +175,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "delete_local_gateway_key": localRuntime.keys = []; return structuredClone(localRuntime);
           case "start_local_gateway": localRuntime.gateway.running = true; return structuredClone(localRuntime);
           case "stop_local_gateway": localRuntime.gateway.running = false; return structuredClone(localRuntime);
+          case "diagnose_local_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 321, bytesReceived: 64 };
           case "create_quota_wake_automation": Object.assign(automation, args.input); localRuntime.automations = [automation]; return structuredClone(localRuntime);
           case "update_quota_wake_automation": Object.assign(automation, args.input); return structuredClone(localRuntime);
           case "set_quota_wake_automation_enabled": automation.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
