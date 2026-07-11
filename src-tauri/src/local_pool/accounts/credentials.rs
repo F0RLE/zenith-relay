@@ -60,6 +60,7 @@ pub struct StoredCodexCredentials {
     organization_id: Option<String>,
     plan_type: Option<String>,
     account_is_fedramp: bool,
+    proxy_url: Option<String>,
 }
 
 impl StoredCodexCredentials {
@@ -103,6 +104,7 @@ impl StoredCodexCredentials {
             organization_id: nonempty(organization_id),
             plan_type: nonempty(plan_type),
             account_is_fedramp,
+            proxy_url: None,
         })
     }
 
@@ -141,6 +143,23 @@ impl StoredCodexCredentials {
 
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
+    }
+
+    pub fn proxy_url(&self) -> Option<&str> {
+        self.proxy_url.as_deref()
+    }
+
+    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Result<Self, CredentialError> {
+        self.proxy_url = proxy_url
+            .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+            .transpose()
+            .map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "account proxy URL is invalid",
+                )
+            })?;
+        Ok(self)
     }
 
     pub fn expire_access_at(&mut self, now_ms: u64) {
@@ -205,7 +224,8 @@ impl StoredCodexCredentials {
             self.organization_id.clone(),
             self.plan_type.clone(),
             self.account_is_fedramp,
-        )
+        )?
+        .with_proxy_url(self.proxy_url.clone())
     }
 
     pub fn apply_refresh(
@@ -227,7 +247,8 @@ impl StoredCodexCredentials {
             self.organization_id.clone(),
             self.plan_type.clone(),
             self.account_is_fedramp,
-        )
+        )?
+        .with_proxy_url(self.proxy_url.clone())
     }
 
     pub fn snapshot(&self) -> StoredCredentialSnapshot {
@@ -243,6 +264,7 @@ impl StoredCodexCredentials {
             generation: self.generation,
             plan_type: self.plan_type.clone(),
             account_is_fedramp: self.account_is_fedramp,
+            proxy_configured: self.proxy_url.is_some(),
         }
     }
 
@@ -296,7 +318,8 @@ impl StoredCodexCredentials {
             wire.organization_id,
             wire.plan_type,
             wire.account_is_fedramp,
-        )
+        )?
+        .with_proxy_url(wire.proxy_url)
     }
 }
 
@@ -330,6 +353,7 @@ impl fmt::Debug for StoredCodexCredentials {
             )
             .field("plan_type", &self.plan_type)
             .field("account_is_fedramp", &self.account_is_fedramp)
+            .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[redacted]"))
             .finish()
     }
 }
@@ -348,6 +372,7 @@ pub struct StoredCredentialSnapshot {
     pub generation: u64,
     pub plan_type: Option<String>,
     pub account_is_fedramp: bool,
+    pub proxy_configured: bool,
 }
 
 pub struct CredentialRefresh {
@@ -497,6 +522,8 @@ struct CredentialWire {
     organization_id: Option<String>,
     plan_type: Option<String>,
     account_is_fedramp: bool,
+    #[serde(default)]
+    proxy_url: Option<String>,
 }
 
 impl From<&StoredCodexCredentials> for CredentialWire {
@@ -516,6 +543,7 @@ impl From<&StoredCodexCredentials> for CredentialWire {
             organization_id: value.organization_id.clone(),
             plan_type: value.plan_type.clone(),
             account_is_fedramp: value.account_is_fedramp,
+            proxy_url: value.proxy_url.clone(),
         }
     }
 }
@@ -594,6 +622,7 @@ mod tests {
     const ID_TOKEN: &str = "stored-id-secret";
     const EMAIL: &str = "stored.user@example.test";
     const PROVIDER_ACCOUNT: &str = "provider-account-secret-id";
+    const PROXY: &str = "http://proxy-user:proxy-pass@proxy.example:8080/";
 
     #[derive(Default)]
     struct MemorySecrets(Mutex<HashMap<String, String>>);
@@ -622,7 +651,7 @@ mod tests {
         let credentials = fixture();
         let debug = format!("{credentials:?}");
         let snapshot = serde_json::to_string(&credentials.snapshot()).unwrap();
-        for secret in [ACCESS, REFRESH, ID_TOKEN, EMAIL, PROVIDER_ACCOUNT] {
+        for secret in [ACCESS, REFRESH, ID_TOKEN, EMAIL, PROVIDER_ACCOUNT, PROXY] {
             assert!(!debug.contains(secret));
             assert!(!snapshot.contains(secret));
         }
@@ -643,6 +672,7 @@ mod tests {
         assert_eq!(loaded.refresh_token(), Some(REFRESH));
         assert_eq!(loaded.id_token(), Some(ID_TOKEN));
         assert_eq!(loaded.provider_account_id(), Some(PROVIDER_ACCOUNT));
+        assert_eq!(loaded.proxy_url(), Some(PROXY));
         assert_eq!(loaded.generation(), 7);
         assert_eq!(
             credential_secret_ref("relay_account_1").unwrap(),
@@ -659,6 +689,7 @@ mod tests {
         assert_eq!(updated.refresh_token(), Some(REFRESH));
         assert_eq!(updated.id_token(), Some(ID_TOKEN));
         assert_eq!(updated.provider_account_id(), Some(PROVIDER_ACCOUNT));
+        assert_eq!(updated.proxy_url(), Some(PROXY));
         assert_eq!(updated.generation(), 8);
     }
 
@@ -678,6 +709,8 @@ mod tests {
             Some("plus".into()),
             false,
         )
+        .unwrap()
+        .with_proxy_url(Some(PROXY.into()))
         .unwrap()
     }
 }

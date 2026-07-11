@@ -1,13 +1,14 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Copy, Download, MoreHorizontal, Plus, RefreshCw } from "lucide-react";
+import { CirclePause, Copy, Download, Eye, EyeOff, MoreHorizontal, Network, Play, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { ImportSession, OAuthFlow, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountSummary, ImportSession, OAuthFlow, ProxyAssignmentResult, SourceSummary, WakeTask } from "../../api/types";
 import {
   Button,
   Dialog,
   EmptyState,
+  IconButton,
   PageHeader,
   QuotaMeter,
   SecretField,
@@ -18,7 +19,7 @@ import {
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
-type DialogKind = "source" | "oauth" | "import" | "automation" | "remote" | "deploy" | "ready" | "topup" | null;
+type DialogKind = "source" | "oauth" | "import" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | null;
 
 export function ConnectionsPage() {
   const { t } = useTranslation();
@@ -28,15 +29,18 @@ export function ConnectionsPage() {
   const [query, setQuery] = useState("");
   const [editingSource, setEditingSource] = useState<SourceSummary | null>(null);
   const [editingAutomation, setEditingAutomation] = useState<WakeTask | null>(null);
+  const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
   const canImportAccounts = mode !== "remote" || supports("account_batch_import");
+  const canManageProxies = supports("account_proxies");
 
   useEffect(() => {
     setView(mode === "zenith" ? "api" : "accounts");
     setDialog(null);
     setEditingSource(null);
     setEditingAutomation(null);
+    setProxyAccount(null);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);
@@ -115,7 +119,7 @@ export function ConnectionsPage() {
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onAdd={() => setDialog("source")} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable query={query} canImport={canImportAccounts} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} canImport={canImportAccounts} canManageProxies={canManageProxies} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={() => setDialog("bulkProxies")} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onAdd={() => { setEditingAutomation(null); setDialog("automation"); }} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
@@ -128,6 +132,8 @@ export function ConnectionsPage() {
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "ready" ? <ReadyApiDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "topup" ? <TopUpDialog onClose={() => setDialog(null)} /> : null}
+      {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
+      {dialog === "bulkProxies" ? <BulkProxyDialog onClose={() => setDialog(null)} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}
     </section>
   );
@@ -167,7 +173,7 @@ function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => vo
   );
 }
 
-function AccountsTable({ query, canImport, onImport, onSignIn }: { query: string; canImport: boolean; onImport: () => void; onSignIn: () => void }) {
+function AccountsTable({ query, canImport, canManageProxies, onImport, onSignIn, onProxy, onBulkProxies }: { query: string; canImport: boolean; canManageProxies: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   if (!runtime?.accounts.length) {
@@ -177,22 +183,23 @@ function AccountsTable({ query, canImport, onImport, onSignIn }: { query: string
   if (!accounts.length) return <NoResults />;
   return (
     <>
-    {mode === "local" ? <div className="table-toolbar"><Button variant="secondary" busy={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")}>{t("accounts.refreshAll")}</Button></div> : null}
+    <div className="table-toolbar"><Button variant="secondary" icon={<Network aria-hidden />} disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : undefined} onClick={onBulkProxies}>{t("proxies.assignBulk")}</Button>{mode === "local" ? <Button variant="secondary" busy={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")}>{t("accounts.refreshAll")}</Button> : null}</div>
     <div className="relay-table-wrap">
       <table className="relay-table">
-        <thead><tr><th>{t("common.health")}</th><th>{t("common.name")}</th><th>{t("accounts.plan")}</th><th>{t("common.quota")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
+        <thead><tr><th>{t("common.health")}</th><th>{t("common.name")}</th><th>{t("accounts.plan")}</th><th>{t("common.quota")}</th><th>{t("proxies.proxy")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
         <tbody>{accounts.map((account) => (
           <tr key={account.id}>
             <td><StatusBadge status={account.health === "healthy" ? "ready" : account.health === "blocked" ? "error" : "warning"} label={t(`health.${account.health}`, { defaultValue: account.health })} /></td>
             <td><strong>{account.label}</strong><small>{account.identityHint}</small></td>
             <td>{account.subscription.planType ?? t("common.unknown")}</td>
             <td><QuotaMeter window={account.quota.primary} label={t("quota.primary")} /></td>
+            <td><button type="button" className="proxy-status-button" disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : t("proxies.changeAccount")} onClick={() => onProxy(account)}><StatusBadge status={account.proxyAvailable === false ? "error" : account.proxyMode === "account" ? "info" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></button></td>
             <td>{account.models.length}</td>
             <td className="row-actions">
-              <Button variant="ghost" busy={busy === `quota-${account.id}`} disabled={mode === "remote"} title={mode === "remote" ? t("accounts.serverRefreshHint") : undefined} onClick={() => perform(`quota-${account.id}`, () => relayCommands.refreshAccountQuota(account.id), "feedback.refreshed")}>{t("accounts.refreshQuota")}</Button>
-              <Button variant="ghost" onClick={() => perform(`drain-${account.id}`, () => mode === "local" ? relayCommands.setAccountDraining(account.id, !account.draining) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { draining: !account.draining }), "feedback.saved")}>{account.draining ? t("accounts.resume") : t("accounts.drain")}</Button>
-              <Button variant="ghost" onClick={() => perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved")}>{account.enabled ? t("common.disable") : t("common.enable")}</Button>
-              <Button variant="ghost" onClick={() => { if (window.confirm(t("accounts.deleteConfirm"))) void perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"); }}>{t("common.delete")}</Button>
+              <IconButton label={t("accounts.refreshQuota")} icon={<RefreshCw aria-hidden />} disabled={mode === "remote" || busy === `quota-${account.id}`} title={mode === "remote" ? t("accounts.serverRefreshHint") : t("accounts.refreshQuota")} onClick={() => perform(`quota-${account.id}`, () => relayCommands.refreshAccountQuota(account.id), "feedback.refreshed")} />
+              <IconButton label={account.draining ? t("accounts.resume") : t("accounts.drain")} icon={account.draining ? <Play aria-hidden /> : <CirclePause aria-hidden />} title={account.draining ? t("accounts.resume") : t("accounts.drain")} onClick={() => perform(`drain-${account.id}`, () => mode === "local" ? relayCommands.setAccountDraining(account.id, !account.draining) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { draining: !account.draining }), "feedback.saved")} />
+              <IconButton label={account.enabled ? t("common.disable") : t("common.enable")} icon={<Power aria-hidden />} title={account.enabled ? t("common.disable") : t("common.enable")} onClick={() => perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved")} />
+              <IconButton label={t("common.delete")} icon={<Trash2 aria-hidden />} title={t("common.delete")} onClick={() => { if (window.confirm(t("accounts.deleteConfirm"))) void perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"); }} />
             </td>
           </tr>
         ))}</tbody>
@@ -200,6 +207,46 @@ function AccountsTable({ query, canImport, onImport, onSignIn }: { query: string
     </div>
     </>
   );
+}
+
+function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, busy, perform } = useRelayState();
+  const [proxyUrl, setProxyUrl] = useState("");
+  const apply = async (value: string | null) => {
+    const ok = await perform(`proxy-${account.id}`, () => mode === "local"
+      ? relayCommands.setAccountProxy(account.id, value)
+      : relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: value }), "feedback.saved");
+    if (ok) onClose();
+  };
+  return <Dialog title={t("proxies.accountTitle", { name: account.label })} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder="user:password@us-proxy.example:8080" /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
+}
+
+function BulkProxyDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, runtime, busy, perform } = useRelayState();
+  const accounts = runtime?.accounts ?? [];
+  const [selected, setSelected] = useState(() => accounts.map((account) => account.id));
+  const [content, setContent] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [result, setResult] = useState<ProxyAssignmentResult | null>(null);
+  const proxyUrls = content.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const selectedAccountIds = accounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
+  const valid = selectedAccountIds.length > 0 && proxyUrls.length >= selectedAccountIds.length;
+  const toggle = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
+  const assign = async () => {
+    let response: ProxyAssignmentResult | null = null;
+    const ok = await perform("proxy-bulk", async () => {
+      response = mode === "local"
+        ? await relayCommands.assignAccountProxies(selectedAccountIds, proxyUrls)
+        : await relayCommands.remoteAction({ type: "assign_account_proxies" }, { accountIds: selectedAccountIds, proxyUrls }) as ProxyAssignmentResult;
+    }, "feedback.saved");
+    if (ok) {
+      setResult(response);
+      setContent("");
+    }
+  };
+  return <Dialog wide title={t("proxies.bulkTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.close")}</Button><Button variant="primary" busy={busy === "proxy-bulk"} disabled={!valid} onClick={assign}>{t("proxies.assign")}</Button></>}><div className="relay-form"><label className="toggle-row"><input type="checkbox" checked={selectedAccountIds.length === accounts.length && accounts.length > 0} onChange={(event) => setSelected(event.target.checked ? accounts.map((account) => account.id) : [])} /><span>{t("proxies.selectAll", { count: accounts.length })}</span></label><fieldset><legend>{t("connections.accounts")}</legend><div className="scope-grid proxy-account-grid">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={selected.includes(account.id)} onChange={() => toggle(account.id)} />{account.label}</label>)}</div></fieldset><label className="relay-field"><span>{t("proxies.proxyList")}</span><div className="proxy-list-field"><textarea className={revealed ? "" : "secret-textarea"} value={content} onChange={(event) => { setContent(event.target.value); setResult(null); }} placeholder={t("proxies.proxyListPlaceholder")} autoComplete="off" spellCheck={false} /><IconButton type="button" label={revealed ? t("common.hide") : t("common.reveal")} icon={revealed ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setRevealed((value) => !value)} /></div></label><p className="form-note">{t("proxies.bulkHint", { selected: selectedAccountIds.length, provided: proxyUrls.length })}</p>{result ? <p role="status" className="form-note success-text">{t("proxies.bulkResult", result)}</p> : null}</div></Dialog>;
 }
 
 function AutomationsTable({ query, onAdd, onEdit }: { query: string; onAdd: () => void; onEdit: (task: WakeTask) => void }) {

@@ -1,4 +1,6 @@
-use super::{current_time_ms, sync_accounts_or_rollback, sync_records_or_rollback};
+use super::{
+    current_time_ms, restart_or_rollback, sync_accounts_or_rollback, sync_records_or_rollback,
+};
 use crate::local_pool::{
     accounts::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
@@ -14,6 +16,7 @@ use crate::local_pool::{
         },
         models::{CodexModelsClient, ModelDiscoveryFailureCode},
         oauth::CodexOAuthClient,
+        proxy::{common_proxy_config, effective_proxy_config},
         quota::{CodexQuotaClient, QuotaRefreshOutcome},
         quota_service::{apply_quota_failure, apply_quota_success},
         records, NativeSecretBackend,
@@ -46,7 +49,7 @@ use zenith_relay_core::{
     automations::AccountSelector,
     discover_source_models,
     quota::{QuotaRefreshFailure, QuotaTransition},
-    ProviderSource, WireApi,
+    ProviderSource, ProxyConfig, WireApi,
 };
 
 const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
@@ -110,6 +113,27 @@ pub struct UpdateAccountInput {
     excluded_models: Option<Vec<String>>,
     #[serde(default)]
     draining: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetAccountProxyInput {
+    account_id: String,
+    proxy_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignAccountProxiesInput {
+    account_ids: Vec<String>,
+    proxy_urls: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyAssignmentResult {
+    assigned: usize,
+    unused: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -238,6 +262,7 @@ pub struct AccountQuotaRefreshResponse {
 pub(crate) struct PreparedAccountCredentials {
     tokens: TokenSet,
     provider_account_id: String,
+    proxy: Option<ProxyConfig>,
 }
 
 impl PreparedAccountCredentials {
@@ -248,6 +273,10 @@ impl PreparedAccountCredentials {
     pub(crate) fn provider_account_id(&self) -> &str {
         &self.provider_account_id
     }
+
+    pub(crate) fn proxy(&self) -> Option<&ProxyConfig> {
+        self.proxy.as_ref()
+    }
 }
 
 impl fmt::Debug for PreparedAccountCredentials {
@@ -256,6 +285,7 @@ impl fmt::Debug for PreparedAccountCredentials {
             .debug_struct("PreparedAccountCredentials")
             .field("tokens", &self.tokens)
             .field("provider_account_id", &"[redacted]")
+            .field("proxy_configured", &self.proxy.is_some())
             .finish()
     }
 }
@@ -581,6 +611,106 @@ pub async fn update_local_account(
 }
 
 #[tauri::command]
+pub async fn set_local_account_proxy(
+    input: SetAccountProxyInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    if state.store()?.account(&input.account_id).is_none() {
+        return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
+    }
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let old = credentials
+        .require(&input.account_id)
+        .map_err(credential_local_error)?;
+    let updated = old
+        .clone()
+        .with_proxy_url(input.proxy_url)
+        .map_err(credential_local_error)?;
+    if old.proxy_url() == updated.proxy_url() {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    state.mark_quota_refresh(&input.account_id, current_time_ms())?;
+    credentials.save(&updated).map_err(credential_local_error)?;
+    restart_or_rollback(&state, || {
+        credentials.save(&old).map_err(credential_local_error)
+    })
+    .await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn assign_local_account_proxies(
+    input: AssignAccountProxiesInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<ProxyAssignmentResult> {
+    let _mutation = state.setup_guard().await;
+    if input.account_ids.is_empty() || input.proxy_urls.len() < input.account_ids.len() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "proxy list must contain at least one URL per selected account",
+        )
+        .into());
+    }
+    let mut seen = HashSet::new();
+    if input
+        .account_ids
+        .iter()
+        .any(|account_id| !seen.insert(account_id.clone()))
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "account proxy assignment contains duplicate account ids",
+        )
+        .into());
+    }
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let mut updates = Vec::with_capacity(input.account_ids.len());
+    for (account_id, proxy_url) in input.account_ids.iter().zip(&input.proxy_urls) {
+        if state.store()?.account(account_id).is_none() {
+            return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
+        }
+        let old = credentials
+            .require(account_id)
+            .map_err(credential_local_error)?;
+        let updated = old
+            .clone()
+            .with_proxy_url(Some(proxy_url.clone()))
+            .map_err(credential_local_error)?;
+        updates.push((old, updated));
+        state.mark_quota_refresh(account_id, current_time_ms())?;
+    }
+    for index in 0..updates.len() {
+        if let Err(error) = credentials
+            .save(&updates[index].1)
+            .map_err(credential_local_error)
+        {
+            restore_proxy_credentials(&credentials, &updates[..index])?;
+            return Err(error.into());
+        }
+    }
+    let rollback = updates.clone();
+    restart_or_rollback(&state, || {
+        restore_proxy_credentials(&credentials, &rollback)
+    })
+    .await?;
+    Ok(ProxyAssignmentResult {
+        assigned: updates.len(),
+        unused: input.proxy_urls.len().saturating_sub(updates.len()),
+    })
+}
+
+fn restore_proxy_credentials(
+    credentials: &CredentialStore<NativeSecretBackend>,
+    updates: &[(StoredCodexCredentials, StoredCodexCredentials)],
+) -> LocalResult<()> {
+    for (old, _) in updates {
+        credentials.save(old).map_err(credential_local_error)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_local_account_enabled(
     account_id: String,
     enabled: bool,
@@ -844,6 +974,8 @@ pub(crate) async fn prepare_account_credentials(
     let stored = credentials
         .require(account_id)
         .map_err(credential_local_error)?;
+    let gateway = state.store()?.gateway().clone();
+    let proxy = effective_proxy_config(&gateway, &stored)?;
     let authority = state.token_authority();
     authority
         .register(
@@ -859,7 +991,7 @@ pub(crate) async fn prepare_account_credentials(
             )
         })?;
     let oauth = Arc::new(
-        CodexOAuthClient::new()
+        CodexOAuthClient::new_with_proxy(proxy.as_ref())
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
     );
     let refresh = StoredRefreshAdapter::new(
@@ -904,6 +1036,7 @@ pub(crate) async fn prepare_account_credentials(
                 "account credentials do not contain a provider account id",
             )
         })?;
+    let proxy = effective_proxy_config(&gateway, &current_credentials)?;
     if prepared.tokens.generation() > stored.generation() {
         codex::sync_account_bindings(
             &state.profile_backup_root(),
@@ -915,6 +1048,7 @@ pub(crate) async fn prepare_account_credentials(
     Ok(PreparedAccountCredentials {
         tokens: prepared.tokens,
         provider_account_id,
+        proxy,
     })
 }
 
@@ -929,7 +1063,7 @@ pub(crate) async fn refresh_account_quota_once(
         .account(account_id)
         .map(|account| account.account.subscription.clone())
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    let quota = CodexQuotaClient::new().map_err(|failure| {
+    let quota = CodexQuotaClient::new_with_proxy(prepared.proxy()).map_err(|failure| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
             format!("failed to initialize quota client: {}", failure.code),
@@ -1057,6 +1191,8 @@ async fn prepare_import_preview(
     let mut prepared_values = Vec::with_capacity(session.items.len());
     let mut credentials_changed = false;
     let now_ms = current_time_ms();
+    let settings = state.store()?.gateway().clone();
+    let common_proxy = common_proxy_config(&settings)?;
     for (item, row) in session
         .items
         .into_iter()
@@ -1080,22 +1216,30 @@ async fn prepare_import_preview(
         }
 
         let plan_hint = row.plan.clone();
+        let hinted_proxy = hinted_import_proxy(state, credentials, &settings, &item)
+            .map_err(import_item_command_error)?;
         credentials_changed |=
             item.secrets().access_token().is_none() && item.secrets().refresh_token().is_some();
-        let material =
-            match build_import_credential_material(item, now_ms, plan_hint.as_deref()).await {
-                Ok(material) => material,
-                Err(error) => {
-                    row.status = ImportPreviewStatus::Invalid;
-                    row.selectable = false;
-                    row.default_selected = false;
-                    row.error = Some(ImportIssue {
-                        code: ImportIssueCode::RefreshExchangeFailed,
-                        message: error.message,
-                    });
-                    continue;
-                }
-            };
+        let material = match build_import_credential_material(
+            item,
+            now_ms,
+            plan_hint.as_deref(),
+            hinted_proxy.as_ref().or(common_proxy.as_ref()),
+        )
+        .await
+        {
+            Ok(material) => material,
+            Err(error) => {
+                row.status = ImportPreviewStatus::Invalid;
+                row.selectable = false;
+                row.default_selected = false;
+                row.error = Some(ImportIssue {
+                    code: ImportIssueCode::RefreshExchangeFailed,
+                    message: error.message,
+                });
+                continue;
+            }
+        };
         let Some(provider_account_id) = material.provider_account_id.as_deref() else {
             row.status = ImportPreviewStatus::Invalid;
             row.selectable = false;
@@ -1109,21 +1253,30 @@ async fn prepare_import_preview(
         row.identity = masked_account_identity(provider_account_id);
         row.plan = material.plan_type.clone().or_else(|| row.plan.clone());
         row.expires_at = material.expires_at_ms.and_then(timestamp_from_ms);
-        if find_existing_account(
+        let existing_account = find_existing_account(
             state,
             credentials,
             provider_account_id,
             material.provider_user_id.as_deref(),
             material.email.as_deref(),
         )
-        .map_err(import_item_command_error)?
-        .is_some()
-        {
+        .map_err(import_item_command_error)?;
+        if existing_account.is_some() {
             row.existing = true;
             row.status = ImportPreviewStatus::Existing;
         }
         if probe_quota {
-            let quota = CodexQuotaClient::new().map_err(|_| {
+            let proxy = match existing_account {
+                Some(ref account) => credentials
+                    .load(&account.account.id)
+                    .map_err(credential_local_error)?
+                    .map(|stored| effective_proxy_config(&settings, &stored))
+                    .transpose()?
+                    .flatten()
+                    .or_else(|| common_proxy.clone()),
+                None => common_proxy.clone(),
+            };
+            let quota = CodexQuotaClient::new_with_proxy(proxy.as_ref()).map_err(|_| {
                 LocalPoolError::new(ErrorCode::InvalidState, "quota client is unavailable")
             })?;
             match tokio::time::timeout(
@@ -1628,8 +1781,20 @@ async fn import_account_item(
     let issued_at_ms = current_time_ms();
     let item_label = item.label.clone();
     let item_priority = item.priority;
-    let material =
-        build_import_credential_material(item, issued_at_ms, context.plan.as_deref()).await?;
+    let settings = state
+        .store()
+        .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
+        .gateway()
+        .clone();
+    let common_proxy = common_proxy_config(&settings).map_err(proxy_item_error)?;
+    let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &item)?;
+    let material = build_import_credential_material(
+        item,
+        issued_at_ms,
+        context.plan.as_deref(),
+        hinted_proxy.as_ref().or(common_proxy.as_ref()),
+    )
+    .await?;
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
         ImportItemError::new(
             "provider_account_id_missing",
@@ -1662,7 +1827,16 @@ async fn import_account_item(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    let credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
+    let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
+    if let Some(proxy_url) = old_credential
+        .as_ref()
+        .and_then(StoredCodexCredentials::proxy_url)
+    {
+        credentials = credentials
+            .with_proxy_url(Some(proxy_url.to_string()))
+            .map_err(credential_item_error)?;
+    }
+    let proxy = effective_proxy_config(&settings, &credentials).map_err(proxy_item_error)?;
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         ImportItemError::new(
             "provider_account_id_missing",
@@ -1670,7 +1844,7 @@ async fn import_account_item(
         )
     })?;
     let models = if discover_models {
-        let client = CodexModelsClient::new().map_err(model_item_error)?;
+        let client = CodexModelsClient::new_with_proxy(proxy.as_ref()).map_err(model_item_error)?;
         let models = client
             .discover(
                 credentials.access_token(),
@@ -1717,7 +1891,7 @@ async fn import_account_item(
         .map_err(|_| ImportItemError::new("invalid_label", "imported account label is invalid"))?;
     account.normalize();
     let quota = if probe_quota {
-        probe_import_quota(&mut account, &credentials).await
+        probe_import_quota(&mut account, &credentials, proxy.as_ref()).await
     } else {
         AccountQuotaOutcome::Skipped
     };
@@ -1736,6 +1910,7 @@ async fn build_import_credential_material(
     item: ParsedImportItem,
     issued_at_ms: u64,
     plan_hint: Option<&str>,
+    proxy: Option<&ProxyConfig>,
 ) -> ItemResult<ImportedCredentialMaterial> {
     let email = item.email().map(str::to_string);
     let item_account_id = item.account_id.clone();
@@ -1768,7 +1943,7 @@ async fn build_import_credential_material(
             "Codex account import requires an access or refresh token",
         )
     })?;
-    let oauth = CodexOAuthClient::new().map_err(|_| {
+    let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
         ImportItemError::new(
             "refresh_exchange_unavailable",
             "refresh-token exchange is unavailable",
@@ -1820,9 +1995,38 @@ async fn build_import_credential_material(
     })
 }
 
+fn hinted_import_proxy(
+    state: &DesktopState,
+    credential_store: &CredentialStore<NativeSecretBackend>,
+    settings: &crate::local_pool::models::GatewaySettings,
+    item: &ParsedImportItem,
+) -> ItemResult<Option<ProxyConfig>> {
+    let Some(provider_account_id) = item.account_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(existing) = find_existing_account(
+        state,
+        credential_store,
+        provider_account_id,
+        item.chatgpt_user_id.as_deref(),
+        item.email(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(credentials) = credential_store
+        .load(&existing.account.id)
+        .map_err(credential_item_error)?
+    else {
+        return Ok(None);
+    };
+    effective_proxy_config(settings, &credentials).map_err(proxy_item_error)
+}
+
 async fn probe_import_quota(
     account: &mut LocalAccountRecord,
     credentials: &StoredCodexCredentials,
+    proxy: Option<&ProxyConfig>,
 ) -> AccountQuotaOutcome {
     let now_ms = current_time_ms();
     let Some(provider_account_id) = credentials.provider_account_id() else {
@@ -1833,7 +2037,7 @@ async fn probe_import_quota(
             retryable: failure.retryable,
         };
     };
-    let client = match CodexQuotaClient::new() {
+    let client = match CodexQuotaClient::new_with_proxy(proxy) {
         Ok(client) => client,
         Err(failure) => {
             apply_quota_failure(account, &failure, now_ms);
@@ -2665,6 +2869,10 @@ fn credential_local_error(error: CredentialError) -> LocalPoolError {
     LocalPoolError::new(code, error.message)
 }
 
+fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
+    ImportItemError::new("proxy_unavailable", &error.message)
+}
+
 fn model_item_error(
     error: crate::local_pool::accounts::models::ModelDiscoveryFailure,
 ) -> ImportItemError {
@@ -3205,6 +3413,7 @@ mod tests {
             )
             .unwrap(),
             provider_account_id: "provider-private".into(),
+            proxy: None,
         };
         assert_eq!(prepared.tokens().access_token(), "access-private");
         let debug = format!("{prepared:?}");
@@ -3290,7 +3499,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let material = build_import_credential_material(parsed.items.remove(0), 1, None)
+        let material = build_import_credential_material(parsed.items.remove(0), 1, None, None)
             .await
             .unwrap();
         assert_eq!(material.email.as_deref(), Some("member@example.test"));

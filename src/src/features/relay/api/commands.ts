@@ -10,6 +10,7 @@ import type {
   OpenCodeProfileState,
   OAuthFlow,
   ProfileBinding,
+  ProxyAssignmentResult,
   RemoteTarget,
   RemoteUsagePage,
   RemoteUsageQuery,
@@ -46,6 +47,8 @@ export const relayCommands = {
   setAccountEnabled: (accountId: string, enabled: boolean) => invoke("set_local_account_enabled", { accountId, enabled }),
   setAccountDraining: (accountId: string, draining: boolean) => invoke("set_local_account_draining", { accountId, draining }),
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
+  setAccountProxy: (accountId: string, proxyUrl: string | null) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl } }),
+  assignAccountProxies: (accountIds: string[], proxyUrls: string[]) => invoke<ProxyAssignmentResult>("assign_local_account_proxies", { input: { accountIds, proxyUrls } }),
 
   startOAuth: () => invoke<OAuthFlow>("start_codex_oauth"),
   resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
@@ -63,6 +66,7 @@ export const relayCommands = {
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
   updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
+  setCommonProxy: (proxyUrl: string | null) => invoke("set_local_common_proxy", { input: { proxyUrl } }),
   diagnoseGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_local_gateway", { stream }),
 
   createAutomation: (input: Record<string, unknown>) => invoke("create_quota_wake_automation", { input }),

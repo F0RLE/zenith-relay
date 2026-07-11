@@ -26,6 +26,7 @@ const MAX_LOCK_BYTES: u64 = 4 * 1024;
 pub trait CodexRefreshClient: Send + Sync {
     fn refresh<'a>(
         &'a self,
+        local_account_id: &'a str,
         provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
@@ -35,6 +36,7 @@ pub trait CodexRefreshClient: Send + Sync {
 impl CodexRefreshClient for CodexOAuthClient {
     fn refresh<'a>(
         &'a self,
+        _local_account_id: &'a str,
         _provider_account_id: Option<&'a str>,
         refresh_token: &'a str,
         now_ms: u64,
@@ -237,7 +239,12 @@ where
             })?;
             let refreshed = self
                 .client
-                .refresh(current.provider_account_id(), refresh_token, now_ms)
+                .refresh(
+                    local_account_id,
+                    current.provider_account_id(),
+                    refresh_token,
+                    now_ms,
+                )
                 .await?;
             let updated = current.apply_refresh(refreshed, now_ms).map_err(|_| {
                 TokenRefreshFailure::new(
@@ -512,6 +519,7 @@ mod tests {
     impl CodexRefreshClient for RefreshOnce {
         fn refresh<'a>(
             &'a self,
+            _local_account_id: &'a str,
             provider_account_id: Option<&'a str>,
             refresh_token: &'a str,
             now_ms: u64,

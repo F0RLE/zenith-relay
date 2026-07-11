@@ -14,7 +14,7 @@ use super::{
     accounts::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
         credentials::CredentialStore,
-        oauth::CodexOAuthClient,
+        proxy::{effective_proxy_config, ProxyRefreshClient},
         records::{candidate_health, candidate_quota, CODEX_RESPONSES_URL},
         NativeSecretBackend,
     },
@@ -65,9 +65,11 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let authority = state.token_authority();
     let mut accounts = Vec::new();
+    let mut refresh_proxies = Vec::new();
     for account in account_records {
+        let account_id = account.account.id.clone();
         let Some(secret) = credentials
-            .load(&account.account.id)
+            .load(&account_id)
             .map_err(account_credential_error)?
         else {
             continue;
@@ -75,9 +77,10 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         let Some(chatgpt_account_id) = secret.provider_account_id() else {
             continue;
         };
+        let proxy = effective_proxy_config(&settings, &secret)?;
         authority
             .register(
-                &account.account.id,
+                &account_id,
                 secret.to_token_set().map_err(account_credential_error)?,
                 account.account.auth_state,
             )
@@ -86,7 +89,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         let health = candidate_health(&account.account);
         let quota = candidate_quota(&account.account.quota, current_time_ms());
         accounts.push(RuntimeAccount {
-            id: account.account.id,
+            id: account_id.clone(),
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
@@ -102,7 +105,9 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             last_used_at_ms: account.account.last_used_at_ms,
             cooldowns: account.cooldowns,
             consecutive_failures: account.consecutive_failures,
+            proxy: proxy.clone(),
         });
+        refresh_proxies.push((account_id, proxy));
     }
     let mut keys = Vec::new();
     for key in key_records {
@@ -119,10 +124,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             model_prefix: key.model_prefix,
         });
     }
-    let oauth = Arc::new(
-        CodexOAuthClient::new()
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
-    );
+    let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
         StoredRefreshAdapter::new(state.root.clone(), credentials.clone(), oauth, 60_000).map_err(
             |error| {

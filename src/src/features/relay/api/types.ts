@@ -50,6 +50,8 @@ export type AccountSummary = {
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   secretAvailable: boolean;
+  proxyMode?: "direct" | "common" | "account";
+  proxyAvailable?: boolean;
   lastErrorCode: string | null;
 };
 
@@ -95,7 +97,14 @@ export type WakeHistory = {
 export type RuntimeSnapshot = {
   schemaVersion: number;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
-  gateway: { running: boolean; baseUrl: string; candidateCount: number; visibleModelIds: string[] };
+  gateway: {
+    running: boolean;
+    baseUrl: string;
+    candidateCount: number;
+    visibleModelIds: string[];
+    commonProxyConfigured?: boolean;
+    commonProxyAvailable?: boolean;
+  };
   platform: string;
   capabilities: { features: string[]; [key: string]: unknown };
   sources: SourceSummary[];
@@ -104,6 +113,11 @@ export type RuntimeSnapshot = {
   automations: WakeTask[];
   wakeHistory: WakeHistory[];
   warnings: string[];
+};
+
+export type ProxyAssignmentResult = {
+  assigned: number;
+  unused: number;
 };
 
 export type LocalUsage = {

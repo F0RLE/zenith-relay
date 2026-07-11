@@ -1,22 +1,27 @@
 use crate::state::{
     now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord, SourceRecord,
-    SERVER_SCHEMA_VERSION,
+    COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
 };
 use futures_util::future::BoxFuture;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+    time::Duration,
+};
 use zenith_relay_core::{
     accounts::{
         AccountAuthState, AccountHealthState, TokenPersistenceAdapter, TokenPersistenceFailure,
         TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
     },
     protocol::{
-        AccountSummary, GatewaySummary, KeySummary, RuntimeStateSnapshot, RuntimeTargetSummary,
-        SourceSummary,
+        AccountSummary, GatewaySummary, KeySummary, ProxyMode, RuntimeStateSnapshot,
+        RuntimeTargetSummary, SourceSummary,
     },
     CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey,
-    ProviderSource, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
+    ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey,
+    RuntimeSource,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -28,7 +33,15 @@ impl AppState {
         self: &Arc<Self>,
         account_id: &str,
     ) -> Result<TokenSet, String> {
-        let refresh = CodexRefreshClient::new()?;
+        let record = find_account(self, account_id)?;
+        let secret = self
+            .vault
+            .load(&record.secret_ref)?
+            .ok_or_else(|| "stored account credential is missing".to_string())?;
+        let credential: AccountCredential = serde_json::from_str(&secret)
+            .map_err(|_| "stored account credential is invalid".to_string())?;
+        let proxy = account_proxy_config(self, &credential)?;
+        let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
         let persistence = ServerTokenPersistence {
             state: self.clone(),
         };
@@ -56,17 +69,43 @@ impl AppState {
         }
 
         let mut accounts = Vec::new();
+        let mut refresh_clients = HashMap::new();
+        let common_proxy_configured = self.store.common_proxy_configured()?;
+        let common_proxy = if common_proxy_configured {
+            self.vault
+                .load(COMMON_PROXY_SECRET_REF)?
+                .and_then(|value| ProxyConfig::parse(&value).ok())
+        } else {
+            None
+        };
         for record in account_records {
             let Some(secret) = self.vault.load(&record.secret_ref)? else {
                 continue;
             };
             let credential: AccountCredential = serde_json::from_str(&secret)
                 .map_err(|_| "stored account credential is invalid".to_string())?;
+            let proxy = match credential.proxy_url.as_deref() {
+                Some(value) => match ProxyConfig::parse(value) {
+                    Ok(proxy) => Some(proxy),
+                    Err(_) => continue,
+                },
+                None if common_proxy_configured => match common_proxy.clone() {
+                    Some(proxy) => Some(proxy),
+                    None => continue,
+                },
+                None => None,
+            };
             self.token_authority
                 .register(&record.id, credential.tokens()?, record.auth_state)
                 .await
                 .map_err(|error| error.to_string())?;
-            accounts.push(runtime_account(record, &credential));
+            if proxy.is_some() {
+                refresh_clients.insert(
+                    record.id.clone(),
+                    CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
+                );
+            }
+            accounts.push(runtime_account(record, &credential, proxy));
         }
 
         let mut keys = Vec::new();
@@ -80,7 +119,10 @@ impl AppState {
             return self.replace_runtime(None);
         }
 
-        let refresh = Arc::new(CodexRefreshClient::new()?);
+        let refresh = Arc::new(ServerRefreshClients {
+            direct: CodexRefreshClient::new_with_proxy(None)?,
+            clients: refresh_clients,
+        });
         let persistence = Arc::new(ServerTokenPersistence {
             state: self.clone(),
         });
@@ -149,6 +191,8 @@ impl AppState {
         let sources = self.store.sources()?;
         let accounts = self.store.accounts()?;
         let keys = self.store.keys()?;
+        let common_proxy_configured = self.store.common_proxy_configured()?;
+        let common_proxy_available = common_proxy_available(self, common_proxy_configured);
         let mut warnings = Vec::new();
         let source_summaries = sources
             .iter()
@@ -163,11 +207,28 @@ impl AppState {
         let account_summaries = accounts
             .iter()
             .map(|record| {
-                let secret_available = self.vault.load(&record.secret_ref)?.is_some();
+                let secret = self.vault.load(&record.secret_ref)?;
+                let secret_available = secret.is_some();
                 if !secret_available {
                     warnings.push(format!("account_secret_missing:{}", record.id));
                 }
-                Ok(account_summary(record, secret_available))
+                let (proxy_mode, proxy_available) = secret
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<AccountCredential>(value).ok())
+                    .map(|credential| {
+                        account_proxy_status(
+                            &credential,
+                            common_proxy_configured,
+                            common_proxy_available,
+                        )
+                    })
+                    .unwrap_or((ProxyMode::Direct, false));
+                Ok(account_summary(
+                    record,
+                    secret_available,
+                    proxy_mode,
+                    proxy_available,
+                ))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let key_summaries = keys.iter().map(key_summary).collect::<Vec<_>>();
@@ -202,6 +263,8 @@ impl AppState {
                 ),
                 candidate_count: sources.len() + accounts.len(),
                 visible_model_ids,
+                common_proxy_configured,
+                common_proxy_available,
             },
             platform: std::env::consts::OS.to_string(),
             capabilities: self.capabilities.clone(),
@@ -213,6 +276,51 @@ impl AppState {
             warnings,
         })
     }
+}
+
+pub(crate) fn account_proxy_config(
+    state: &AppState,
+    credential: &AccountCredential,
+) -> Result<Option<ProxyConfig>, String> {
+    if let Some(value) = credential.proxy_url.as_deref() {
+        return ProxyConfig::parse(value)
+            .map(Some)
+            .map_err(|_| "stored account proxy URL is invalid".to_string());
+    }
+    if !state.store.common_proxy_configured()? {
+        return Ok(None);
+    }
+    let value = state
+        .vault
+        .load(COMMON_PROXY_SECRET_REF)?
+        .ok_or_else(|| "common account proxy is configured but unavailable".to_string())?;
+    ProxyConfig::parse(&value)
+        .map(Some)
+        .map_err(|_| "stored common proxy URL is invalid".to_string())
+}
+
+fn common_proxy_available(state: &AppState, configured: bool) -> bool {
+    configured
+        && state
+            .vault
+            .load(COMMON_PROXY_SECRET_REF)
+            .ok()
+            .flatten()
+            .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+}
+
+fn account_proxy_status(
+    credential: &AccountCredential,
+    common_configured: bool,
+    common_available: bool,
+) -> (ProxyMode, bool) {
+    if let Some(value) = credential.proxy_url.as_deref() {
+        return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
+    }
+    if common_configured {
+        return (ProxyMode::Common, common_available);
+    }
+    (ProxyMode::Direct, true)
 }
 
 fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
@@ -235,7 +343,11 @@ fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
     }
 }
 
-fn runtime_account(record: ServerAccountRecord, credential: &AccountCredential) -> RuntimeAccount {
+fn runtime_account(
+    record: ServerAccountRecord,
+    credential: &AccountCredential,
+    proxy: Option<ProxyConfig>,
+) -> RuntimeAccount {
     let quota = candidate_quota(&record);
     RuntimeAccount {
         id: record.id,
@@ -254,6 +366,7 @@ fn runtime_account(record: ServerAccountRecord, credential: &AccountCredential) 
         last_used_at_ms: record.last_used_at_ms,
         cooldowns: record.cooldowns,
         consecutive_failures: record.consecutive_failures,
+        proxy,
     }
 }
 
@@ -318,7 +431,12 @@ fn source_summary(record: &SourceRecord, secret_available: bool) -> SourceSummar
     }
 }
 
-fn account_summary(record: &ServerAccountRecord, secret_available: bool) -> AccountSummary {
+fn account_summary(
+    record: &ServerAccountRecord,
+    secret_available: bool,
+    proxy_mode: ProxyMode,
+    proxy_available: bool,
+) -> AccountSummary {
     AccountSummary {
         id: record.id.clone(),
         label: record.label.clone(),
@@ -335,6 +453,8 @@ fn account_summary(record: &ServerAccountRecord, secret_available: bool) -> Acco
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),
         secret_available,
+        proxy_mode,
+        proxy_available,
         last_error_code: record.last_error_code.clone(),
     }
 }
@@ -424,14 +544,37 @@ struct CodexRefreshClient {
 }
 
 impl CodexRefreshClient {
-    fn new() -> Result<Self, String> {
-        let http = reqwest::Client::builder()
+    fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, String> {
+        let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(20))
-            .user_agent("Zenith Relay Server")
-            .build()
-            .map_err(|error| error.to_string())?;
+            .user_agent("Zenith Relay Server");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|error| error.to_string())?;
         Ok(Self { http })
+    }
+}
+
+struct ServerRefreshClients {
+    direct: CodexRefreshClient,
+    clients: HashMap<String, CodexRefreshClient>,
+}
+
+impl TokenRefreshAdapter for ServerRefreshClients {
+    fn refresh<'a>(
+        &'a self,
+        account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            let client = self.clients.get(account_id).unwrap_or(&self.direct);
+            client.refresh(account_id, refresh_token, now_ms).await
+        })
     }
 }
 

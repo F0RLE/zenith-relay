@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { ClipboardCheck, Copy, Play, RefreshCw, RotateCw, Save, Square, Wrench } from "lucide-react";
+import { ClipboardCheck, Copy, Network, Play, RefreshCw, RotateCw, Save, Square, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
 import type { GatewayDiagnostic, SupportBundlePreview } from "../../api/types";
-import { Button, Dialog, EmptyState, PageHeader, StatusBadge, Tabs, copyText } from "../../components/Ui";
+import { Button, Dialog, EmptyState, PageHeader, SecretField, StatusBadge, Tabs, copyText } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "endpoint" | "clients" | "diagnostics";
@@ -18,11 +18,30 @@ export function GatewayPage() {
 }
 
 function EndpointView({ running, endpoint }: { running: boolean; endpoint: string }) {
-  const { t } = useTranslation(); const { mode, runtime, busy, perform } = useRelayState(); const currentPort = endpoint ? new URL(endpoint).port || "443" : ""; const [port, setPort] = useState(currentPort);
+  const { t } = useTranslation();
+  const { mode, runtime, busy, perform } = useRelayState();
+  const currentPort = endpoint ? new URL(endpoint).port || "443" : "";
+  const [port, setPort] = useState(currentPort);
+  const [proxyUrl, setProxyUrl] = useState("");
   useEffect(() => setPort(currentPort), [currentPort]);
   if (!endpoint) return <EmptyState title={t("gateway.emptyTitle")} description={t("gateway.emptyDescription")} />;
-  const numericPort = Number(port); const portValid = Number.isInteger(numericPort) && numericPort >= 1024 && numericPort <= 65535;
-  return <div className="gateway-sections"><section><header><h2>{t("gateway.endpoint")}</h2><StatusBadge status={running ? "ready" : "warning"} label={running ? t("common.online") : t("common.offline")} /></header><div className="endpoint-line"><code>{endpoint}</code><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => copyText(endpoint)}>{t("common.copy")}</Button></div></section><section><h2>{t("gateway.runtime")}</h2><dl className="runtime-grid"><div><dt>{t("common.status")}</dt><dd>{running ? t("common.online") : t("common.offline")}</dd></div><div><dt>{t("common.models")}</dt><dd>{runtime?.gateway.visibleModelIds.length ?? "-"}</dd></div><div><dt>{t("pool.members")}</dt><dd>{runtime?.gateway.candidateCount ?? "-"}</dd></div><div><dt>{t("common.mode")}</dt><dd>{t(`modes.${mode}`)}</dd></div></dl></section><section><h2>{t("gateway.settings")}</h2><div className="settings-row"><label><span>{t("gateway.host")}</span><input value={mode === "local" ? "127.0.0.1" : new URL(endpoint).host} disabled /></label><label><span>{t("gateway.port")}</span><input type="number" min="1024" max="65535" value={port} disabled={mode !== "local"} onChange={(event) => setPort(event.target.value)} /></label><label><span>{t("gateway.bind")}</span><select disabled><option>{mode === "local" ? t("gateway.loopback") : t("gateway.serverManaged")}</option></select></label>{mode === "local" ? <Button variant="secondary" busy={busy === "gateway-port"} disabled={!portValid || port === currentPort} icon={<Save aria-hidden />} onClick={() => perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved")}>{running ? t("gateway.applyRestart") : t("common.save")}</Button> : null}</div></section></div>;
+  const numericPort = Number(port);
+  const portValid = Number.isInteger(numericPort) && numericPort >= 1024 && numericPort <= 65535;
+  const proxySupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_proxies"));
+  const proxyConfigured = Boolean(runtime?.gateway.commonProxyConfigured);
+  const proxyAvailable = Boolean(runtime?.gateway.commonProxyAvailable);
+  const saveProxy = async (value: string | null) => {
+    const ok = await perform("gateway-proxy", () => mode === "local"
+      ? relayCommands.setCommonProxy(value)
+      : relayCommands.remoteAction({ type: "set_common_proxy" }, { proxyUrl: value }), "feedback.saved");
+    if (ok) setProxyUrl("");
+  };
+  return <div className="gateway-sections">
+    <section><header><h2>{t("gateway.endpoint")}</h2><StatusBadge status={running ? "ready" : "warning"} label={running ? t("common.online") : t("common.offline")} /></header><div className="endpoint-line"><code>{endpoint}</code><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => copyText(endpoint)}>{t("common.copy")}</Button></div></section>
+    <section><h2>{t("gateway.runtime")}</h2><dl className="runtime-grid"><div><dt>{t("common.status")}</dt><dd>{running ? t("common.online") : t("common.offline")}</dd></div><div><dt>{t("common.models")}</dt><dd>{runtime?.gateway.visibleModelIds.length ?? "-"}</dd></div><div><dt>{t("pool.members")}</dt><dd>{runtime?.gateway.candidateCount ?? "-"}</dd></div><div><dt>{t("common.mode")}</dt><dd>{t(`modes.${mode}`)}</dd></div></dl></section>
+    <section><h2>{t("gateway.settings")}</h2><div className="settings-row"><label><span>{t("gateway.host")}</span><input value={mode === "local" ? "127.0.0.1" : new URL(endpoint).host} disabled /></label><label><span>{t("gateway.port")}</span><input type="number" min="1024" max="65535" value={port} disabled={mode !== "local"} onChange={(event) => setPort(event.target.value)} /></label><label><span>{t("gateway.bind")}</span><select disabled><option>{mode === "local" ? t("gateway.loopback") : t("gateway.serverManaged")}</option></select></label>{mode === "local" ? <Button variant="secondary" busy={busy === "gateway-port"} disabled={!portValid || port === currentPort} icon={<Save aria-hidden />} onClick={() => perform("gateway-port", () => relayCommands.updateGatewayPort(numericPort), "feedback.saved")}>{running ? t("gateway.applyRestart") : t("common.save")}</Button> : null}</div></section>
+    {mode !== "zenith" ? <section className="proxy-settings"><header><div><h2>{t("proxies.commonTitle")}</h2><p>{t("proxies.commonDescription")}</p></div><StatusBadge status={!proxySupported ? "disabled" : proxyConfigured && !proxyAvailable ? "error" : "ready"} label={!proxySupported ? t("common.unsupported") : proxyConfigured ? proxyAvailable ? t("proxies.configured") : t("proxies.unavailable") : t("proxies.notConfigured")} /></header><div className="proxy-settings-form"><Network aria-hidden /><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder="user:password@us-proxy.example:8080" /><div className="inline-actions">{proxyConfigured ? <Button variant="secondary" busy={busy === "gateway-proxy"} disabled={!proxySupported} onClick={() => saveProxy(null)}>{t("proxies.clearCommon")}</Button> : null}<Button variant="primary" busy={busy === "gateway-proxy"} disabled={!proxySupported || !proxyUrl.trim()} onClick={() => saveProxy(proxyUrl.trim())}>{t("common.save")}</Button></div></div><p className="form-note">{t("proxies.precedence")}</p></section> : null}
+  </div>;
 }
 
 function ClientSetup({ endpoint }: { endpoint: string }) {

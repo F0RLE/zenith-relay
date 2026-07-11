@@ -33,6 +33,19 @@ pub struct GatewaySummary {
     pub base_url: String,
     pub candidate_count: usize,
     pub visible_model_ids: Vec<String>,
+    #[serde(default)]
+    pub common_proxy_configured: bool,
+    #[serde(default)]
+    pub common_proxy_available: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    #[default]
+    Direct,
+    Common,
+    Account,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,6 +84,10 @@ pub struct AccountSummary {
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
     pub secret_available: bool,
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
+    #[serde(default)]
+    pub proxy_available: bool,
     pub last_error_code: Option<String>,
 }
 

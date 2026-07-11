@@ -613,6 +613,7 @@ fn account(
         last_used_at_ms: None,
         cooldowns: Default::default(),
         consecutive_failures: 0,
+        proxy: None,
     }
 }
 

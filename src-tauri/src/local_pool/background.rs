@@ -297,9 +297,10 @@ async fn execute_wake_permit(
         Ok(prepared) => prepared,
         Err(error) => return Ok(Some(failed_wake_completion(credential_error_code(&error)))),
     };
-    let client = match CodexWakeClient::new(
+    let client = match CodexWakeClient::new_with_proxy(
         prepared.tokens().access_token(),
         prepared.provider_account_id(),
+        prepared.proxy(),
     ) {
         Ok(client) => client,
         Err(failure) => {

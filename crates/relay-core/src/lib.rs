@@ -4,6 +4,7 @@ pub mod catalog;
 mod error;
 pub mod gateway;
 pub mod protocol;
+pub mod proxy;
 pub mod quota;
 mod runtime;
 pub mod scheduler;
@@ -12,6 +13,7 @@ pub mod usage;
 
 pub use catalog::{ModelRegistry, ModelRules};
 pub use error::{Error, Result};
+pub use proxy::{normalize_proxy_url, ProxyConfig};
 pub use runtime::{
     discover_source_models, GatewayRuntime, GatewayRuntimeOptions, RuntimeAccount,
     RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,

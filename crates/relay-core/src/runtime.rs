@@ -2,6 +2,7 @@ use crate::accounts::{
     TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter, TokenRefreshAdapter,
 };
 use crate::sources::normalized_base_url;
+use crate::ProxyConfig;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
     ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RuntimeCandidate, Selection,
@@ -66,6 +67,7 @@ pub struct RuntimeAccount {
     pub last_used_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
+    pub proxy: Option<ProxyConfig>,
 }
 
 impl fmt::Debug for RuntimeAccount {
@@ -88,6 +90,7 @@ impl fmt::Debug for RuntimeAccount {
             .field("last_used_at_ms", &self.last_used_at_ms)
             .field("cooldowns", &self.cooldowns)
             .field("consecutive_failures", &self.consecutive_failures)
+            .field("proxy_configured", &self.proxy.is_some())
             .finish()
     }
 }
@@ -206,6 +209,8 @@ struct AccountExecutor {
     refresh_adapter: Arc<dyn TokenRefreshAdapter>,
     persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
     refresh_skew_ms: u64,
+    client: Option<reqwest::Client>,
+    bounded_client: Option<reqwest::Client>,
 }
 
 #[derive(Clone)]
@@ -378,6 +383,16 @@ impl GatewayRuntime {
                 ));
             }
             let responses_url = normalized_responses_url(&account.responses_url)?;
+            let client = account
+                .proxy
+                .as_ref()
+                .map(|proxy| runtime_client(Some(proxy), false))
+                .transpose()?;
+            let bounded_client = account
+                .proxy
+                .as_ref()
+                .map(|proxy| runtime_client(Some(proxy), true))
+                .transpose()?;
             let mut chatgpt_account_id = HeaderValue::from_str(&account.chatgpt_account_id)
                 .map_err(|_| {
                     Error::Validation(
@@ -422,6 +437,8 @@ impl GatewayRuntime {
                     refresh_adapter: auth.refresh_adapter.clone(),
                     persistence_adapter: auth.persistence_adapter.clone(),
                     refresh_skew_ms: auth.refresh_skew_ms,
+                    client,
+                    bounded_client,
                 },
             );
         }
@@ -670,6 +687,28 @@ impl GatewayRuntime {
             chatgpt_account_id: Some(account.chatgpt_account_id.clone()),
             originator: Some(HeaderValue::from_static("codex_cli_rs")),
         })
+    }
+
+    pub(crate) fn request_client(
+        &self,
+        candidate_id: &str,
+        upstream_stream: bool,
+    ) -> &reqwest::Client {
+        if let Some(account) = self.accounts.get(candidate_id) {
+            let client = if upstream_stream {
+                account.client.as_ref()
+            } else {
+                account.bounded_client.as_ref()
+            };
+            if let Some(client) = client {
+                return client;
+            }
+        }
+        if upstream_stream {
+            &self.client
+        } else {
+            &self.bounded_client
+        }
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
@@ -931,6 +970,22 @@ fn normalized_responses_url(value: &str) -> Result<Url> {
         ));
     }
     Ok(url)
+}
+
+fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = if bounded {
+        builder.timeout(Duration::from_secs(900))
+    } else {
+        builder.read_timeout(Duration::from_secs(300))
+    };
+    let builder = match proxy {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    };
+    builder.build().map_err(Error::from)
 }
 
 fn redacted_runtime_url(value: &str) -> String {

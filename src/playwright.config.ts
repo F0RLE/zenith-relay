@@ -7,6 +7,7 @@ export default defineConfig({
   expect: { timeout: 5_000 },
   reporter: "list",
   fullyParallel: false,
+  workers: 2,
   use: {
     baseURL: "http://127.0.0.1:1420",
     viewport: { width: 1160, height: 760 },

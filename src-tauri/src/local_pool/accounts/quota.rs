@@ -9,6 +9,7 @@ use zenith_relay_core::quota::{
     QuotaAdapterCapabilities, QuotaRefreshData, QuotaRefreshFailure, QuotaWindowInput,
     QuotaWindowKind, ResetTime, Subscription, SubscriptionInput,
 };
+use zenith_relay_core::ProxyConfig;
 
 pub const CODEX_QUOTA_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -25,18 +26,34 @@ pub struct CodexQuotaClient {
 
 impl CodexQuotaClient {
     pub fn new() -> Result<Self, QuotaRefreshFailure> {
-        let usage_endpoint = Url::parse(CODEX_QUOTA_ENDPOINT)
-            .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
-        Self::with_endpoint(usage_endpoint)
+        Self::new_with_proxy(None)
     }
 
+    pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, QuotaRefreshFailure> {
+        let usage_endpoint = Url::parse(CODEX_QUOTA_ENDPOINT)
+            .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+        Self::with_endpoint_and_proxy(usage_endpoint, proxy)
+    }
+
+    #[cfg(test)]
     fn with_endpoint(usage_endpoint: Url) -> Result<Self, QuotaRefreshFailure> {
-        let http = reqwest::Client::builder()
+        Self::with_endpoint_and_proxy(usage_endpoint, None)
+    }
+
+    fn with_endpoint_and_proxy(
+        usage_endpoint: Url,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, QuotaRefreshFailure> {
+        let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(20))
-            .user_agent("Zenith Relay")
-            .build()
-            .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+            .user_agent("Zenith Relay");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
         Ok(Self {
             http,
             usage_endpoint,

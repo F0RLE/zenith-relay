@@ -25,6 +25,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/sources/{id}/test", post(management_api::test_source))
         .route("/accounts", get(management_api::list_accounts))
+        .route("/proxies/common", post(management_api::set_common_proxy))
+        .route(
+            "/accounts/proxies/assign",
+            post(management_api::assign_account_proxies),
+        )
         .route(
             "/accounts/import/preview",
             post(management_api::preview_account_import),
@@ -44,6 +49,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/accounts/{id}",
             patch(management_api::update_account).delete(management_api::delete_account),
+        )
+        .route(
+            "/accounts/{id}/proxy",
+            post(management_api::set_account_proxy),
         )
         .route(
             "/keys",

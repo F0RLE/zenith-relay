@@ -1,4 +1,5 @@
 use crate::{
+    app::account_proxy_config,
     jobs::wake_automation,
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
@@ -109,12 +110,18 @@ async fn refresh_data(
         .map_err(|_| ("quota_account_id_invalid".to_string(), false))?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
         .map_err(|_| ("quota_access_token_invalid".to_string(), false))?;
-    let client = reqwest::Client::builder()
+    let proxy = account_proxy_config(state, &credential)
+        .map_err(|_| ("quota_proxy_unavailable".to_string(), false))?;
+    let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .timeout(Duration::from_secs(20))
-        .user_agent("Zenith Relay Server")
-        .build()
-        .map_err(|_| ("quota_client_init".to_string(), false))?;
+        .user_agent("Zenith Relay Server");
+    let client = match proxy.as_ref() {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| ("quota_client_init".to_string(), false))?;
     let response = client
         .get(CODEX_QUOTA_ENDPOINT)
         .header(AUTHORIZATION, authorization)

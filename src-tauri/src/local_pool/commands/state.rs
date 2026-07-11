@@ -1,4 +1,9 @@
 use crate::local_pool::{
+    accounts::{
+        credentials::CredentialStore,
+        proxy::{common_proxy_available, proxy_status},
+        NativeSecretBackend,
+    },
     error::CommandError,
     models::{LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
@@ -24,6 +29,7 @@ pub async fn get_local_runtime_state(
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let snapshot = state.snapshot().await?;
     let running = snapshot.runtime_target.connected;
+    let common_proxy_available = common_proxy_available(&snapshot.gateway);
     let visible_model_ids = snapshot
         .sources
         .iter()
@@ -61,6 +67,8 @@ pub async fn get_local_runtime_state(
             base_url,
             candidate_count,
             visible_model_ids,
+            common_proxy_configured: snapshot.gateway.common_proxy_configured,
+            common_proxy_available,
         },
         platform: snapshot.platform.to_string(),
         capabilities: Capabilities::desktop_local(),
@@ -72,7 +80,7 @@ pub async fn get_local_runtime_state(
         accounts: snapshot
             .accounts
             .iter()
-            .map(local_account_summary)
+            .map(|record| local_account_summary(record, &snapshot.gateway, common_proxy_available))
             .collect::<Result<_, _>>()?,
         keys: snapshot.keys.iter().map(local_key_summary).collect(),
         automations: snapshot.automations,
@@ -103,6 +111,8 @@ fn local_source_summary(
 
 fn local_account_summary(
     record: &LocalAccountRecord,
+    settings: &crate::local_pool::models::GatewaySettings,
+    common_proxy_available: bool,
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let secret_available = record
         .account
@@ -112,6 +122,18 @@ fn local_account_summary(
         .collect::<crate::local_pool::error::Result<Vec<_>>>()?
         .into_iter()
         .all(|value| value.is_some());
+    let credentials = CredentialStore::from_backend(NativeSecretBackend)
+        .load(&record.account.id)
+        .map_err(|error| {
+            crate::local_pool::error::LocalPoolError::new(
+                crate::local_pool::error::ErrorCode::SecretStoreUnavailable,
+                error.to_string(),
+            )
+        })?;
+    let (proxy_mode, proxy_available) = credentials
+        .as_ref()
+        .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
+        .unwrap_or((zenith_relay_core::protocol::ProxyMode::Direct, false));
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -134,6 +156,8 @@ fn local_account_summary(
         subscription: record.account.subscription.clone(),
         quota: record.account.quota.clone(),
         secret_available,
+        proxy_mode,
+        proxy_available,
         last_error_code: record.account.last_error_code.clone(),
     })
 }
@@ -179,6 +203,8 @@ mod parity_tests {
                 base_url: "http://127.0.0.1:14998/v1".into(),
                 candidate_count: 0,
                 visible_model_ids: Vec::new(),
+                common_proxy_configured: false,
+                common_proxy_available: false,
             },
             platform: "test".into(),
             capabilities: Capabilities::desktop_local(),

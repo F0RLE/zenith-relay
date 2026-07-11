@@ -220,6 +220,7 @@ keys
 profile_attach
 diagnostics
 wake_tasks
+account_proxies
 ```
 
 Minimum safe endpoints:
@@ -233,7 +234,10 @@ POST /accounts/import/preview
 POST /accounts/import/confirm
 POST /accounts/import/batch/preview
 POST /accounts/import/batch/confirm
+POST /accounts/proxies/assign
+POST /accounts/{id}/proxy
 DELETE /accounts/{id}
+POST /proxies/common
 GET  /sources
 POST /sources
 PATCH /sources/{id}
@@ -264,6 +268,15 @@ upstream credential, updates the source model registry, and returns only the
 redacted source summary. `POST /wake-tasks/{id}/test` validates that specific
 task selector and model policy and reports the eligible account count; it does
 not enqueue or send a wake request.
+
+`account_proxies` provides one encrypted common HTTP(S) proxy plus an optional
+encrypted override per account. Effective routing is `account override ->
+common proxy -> direct`. A configured proxy that is missing or invalid fails
+closed for that account; runtime requests, token refresh, quota refresh, model
+discovery, and wake requests must never silently fall back to a direct route.
+Management snapshots expose only proxy mode and availability, never a saved URL
+or credentials. Bulk assignment maps submitted proxy lines to submitted account
+IDs in order and reports unused lines.
 
 Optional proxy endpoints:
 

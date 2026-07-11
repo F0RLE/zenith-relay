@@ -6,16 +6,23 @@ use axum::{
         StatusCode,
     },
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use tempfile::TempDir;
 use zenith_relay_server::{
     config::Config,
     http,
-    state::AppState,
+    state::{AppState, COMMON_PROXY_SECRET_REF},
     store::{Store, Vault},
 };
 
@@ -659,6 +666,243 @@ async fn batch_import_enforces_size_count_depth_and_batch_ownership() {
     server.task.abort();
 }
 
+#[tokio::test]
+async fn server_account_proxies_support_common_override_bulk_and_redaction() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let (common_address, common_hits, common_task) = spawn_account_proxy("common-proxy").await;
+    let (account_address, account_hits, account_task) = spawn_account_proxy("account-proxy").await;
+    let client = reqwest::Client::new();
+    let common_secret = format!("common-user:common-pass@{common_address}");
+    let account_secret = format!("account-user:account-pass@{account_address}");
+
+    let common_state: Value = client
+        .post(format!("{}/proxies/common", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": common_secret}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(common_state["gateway"]["commonProxyConfigured"], true);
+    assert_eq!(common_state["gateway"]["commonProxyAvailable"], true);
+    assert!(!common_state.to_string().contains("common-pass"));
+
+    let preview: Value = client
+        .post(format!("{}/accounts/import/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "label": "Proxy account",
+            "accessToken": "synthetic-proxy-access-token",
+            "expiresAtMs": 4_000_000_000_000_u64,
+            "chatgptAccountId": "synthetic-proxy-account-id",
+            "responsesUrl": "http://127.0.0.1:9/account/responses",
+            "models": ["gpt-proxy-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_id = preview["accountId"].as_str().unwrap().to_string();
+    let confirmed: Value = client
+        .post(format!("{}/accounts/import/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": preview["sessionId"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(confirmed["proxyMode"], "common");
+    assert_eq!(confirmed["proxyAvailable"], true);
+
+    let generated: Value = client
+        .post(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "label": "Proxy test client",
+            "sourceIds": [],
+            "accountIds": [account_id],
+            "allowedModels": [],
+            "excludedModels": [],
+            "modelPrefix": null
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_key = generated["secret"].as_str().unwrap();
+
+    let first = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(pool_key)
+        .json(&json!({"model":"gpt-proxy-test","input":"common proxy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert!(first.text().await.unwrap().contains("common-proxy"));
+    assert_eq!(common_hits.load(Ordering::SeqCst), 1);
+
+    let account_state: Value = client
+        .post(format!("{}/accounts/{account_id}/proxy", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": account_secret}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(account_state["proxyMode"], "account");
+    assert!(!account_state.to_string().contains("account-pass"));
+
+    let second = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(pool_key)
+        .json(&json!({"model":"gpt-proxy-test","input":"account proxy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    assert!(second.text().await.unwrap().contains("account-proxy"));
+    assert_eq!(account_hits.load(Ordering::SeqCst), 1);
+
+    let replacement_preview: Value = client
+        .post(format!("{}/accounts/import/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "label": "Proxy account refreshed",
+            "accessToken": "synthetic-proxy-access-token-refreshed",
+            "expiresAtMs": 4_000_000_100_000_u64,
+            "chatgptAccountId": "synthetic-proxy-account-id",
+            "responsesUrl": "http://127.0.0.1:9/account/responses",
+            "models": ["gpt-proxy-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replacement_preview["accountId"], account_id);
+    let replacement: Value = client
+        .post(format!("{}/accounts/import/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": replacement_preview["sessionId"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(replacement["proxyMode"], "account");
+    assert!(!replacement.to_string().contains("account-pass"));
+
+    let bulk: Value = client
+        .post(format!("{}/accounts/proxies/assign", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "accountIds": [account_id],
+            "proxyUrls": [account_secret, "unused:unused@127.0.0.1:9999"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bulk, json!({"assigned": 1, "unused": 1}));
+
+    let inherited: Value = client
+        .post(format!("{}/accounts/{account_id}/proxy", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": null}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(inherited["proxyMode"], "common");
+    let third = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(pool_key)
+        .json(&json!({"model":"gpt-proxy-test","input":"inherited proxy"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(third.status(), StatusCode::OK);
+    assert!(third.text().await.unwrap().contains("common-proxy"));
+    assert_eq!(common_hits.load(Ordering::SeqCst), 2);
+
+    let state_text = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for secret in ["common-pass", "account-pass", "unused:unused"] {
+        assert!(!state_text.contains(secret));
+    }
+    let database_bytes = std::fs::read(root.path().join("relay.sqlite")).unwrap();
+    let database = String::from_utf8_lossy(&database_bytes);
+    let vault_bytes = std::fs::read(root.path().join("vault").join("secrets.enc")).unwrap();
+    let vault = String::from_utf8_lossy(&vault_bytes);
+    for secret in ["common-pass", "account-pass", "unused:unused"] {
+        assert!(!database.contains(secret));
+        assert!(!vault.contains(secret));
+    }
+
+    server.state.vault.delete(COMMON_PROXY_SECRET_REF).unwrap();
+    server.task.abort();
+    let _ = server.task.await;
+    drop(server.state);
+
+    let recovered = spawn_server(root.path()).await;
+    let recovery_state: Value = client
+        .get(format!("{}/state", recovered.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovery_state["gateway"]["commonProxyConfigured"], true);
+    assert_eq!(recovery_state["gateway"]["commonProxyAvailable"], false);
+    assert_eq!(recovery_state["gateway"]["running"], false);
+    assert_eq!(recovery_state["accounts"][0]["proxyMode"], "common");
+    assert_eq!(recovery_state["accounts"][0]["proxyAvailable"], false);
+
+    let repaired_state: Value = client
+        .post(format!("{}/proxies/common", recovered.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": common_secret}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repaired_state["gateway"]["commonProxyAvailable"], true);
+    assert_eq!(repaired_state["gateway"]["running"], true);
+
+    recovered.task.abort();
+    common_task.abort();
+    account_task.abort();
+}
+
 async fn batch_preview(client: &reqwest::Client, origin: &str, content: String) -> Value {
     let response = client
         .post(format!("{origin}/accounts/import/batch/preview"))
@@ -736,6 +980,36 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
         axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{address}"), task)
+}
+
+async fn spawn_account_proxy(
+    response_id: &'static str,
+) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let marker = hits.clone();
+    let router = Router::new().fallback(any(move |request: Request| {
+        let marker = marker.clone();
+        async move {
+            marker.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.method(), axum::http::Method::POST);
+            assert!(request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("Bearer synthetic-proxy-access-token")));
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from(format!(
+                    "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{response_id}\",\"object\":\"response\",\"model\":\"gpt-proxy-test\",\"output\":[],\"usage\":{{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}}}}\n\n"
+                )))
+                .unwrap()
+        }
+    }));
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (address, hits, task)
 }
 
 async fn models_response(request: Request) -> impl IntoResponse {

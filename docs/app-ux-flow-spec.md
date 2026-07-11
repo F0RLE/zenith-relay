@@ -842,9 +842,15 @@ Layout:
 + Settings -----------------------------------------------------------------+
 | Port | Host | Bind scope                         [Apply and restart]       |
 + Advanced -----------------------------------------------------------------+
-| LAN | Proxy | Timeouts | Debug | Management API                          |
+| Common account proxy | Timeouts | Debug | Management API                  |
 +---------------------------------------------------------------------------+
 ```
+
+The common proxy control accepts a new HTTP(S) proxy value or clears the saved
+value; it never reveals a stored address. `Connections -> Accounts` shows only
+`Direct`, `Common`, or `Account proxy` plus availability. Each account can
+replace or clear its override, and the bulk dialog assigns one proxy line per
+selected account while reporting unused lines.
 
 Mode behavior:
 

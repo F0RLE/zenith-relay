@@ -16,6 +16,7 @@ use crate::local_pool::{
             OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEventSink, OAuthFlowManager,
             OAuthFlowStart, OAuthFlowStatus,
         },
+        proxy::{common_proxy_config, effective_proxy_config},
         quota::CodexQuotaClient,
         quota_service::apply_quota_success,
         records::{self, new_account_record, CODEX_SOURCE_ID},
@@ -31,7 +32,7 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
-use zenith_relay_core::{accounts::AccountAuthMode, quota::QuotaRefreshFailure};
+use zenith_relay_core::{accounts::AccountAuthMode, quota::QuotaRefreshFailure, ProxyConfig};
 
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_PATH: &str = "/auth/callback";
@@ -46,7 +47,9 @@ pub async fn start_codex_oauth(
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
-    let oauth = CodexOAuthClient::new().map_err(oauth_error)?;
+    let settings = state.store()?.gateway().clone();
+    let proxy = common_proxy_config(&settings)?;
+    let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(oauth_error)?;
     let flow = state.oauth_flow();
     let start = flow.start(&oauth).await.map_err(flow_error)?;
     let authorization_url = validated_authorization_url(&start)?;
@@ -123,33 +126,10 @@ pub async fn complete_codex_oauth(
 async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<LocalAccountRecord> {
     let flow = state.oauth_flow();
     let now_ms = super::current_time_ms();
-    let (checkpoint, encoded_checkpoint) = completion_checkpoint(&flow, login_id, now_ms).await?;
-
-    let models = CodexModelsClient::new()
-        .map_err(model_error)?
-        .discover(
-            &checkpoint.access_token,
-            &checkpoint.provider_account_id,
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await
-        .map_err(model_error)?;
-    if models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "Codex account did not expose any supported models",
-        ));
-    }
-    let quota = CodexQuotaClient::new().map_err(quota_error)?;
-    let quota_data = quota
-        .refresh_data(
-            &checkpoint.access_token,
-            &checkpoint.provider_account_id,
-            now_ms,
-        )
-        .await
-        .map_err(quota_error)?;
-
+    let settings = state.store()?.gateway().clone();
+    let common_proxy = common_proxy_config(&settings)?;
+    let (checkpoint, encoded_checkpoint) =
+        completion_checkpoint(&flow, login_id, now_ms, common_proxy.as_ref()).await?;
     let (old_accounts, old_keys) = current_accounts(state)?;
     let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let existing = find_existing_account(
@@ -174,9 +154,42 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         .max()
         .unwrap_or(0)
         .saturating_add(1);
-    let credentials = checkpoint
+    let mut credentials = checkpoint
         .to_credentials(&local_account_id, generation)
         .map_err(credential_error)?;
+    if let Some(proxy_url) = previous_credentials
+        .as_ref()
+        .and_then(StoredCodexCredentials::proxy_url)
+    {
+        credentials = credentials
+            .with_proxy_url(Some(proxy_url.to_string()))
+            .map_err(credential_error)?;
+    }
+    let proxy = effective_proxy_config(&settings, &credentials)?;
+    let models = CodexModelsClient::new_with_proxy(proxy.as_ref())
+        .map_err(model_error)?
+        .discover(
+            &checkpoint.access_token,
+            &checkpoint.provider_account_id,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .await
+        .map_err(model_error)?;
+    if models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "Codex account did not expose any supported models",
+        ));
+    }
+    let quota = CodexQuotaClient::new_with_proxy(proxy.as_ref()).map_err(quota_error)?;
+    let quota_data = quota
+        .refresh_data(
+            &checkpoint.access_token,
+            &checkpoint.provider_account_id,
+            now_ms,
+        )
+        .await
+        .map_err(quota_error)?;
     let authority_tokens = credentials.to_token_set().map_err(credential_error)?;
     let mut record = new_account_record(
         &credentials,
@@ -520,6 +533,7 @@ async fn completion_checkpoint<E>(
     flow: &OAuthFlowManager<NativeSecretBackend, E>,
     login_id: &str,
     now_ms: u64,
+    proxy: Option<&ProxyConfig>,
 ) -> LocalResult<(OAuthCompletionCheckpoint, String)>
 where
     E: OAuthFlowEventSink,
@@ -545,7 +559,7 @@ where
         .exchange_material(&start.login_id)
         .map_err(flow_error)?;
     let (pending, callback) = material.into_parts();
-    let tokens = CodexOAuthClient::new()
+    let tokens = CodexOAuthClient::new_with_proxy(proxy)
         .map_err(oauth_error)?
         .exchange_code(&pending, callback, now_ms)
         .await

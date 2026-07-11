@@ -15,8 +15,9 @@ use zenith_relay_core::{
     GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 3;
+pub const SERVER_SCHEMA_VERSION: u32 = 4;
 pub const MAX_SERVER_ACCOUNTS: usize = 512;
+pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +89,8 @@ pub struct AccountCredential {
     pub generation: u64,
     pub chatgpt_account_id: String,
     pub responses_url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
 }
 
 impl AccountCredential {

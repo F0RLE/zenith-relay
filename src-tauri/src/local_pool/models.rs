@@ -7,7 +7,7 @@ use zenith_relay_core::{
     WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
@@ -46,6 +46,8 @@ pub struct GatewaySettings {
     pub session_affinity: bool,
     #[serde(default = "default_session_affinity_ttl_seconds")]
     pub session_affinity_ttl_seconds: u64,
+    #[serde(default)]
+    pub common_proxy_configured: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -153,6 +155,7 @@ impl Default for GatewaySettings {
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
             session_affinity: true,
             session_affinity_ttl_seconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
+            common_proxy_configured: false,
         }
     }
 }

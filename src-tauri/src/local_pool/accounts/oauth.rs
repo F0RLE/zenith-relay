@@ -13,6 +13,7 @@ use url::Url;
 use zenith_relay_core::accounts::{
     TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind,
 };
+use zenith_relay_core::ProxyConfig;
 
 pub const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -36,7 +37,12 @@ pub struct CodexOAuthClient {
 }
 
 impl CodexOAuthClient {
+    #[cfg(test)]
     pub fn new() -> Result<Self, OAuthError> {
+        Self::new_with_proxy(None)
+    }
+
+    pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, OAuthError> {
         let issuer = Url::parse(CODEX_OAUTH_ISSUER)
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         let authorize_endpoint = issuer
@@ -45,16 +51,29 @@ impl CodexOAuthClient {
         let token_endpoint = issuer
             .join("oauth/token")
             .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
-        Self::with_endpoints(authorize_endpoint, token_endpoint)
+        Self::with_endpoints_and_proxy(authorize_endpoint, token_endpoint, proxy)
     }
 
+    #[cfg(test)]
     fn with_endpoints(authorize_endpoint: Url, token_endpoint: Url) -> Result<Self, OAuthError> {
-        let http = reqwest::Client::builder()
+        Self::with_endpoints_and_proxy(authorize_endpoint, token_endpoint, None)
+    }
+
+    fn with_endpoints_and_proxy(
+        authorize_endpoint: Url,
+        token_endpoint: Url,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, OAuthError> {
+        let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(20))
-            .user_agent("Zenith Relay")
-            .build()
-            .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
+            .user_agent("Zenith Relay");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidConfiguration, false))?;
         Ok(Self {
             http,
             authorize_endpoint,

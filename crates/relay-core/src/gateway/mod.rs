@@ -279,11 +279,7 @@ async fn execute_request(
                 continue;
             }
         };
-        let client = if upstream_stream {
-            &runtime.client
-        } else {
-            &runtime.bounded_client
-        };
+        let client = runtime.request_client(&route.candidate_id, upstream_stream);
         let mut upstream_request = client
             .post(route.upstream_url.clone())
             .header(AUTHORIZATION, prepared.authorization)

@@ -57,6 +57,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       subscription: { planType: "Plus", activeUntilMs: null, status: "active", updatedAtMs: Date.now() },
       quota,
       secretAvailable: true,
+      proxyMode: "common",
+      proxyAvailable: true,
       lastErrorCode: null,
     };
     const key = {
@@ -86,11 +88,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       updatedAtMs: Date.now() - 60_000,
     };
     const localRuntime = {
-      schemaVersion: 4,
+      schemaVersion: 5,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: populated ? 2 : 0, visibleModelIds: populated ? ["gpt-5.4", "gpt-5.4-mini"] : [] },
+      gateway: { running: true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: populated ? 2 : 0, visibleModelIds: populated ? ["gpt-5.4", "gpt-5.4-mini"] : [], commonProxyConfigured: true, commonProxyAvailable: true },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies"] },
       sources: populated ? [source] : [],
       accounts: populated ? [account] : [],
       keys: populated ? [key] : [],
@@ -102,7 +104,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies"] };
 
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
@@ -169,6 +171,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_account_enabled": account.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
           case "set_local_account_draining": account.draining = Boolean(args.draining); return structuredClone(localRuntime);
           case "delete_local_account": localRuntime.accounts = []; return structuredClone(localRuntime);
+          case "set_local_account_proxy": {
+            const request = args.input as { accountId: string; proxyUrl: string | null };
+            account.proxyMode = request.proxyUrl ? "account" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
+            account.proxyAvailable = true;
+            return structuredClone(localRuntime);
+          }
+          case "assign_local_account_proxies": {
+            const request = args.input as { accountIds: string[]; proxyUrls: string[] };
+            account.proxyMode = "account";
+            account.proxyAvailable = true;
+            return { assigned: request.accountIds.length, unused: request.proxyUrls.length - request.accountIds.length };
+          }
           case "start_codex_oauth": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "get_codex_oauth_status": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "callback_received" };
@@ -187,6 +201,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const port = Number(args.port);
             localRuntime.gateway.baseUrl = `http://127.0.0.1:${port}/v1`;
             localRuntime.runtimeTarget.origin = `http://127.0.0.1:${port}`;
+            return structuredClone(localRuntime);
+          }
+          case "set_local_common_proxy": {
+            const request = args.input as { proxyUrl: string | null };
+            localRuntime.gateway.commonProxyConfigured = Boolean(request.proxyUrl);
+            localRuntime.gateway.commonProxyAvailable = Boolean(request.proxyUrl);
+            if (account.proxyMode !== "account") account.proxyMode = request.proxyUrl ? "common" : "direct";
             return structuredClone(localRuntime);
           }
           case "diagnose_local_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 321, bytesReceived: 64 };
@@ -212,7 +233,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
-          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 4, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
+          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 5, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
           case "list_codex_account_bindings": return populated ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
@@ -248,6 +269,24 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "confirm_account_batch_import") return { sessionId: "remote_import", results: [] };
       if (type === "test_source") return structuredClone(source);
       if (type === "test_wake_task") return { taskId: String(input.action?.id), status: "ready", eligibleAccounts: 1 };
+      if (type === "set_common_proxy") {
+        const proxyUrl = input.payload?.proxyUrl;
+        remoteRuntime.gateway.commonProxyConfigured = Boolean(proxyUrl);
+        remoteRuntime.gateway.commonProxyAvailable = Boolean(proxyUrl);
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_account_proxy") {
+        account.proxyMode = input.payload?.proxyUrl ? "account" : remoteRuntime.gateway.commonProxyConfigured ? "common" : "direct";
+        account.proxyAvailable = true;
+        return structuredClone(account);
+      }
+      if (type === "assign_account_proxies") {
+        const accountIds = input.payload?.accountIds as string[] ?? [];
+        const proxyUrls = input.payload?.proxyUrls as string[] ?? [];
+        account.proxyMode = "account";
+        account.proxyAvailable = true;
+        return { assigned: accountIds.length, unused: proxyUrls.length - accountIds.length };
+      }
       if (type === "clear_usage") { remoteUsage = []; return null; }
       return null;
     }

@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 use url::Url;
+use zenith_relay_core::ProxyConfig;
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
@@ -26,20 +27,32 @@ pub struct CodexModelsClient {
 }
 
 impl CodexModelsClient {
-    pub fn new() -> Result<Self, ModelDiscoveryFailure> {
+    pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, ModelDiscoveryFailure> {
         let endpoint = Url::parse(CODEX_MODELS_ENDPOINT)
             .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidEndpoint))?;
-        Self::with_endpoint(endpoint)
+        Self::with_endpoint_and_proxy(endpoint, proxy)
     }
 
+    #[cfg(test)]
     pub fn with_endpoint(endpoint: Url) -> Result<Self, ModelDiscoveryFailure> {
+        Self::with_endpoint_and_proxy(endpoint, None)
+    }
+
+    fn with_endpoint_and_proxy(
+        endpoint: Url,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, ModelDiscoveryFailure> {
         validate_endpoint(&endpoint)?;
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(10))
-            .user_agent("Zenith Relay")
-            .build()
-            .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidEndpoint))?;
+            .user_agent("Zenith Relay");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidEndpoint))?;
         Ok(Self { http, endpoint })
     }
 

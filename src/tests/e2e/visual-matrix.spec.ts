@@ -33,3 +33,32 @@ for (const locale of locales) {
     }
   }
 }
+
+for (const viewport of viewports) {
+  test(`proxy controls ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Gateway", exact: true }).click();
+    await page.locator(".proxy-settings").scrollIntoViewIfNeeded();
+    await expect(page.locator(".proxy-settings")).toBeVisible();
+    await page.screenshot({ path: `output/playwright/proxy-common-${viewport.width}x${viewport.height}.png` });
+
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.getByRole("button", { name: "Common", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Proxy for Personal Plus" })).toBeVisible();
+    await page.screenshot({ path: `output/playwright/proxy-account-${viewport.width}x${viewport.height}.png` });
+    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Assign proxies" }).click();
+    await expect(page.getByRole("dialog", { name: "Assign account proxies" })).toBeVisible();
+    await page.screenshot({ path: `output/playwright/proxy-bulk-${viewport.width}x${viewport.height}.png` });
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => {
+      const dialog = document.querySelector<HTMLElement>(".relay-dialog");
+      if (!dialog) return false;
+      const rect = dialog.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+    })).toBe(true);
+  });
+}

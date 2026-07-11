@@ -1,7 +1,7 @@
 use crate::{
     state::{
         identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
-        SourceRecord,
+        SourceRecord, COMMON_PROXY_SECRET_REF, MAX_SERVER_ACCOUNTS,
     },
     store::PendingImport,
 };
@@ -27,7 +27,7 @@ use url::{Host, Url};
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState},
     automations::{AccountSelector, WakeHistory, WakeModelPolicy, WakeTask},
-    discover_source_models,
+    discover_source_models, normalize_proxy_url,
     protocol::{
         AccountSummary, ApiError, ErrorEnvelope, GatewayDiagnostic, HealthResponse, KeySummary,
         RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery, UsageRange,
@@ -269,6 +269,203 @@ pub async fn list_accounts(
     Ok(Json(state.snapshot().map_err(store_error)?.accounts))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetProxyInput {
+    proxy_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignProxiesInput {
+    account_ids: Vec<String>,
+    proxy_urls: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyAssignmentResult {
+    assigned: usize,
+    unused: usize,
+}
+
+pub async fn set_common_proxy(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetProxyInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let next = normalize_optional_proxy(input.proxy_url)?;
+    let previous_configured = state.store.common_proxy_configured().map_err(store_error)?;
+    let previous = state
+        .vault
+        .load(COMMON_PROXY_SECRET_REF)
+        .map_err(vault_error)?;
+    if previous_configured == next.is_some() && previous.as_deref() == next.as_deref() {
+        return Ok(Json(state.snapshot().map_err(store_error)?));
+    }
+    save_optional_proxy(&state, COMMON_PROXY_SECRET_REF, next.as_deref())?;
+    if let Err(error) = state.store.set_common_proxy_configured(next.is_some()) {
+        restore_common_proxy(&state, previous_configured, previous.as_deref())?;
+        return Err(store_error(error));
+    }
+    if let Err(error) = state.rebuild_runtime().await {
+        restore_common_proxy(&state, previous_configured, previous.as_deref())?;
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+pub async fn set_account_proxy(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<SetProxyInput>,
+) -> Result<Json<AccountSummary>, ManagementError> {
+    let record = find_account(&state, &id)?;
+    let previous = state
+        .vault
+        .load(&record.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::not_found("account_secret_missing", "account secret missing")
+        })?;
+    let mut credential: AccountCredential = serde_json::from_str(&previous).map_err(|_| {
+        ManagementError::internal("account_secret_invalid", "account secret is invalid")
+    })?;
+    let next = normalize_optional_proxy(input.proxy_url)?;
+    if credential.proxy_url == next {
+        return Ok(Json(account_summary(&state, &record)?));
+    }
+    credential.proxy_url = next;
+    let encoded = serde_json::to_string(&credential).map_err(|_| {
+        ManagementError::internal(
+            "account_secret_serialize",
+            "account secret could not be saved",
+        )
+    })?;
+    state
+        .vault
+        .save(&record.secret_ref, &encoded)
+        .map_err(vault_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        state
+            .vault
+            .save(&record.secret_ref, &previous)
+            .map_err(vault_error)?;
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(account_summary(&state, &record)?))
+}
+
+pub async fn assign_account_proxies(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<AssignProxiesInput>,
+) -> Result<Json<ProxyAssignmentResult>, ManagementError> {
+    if input.account_ids.is_empty()
+        || input.account_ids.len() > MAX_SERVER_ACCOUNTS
+        || input.proxy_urls.len() < input.account_ids.len()
+    {
+        return Err(ManagementError::validation(
+            "proxy_assignment_invalid",
+            "proxy list must contain one URL per selected account",
+        ));
+    }
+    let mut seen = HashSet::new();
+    if input
+        .account_ids
+        .iter()
+        .any(|account_id| !seen.insert(account_id.clone()))
+    {
+        return Err(ManagementError::validation(
+            "proxy_assignment_duplicate",
+            "proxy assignment contains duplicate account ids",
+        ));
+    }
+    let mut updates = Vec::with_capacity(input.account_ids.len());
+    for (account_id, proxy_url) in input.account_ids.iter().zip(&input.proxy_urls) {
+        let record = find_account(&state, account_id)?;
+        let previous = state
+            .vault
+            .load(&record.secret_ref)
+            .map_err(vault_error)?
+            .ok_or_else(|| {
+                ManagementError::not_found("account_secret_missing", "account secret missing")
+            })?;
+        let mut credential: AccountCredential = serde_json::from_str(&previous).map_err(|_| {
+            ManagementError::internal("account_secret_invalid", "account secret is invalid")
+        })?;
+        credential.proxy_url = Some(normalize_proxy(proxy_url)?);
+        let next = serde_json::to_string(&credential).map_err(|_| {
+            ManagementError::internal(
+                "account_secret_serialize",
+                "account secret could not be saved",
+            )
+        })?;
+        updates.push((record.secret_ref, previous, next));
+    }
+    for index in 0..updates.len() {
+        if let Err(error) = state.vault.save(&updates[index].0, &updates[index].2) {
+            restore_account_proxy_secrets(&state, &updates[..index])?;
+            return Err(vault_error(error));
+        }
+    }
+    if let Err(error) = state.rebuild_runtime().await {
+        restore_account_proxy_secrets(&state, &updates)?;
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(ProxyAssignmentResult {
+        assigned: updates.len(),
+        unused: input.proxy_urls.len().saturating_sub(updates.len()),
+    }))
+}
+
+fn restore_account_proxy_secrets(
+    state: &AppState,
+    updates: &[(String, String, String)],
+) -> Result<(), ManagementError> {
+    for (secret_ref, previous, _) in updates {
+        state
+            .vault
+            .save(secret_ref, previous)
+            .map_err(vault_error)?;
+    }
+    Ok(())
+}
+
+fn restore_common_proxy(
+    state: &AppState,
+    configured: bool,
+    value: Option<&str>,
+) -> Result<(), ManagementError> {
+    save_optional_proxy(state, COMMON_PROXY_SECRET_REF, value)?;
+    state
+        .store
+        .set_common_proxy_configured(configured)
+        .map_err(store_error)
+}
+
+fn save_optional_proxy(
+    state: &AppState,
+    secret_ref: &str,
+    value: Option<&str>,
+) -> Result<(), ManagementError> {
+    match value {
+        Some(value) => state.vault.save(secret_ref, value).map(|_| ()),
+        None => state.vault.delete(secret_ref).map(|_| ()),
+    }
+    .map_err(vault_error)
+}
+
+fn normalize_optional_proxy(value: Option<String>) -> Result<Option<String>, ManagementError> {
+    value.map(|value| normalize_proxy(&value)).transpose()
+}
+
+fn normalize_proxy(value: &str) -> Result<String, ManagementError> {
+    normalize_proxy_url(value)
+        .map_err(|message| ManagementError::validation("proxy_invalid", message))
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountImportInput {
@@ -363,18 +560,34 @@ fn prepare_account_import(
     let chatgpt_account_id = clean_identifier(&input.chatgpt_account_id, "account id")?;
     let responses_url = validate_account_responses_url(input.responses_url.as_deref())?;
     let identity_hint = identity_hint(&chatgpt_account_id);
-    let duplicate_account_id = state
+    let duplicate_account = state
         .store
         .accounts()
         .map_err(store_error)?
         .into_iter()
-        .find(|record| record.identity_hint == identity_hint)
-        .map(|record| record.id);
+        .find(|record| record.identity_hint == identity_hint);
+    let duplicate_account_id = duplicate_account.as_ref().map(|record| record.id.clone());
     let account_id = duplicate_account_id
         .clone()
         .unwrap_or_else(|| format!("account_{}", uuid::Uuid::new_v4().simple()));
     let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("account:{account_id}:{}", uuid::Uuid::new_v4().simple());
+    let proxy_url = match duplicate_account.as_ref() {
+        Some(record) => match state.vault.load(&record.secret_ref).map_err(vault_error)? {
+            Some(value) => {
+                serde_json::from_str::<AccountCredential>(&value)
+                    .map_err(|_| {
+                        ManagementError::internal(
+                            "account_secret_invalid",
+                            "account secret is invalid",
+                        )
+                    })?
+                    .proxy_url
+            }
+            None => None,
+        },
+        None => None,
+    };
     let credential = AccountCredential {
         access_token: input.access_token,
         refresh_token: nonempty(input.refresh_token),
@@ -384,6 +597,7 @@ fn prepare_account_import(
         generation: 0,
         chatgpt_account_id,
         responses_url,
+        proxy_url,
     };
     credential.tokens().map_err(validation_error)?;
     let auth_state = if credential.refresh_token.is_some() {

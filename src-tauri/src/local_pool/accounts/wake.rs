@@ -7,6 +7,7 @@ use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
+use zenith_relay_core::ProxyConfig;
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
@@ -33,16 +34,30 @@ pub struct CodexWakeClient {
 }
 
 impl CodexWakeClient {
-    pub fn new(access_token: &str, chatgpt_account_id: &str) -> Result<Self, WakeExecutionFailure> {
+    pub fn new_with_proxy(
+        access_token: &str,
+        chatgpt_account_id: &str,
+        proxy: Option<&ProxyConfig>,
+    ) -> Result<Self, WakeExecutionFailure> {
         let endpoint = Url::parse(DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT)
             .map_err(|_| WakeExecutionFailure::configuration())?;
-        Self::with_endpoint(endpoint, access_token, chatgpt_account_id)
+        Self::with_endpoint_and_proxy(endpoint, access_token, chatgpt_account_id, proxy)
     }
 
+    #[cfg(test)]
     pub fn with_endpoint(
         responses_endpoint: Url,
         access_token: &str,
         chatgpt_account_id: &str,
+    ) -> Result<Self, WakeExecutionFailure> {
+        Self::with_endpoint_and_proxy(responses_endpoint, access_token, chatgpt_account_id, None)
+    }
+
+    fn with_endpoint_and_proxy(
+        responses_endpoint: Url,
+        access_token: &str,
+        chatgpt_account_id: &str,
+        proxy: Option<&ProxyConfig>,
     ) -> Result<Self, WakeExecutionFailure> {
         validate_endpoint(&responses_endpoint)?;
         validate_secret(
@@ -65,13 +80,17 @@ impl CodexWakeClient {
             WakeExecutionFailure::invalid(WakeExecutionErrorCode::InvalidProviderAccountId)
         })?;
         account_id.set_sensitive(true);
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
-            .user_agent("Zenith Relay")
-            .build()
-            .map_err(|_| WakeExecutionFailure::configuration())?;
+            .user_agent("Zenith Relay");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|_| WakeExecutionFailure::configuration())?;
         Ok(Self {
             http,
             responses_endpoint,

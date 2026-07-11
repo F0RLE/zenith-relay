@@ -1,5 +1,6 @@
-use super::{runtime_from_store, sync_gateway_or_rollback};
+use super::{restart_or_rollback, runtime_from_store, sync_gateway_or_rollback};
 use crate::local_pool::{
+    accounts::proxy::COMMON_PROXY_SECRET_REF,
     error::{CommandError, ErrorCode, LocalPoolError},
     models::LocalPoolSnapshot,
     state::DesktopState,
@@ -29,6 +30,12 @@ struct ModelsResponse {
 #[derive(Deserialize)]
 struct ModelEntry {
     id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetCommonProxyInput {
+    proxy_url: Option<String>,
 }
 
 #[tauri::command]
@@ -85,6 +92,50 @@ pub async fn update_local_gateway_port(
     state.store()?.replace_gateway(gateway)?;
     sync_gateway_or_rollback(&state, old_gateway).await?;
     state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_common_proxy(
+    input: SetCommonProxyInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let next_secret = input
+        .proxy_url
+        .map(|value| zenith_relay_core::normalize_proxy_url(&value))
+        .transpose()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    let old_gateway = state.store()?.gateway().clone();
+    let old_secret = secret_store::load(COMMON_PROXY_SECRET_REF)?;
+    if old_gateway.common_proxy_configured == next_secret.is_some()
+        && old_secret.as_deref() == next_secret.as_deref()
+    {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    save_optional_proxy(next_secret.as_deref())?;
+    let mut next_gateway = old_gateway.clone();
+    next_gateway.common_proxy_configured = next_secret.is_some();
+    if let Err(error) = state.store()?.replace_gateway(next_gateway) {
+        restore_common_proxy(old_secret.as_deref())?;
+        return Err(error.into());
+    }
+    restart_or_rollback(&state, || {
+        restore_common_proxy(old_secret.as_deref())?;
+        state.store()?.replace_gateway(old_gateway)
+    })
+    .await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+fn save_optional_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
+    match value {
+        Some(value) => secret_store::save(COMMON_PROXY_SECRET_REF, value),
+        None => secret_store::delete(COMMON_PROXY_SECRET_REF),
+    }
+}
+
+fn restore_common_proxy(value: Option<&str>) -> crate::local_pool::error::Result<()> {
+    save_optional_proxy(value)
 }
 
 #[tauri::command]

@@ -18,6 +18,7 @@ pub enum Feature {
     Diagnostics,
     WakeTasks,
     Backups,
+    AccountProxies,
 }
 
 impl Feature {
@@ -35,6 +36,7 @@ impl Feature {
             Self::Diagnostics => "diagnostics",
             Self::WakeTasks => "wake_tasks",
             Self::Backups => "backups",
+            Self::AccountProxies => "account_proxies",
         }
     }
 }
@@ -87,6 +89,7 @@ impl Capabilities {
             Feature::Diagnostics,
             Feature::WakeTasks,
             Feature::Backups,
+            Feature::AccountProxies,
         ]
         .into_iter()
         .map(|feature| feature.as_str().to_string())

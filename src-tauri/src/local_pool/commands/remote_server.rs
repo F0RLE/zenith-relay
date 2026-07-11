@@ -54,6 +54,9 @@ pub enum RemoteServerAction {
     ConfirmAccountBatchImport,
     UpdateAccount { id: String },
     DeleteAccount { id: String },
+    SetCommonProxy,
+    SetAccountProxy { id: String },
+    AssignAccountProxies,
     CreateKey,
     UpdateKey { id: String },
     DeleteKey { id: String },
@@ -314,6 +317,15 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::DeleteAccount { id } => {
             (Method::DELETE, object_path("accounts", id)?, false)
+        }
+        RemoteServerAction::SetCommonProxy => (Method::POST, "/proxies/common".to_string(), true),
+        RemoteServerAction::SetAccountProxy { id } => (
+            Method::POST,
+            format!("{}/proxy", object_path("accounts", id)?),
+            true,
+        ),
+        RemoteServerAction::AssignAccountProxies => {
+            (Method::POST, "/accounts/proxies/assign".to_string(), true)
         }
         RemoteServerAction::CreateKey => (Method::POST, "/keys".to_string(), true),
         RemoteServerAction::UpdateKey { id } => (Method::PATCH, object_path("keys", id)?, true),

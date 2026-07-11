@@ -1,4 +1,5 @@
 use crate::{
+    app::account_proxy_config,
     jobs::quota_refresh,
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
@@ -136,13 +137,19 @@ async fn execute_inner(
         .map_err(|_| "wake_access_token_invalid".to_string())?;
     let account_id = HeaderValue::from_str(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
-    let client = reqwest::Client::builder()
+    let proxy = account_proxy_config(state, &credential)
+        .map_err(|_| "wake_proxy_unavailable".to_string())?;
+    let builder = reqwest::Client::builder()
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
-        .user_agent("Zenith Relay Server")
-        .build()
-        .map_err(|_| "wake_client_init".to_string())?;
+        .user_agent("Zenith Relay Server");
+    let client = match proxy.as_ref() {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| "wake_client_init".to_string())?;
     let response = client
         .post(&credential.responses_url)
         .header(AUTHORIZATION, authorization)

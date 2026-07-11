@@ -5,6 +5,7 @@ pub(crate) mod imports;
 pub(crate) mod models;
 pub(crate) mod oauth;
 pub(crate) mod oauth_flow;
+pub(crate) mod proxy;
 pub(crate) mod quota;
 pub(crate) mod quota_service;
 pub(crate) mod records;

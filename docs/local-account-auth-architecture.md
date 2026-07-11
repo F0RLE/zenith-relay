@@ -78,6 +78,13 @@ LocalAccount
   last_used_at
 ```
 
+An account may also carry an optional HTTP(S) proxy override inside its native
+secret-store/encrypted-vault credential payload. The common account proxy is a
+separate protected secret. Neither URL is part of account records, snapshots,
+diagnostics, exports, logs, or portable imports. Re-import and token rotation
+preserve an existing account override. SOCKS and silent direct fallback are not
+supported.
+
 Useful index shape:
 
 ```text

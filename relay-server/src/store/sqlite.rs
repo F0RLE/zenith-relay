@@ -36,6 +36,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "003_usage_query_indexes",
         sql: include_str!("../../migrations/003_usage_query_indexes.sql"),
     },
+    Migration {
+        version: 4,
+        name: "004_account_proxies",
+        sql: include_str!("../../migrations/004_account_proxies.sql"),
+    },
 ];
 
 struct Migration {
@@ -126,6 +131,19 @@ impl Store {
 
     pub fn set_gateway_enabled(&self, enabled: bool) -> Result<(), String> {
         self.set_metadata("gateway_enabled", if enabled { "true" } else { "false" })
+    }
+
+    pub fn common_proxy_configured(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("common_proxy_configured")?
+            .is_some_and(|value| value == "true"))
+    }
+
+    pub fn set_common_proxy_configured(&self, configured: bool) -> Result<(), String> {
+        self.set_metadata(
+            "common_proxy_configured",
+            if configured { "true" } else { "false" },
+        )
     }
 
     pub fn sources(&self) -> Result<Vec<SourceRecord>, String> {
@@ -810,13 +828,16 @@ mod tests {
         let first = Store::open(path.clone()).unwrap();
         let server_id = first.server_id().unwrap();
         assert!(first.gateway_enabled().unwrap());
+        assert!(!first.common_proxy_configured().unwrap());
+        first.set_common_proxy_configured(true).unwrap();
         assert_eq!(
             first.metadata("schema_version").unwrap().as_deref(),
-            Some("3")
+            Some("4")
         );
         drop(first);
         let second = Store::open(path).unwrap();
         assert_eq!(second.server_id().unwrap(), server_id);
+        assert!(second.common_proxy_configured().unwrap());
         drop(second);
         fs::remove_dir_all(root).unwrap();
     }
@@ -831,7 +852,7 @@ mod tests {
         assert_eq!(store.server_id().unwrap(), "stable-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("3")
+            Some("4")
         );
         let ledger = {
             let connection = store.lock().unwrap();
@@ -851,7 +872,8 @@ mod tests {
             vec![
                 (1, "001_init".to_string()),
                 (2, "002_migration_ledger".to_string()),
-                (3, "003_usage_query_indexes".to_string())
+                (3, "003_usage_query_indexes".to_string()),
+                (4, "004_account_proxies".to_string())
             ]
         );
         drop(store);
@@ -905,13 +927,13 @@ mod tests {
             )
             .unwrap();
         drop(connection);
-        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:3\n").unwrap();
+        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:4\n").unwrap();
 
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(store.server_id().unwrap(), "original-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("3")
+            Some("4")
         );
         assert!(!sibling_path(&path, ".migration-in-progress").exists());
         drop(store);

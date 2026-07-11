@@ -46,6 +46,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 1 => migrate_v1_to_v2(root)?,
                 2 => migrate_v2_to_v3(root, &gateway_path)?,
                 3 => migrate_v3_to_v4(root)?,
+                4 => migrate_v4_to_v5(root, &gateway_path)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -65,6 +66,22 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v4_to_v5(root: &Path, gateway_path: &Path) -> Result<()> {
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway
+        .entry("commonProxyConfigured")
+        .or_insert_with(|| Value::Bool(false));
+    save_json(gateway_path, gateway)
 }
 
 fn migrate_v3_to_v4(root: &Path) -> Result<()> {
@@ -429,6 +446,28 @@ mod tests {
         assert!(keys[0]["accountIds"].is_null());
         assert!(root.join("records").join("accounts.json").exists());
         assert!(automations.tasks.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v4_gateway_with_common_proxy_disabled() {
+        let root = temp_root();
+        write_v3_store(&root);
+        migrate_v3_to_v4(&root).unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 4 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let gateway: Value = load_json(&root.join("settings").join("gateway.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(gateway["commonProxyConfigured"], false);
         fs::remove_dir_all(root).unwrap();
     }
 

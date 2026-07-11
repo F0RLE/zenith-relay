@@ -2586,6 +2586,86 @@ textarea {
   font-size: 12px;
 }
 
+.proxy-status-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.proxy-status-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.proxy-current {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.proxy-settings header > div {
+  min-width: 0;
+}
+
+.proxy-settings header h2,
+.proxy-settings header p {
+  margin: 0;
+}
+
+.proxy-settings header p {
+  margin-top: 2px;
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.proxy-settings-form {
+  display: grid;
+  grid-template-columns: 20px minmax(260px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.proxy-settings-form > svg {
+  align-self: center;
+  color: var(--relay-muted);
+}
+
+.proxy-list-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+}
+
+.proxy-list-field textarea {
+  min-height: 150px;
+  border-radius: 6px 0 0 6px;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.proxy-list-field button {
+  height: 34px;
+  border-left: 0;
+  border-radius: 0 6px 6px 0;
+}
+
+.secret-textarea {
+  -webkit-text-security: disc;
+}
+
+.proxy-account-grid {
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+}
+
+.success-text {
+  color: var(--relay-accent-hover);
+}
+
 .segmented {
   width: fit-content;
   display: inline-flex;
@@ -3187,6 +3267,8 @@ input[type="password"] {
   .intro-copy dl > div { border-right: 0; border-bottom: 1px solid var(--relay-border); }
   .intro-copy dl > div:last-child { border-bottom: 0; }
   .flow-line { grid-template-columns: 1fr 36px 1fr 36px 1fr; }
+  .proxy-settings-form { grid-template-columns: 20px minmax(0, 1fr); }
+  .proxy-settings-form .inline-actions { grid-column: 2; }
 }
 
 :root[data-compact="true"] .relay-table th,
