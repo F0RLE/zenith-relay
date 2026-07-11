@@ -24,6 +24,7 @@ export function ConnectionsPage() {
   const { mode, runtime, readyState, busy, perform, refresh } = useRelayState();
   const [view, setView] = useState<View>(mode === "zenith" ? "api" : "accounts");
   const [dialog, setDialog] = useState<DialogKind>(null);
+  const [query, setQuery] = useState("");
   const [editingSource, setEditingSource] = useState<SourceSummary | null>(null);
   const [editingAutomation, setEditingAutomation] = useState<WakeTask | null>(null);
 
@@ -33,6 +34,8 @@ export function ConnectionsPage() {
     setEditingSource(null);
     setEditingAutomation(null);
   }, [mode]);
+
+  useEffect(() => setQuery(""), [mode, view]);
 
   const tabs = mode === "zenith"
     ? [{ id: "api", label: t("connections.api") }]
@@ -92,17 +95,17 @@ export function ConnectionsPage() {
         }
       />
       <Tabs value={view} items={tabs} onChange={(id) => setView(id as View)} label={t("connections.views")} />
-      <div className="table-toolbar">
+      {view === "sources" || view === "accounts" || view === "automations" ? <div className="table-toolbar">
         <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>
-          <input placeholder={t("common.search")} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
         </label>
         <Button variant="ghost" icon={<RefreshCw aria-hidden />} onClick={refresh}>{t("common.refresh")}</Button>
-      </div>
+      </div> : null}
 
-      {view === "sources" ? <SourcesTable onAdd={() => setDialog("source")} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} /> : null}
-      {view === "automations" ? <AutomationsTable onAdd={() => { setEditingAutomation(null); setDialog("automation"); }} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
+      {view === "sources" ? <SourcesTable query={query} onAdd={() => setDialog("source")} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} /> : null}
+      {view === "automations" ? <AutomationsTable query={query} onAdd={() => { setEditingAutomation(null); setDialog("automation"); }} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
 
@@ -119,17 +122,19 @@ export function ConnectionsPage() {
   );
 }
 
-function SourcesTable({ onAdd, onEdit }: { onAdd: () => void; onEdit: (source: SourceSummary) => void }) {
+function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => void; onEdit: (source: SourceSummary) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onAdd}>{t("sources.add")}</Button>} />;
   }
+  const sources = runtime.sources.filter((source) => matchesQuery(query, source.name, source.baseUrl, source.wireApi, source.models));
+  if (!sources.length) return <NoResults />;
   return (
     <div className="relay-table-wrap">
       <table className="relay-table">
         <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.protocol")}</th><th>{t("common.models")}</th><th>{t("pool.priority")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
-        <tbody>{runtime.sources.map((source) => (
+        <tbody>{sources.map((source) => (
           <tr key={source.id}>
             <td><StatusBadge status={source.enabled && source.secretAvailable ? "ready" : "disabled"} label={source.enabled ? t("common.enabled") : t("common.disabled")} /></td>
             <td><strong>{source.name}</strong></td>
@@ -150,19 +155,21 @@ function SourcesTable({ onAdd, onEdit }: { onAdd: () => void; onEdit: (source: S
   );
 }
 
-function AccountsTable({ onImport, onSignIn }: { onImport: () => void; onSignIn: () => void }) {
+function AccountsTable({ query, onImport, onSignIn }: { query: string; onImport: () => void; onSignIn: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   if (!runtime?.accounts.length) {
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
+  const accounts = runtime.accounts.filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models));
+  if (!accounts.length) return <NoResults />;
   return (
     <>
     {mode === "local" ? <div className="table-toolbar"><Button variant="secondary" busy={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")}>{t("accounts.refreshAll")}</Button></div> : null}
     <div className="relay-table-wrap">
       <table className="relay-table">
         <thead><tr><th>{t("common.health")}</th><th>{t("common.name")}</th><th>{t("accounts.plan")}</th><th>{t("common.quota")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
-        <tbody>{runtime.accounts.map((account) => (
+        <tbody>{accounts.map((account) => (
           <tr key={account.id}>
             <td><StatusBadge status={account.health === "healthy" ? "ready" : account.health === "blocked" ? "error" : "warning"} label={t(`health.${account.health}`, { defaultValue: account.health })} /></td>
             <td><strong>{account.label}</strong><small>{account.identityHint}</small></td>
@@ -183,19 +190,21 @@ function AccountsTable({ onImport, onSignIn }: { onImport: () => void; onSignIn:
   );
 }
 
-function AutomationsTable({ onAdd, onEdit }: { onAdd: () => void; onEdit: (task: WakeTask) => void }) {
+function AutomationsTable({ query, onAdd, onEdit }: { query: string; onAdd: () => void; onEdit: (task: WakeTask) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   if (!runtime?.automations.length) {
     return <EmptyState title={t("automations.emptyTitle")} description={t("automations.emptyDescription")} action={<Button variant="primary" onClick={onAdd}>{t("automations.add")}</Button>} />;
   }
+  const automations = runtime.automations.filter((task) => matchesQuery(query, task.name, task.accountSelector.kind === "all_eligible" ? "" : task.accountSelector.values, task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : ""));
+  if (!automations.length) return <NoResults />;
   return (
     <>
       <div className="table-toolbar"><Button variant="secondary" busy={busy === "wake-due"} onClick={() => perform("wake-due", () => mode === "local" ? relayCommands.runWakeConfirmations() : relayCommands.remoteAction({ type: "test_wake_task", id: runtime.automations[0].id }), "feedback.checked")}>{t("automations.runDue")}</Button></div>
       <div className="relay-table-wrap">
         <table className="relay-table">
           <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("connections.accounts")}</th><th>{t("common.quota")}</th><th>{t("common.model")}</th><th>{t("automations.lastResult")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
-          <tbody>{runtime.automations.map((task) => {
+          <tbody>{automations.map((task) => {
             const history = runtime.wakeHistory.filter((item) => item.taskId === task.id);
             const last = history[history.length - 1];
             return (
@@ -459,4 +468,14 @@ function TopUpDialog({ onClose }: { onClose: () => void }) {
 
 function safeHost(value: string) {
   try { return new URL(value).host; } catch { return value; }
+}
+
+function matchesQuery(query: string, ...values: Array<string | string[] | null | undefined>) {
+  const normalized = query.trim().toLocaleLowerCase();
+  return !normalized || values.flatMap((value) => Array.isArray(value) ? value : value ?? []).some((value) => value.toLocaleLowerCase().includes(normalized));
+}
+
+function NoResults() {
+  const { t } = useTranslation();
+  return <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />;
 }

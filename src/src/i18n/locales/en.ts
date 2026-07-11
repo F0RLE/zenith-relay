@@ -237,6 +237,8 @@ const relayEn = {
     run: "Run",
     save: "Save",
     search: "Search",
+    noResults: "No matching results",
+    noResultsHint: "Change or clear the current filters.",
     status: "Status",
     success: "Success",
     test: "Test",

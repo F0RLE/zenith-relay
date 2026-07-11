@@ -137,3 +137,22 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   expect(commands).toEqual(expect.arrayContaining(["export_usage", "export_support_bundle", "open_relay_folder"]));
   expect(commands).not.toContain("reset_local_pool_data");
 });
+
+test("connection search and request ID filters change visible rows", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const connectionSearch = page.getByPlaceholder("Search");
+  await connectionSearch.fill("no such account");
+  await expect(page.getByText("No matching results")).toBeVisible();
+  await connectionSearch.fill("Personal Plus");
+  await expect(page.getByText("Personal Plus")).toBeVisible();
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  const requestFilter = page.getByRole("textbox", { name: "Request ID" });
+  await requestFilter.fill("missing-request");
+  await expect(page.getByText("No matching results")).toBeVisible();
+  await requestFilter.fill("req_synthetic_local");
+  await expect(page.getByText("req_synthetic_local")).toBeVisible();
+});
