@@ -101,7 +101,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "wake_tasks"] };
+    remoteRuntime.capabilities = { features: ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks"] };
 
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
     const remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
@@ -190,6 +190,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_quota_wake_automation_enabled": automation.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
           case "delete_quota_wake_automation": localRuntime.automations = []; return structuredClone(localRuntime);
           case "run_due_quota_wake_confirmations": return 1;
+          case "test_quota_wake_automation": return { taskId: String(args.taskId), status: "ready", eligibleAccounts: 1 };
           case "attach_codex_to_local_gateway":
           case "attach_opencode_to_local_gateway":
           case "launch_saved_codex":
@@ -228,12 +229,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     function remoteAction(args: Record<string, unknown>) {
-      const input = args.input as { action?: { type?: string }; payload?: Record<string, unknown> };
+      const input = args.input as { action?: { type?: string; id?: string }; payload?: Record<string, unknown> };
       const type = input?.action?.type;
       if (type === "rotate_key") return { key, secret: "zlr_synthetic_remote_rotated_key" };
       if (type === "create_key") return { key, secret: "zlr_synthetic_remote_key" };
       if (type === "preview_account_batch_import") return importSession("remote_import");
       if (type === "confirm_account_batch_import") return { sessionId: "remote_import", results: [] };
+      if (type === "test_source") return structuredClone(source);
+      if (type === "test_wake_task") return { taskId: String(input.action?.id), status: "ready", eligibleAccounts: 1 };
       return null;
     }
 

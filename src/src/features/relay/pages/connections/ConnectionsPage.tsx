@@ -136,6 +136,7 @@ export function ConnectionsPage() {
 function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => void; onEdit: (source: SourceSummary) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const canTest = mode !== "remote" || runtime?.capabilities.features.includes("diagnostics");
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onAdd}>{t("sources.add")}</Button>} />;
   }
@@ -154,7 +155,7 @@ function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => vo
             <td>{source.models.length}</td>
             <td>{source.priority}</td>
             <td className="row-actions">
-              <Button variant="ghost" busy={busy === `test-${source.id}`} onClick={() => perform(`test-${source.id}`, () => mode === "local" ? relayCommands.testSource(source.id) : relayCommands.remoteAction({ type: "update_source", id: source.id }, {}), "feedback.checked")}>{t("common.test")}</Button>
+              <Button variant="ghost" busy={busy === `test-${source.id}`} disabled={!canTest} title={!canTest ? t("remote.capabilityUnavailable") : undefined} onClick={() => perform(`test-${source.id}`, () => mode === "local" ? relayCommands.testSource(source.id) : relayCommands.remoteAction({ type: "test_source", id: source.id }), "feedback.checked")}>{t("common.test")}</Button>
               <Button variant="ghost" onClick={() => onEdit(source)}>{t("common.edit")}</Button>
               <Button variant="ghost" icon={<MoreHorizontal aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => mode === "local" ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</Button>
               <Button variant="ghost" onClick={() => { if (window.confirm(t("sources.deleteConfirm"))) void perform(`delete-${source.id}`, () => mode === "local" ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"); }}>{t("common.delete")}</Button>
@@ -211,7 +212,7 @@ function AutomationsTable({ query, onAdd, onEdit }: { query: string; onAdd: () =
   if (!automations.length) return <NoResults />;
   return (
     <>
-      <div className="table-toolbar"><Button variant="secondary" busy={busy === "wake-due"} onClick={() => perform("wake-due", () => mode === "local" ? relayCommands.runWakeConfirmations() : relayCommands.remoteAction({ type: "test_wake_task", id: runtime.automations[0].id }), "feedback.checked")}>{t("automations.runDue")}</Button></div>
+      {mode === "local" ? <div className="table-toolbar"><Button variant="secondary" busy={busy === "wake-due"} onClick={() => perform("wake-due", relayCommands.runWakeConfirmations, "feedback.checked")}>{t("automations.runDue")}</Button></div> : null}
       <div className="relay-table-wrap">
         <table className="relay-table">
           <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("connections.accounts")}</th><th>{t("common.quota")}</th><th>{t("common.model")}</th><th>{t("automations.lastResult")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
@@ -226,7 +227,7 @@ function AutomationsTable({ query, onAdd, onEdit }: { query: string; onAdd: () =
                 <td>{task.windowKinds.map((item) => t(`quota.${item}`)).join(", ")}</td>
                 <td>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</td>
                 <td>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</td>
-                <td className="row-actions"><Button variant="ghost" onClick={() => onEdit(task)}>{t("common.edit")}</Button><Button variant="ghost" onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.runWakeConfirmations() : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")}>{t("common.test")}</Button><Button variant="ghost" onClick={() => { if (window.confirm(t("automations.deleteConfirm"))) void perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"); }}>{t("common.delete")}</Button></td>
+                <td className="row-actions"><Button variant="ghost" onClick={() => onEdit(task)}>{t("common.edit")}</Button><Button variant="ghost" busy={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")}>{t("common.test")}</Button><Button variant="ghost" onClick={() => { if (window.confirm(t("automations.deleteConfirm"))) void perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"); }}>{t("common.delete")}</Button></td>
               </tr>
             );
           })}</tbody>
@@ -255,11 +256,15 @@ function SourceDialog({ source, onClose }: { source: SourceSummary | null; onClo
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
+  const [wireApi, setWireApi] = useState<SourceSummary["wireApi"]>(source?.wireApi ?? "responses");
+  const [models, setModels] = useState(source?.models.join(", ") ?? "");
+  const [allowed, setAllowed] = useState(source?.allowedModels.join(", ") ?? "");
+  const [excluded, setExcluded] = useState(source?.excludedModels.join(", ") ?? "");
   const [priority, setPriority] = useState(source?.priority ?? 0);
   const [weight, setWeight] = useState(source?.weight ?? 100);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const base = { name, baseUrl, wireApi: source?.wireApi ?? "responses", models: source?.models ?? [], allowedModels: source?.allowedModels ?? [], excludedModels: source?.excludedModels ?? [], draining: source?.draining ?? false, priority, weight };
+    const base = { name, baseUrl, wireApi, models: parseList(models), allowedModels: parseList(allowed), excludedModels: parseList(excluded), draining: source?.draining ?? false, priority, weight };
     const ok = await perform("source-save", async () => {
       if (!source) {
         const payload = { ...base, apiKey };
@@ -276,7 +281,7 @@ function SourceDialog({ source, onClose }: { source: SourceSummary | null; onClo
     }, source ? "feedback.saved" : "feedback.sourceAdded");
     if (ok) onClose();
   };
-  return <Dialog title={source ? t("sources.edit") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} onClick={() => document.getElementById("source-form")?.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }))}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><div className="settings-row"><label><span>{t("pool.priority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label><label><span>{t("pool.weight")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
+  return <Dialog wide title={source ? t("sources.edit") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiKey.trim()} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><label className="relay-field"><span>{t("sources.protocol")}</span><select value={wireApi} onChange={(event) => setWireApi(event.target.value as SourceSummary["wireApi"])}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><label className="relay-field"><span>{t("common.models")}</span><input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><div className="settings-row"><label><span>{t("pool.priority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label><label><span>{t("pool.weight")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
 }
 
 function OAuthDialog({ onClose }: { onClose: () => void }) {
@@ -497,6 +502,10 @@ function safeHost(value: string) {
 function matchesQuery(query: string, ...values: Array<string | string[] | null | undefined>) {
   const normalized = query.trim().toLocaleLowerCase();
   return !normalized || values.flatMap((value) => Array.isArray(value) ? value : value ?? []).some((value) => value.toLocaleLowerCase().includes(normalized));
+}
+
+function parseList(value: string) {
+  return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
 }
 
 function NoResults() {

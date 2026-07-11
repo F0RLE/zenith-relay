@@ -32,7 +32,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         StatusCode::UNAUTHORIZED
     );
 
-    let source = client
+    let source_response = client
         .post(format!("{}/sources", first.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
@@ -45,7 +45,24 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .send()
         .await
         .unwrap();
-    assert_eq!(source.status(), StatusCode::CREATED);
+    assert_eq!(source_response.status(), StatusCode::CREATED);
+    let source_text = source_response.text().await.unwrap();
+    assert!(!source_text.contains("synthetic-upstream-api-key"));
+    let source: Value = serde_json::from_str(&source_text).unwrap();
+    let source_id = source["id"].as_str().unwrap();
+    let tested_source: Value = client
+        .post(format!("{}/sources/{source_id}/test", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tested_source["models"], json!(["gpt-test"]));
+    assert!(!tested_source
+        .to_string()
+        .contains("synthetic-upstream-api-key"));
 
     let generated: Value = client
         .post(format!("{}/keys", first.origin))
@@ -141,6 +158,44 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap();
     assert_eq!(reenabling.status(), StatusCode::OK);
+
+    let wake_task: Value = client
+        .post(format!("{}/wake-tasks", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "id": "",
+            "name": "Synthetic selected wake",
+            "enabled": true,
+            "accountSelector": {"kind": "account_ids", "values": [account_id]},
+            "windowKinds": ["primary"],
+            "modelPolicy": {"kind": "explicit", "value": "gpt-test"},
+            "trigger": {"kind": "quota_full"},
+            "fallbackSchedule": null,
+            "executionPolicy": "automatic",
+            "jitterSeconds": 0,
+            "maxAttemptsPerCycle": 1,
+            "createdAtMs": 0,
+            "updatedAtMs": 0
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let wake_id = wake_task["id"].as_str().unwrap();
+    let wake_test: Value = client
+        .post(format!("{}/wake-tasks/{wake_id}/test", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(wake_test["taskId"], wake_id);
+    assert_eq!(wake_test["status"], "ready");
+    assert_eq!(wake_test["eligibleAccounts"], 1);
 
     let account_response = client
         .post(format!("{}/v1/responses", first.origin))
@@ -572,16 +627,24 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let router = Router::new()
-        .route(
-            "/v1/models",
-            get(|| async { Json(json!({"data":[{"id":"gpt-test"}]})) }),
-        )
+        .route("/v1/models", get(models_response))
         .route("/v1/responses", post(upstream_response))
         .route("/account/responses", post(account_response));
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{address}"), task)
+}
+
+async fn models_response(request: Request) -> impl IntoResponse {
+    assert_eq!(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer synthetic-upstream-api-key")
+    );
+    Json(json!({"data":[{"id":"gpt-test"}]}))
 }
 
 async fn upstream_response(request: Request) -> impl IntoResponse {

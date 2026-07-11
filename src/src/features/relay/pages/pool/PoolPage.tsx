@@ -50,7 +50,7 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
     const payload = { priority, weight, allowedModels, excludedModels, draining };
     await perform(`member-${member.id}`, () => {
       if (member.kind === "account") return mode === "local"
-        ? relayCommands.updateAccount({ accountId: member.id, priority, weight, allowedModels, excludedModels })
+        ? relayCommands.updateAccount({ accountId: member.id, priority, weight, allowedModels, excludedModels, draining })
         : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, allowedModels, excludedModels, draining, priority, weight };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);

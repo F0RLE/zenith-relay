@@ -64,6 +64,7 @@ export const relayCommands = {
   setAutomationEnabled: (taskId: string, enabled: boolean) => invoke("set_quota_wake_automation_enabled", { taskId, enabled }),
   deleteAutomation: (taskId: string) => invoke("delete_quota_wake_automation", { taskId }),
   runWakeConfirmations: () => invoke<number>("run_due_quota_wake_confirmations", { maxClaims: 2 }),
+  testAutomation: (taskId: string) => invoke<{ taskId: string; status: string; eligibleAccounts: number }>("test_quota_wake_automation", { taskId }),
 
   attachCodexGateway: (keyId: string) => invoke("attach_codex_to_local_gateway", { keyId }),
   attachOpenCodeGateway: (keyId: string) => invoke("attach_opencode_to_local_gateway", { keyId }),

@@ -1307,6 +1307,7 @@ fn main() {
             local_pool::commands::automations::set_quota_wake_automation_enabled,
             local_pool::commands::automations::delete_quota_wake_automation,
             local_pool::commands::automations::run_due_quota_wake_confirmations,
+            local_pool::commands::automations::test_quota_wake_automation,
             local_pool::commands::pool::create_local_gateway_key,
             local_pool::commands::pool::update_local_gateway_key,
             local_pool::commands::pool::set_local_gateway_key_enabled,

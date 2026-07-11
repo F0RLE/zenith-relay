@@ -23,7 +23,8 @@ use std::{
 use url::{Host, Url};
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState},
-    automations::{WakeHistory, WakeTask},
+    automations::{AccountSelector, WakeHistory, WakeModelPolicy, WakeTask},
+    discover_source_models,
     protocol::{
         AccountSummary, ApiError, ErrorEnvelope, HealthResponse, KeySummary, RuntimeStateSnapshot,
         SourceSummary, UsagePage,
@@ -92,7 +93,8 @@ pub async fn create_source(
     let api_key = input.api_key.clone();
     let id = format!("source_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("source:{id}");
-    let record = source_record(id, secret_ref.clone(), input)?;
+    let mut record = source_record(id, secret_ref.clone(), input)?;
+    record.models = discover_models(&record, &api_key).await?;
     state
         .vault
         .save(&secret_ref, &api_key)
@@ -225,6 +227,37 @@ pub async fn delete_source(
         return Err(runtime_error(error));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn test_source(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<SourceSummary>, ManagementError> {
+    let mut record = find_source(&state, &id)?;
+    let previous = record.clone();
+    let api_key = state
+        .vault
+        .load(&record.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::not_found("source_secret_missing", "source secret missing")
+        })?;
+    record.models = match discover_models(&record, &api_key).await {
+        Ok(models) => models,
+        Err(error) => {
+            record.last_error_code = Some(error.code.clone());
+            state.store.save_source(&record).map_err(store_error)?;
+            return Err(error);
+        }
+    };
+    record.last_error_code = None;
+    state.store.save_source(&record).map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        let _ = state.store.save_source(&previous);
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(source_summary(&state, &record)?))
 }
 
 pub async fn list_accounts(
@@ -1460,28 +1493,91 @@ pub async fn delete_wake_task(
 pub struct WakeTestResult {
     task_id: String,
     status: &'static str,
+    eligible_accounts: usize,
 }
 
 pub async fn test_wake_task(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<WakeTestResult>, ManagementError> {
-    if !state
+    let task = state
         .store
         .wake_tasks()
         .map_err(store_error)?
-        .iter()
-        .any(|value| value.id == id)
-    {
-        return Err(ManagementError::not_found(
-            "wake_task_not_found",
-            "wake task not found",
-        ));
+        .into_iter()
+        .find(|value| value.id == id)
+        .ok_or_else(|| ManagementError::not_found("wake_task_not_found", "wake task not found"))?;
+    let accounts = state.store.accounts().map_err(store_error)?;
+    let mut selected = match &task.account_selector {
+        AccountSelector::AllEligible => accounts
+            .iter()
+            .filter(|account| account.enabled && !account.draining)
+            .collect::<Vec<_>>(),
+        AccountSelector::AccountIds(ids) => {
+            let mut selected = Vec::with_capacity(ids.len());
+            for account_id in ids {
+                selected.push(
+                    accounts
+                        .iter()
+                        .find(|account| account.id == *account_id)
+                        .ok_or_else(|| {
+                            ManagementError::validation(
+                                "wake_account_missing",
+                                "wake task references an unknown account",
+                            )
+                        })?,
+                );
+            }
+            selected
+        }
+        AccountSelector::Tags(_) => Vec::new(),
+    };
+    selected.retain(|account| account.enabled && !account.draining);
+    if let WakeModelPolicy::Explicit(model) = &task.model_policy {
+        if matches!(task.account_selector, AccountSelector::AllEligible) {
+            selected.retain(|account| account_supports_model(account, model));
+        } else if selected
+            .iter()
+            .any(|account| !account_supports_model(account, model))
+        {
+            return Err(ManagementError::validation(
+                "wake_model_unavailable",
+                "wake model is unavailable for a selected account",
+            ));
+        }
+    } else {
+        selected.retain(|account| {
+            account
+                .models
+                .iter()
+                .any(|model| account_supports_model(account, model))
+        });
     }
     Ok(Json(WakeTestResult {
         task_id: id,
-        status: "queued_for_background_worker",
+        status: if selected.is_empty() {
+            "no_eligible_accounts"
+        } else {
+            "ready"
+        },
+        eligible_accounts: selected.len(),
     }))
+}
+
+fn account_supports_model(account: &ServerAccountRecord, model: &str) -> bool {
+    account
+        .models
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(model))
+        && (account.allowed_models.is_empty()
+            || account
+                .allowed_models
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(model)))
+        && !account
+            .excluded_models
+            .iter()
+            .any(|excluded| excluded.eq_ignore_ascii_case(model))
 }
 
 pub async fn wake_history(
@@ -1524,6 +1620,12 @@ fn source_record(
 }
 
 fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), ManagementError> {
+    if matches!(record.wire_api, WireApi::Messages) {
+        return Err(ManagementError::validation(
+            "source_protocol_unsupported",
+            "source protocol is not supported",
+        ));
+    }
     ProviderSource {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -1534,6 +1636,36 @@ fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), Ma
     }
     .validate()
     .map_err(|error| validation_error(error.to_string()))
+}
+
+async fn discover_models(
+    record: &SourceRecord,
+    api_key: &str,
+) -> Result<Vec<String>, ManagementError> {
+    let source = ProviderSource {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        base_url: record.base_url.clone(),
+        api_key: api_key.to_string(),
+        wire_api: record.wire_api,
+        models: record.models.clone(),
+    };
+    let models = discover_source_models(&source).await.map_err(|_| {
+        ManagementError::new(
+            StatusCode::BAD_GATEWAY,
+            "source_test_failed",
+            "source model discovery failed",
+            "upstream",
+            true,
+        )
+    })?;
+    if models.is_empty() {
+        return Err(ManagementError::validation(
+            "source_models_empty",
+            "source did not expose any models",
+        ));
+    }
+    Ok(models)
 }
 
 fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementError> {

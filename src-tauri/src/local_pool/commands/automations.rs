@@ -3,7 +3,7 @@ use crate::local_pool::{
     models::{AutomationRecords, LocalPoolSnapshot},
     state::DesktopState,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
@@ -163,6 +163,40 @@ pub async fn run_due_quota_wake_confirmations(
     .map_err(Into::into)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WakeAutomationTestResult {
+    task_id: String,
+    status: &'static str,
+    eligible_accounts: usize,
+}
+
+#[tauri::command]
+pub async fn test_quota_wake_automation(
+    task_id: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<WakeAutomationTestResult> {
+    let task = state
+        .store()?
+        .automations()
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "automation not found"))?;
+    validate_automation_targets(&task, &state)?;
+    let eligible_accounts = selected_automation_accounts(&task, &state)?.len();
+    Ok(WakeAutomationTestResult {
+        task_id,
+        status: if eligible_accounts == 0 {
+            "no_eligible_accounts"
+        } else {
+            "ready"
+        },
+        eligible_accounts,
+    })
+}
+
 fn build_task(
     id: String,
     input: WakeAutomationInput,
@@ -194,35 +228,11 @@ fn build_task(
 }
 
 fn validate_automation_targets(task: &WakeTask, state: &DesktopState) -> Result<(), CommandError> {
-    let store = state.store()?;
-    let selected = match &task.account_selector {
-        AccountSelector::AllEligible => store
-            .accounts()
-            .iter()
-            .filter(|account| account.account.enabled && !account.account.draining)
-            .collect::<Vec<_>>(),
-        AccountSelector::AccountIds(ids) => {
-            let mut selected = Vec::with_capacity(ids.len());
-            for id in ids {
-                selected.push(store.account(id).ok_or_else(|| {
-                    LocalPoolError::new(
-                        ErrorCode::InvalidState,
-                        "automation contains an unknown account",
-                    )
-                })?);
-            }
-            selected
-        }
-        AccountSelector::Tags(tags) => store
-            .accounts()
-            .iter()
-            .filter(|account| !tags.is_disjoint(&account.account.tags))
-            .collect::<Vec<_>>(),
-    };
+    let selected = selected_automation_accounts(task, state)?;
     let WakeModelPolicy::Explicit(model) = &task.model_policy else {
         return Ok(());
     };
-    let supports_model = |account: &&crate::local_pool::models::LocalAccountRecord| {
+    let supports_model = |account: &crate::local_pool::models::LocalAccountRecord| {
         account
             .models
             .iter()
@@ -251,6 +261,36 @@ fn validate_automation_targets(task: &WakeTask, state: &DesktopState) -> Result<
         .into());
     }
     Ok(())
+}
+
+fn selected_automation_accounts(
+    task: &WakeTask,
+    state: &DesktopState,
+) -> Result<Vec<crate::local_pool::models::LocalAccountRecord>, CommandError> {
+    let store = state.store()?;
+    let mut selected = match &task.account_selector {
+        AccountSelector::AllEligible => store.accounts().to_vec(),
+        AccountSelector::AccountIds(ids) => ids
+            .iter()
+            .map(|id| {
+                store.account(id).cloned().ok_or_else(|| {
+                    LocalPoolError::new(
+                        ErrorCode::InvalidState,
+                        "automation contains an unknown account",
+                    )
+                    .into()
+                })
+            })
+            .collect::<Result<Vec<_>, CommandError>>()?,
+        AccountSelector::Tags(tags) => store
+            .accounts()
+            .iter()
+            .filter(|account| !tags.is_disjoint(&account.account.tags))
+            .cloned()
+            .collect(),
+    };
+    selected.retain(|account| account.account.enabled && !account.account.draining);
+    Ok(selected)
 }
 
 fn trim_model_policy(policy: WakeModelPolicy) -> WakeModelPolicy {
@@ -338,6 +378,10 @@ mod tests {
             AccountSelector::AccountIds(BTreeSet::from(["account-1".to_string()]));
         let task = build_task("wake_test".into(), selected, 10, 20).unwrap();
         validate_automation_targets(&task, &state).unwrap();
+        assert_eq!(
+            selected_automation_accounts(&task, &state).unwrap().len(),
+            1
+        );
 
         state
             .store()

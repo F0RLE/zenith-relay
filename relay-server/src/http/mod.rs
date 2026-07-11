@@ -23,6 +23,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/sources/{id}",
             patch(management_api::update_source).delete(management_api::delete_source),
         )
+        .route("/sources/{id}/test", post(management_api::test_source))
         .route("/accounts", get(management_api::list_accounts))
         .route(
             "/accounts/import/preview",

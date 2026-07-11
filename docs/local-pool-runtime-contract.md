@@ -238,6 +238,7 @@ GET  /sources
 POST /sources
 PATCH /sources/{id}
 DELETE /sources/{id}
+POST /sources/{id}/test
 GET  /quota
 GET  /models
 POST /gateway/start
@@ -257,6 +258,12 @@ redacted and return independently selectable item IDs. Confirm requires the
 batch session ID plus `selectedItemIds`; item IDs cannot be confirmed from a
 different batch. Proxy and source records in a portable bundle are reported as
 ignored and are never ingested by account import.
+
+`POST /sources/{id}/test` performs bounded model discovery with the stored
+upstream credential, updates the source model registry, and returns only the
+redacted source summary. `POST /wake-tasks/{id}/test` validates that specific
+task selector and model policy and reports the eligible account count; it does
+not enqueue or send a wake request.
 
 Optional proxy endpoints:
 

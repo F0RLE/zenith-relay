@@ -7,8 +7,13 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
-  await expect(page.getByRole("dialog", { name: "Edit source" })).toBeVisible();
-  await page.getByRole("button", { name: "Cancel" }).click();
+  const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
+  await sourceDialog.getByLabel("Protocol").selectOption("chat_completions");
+  await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4-mini, gpt-5.4");
+  await sourceDialog.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
+  await sourceDialog.getByLabel("Excluded models", { exact: true }).fill("gpt-5.4");
+  await sourceDialog.getByRole("button", { name: "Save" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Test" }).click();
   await page.getByRole("tab", { name: "Accounts" }).click();
   await page.getByRole("button", { name: "Sign in" }).first().click();
   await page.getByRole("button", { name: "Open sign-in" }).click();
@@ -48,15 +53,19 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(automationRow).toContainText("Primary");
   await expect(automationRow).not.toContainText("Secondary");
   await expect(automationRow).toContainText("gpt-5.4-mini");
+  await automationRow.getByRole("button", { name: "Test" }).click();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Personal Plus" }).click();
+  await page.getByLabel("Drain").check();
+  await page.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await page.getByRole("tab", { name: "Keys" }).click();
   await page.getByRole("button", { name: "Edit policy" }).click();
-  await expect(page.getByRole("dialog", { name: "Edit policy" })).toBeVisible();
-  await page.getByRole("button", { name: "Cancel" }).click();
+  const keyPolicy = page.getByRole("dialog", { name: "Edit policy" });
+  await keyPolicy.getByLabel("Model prefix").fill("team");
+  await keyPolicy.getByRole("button", { name: "Save" }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "Rotate" }).click();
   await expect(page.getByText("zlr_synthetic_rotated_key")).toBeVisible();
@@ -81,6 +90,16 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
   const profileCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "attach_codex_to_local_gateway" || call.command === "attach_opencode_to_local_gateway").map((call) => call.command));
   expect(profileCalls).toEqual(["attach_codex_to_local_gateway", "attach_opencode_to_local_gateway"]);
+  const policyCalls = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__;
+    return Object.fromEntries(calls
+      .filter((call) => ["update_local_source", "test_quota_wake_automation", "update_local_account", "update_local_gateway_key"].includes(call.command))
+      .map((call) => [call.command, call.args]));
+  });
+  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", models: ["gpt-5.4-mini", "gpt-5.4"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"] } });
+  expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
+  expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"] } });
+  expect(policyCalls.update_local_gateway_key).toMatchObject({ input: { modelPrefix: "team" } });
 });
 
 test("import failures remain actionable without reusing a consumed session", async ({ page }) => {
@@ -217,6 +236,8 @@ test("remote bulk import previews portable content and confirms selected rows", 
   await existing.check();
   await dialog.getByRole("button", { name: "Import 1 account(s)" }).click();
   await expect(dialog).toBeHidden();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Test" }).click();
 
   const actions = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__;
@@ -230,5 +251,6 @@ test("remote bulk import previews portable content and confirms selected rows", 
       action: { type: "confirm_account_batch_import" },
       payload: { sessionId: "remote_import", selectedItemIds: ["import_fedcba9876543210"] },
     },
+    { action: { type: "test_source", id: "source_synthetic" }, payload: null },
   ]);
 });

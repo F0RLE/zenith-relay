@@ -108,6 +108,8 @@ pub struct UpdateAccountInput {
     allowed_models: Option<Vec<String>>,
     #[serde(default)]
     excluded_models: Option<Vec<String>>,
+    #[serde(default)]
+    draining: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2107,6 +2109,9 @@ fn apply_account_patch(
     if let Some(models) = input.excluded_models {
         account.excluded_models = normalize_models(models)?;
     }
+    if let Some(draining) = input.draining {
+        account.account.draining = draining;
+    }
     account.normalize();
     Ok(())
 }
@@ -2984,6 +2989,7 @@ mod tests {
                 weight: Some(2),
                 allowed_models: Some(vec![" gpt-test ".into(), "gpt-test".into()]),
                 excluded_models: Some(vec![" gpt-old ".into()]),
+                draining: Some(true),
             },
         )
         .unwrap();
@@ -2992,6 +2998,7 @@ mod tests {
         assert_eq!(account.weight, 2);
         assert_eq!(account.allowed_models, ["gpt-test"]);
         assert_eq!(account.excluded_models, ["gpt-old"]);
+        assert!(account.account.draining);
         assert!(apply_account_patch(
             &mut account,
             UpdateAccountInput {
@@ -3001,6 +3008,7 @@ mod tests {
                 weight: Some(0),
                 allowed_models: None,
                 excluded_models: None,
+                draining: None,
             },
         )
         .is_err());
