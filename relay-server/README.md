@@ -52,3 +52,14 @@ zenith-relay-server --restore /secure/path/relay-backup
 The backup contains SQLite metadata and the encrypted vault. The same
 `ZENITH_RELAY_VAULT_KEY` is required after restore. Store the backup and vault
 key separately.
+
+## Database Migrations
+
+Migrations in `migrations/` are append-only and run in numeric order. Schema
+version 2 records the applied filename/version ledger in `schema_migrations`.
+Before upgrading an existing database, Relay creates a consistent
+`relay.sqlite.pre-migration` snapshot and a durable in-progress marker. If the
+process stops during migration, the next start validates and restores that
+snapshot before retrying. The snapshot remains available after a successful
+migration; a database created by a newer Relay version is rejected without
+rewriting it.
