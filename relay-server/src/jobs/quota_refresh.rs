@@ -13,7 +13,7 @@ use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState},
     quota::{
         QuotaErrorState, QuotaRefreshData, QuotaTransition, QuotaWindowInput, QuotaWindowKind,
-        ResetTime, SubscriptionInput,
+        ResetTime, SubscriptionInput, SupplementalQuotaWindowInput,
     },
 };
 
@@ -153,6 +153,8 @@ async fn refresh_data(
 struct UsagePayload {
     plan_type: Option<String>,
     rate_limit: Option<RateLimit>,
+    code_review_rate_limit: Option<SupplementalRateLimit>,
+    additional_rate_limits: Option<Vec<AdditionalRateLimit>>,
     rate_limit_reset_credits: Option<ResetCredits>,
 }
 
@@ -162,12 +164,26 @@ struct RateLimit {
     secondary_window: Option<RateLimitWindow>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RateLimitWindow {
-    used_percent: f64,
+    #[serde(default)]
+    used_percent: Option<f64>,
     limit_window_seconds: Option<i64>,
     reset_after_seconds: Option<i64>,
     reset_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct SupplementalRateLimit {
+    primary_window: Option<RateLimitWindow>,
+    secondary_window: Option<RateLimitWindow>,
+}
+
+#[derive(Deserialize)]
+struct AdditionalRateLimit {
+    limit_name: Option<String>,
+    metered_feature: Option<String>,
+    rate_limit: Option<SupplementalRateLimit>,
 }
 
 #[derive(Deserialize)]
@@ -178,6 +194,7 @@ struct ResetCredits {
 fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, String> {
     let payload: UsagePayload =
         serde_json::from_slice(body).map_err(|_| "quota_invalid_response".to_string())?;
+    let supplemental = collect_supplemental_windows(&payload, observed_at_ms);
     let (primary, secondary) = match payload.rate_limit {
         Some(rate_limit) => (
             rate_limit
@@ -203,6 +220,7 @@ fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, S
     Ok(QuotaRefreshData {
         primary,
         secondary,
+        supplemental,
         subscription,
         reset_credits_available: payload
             .rate_limit_reset_credits
@@ -211,14 +229,92 @@ fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, S
     })
 }
 
+fn collect_supplemental_windows(
+    payload: &UsagePayload,
+    observed_at_ms: u64,
+) -> Vec<SupplementalQuotaWindowInput> {
+    let mut windows = Vec::new();
+    if let Some(rate_limit) = payload.code_review_rate_limit.as_ref() {
+        append_supplemental_windows(
+            &mut windows,
+            "code_review",
+            "Code Review",
+            rate_limit,
+            observed_at_ms,
+        );
+    }
+    for (index, entry) in payload
+        .additional_rate_limits
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .take(15)
+        .enumerate()
+    {
+        let Some(rate_limit) = entry.rate_limit.as_ref() else {
+            continue;
+        };
+        let label = entry
+            .limit_name
+            .as_deref()
+            .and_then(safe_display_label)
+            .or_else(|| {
+                entry
+                    .metered_feature
+                    .as_deref()
+                    .and_then(safe_display_label)
+            })
+            .unwrap_or_else(|| "Additional quota".to_string());
+        append_supplemental_windows(
+            &mut windows,
+            &format!("additional:{index}"),
+            &label,
+            rate_limit,
+            observed_at_ms,
+        );
+    }
+    windows
+}
+
+fn append_supplemental_windows(
+    output: &mut Vec<SupplementalQuotaWindowInput>,
+    id_prefix: &str,
+    label: &str,
+    rate_limit: &SupplementalRateLimit,
+    observed_at_ms: u64,
+) {
+    for (kind, window) in [
+        (QuotaWindowKind::Primary, rate_limit.primary_window.as_ref()),
+        (
+            QuotaWindowKind::Secondary,
+            rate_limit.secondary_window.as_ref(),
+        ),
+    ] {
+        let Some(window) = window else { continue };
+        let kind_label = match kind {
+            QuotaWindowKind::Primary => "primary",
+            QuotaWindowKind::Secondary => "secondary",
+        };
+        let Ok(window) = map_window(window.clone(), kind, observed_at_ms) else {
+            continue;
+        };
+        output.push(SupplementalQuotaWindowInput {
+            id: format!("{id_prefix}:{kind_label}"),
+            label: label.to_string(),
+            window,
+        });
+    }
+}
+
 fn map_window(
     window: RateLimitWindow,
     kind: QuotaWindowKind,
     observed_at_ms: u64,
 ) -> Result<QuotaWindowInput, String> {
-    if !window.used_percent.is_finite() || !(0.0..=100.0).contains(&window.used_percent) {
-        return Err("quota_invalid_percentage".to_string());
-    }
+    let used_percent = window
+        .used_percent
+        .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+        .ok_or_else(|| "quota_invalid_percentage".to_string())?;
     let reset = window
         .reset_at
         .filter(|value| *value > 0)
@@ -233,7 +329,7 @@ fn map_window(
         });
     Ok(QuotaWindowInput {
         kind,
-        available_percent: Some(100.0 - window.used_percent),
+        available_percent: Some(100.0 - used_percent),
         explicitly_full: None,
         reset,
         window_minutes: window
@@ -255,6 +351,12 @@ fn safe_label(value: String) -> Option<String> {
     .then(|| value.to_ascii_lowercase())
 }
 
+fn safe_display_label(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+        .then(|| value.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +370,13 @@ mod tests {
                     "primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_after_seconds":60},
                     "secondary_window":{"used_percent":0,"limit_window_seconds":604800,"reset_after_seconds":604800}
                 },
+                "code_review_rate_limit":{
+                    "primary_window":{"used_percent":40,"limit_window_seconds":18000}
+                },
+                "additional_rate_limits":[{
+                    "metered_feature":" GPT-5   Priority ",
+                    "rate_limit":{"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}
+                }],
                 "rate_limit_reset_credits":{"available_count":2}
             }"#,
             1_000,
@@ -279,6 +388,60 @@ mod tests {
             quota.secondary.unwrap().available_basis_points,
             Some(10_000)
         );
+        assert_eq!(quota.supplemental.len(), 2);
+        assert_eq!(quota.supplemental[0].id, "code_review:primary");
+        assert_eq!(
+            quota.supplemental[0].window.available_basis_points,
+            Some(6_000)
+        );
+        assert_eq!(quota.supplemental[1].id, "additional:0:secondary");
+        assert_eq!(quota.supplemental[1].label, "GPT-5 Priority");
         assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("plus"));
+    }
+
+    #[test]
+    fn optional_quota_windows_are_absent_or_skipped_when_unusable() {
+        let data = parse_payload(
+            br#"{
+                "rate_limit":{"primary_window":{"used_percent":25}},
+                "code_review_rate_limit":{"primary_window":{}},
+                "additional_rate_limits":[{
+                    "limit_name":"Broken optional limit",
+                    "rate_limit":{"primary_window":{"used_percent":101}}
+                }]
+            }"#,
+            1_000,
+        )
+        .unwrap();
+        assert!(data.supplemental.is_empty());
+        assert_eq!(
+            data.normalize(&Default::default())
+                .unwrap()
+                .0
+                .primary
+                .unwrap()
+                .available_basis_points,
+            Some(7_500)
+        );
+
+        let without_optional = parse_payload(
+            br#"{"rate_limit":{"primary_window":{"used_percent":25}}}"#,
+            1_000,
+        )
+        .unwrap();
+        assert!(without_optional.supplemental.is_empty());
+    }
+
+    #[test]
+    fn primary_window_rejects_missing_or_invalid_usage_percentage() {
+        for body in [
+            br#"{"rate_limit":{"primary_window":{}}}"#.as_slice(),
+            br#"{"rate_limit":{"primary_window":{"used_percent":101}}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                parse_payload(body, 1_000).unwrap_err(),
+                "quota_invalid_percentage"
+            );
+        }
     }
 }

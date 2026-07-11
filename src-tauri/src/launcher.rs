@@ -18,39 +18,17 @@ const CODEX_PROCESS_NAMES: &[&str] = &[
 ];
 
 pub fn launch_codex() -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if launch_codex_desktop().is_ok() {
-            return "Codex запущен.".to_string();
-        }
-    }
+    launch_codex_checked(true)
+        .map(|_| "Codex запущен.".to_string())
+        .unwrap_or_else(|error| format!("Ключ сохранен, но Codex не запустился: {error}"))
+}
 
-    #[cfg(target_os = "windows")]
-    {
-        match start_detached(PathBuf::from("codex")) {
-            Ok(_) => "Codex запущен.".to_string(),
-            Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        }
+pub fn launch_codex_with_profile() -> Result<(), String> {
+    if is_codex_running() {
+        stop_codex();
+        thread::sleep(Duration::from_millis(600));
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        if Command::new("open").args(["-a", "Codex"]).spawn().is_ok() {
-            return "Codex запущен.".to_string();
-        }
-        match start_detached(PathBuf::from("codex")) {
-            Ok(_) => "Codex запущен.".to_string(),
-            Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        }
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        match start_detached(PathBuf::from("codex")) {
-            Ok(_) => "Codex запущен.".to_string(),
-            Err(err) => format!("Ключ сохранен, но Codex не запустился: {err}"),
-        }
-    }
+    launch_codex_checked(false)
 }
 
 pub fn restart_codex_if_running() -> Option<String> {
@@ -80,24 +58,54 @@ fn stop_codex() {
     }
 }
 
-fn start_detached(path: PathBuf) -> Result<(), String> {
+fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if launch_codex_desktop().is_ok() {
+            return Ok(());
+        }
+        start_detached(PathBuf::from("codex"), inject_saved_key)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if Command::new("open").args(["-a", "Codex"]).spawn().is_ok() {
+            return Ok(());
+        }
+        start_detached(PathBuf::from("codex"), inject_saved_key)
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        start_detached(PathBuf::from("codex"), inject_saved_key)
+    }
+}
+
+fn start_detached(path: PathBuf, inject_saved_key: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         let mut command = windows_hidden_command(path);
-        if let Some(api_key) = load_api_key_for_launch() {
-            command.env("OPENAI_API_KEY", api_key);
-        }
+        configure_launch_environment(&mut command, inject_saved_key);
         command.spawn().map(|_| ()).map_err(|err| err.to_string())
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         let mut command = Command::new(path);
+        configure_launch_environment(&mut command, inject_saved_key);
+        command.spawn().map(|_| ()).map_err(|err| err.to_string())
+    }
+}
+
+fn configure_launch_environment(command: &mut Command, inject_saved_key: bool) {
+    if inject_saved_key {
         if let Some(api_key) = load_api_key_for_launch() {
             command.env("OPENAI_API_KEY", api_key);
         }
-        command.spawn().map(|_| ()).map_err(|err| err.to_string())
+        return;
     }
+    command.env_remove("OPENAI_API_KEY");
+    command.env_remove("OPENAI_BASE_URL");
 }
 
 #[cfg(target_os = "windows")]
@@ -128,4 +136,25 @@ fn is_codex_process(process: &sysinfo::Process) -> bool {
     CODEX_PROCESS_NAMES
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn account_profile_launch_clears_api_environment_overrides() {
+        let mut command = Command::new("codex");
+        command.env("OPENAI_API_KEY", "old-key");
+        command.env("OPENAI_BASE_URL", "https://old.example/v1");
+        configure_launch_environment(&mut command, false);
+        let environment = command.get_envs().collect::<Vec<_>>();
+        assert!(environment
+            .iter()
+            .any(|(key, value)| { *key == OsStr::new("OPENAI_API_KEY") && value.is_none() }));
+        assert!(environment
+            .iter()
+            .any(|(key, value)| { *key == OsStr::new("OPENAI_BASE_URL") && value.is_none() }));
+    }
 }

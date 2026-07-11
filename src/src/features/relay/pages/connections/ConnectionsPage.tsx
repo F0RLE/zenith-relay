@@ -1,25 +1,36 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { CirclePause, Copy, Download, Eye, EyeOff, Network, Pencil, Play, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
+import { CirclePause, Copy, Download, Eye, EyeOff, LogIn, MoreHorizontal, Network, Pencil, Play, Plus, Power, RefreshCw, ShieldAlert, SlidersHorizontal, Trash2, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { AccountSummary, ImportSession, OAuthFlow, ProxyAssignmentResult, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountExportFormat, AccountSummary, ImportSession, OAuthFlow, ProxyAssignmentResult, SourceSummary, WakeTask } from "../../api/types";
 import {
   Button,
   Dialog,
   EmptyState,
   IconButton,
   PageHeader,
-  QuotaMeter,
+  QuotaStack,
   SecretField,
   StatusBadge,
   Tabs,
   copyText,
+  quotaWindowLabel,
 } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
-type DialogKind = "source" | "oauth" | "import" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | null;
+type DialogKind = "source" | "oauth" | "import" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
+
+const accountExportFormats: Array<{ value: AccountExportFormat; label: string }> = [
+  { value: "sub2api", label: "sub2api" },
+  { value: "cpa", label: "CPA" },
+  { value: "cockpit", label: "Cockpit" },
+  { value: "9router", label: "9router" },
+  { value: "codex", label: "Codex" },
+  { value: "axon_hub", label: "AxonHub" },
+  { value: "codex_manager", label: "Codex-Manager" },
+];
 
 export function ConnectionsPage() {
   const { t } = useTranslation();
@@ -30,10 +41,13 @@ export function ConnectionsPage() {
   const [editingSource, setEditingSource] = useState<SourceSummary | null>(null);
   const [editingAutomation, setEditingAutomation] = useState<WakeTask | null>(null);
   const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
+  const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
   const canImportAccounts = mode !== "remote" || supports("account_batch_import");
   const canManageProxies = supports("account_proxies");
+  const canExportAccounts = supports("account_export");
+  const canRevealAccountIdentity = mode === "local" || supports("account_identity_reveal");
 
   useEffect(() => {
     setView(mode === "zenith" ? "api" : "accounts");
@@ -41,6 +55,7 @@ export function ConnectionsPage() {
     setEditingSource(null);
     setEditingAutomation(null);
     setProxyAccount(null);
+    setExportAccountIds([]);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);
@@ -61,7 +76,7 @@ export function ConnectionsPage() {
       ];
 
   const primaryLabel = view === "accounts"
-    ? mode === "local" ? t("accounts.signIn") : t("accounts.import")
+    ? mode === "local" ? t("accounts.signIn") : t("connections.import")
     : view === "sources"
       ? t("sources.add")
       : view === "automations"
@@ -98,19 +113,19 @@ export function ConnectionsPage() {
         subtitle={t(`connections.subtitles.${mode}`)}
         actions={
           <>
-            {view === "accounts" && mode !== "zenith" ? (
-              <Button variant="secondary" icon={<Download aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={() => setDialog("import")}>
+            {view === "accounts" && mode === "local" ? (
+              <Button variant="secondary" icon={<Upload aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={() => setDialog("import")}>
                 {t("connections.import")}
               </Button>
             ) : null}
-            <Button variant="primary" icon={view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
+            <Button variant="primary" icon={view === "accounts" ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden /> : view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
               {primaryLabel}
             </Button>
           </>
         }
       />
       <Tabs value={view} items={tabs} onChange={(id) => setView(id as View)} label={t("connections.views")} />
-      {view === "sources" || view === "accounts" || view === "automations" ? <div className="table-toolbar">
+      {view === "sources" || view === "automations" ? <div className="table-toolbar">
         <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
@@ -119,7 +134,7 @@ export function ConnectionsPage() {
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onAdd={() => setDialog("source")} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable query={query} canImport={canImportAccounts} canManageProxies={canManageProxies} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={() => setDialog("bulkProxies")} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={() => setDialog("bulkProxies")} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onAdd={() => { setEditingAutomation(null); setDialog("automation"); }} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
@@ -134,6 +149,7 @@ export function ConnectionsPage() {
       {dialog === "topup" ? <TopUpDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog onClose={() => setDialog(null)} /> : null}
+      {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}
     </section>
   );
@@ -173,40 +189,128 @@ function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => vo
   );
 }
 
-function AccountsTable({ query, canImport, canManageProxies, onImport, onSignIn, onProxy, onBulkProxies }: { query: string; canImport: boolean; canManageProxies: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: () => void }) {
+function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, canRevealIdentity, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; canRevealIdentity: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: () => void; onExport: (accountIds: string[]) => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode, runtime, perform, busy, quotaWindows, setQuotaWindowVisible } = useRelayState();
+  const [selected, setSelected] = useState<string[]>([]);
+  const [revealedIdentities, setRevealedIdentities] = useState<Record<string, string>>({});
+  const allAccounts = runtime?.accounts ?? [];
+  useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
+  useEffect(() => setRevealedIdentities({}), [mode]);
   if (!runtime?.accounts.length) {
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
   const accounts = runtime.accounts.filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models));
-  if (!accounts.length) return <NoResults />;
+  const exportIds = selected.length ? selected : allAccounts.map((account) => account.id);
+  const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
+  const selectedAccount = selected.length === 1 ? allAccounts.find((account) => account.id === selected[0]) : null;
+  const primaryWindow = allAccounts.find((account) => account.quota.primary)?.quota.primary ?? null;
+  const secondaryWindow = allAccounts.find((account) => account.quota.secondary)?.quota.secondary ?? null;
+  const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
+  const toggleAllVisible = (checked: boolean) => setSelected(checked ? [...new Set([...selected, ...accounts.map((account) => account.id)])] : selected.filter((id) => !accounts.some((account) => account.id === id)));
+  const toggleIdentity = async (account: AccountSummary) => {
+    if (revealedIdentities[account.id]) {
+      setRevealedIdentities((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== account.id)));
+      return;
+    }
+    let identity = "";
+    const ok = await perform(`identity-${account.id}`, async () => {
+      const result = mode === "local"
+        ? await relayCommands.revealLocalAccountIdentity(account.id)
+        : await relayCommands.revealRemoteAccountIdentity(account.id);
+      identity = result.identity;
+    });
+    if (ok && identity) setRevealedIdentities((current) => ({ ...current, [account.id]: identity }));
+  };
   return (
     <>
-    <div className="table-toolbar"><Button variant="secondary" icon={<Network aria-hidden />} disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : undefined} onClick={onBulkProxies}>{t("proxies.assignBulk")}</Button>{mode === "local" ? <Button variant="secondary" busy={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")}>{t("accounts.refreshAll")}</Button> : null}</div>
-    <div className="relay-table-wrap">
-      <table className="relay-table">
-        <thead><tr><th>{t("common.health")}</th><th>{t("common.name")}</th><th>{t("accounts.plan")}</th><th>{t("common.quota")}</th><th>{t("proxies.proxy")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
-        <tbody>{accounts.map((account) => (
-          <tr key={account.id}>
-            <td><StatusBadge status={account.health === "healthy" ? "ready" : account.health === "blocked" ? "error" : "warning"} label={t(`health.${account.health}`, { defaultValue: account.health })} /></td>
-            <td><strong>{account.label}</strong><small>{account.identityHint}</small></td>
-            <td>{account.subscription.planType ?? t("common.unknown")}</td>
-            <td><QuotaMeter window={account.quota.primary} label={t("quota.primary")} /></td>
-            <td><button type="button" className="proxy-status-button" disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : t("proxies.changeAccount")} onClick={() => onProxy(account)}><StatusBadge status={account.proxyAvailable === false ? "error" : account.proxyMode === "account" ? "info" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></button></td>
-            <td>{account.models.length}</td>
-            <td className="row-actions">
-              <IconButton label={t("accounts.refreshQuota")} icon={<RefreshCw aria-hidden />} disabled={mode === "remote" || busy === `quota-${account.id}`} title={mode === "remote" ? t("accounts.serverRefreshHint") : t("accounts.refreshQuota")} onClick={() => perform(`quota-${account.id}`, () => relayCommands.refreshAccountQuota(account.id), "feedback.refreshed")} />
-              <IconButton label={account.draining ? t("accounts.resume") : t("accounts.drain")} icon={account.draining ? <Play aria-hidden /> : <CirclePause aria-hidden />} title={account.draining ? t("accounts.resume") : t("accounts.drain")} onClick={() => perform(`drain-${account.id}`, () => mode === "local" ? relayCommands.setAccountDraining(account.id, !account.draining) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { draining: !account.draining }), "feedback.saved")} />
-              <IconButton label={account.enabled ? t("common.disable") : t("common.enable")} icon={<Power aria-hidden />} title={account.enabled ? t("common.disable") : t("common.enable")} onClick={() => perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved")} />
-              <IconButton label={t("common.delete")} icon={<Trash2 aria-hidden />} title={t("common.delete")} onClick={() => { if (window.confirm(t("accounts.deleteConfirm"))) void perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"); }} />
-            </td>
-          </tr>
-        ))}</tbody>
-      </table>
+    <div className="account-command-bar">
+      <div className="account-command-context">
+        <input type="checkbox" aria-label={t("accounts.selectAll")} title={t("accounts.selectAll")} checked={allSelected} disabled={!accounts.length} onChange={(event) => toggleAllVisible(event.target.checked)} />
+        {selected.length ? <span>{t("accounts.selectedCount", { count: selected.length })}</span> : <label className="search-field account-search"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} /></label>}
+      </div>
+      <div>
+        {selected.length ? <>
+          {mode === "local" && selectedAccount ? <Button variant="primary" icon={<Play aria-hidden />} busy={busy === `launch-account-${selectedAccount.id}`} disabled={!selectedAccount.secretAvailable} title={!selectedAccount.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchSelected")} onClick={() => void perform(`launch-account-${selectedAccount.id}`, () => relayCommands.launchCodexAccount(selectedAccount.id), "feedback.launched")}>{t("accounts.launchSelected")}</Button> : null}
+          <Button variant="secondary" icon={<Download aria-hidden />} disabled={!canExport} title={!canExport ? t("remote.capabilityUnavailable") : undefined} onClick={() => onExport(exportIds)}>{t("accounts.exportSelected", { count: selected.length })}</Button>
+          <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
+        </> : <>
+          {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={<RefreshCw className={busy === "quota-all" ? "spin" : undefined} aria-hidden />} disabled={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")} /> : null}
+          <details className="quota-display-menu">
+            <summary aria-label={t("quota.displaySettings")} title={t("quota.displaySettings")}><SlidersHorizontal aria-hidden /></summary>
+            <div aria-label={t("quota.displaySettings")}>
+              <strong>{t("quota.displaySettings")}</strong>
+              <label><input type="checkbox" checked={quotaWindows.primary} disabled={quotaWindows.primary && !quotaWindows.secondary} onChange={(event) => setQuotaWindowVisible("primary", event.target.checked)} /><span>{quotaWindowLabel(primaryWindow, "primary", t)}</span></label>
+              <label><input type="checkbox" checked={quotaWindows.secondary} disabled={quotaWindows.secondary && !quotaWindows.primary} onChange={(event) => setQuotaWindowVisible("secondary", event.target.checked)} /><span>{quotaWindowLabel(secondaryWindow, "secondary", t)}</span></label>
+            </div>
+          </details>
+          <details className="account-row-menu account-bulk-menu">
+            <summary aria-label={t("common.actions")} title={t("common.actions")}><MoreHorizontal aria-hidden /></summary>
+            <div role="menu">
+              <button type="button" role="menuitem" disabled={!canExport} onClick={(event) => { closeDetails(event.currentTarget); onExport(exportIds); }}><Download aria-hidden /><span>{t("accounts.exportAll")}</span></button>
+              <button type="button" role="menuitem" disabled={!canManageProxies} onClick={(event) => { closeDetails(event.currentTarget); onBulkProxies(); }}><Network aria-hidden /><span>{t("proxies.assignBulk")}</span></button>
+            </div>
+          </details>
+        </>}
+      </div>
     </div>
+    {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")}>
+      {accounts.map((account) => (
+        <article key={account.id} className={`account-card${selected.includes(account.id) ? " selected" : ""}`} role="listitem">
+          <div className="account-card-main">
+            <input type="checkbox" aria-label={t("accounts.select", { name: account.label })} checked={selected.includes(account.id)} onChange={() => toggleSelected(account.id)} />
+            <div className="account-identity">
+              <strong>{account.label}</strong>
+              <div>
+                <span className={`account-health ${accountHealthTone(account.health)}`}>{t(`health.${account.health}`, { defaultValue: account.health })}</span>
+                <small className={revealedIdentities[account.id] ? "revealed" : undefined} title={revealedIdentities[account.id]}>{revealedIdentities[account.id] ?? account.identityHint}</small>
+                {canRevealIdentity ? <IconButton label={revealedIdentities[account.id] ? t("accounts.hideIdentity") : t("accounts.revealIdentity")} icon={revealedIdentities[account.id] ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={!account.secretAvailable || busy === `identity-${account.id}`} title={!account.secretAvailable ? t("accounts.credentialsUnavailable") : revealedIdentities[account.id] ? t("accounts.hideIdentity") : t("accounts.revealIdentity")} onClick={() => void toggleIdentity(account)} /> : null}
+              </div>
+            </div>
+            <div className="account-facts">
+              <div><span>{t("accounts.plan")}</span><strong>{accountPlanLabel(account.subscription.planType, t("common.unknown"))}</strong></div>
+              <div><span>{t("proxies.proxy")}</span><button type="button" className="proxy-status-button" disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : t("proxies.changeAccount")} onClick={() => onProxy(account)}><StatusBadge status={account.proxyAvailable === false ? "error" : account.proxyMode === "account" ? "info" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></button></div>
+            </div>
+            <div className="account-row-action-list">
+              <details className="account-row-menu">
+                <summary aria-label={t("common.actions")} title={t("common.actions")}><MoreHorizontal aria-hidden /></summary>
+                <div role="menu">
+                  <button type="button" role="menuitem" disabled={!canExport || !account.secretAvailable} onClick={(event) => { closeDetails(event.currentTarget); onExport([account.id]); }}><Download aria-hidden /><span>{t("accounts.exportOne", { name: account.label })}</span></button>
+                  {mode === "local" ? <button type="button" role="menuitem" disabled={busy === `quota-${account.id}`} onClick={(event) => { closeDetails(event.currentTarget); void perform(`quota-${account.id}`, () => relayCommands.refreshAccountQuota(account.id), "feedback.refreshed"); }}><RefreshCw aria-hidden /><span>{t("accounts.refreshQuota")}</span></button> : null}
+                  <button type="button" role="menuitem" onClick={(event) => { closeDetails(event.currentTarget); void perform(`drain-${account.id}`, () => mode === "local" ? relayCommands.setAccountDraining(account.id, !account.draining) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { draining: !account.draining }), "feedback.saved"); }}>{account.draining ? <Play aria-hidden /> : <CirclePause aria-hidden />}<span>{account.draining ? t("accounts.resume") : t("accounts.drain")}</span></button>
+                  <button type="button" role="menuitem" onClick={(event) => { closeDetails(event.currentTarget); void perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved"); }}><Power aria-hidden /><span>{account.enabled ? t("common.disable") : t("common.enable")}</span></button>
+                  <button type="button" role="menuitem" className="danger" onClick={(event) => { closeDetails(event.currentTarget); if (window.confirm(t("accounts.deleteConfirm"))) void perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"); }}><Trash2 aria-hidden /><span>{t("common.delete")}</span></button>
+                </div>
+              </details>
+            </div>
+          </div>
+          <div className="account-card-quota"><QuotaStack snapshot={account.quota} visibility={quotaWindows} /></div>
+        </article>
+      ))}
+    </div> : <NoResults />}
     </>
   );
+}
+
+function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, perform, busy } = useRelayState();
+  const [format, setFormat] = useState<AccountExportFormat>("sub2api");
+  const [confirmed, setConfirmed] = useState(false);
+  const run = async (destination: "copy" | "download") => {
+    const ok = await perform(`account-export-${destination}`, async () => {
+      const input = { accountIds, format, destination } as const;
+      const result = mode === "local"
+        ? await relayCommands.exportLocalAccounts(input)
+        : await relayCommands.exportRemoteAccounts(input);
+      if (destination === "copy") {
+        if (!result.content) throw new Error("account export content is missing");
+        await copyText(result.content);
+      }
+    }, destination === "copy" ? "feedback.accountExportCopied" : "feedback.accountExportDownloaded");
+    if (ok) onClose();
+  };
+  return <Dialog title={t("accounts.exportTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} disabled={!confirmed} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button><Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} disabled={!confirmed} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button></>}><div className="relay-form account-export-form"><div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div><div className="account-export-formats" role="radiogroup" aria-label={t("accounts.exportFormat")}>{accountExportFormats.map((option) => <button type="button" role="radio" aria-checked={format === option.value} key={option.value} onClick={() => setFormat(option.value)}><span className="account-export-radio" aria-hidden /><span>{option.label}</span></button>)}</div><div role="alert" className="account-export-warning"><ShieldAlert aria-hidden /><div><strong>{t("accounts.exportSensitiveTitle")}</strong><span>{t("accounts.exportWarning")}</span></div></div><label className="account-export-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>{t("accounts.confirmExport")}</span></label></div></Dialog>;
 }
 
 function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
@@ -546,6 +650,28 @@ function safeHost(value: string) {
   try { return new URL(value).host; } catch { return value; }
 }
 
+function accountHealthTone(health: string) {
+  if (health === "healthy") return "ready";
+  if (health === "blocked" || health === "unhealthy") return "error";
+  return "warning";
+}
+
+function accountPlanLabel(planType: string | null, unknown: string) {
+  const value = planType?.trim();
+  if (!value) return unknown;
+  const key = value.toLocaleLowerCase().replace(/[\s_-]/g, "");
+  if (key.includes("team") || key.includes("business")) return "Business";
+  if (key.includes("enterprise")) return "Enterprise";
+  if (key === "prolite") return "Pro 5x";
+  if (key === "promax") return "Pro 20x";
+  if (key === "pro") return "Pro";
+  if (key.includes("plus")) return "Plus";
+  if (key === "free") return "Free";
+  if (key === "go") return "Go";
+  if (key === "edu" || key.includes("education")) return "Edu";
+  return value;
+}
+
 function matchesQuery(query: string, ...values: Array<string | string[] | null | undefined>) {
   const normalized = query.trim().toLocaleLowerCase();
   return !normalized || values.flatMap((value) => Array.isArray(value) ? value : value ?? []).some((value) => value.toLocaleLowerCase().includes(normalized));
@@ -553,6 +679,11 @@ function matchesQuery(query: string, ...values: Array<string | string[] | null |
 
 function parseList(value: string) {
   return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
+}
+
+function closeDetails(element: HTMLElement) {
+  const details = element.closest("details");
+  if (details) details.open = false;
 }
 
 function NoResults() {

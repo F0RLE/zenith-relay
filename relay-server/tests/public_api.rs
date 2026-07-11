@@ -220,6 +220,96 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap();
     assert_eq!(reenabling.status(), StatusCode::OK);
 
+    assert_eq!(
+        client
+            .post(format!(
+                "{}/accounts/{account_id}/identity/reveal",
+                first.origin
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let revealed = client
+        .post(format!(
+            "{}/accounts/{account_id}/identity/reveal",
+            first.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revealed.status(), StatusCode::OK);
+    assert_eq!(
+        revealed
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store, max-age=0")
+    );
+    let revealed_text = revealed.text().await.unwrap();
+    assert!(!revealed_text.contains("synthetic-access-token"));
+    let revealed_json: Value = serde_json::from_str(&revealed_text).unwrap();
+    assert_eq!(revealed_json["accountId"], account_id);
+    assert_eq!(revealed_json["identity"], "synthetic-chatgpt-account-id");
+
+    assert_eq!(
+        client
+            .post(format!("{}/accounts/export", first.origin))
+            .json(&json!({"accountIds": [account_id], "format": "codex"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    for format in [
+        "cpa",
+        "sub2api",
+        "cockpit",
+        "9router",
+        "codex",
+        "axon_hub",
+        "codex_manager",
+    ] {
+        let exported = client
+            .post(format!("{}/accounts/export", first.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({"accountIds": [account_id], "format": format}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(exported.status(), StatusCode::OK, "{format}");
+        assert_eq!(
+            exported
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store, max-age=0")
+        );
+        let document: Value = exported.json().await.unwrap();
+        assert_eq!(document["accountCount"], 1);
+        let content = document["content"].as_str().unwrap();
+        assert!(content.contains("synthetic-access-token"), "{format}");
+        assert!(content.contains("synthetic-refresh-token"), "{format}");
+        assert!(!content.contains("proxy.example"), "{format}");
+        serde_json::from_str::<Value>(content).unwrap();
+    }
+    assert_eq!(
+        client
+            .post(format!("{}/accounts/export", first.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({"accountIds": [account_id, account_id], "format": "codex"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
     let wake_task: Value = client
         .post(format!("{}/wake-tasks", first.origin))
         .bearer_auth("synthetic-management-token-value")

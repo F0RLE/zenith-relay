@@ -1,7 +1,8 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleAlert, CircleHelp, Copy, Eye, EyeOff, Loader2, X } from "lucide-react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { QuotaWindow } from "../api/types";
+import type { QuotaSnapshot, QuotaWindow, QuotaWindowVisibility } from "../api/types";
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
@@ -56,12 +57,39 @@ export function EmptyState({ title, description, action }: { title: string; desc
   return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong><p>{description}</p>{action}</div>;
 }
 
-export function QuotaMeter({ window, label }: { window: QuotaWindow | null; label: string }) {
+export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string }) {
   const { i18n, t } = useTranslation();
-  if (!window?.availableBasisPoints && window?.availableBasisPoints !== 0) return <span className="quota-unknown">{t("common.unknown")}</span>;
+  const windowKind = kind ?? window?.kind ?? "primary";
+  const resolvedLabel = label ?? quotaWindowLabel(window, windowKind, t);
+  if (!window?.availableBasisPoints && window?.availableBasisPoints !== 0) {
+    const unavailable = window ? t("common.unknown") : t("quota.notReported");
+    return <div className="quota-meter unavailable"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={unavailable}>{unavailable}</small><strong>-</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${unavailable}`} /></div>;
+  }
   const percent = Math.round(window.availableBasisPoints / 100);
   const reset = window.resetAtMs ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(window.resetAtMs)) : t("common.unknown");
-  return <div className="quota-meter"><div><span>{label}</span><strong>{percent}%</strong></div><div className="quota-track" aria-label={`${label} ${percent}%`}><span style={{ width: `${percent}%` }} /></div><small>{t("quota.reset", { value: reset })}</small></div>;
+  const resetLabel = t("quota.reset", { value: reset });
+  return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{percent}%</strong></div><div className="quota-track" aria-label={`${resolvedLabel} ${percent}%`}><span style={{ width: `${percent}%` }} /></div></div>;
+}
+
+export function QuotaStack({ snapshot, visibility }: { snapshot: QuotaSnapshot; visibility: QuotaWindowVisibility }) {
+  const { t } = useTranslation();
+  const reported = [
+    ...(["primary", "secondary"] as const).flatMap((kind) => snapshot[kind] ? [{ id: kind, label: "", window: snapshot[kind] }] : []),
+    ...(snapshot.supplemental ?? []),
+  ];
+  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} /></div>;
+  const windows = reported.filter((item) => visibility[item.window.kind]);
+  return <div className="quota-stack">{windows.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} />)}</div>;
+}
+
+export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
+  const minutes = window?.windowMinutes;
+  if (!minutes) return t(`quota.${kind}`);
+  const weeks = Math.round(minutes / 10_080);
+  if (weeks > 0 && Math.abs(minutes - weeks * 10_080) <= 1) return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
+  if (minutes % 1_440 === 0) return t("quota.days", { count: minutes / 1_440 });
+  if (minutes % 60 === 0) return t("quota.hours", { count: minutes / 60 });
+  return t("quota.minutes", { count: minutes });
 }
 
 export function SecretField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {

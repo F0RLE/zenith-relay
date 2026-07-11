@@ -2,7 +2,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats, getSavedKeyUsageHistory, getState, KeyStats, UiState, UsageLogEntry } from "../../../tauri";
 import { relayCommands } from "../api/commands";
-import type { LocalUsage, PageId, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import type { LocalUsage, PageId, QuotaWindowVisibility, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
 
@@ -32,6 +32,8 @@ type RelayContextValue = {
   setTheme: (theme: "system" | "light" | "dark") => void;
   compact: boolean;
   setCompact: (compact: boolean) => void;
+  quotaWindows: QuotaWindowVisibility;
+  setQuotaWindowVisible: (kind: keyof QuotaWindowVisibility, visible: boolean) => void;
 };
 
 const RelayContext = createContext<RelayContextValue | null>(null);
@@ -53,6 +55,10 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
+  const [quotaWindows, setQuotaWindows] = useState<QuotaWindowVisibility>(() => ({
+    primary: stored("relay.quota.primary", "1") !== "0",
+    secondary: stored("relay.quota.secondary", "1") !== "0",
+  }));
   const remoteUsageRequest = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -166,6 +172,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCompactState(next);
   }, []);
 
+  const setQuotaWindowVisible = useCallback((kind: keyof QuotaWindowVisibility, visible: boolean) => {
+    setQuotaWindows((current) => {
+      const next = { ...current, [kind]: visible };
+      if (!next.primary && !next.secondary) return current;
+      localStorage.setItem(`relay.quota.${kind}`, visible ? "1" : "0");
+      return next;
+    });
+  }, []);
+
   const value = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
@@ -192,7 +207,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     compact,
     setCompact,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
+    quotaWindows,
+    setQuotaWindowVisible,
+  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, quotaWindows, setQuotaWindowVisible]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

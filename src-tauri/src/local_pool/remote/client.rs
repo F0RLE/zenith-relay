@@ -2,9 +2,11 @@ use super::origin::{OriginError, PinnedOrigin};
 use reqwest::{header::LOCATION, Method};
 use serde::{de::DeserializeOwned, Serialize};
 use std::{fmt, time::Duration};
+use zenith_relay_core::accounts::{AccountExportDocument, AccountExportRequest};
 use zenith_relay_core::protocol::{
     negotiate, Capabilities, ClientProtocolRange, GatewayDiagnostic, HealthResponse,
-    NegotiatedProtocol, RuntimeStateSnapshot, UsagePage, UsageQuery, UsageRange,
+    NegotiatedProtocol, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
+    UsageRange,
 };
 use zenith_relay_core::WireApi;
 
@@ -116,6 +118,47 @@ impl RemoteClient {
             true,
         )
         .await
+    }
+
+    pub async fn export_accounts(
+        &self,
+        input: &AccountExportRequest,
+    ) -> Result<AccountExportDocument, RemoteClientError> {
+        input
+            .validate()
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
+        let document: AccountExportDocument = self
+            .request(Method::POST, "/accounts/export", Some(input), true)
+            .await?;
+        document
+            .validate()
+            .map_err(|_| RemoteClientError::InvalidResponse)?;
+        Ok(document)
+    }
+
+    pub async fn reveal_account_identity(
+        &self,
+        account_id: &str,
+    ) -> Result<RevealedAccountIdentity, RemoteClientError> {
+        let identity: RevealedAccountIdentity = self
+            .request(
+                Method::POST,
+                &format!("/accounts/{account_id}/identity/reveal"),
+                Option::<&()>::None,
+                true,
+            )
+            .await?;
+        if identity.account_id != account_id
+            || identity.identity.is_empty()
+            || identity.identity.len() > 512
+            || identity
+                .identity
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+        {
+            return Err(RemoteClientError::InvalidResponse);
+        }
+        Ok(identity)
     }
 
     pub async fn mutate(
@@ -290,7 +333,7 @@ mod tests {
     use axum::{
         http::{header::AUTHORIZATION, Uri},
         response::Redirect,
-        routing::get,
+        routing::{get, post},
         Json, Router,
     };
     use std::sync::{
@@ -364,6 +407,25 @@ mod tests {
         assert!(uri.contains("modelQuery=gpt+test%26success%3Dfalse"));
         assert!(uri.contains("success=true"));
         assert!(!uri.contains("modelQuery=gpt+test&success=false"));
+    }
+
+    #[tokio::test]
+    async fn identity_reveal_rejects_a_mismatched_account() {
+        let server = spawn(Router::new().route(
+            "/accounts/{id}/identity/reveal",
+            post(|| async {
+                Json(serde_json::json!({
+                    "accountId": "different-account",
+                    "identity": "private@example.test"
+                }))
+            }),
+        ))
+        .await;
+        let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+        assert!(matches!(
+            client.reveal_account_identity("account-1").await,
+            Err(RemoteClientError::InvalidResponse)
+        ));
     }
 
     async fn spawn(router: Router) -> String {

@@ -66,11 +66,12 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/proxy-common-${viewport.width}x${viewport.height}.png` });
 
     await page.getByRole("button", { name: "Connections", exact: true }).click();
-    await page.getByRole("button", { name: "Common", exact: true }).click();
+    await page.getByRole("button", { name: "Common proxy", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "Proxy for Personal Plus" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/proxy-account-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
-    await page.getByRole("button", { name: "Assign proxies" }).click();
+    await page.locator(".account-bulk-menu summary").click();
+    await page.getByRole("menuitem", { name: "Assign proxies" }).click();
     await expect(page.getByRole("dialog", { name: "Assign account proxies" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/proxy-bulk-${viewport.width}x${viewport.height}.png` });
 
@@ -80,6 +81,141 @@ for (const viewport of viewports) {
       if (!dialog) return false;
       const rect = dialog.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+    })).toBe(true);
+  });
+
+  test(`account export ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.locator(".account-bulk-menu summary").click();
+    await page.getByRole("menuitem", { name: "Export all" }).click();
+    const dialog = page.getByRole("dialog", { name: "Export accounts" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Copy JSON" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Download JSON" })).toBeVisible();
+    await page.screenshot({ path: `output/playwright/account-export-${viewport.width}x${viewport.height}.png` });
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+  });
+
+  test(`account actions ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.locator(".account-card .account-row-menu summary").click();
+    const menu = page.locator(".account-card .account-row-menu [role=menu]");
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("menuitem")).toHaveCount(5);
+    await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
+    expect(await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+  });
+
+  test(`account bulk actions ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.locator(".account-bulk-menu summary").click();
+    const menu = page.locator(".account-bulk-menu [role=menu]");
+    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    await page.screenshot({ path: `output/playwright/account-bulk-actions-${viewport.width}x${viewport.height}.png` });
+    expect(await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+  });
+
+  test(`account selection ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.locator(".relay-sidebar nav button").nth(1).click();
+    await page.getByLabel("Выбрать Personal Plus").check();
+    await expect(page.getByRole("button", { name: "Запустить выбранную" })).toBeVisible();
+    await expect(page.locator(".account-command-context > span")).toHaveText("Выбрано: 1");
+    await page.screenshot({ path: `output/playwright/account-selection-ru-${viewport.width}x${viewport.height}.png` });
+    expect(await page.locator(".account-command-bar").evaluate((bar) => {
+      const count = bar.firstElementChild?.getBoundingClientRect();
+      const actions = bar.lastElementChild?.getBoundingClientRect();
+      return Boolean(count && actions && count.right <= actions.left && actions.right <= innerWidth);
+    })).toBe(true);
+    expect(await page.locator(".account-card").evaluate((card) => {
+      const cardRect = card.getBoundingClientRect();
+      const actions = card.querySelector<HTMLElement>(".account-row-action-list")?.getBoundingClientRect();
+      return Boolean(actions && actions.left >= cardRect.left && actions.right <= cardRect.right && actions.top >= cardRect.top && actions.bottom <= cardRect.bottom);
+    })).toBe(true);
+  });
+
+  test(`account identity ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.locator(".relay-sidebar nav button").nth(1).click();
+    await page.getByRole("button", { name: "Показать имя полностью" }).click();
+    const identity = page.getByText("person@example.test");
+    await expect(identity).toBeVisible();
+    await expect(page.getByRole("button", { name: "Скрыть полное имя" })).toBeVisible();
+    await page.screenshot({ path: `output/playwright/account-identity-ru-${viewport.width}x${viewport.height}.png` });
+    expect(await identity.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  });
+
+  test(`multiple accounts ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true, accountCount: 3 });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.locator(".relay-sidebar nav button").nth(1).click();
+    const cards = page.locator(".account-card");
+    await expect(cards).toHaveCount(3);
+    await expect(cards.nth(1)).toContainText("Business");
+    await expect(cards.nth(1)).toContainText("5 недель");
+    await expect(cards.nth(1).locator(".quota-meter")).toHaveCount(1);
+    await expect(cards.nth(2).locator(".quota-meter")).toHaveCount(1);
+    expect(await cards.evaluateAll((items) => items.every((item) => !item.textContent?.includes("Модели")))).toBe(true);
+    await page.screenshot({ path: `output/playwright/multiple-accounts-ru-${viewport.width}x${viewport.height}.png` });
+    expect(await cards.evaluateAll((items) => {
+      const columns = items.map((item) => [".account-identity", ".account-facts", ".account-row-action-list"].map((selector) => item.querySelector<HTMLElement>(selector)?.getBoundingClientRect().left ?? -1));
+      return columns.every((row) => row.every((left, index) => Math.abs(left - columns[0][index]) <= 1));
+    })).toBe(true);
+    expect(await cards.evaluateAll((items) => items.every((item) => {
+      const identity = item.querySelector<HTMLElement>(".account-identity")?.getBoundingClientRect();
+      const facts = item.querySelector<HTMLElement>(".account-facts")?.getBoundingClientRect();
+      return Boolean(identity && facts && Math.abs(identity.top - facts.top) <= 1 && Math.abs(identity.height - facts.height) <= 1);
+    }))).toBe(true);
+    expect(await page.locator(".account-facts span").evaluateAll((labels) => labels.every((label) => label.scrollWidth <= label.clientWidth))).toBe(true);
+  });
+
+  test(`quota windows ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, supplementalQuota: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    const meters = page.locator(".account-list .quota-meter");
+    await expect(meters).toHaveCount(5);
+    await expect(page.locator(".account-list")).toContainText("5 hours");
+    await expect(page.locator(".account-list")).toContainText("Weekly");
+    await expect(page.locator(".account-list")).toContainText("Code Review");
+    await expect(page.locator(".account-list")).toContainText("GPT-5.4 priority");
+    expect(await meters.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+    expect(await meters.last().evaluate((item) => {
+      const current = item.getBoundingClientRect();
+      const first = item.parentElement?.firstElementChild?.getBoundingClientRect();
+      return Boolean(first && Math.abs(current.left - first.left) <= 1 && Math.abs(current.width - item.parentElement!.getBoundingClientRect().width) <= 1);
+    })).toBe(true);
+    await page.locator(".quota-display-menu summary").click();
+    const menu = page.locator(".quota-display-menu > div");
+    await expect(menu).toBeVisible();
+    await page.screenshot({ path: `output/playwright/quota-windows-${viewport.width}x${viewport.height}.png` });
+    expect(await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
     })).toBe(true);
   });
 }

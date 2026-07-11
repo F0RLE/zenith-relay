@@ -25,12 +25,16 @@ use std::{
 use tower::ServiceExt;
 use url::{Host, Url};
 use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState},
+    accounts::{
+        build_account_export, AccountAuthState, AccountExportCredential, AccountExportDocument,
+        AccountExportRequest, AccountHealthState,
+    },
     automations::{AccountSelector, WakeHistory, WakeModelPolicy, WakeTask},
     discover_source_models, normalize_proxy_url,
     protocol::{
         AccountSummary, ApiError, ErrorEnvelope, GatewayDiagnostic, HealthResponse, KeySummary,
-        RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery, UsageRange,
+        RevealedAccountIdentity, RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery,
+        UsageRange,
     },
     quota::{QuotaSnapshot, Subscription, SubscriptionInput},
     ProviderSource, WireApi,
@@ -267,6 +271,99 @@ pub async fn list_accounts(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<AccountSummary>>, ManagementError> {
     Ok(Json(state.snapshot().map_err(store_error)?.accounts))
+}
+
+pub async fn reveal_account_identity(
+    Path(account_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, ManagementError> {
+    let record = find_account(&state, &account_id)?;
+    let secret = state
+        .vault
+        .load(&record.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::internal(
+                "account_secret_missing",
+                "stored account credential is unavailable",
+            )
+        })?;
+    let credential: AccountCredential = serde_json::from_str(&secret).map_err(|_| {
+        ManagementError::internal(
+            "account_secret_invalid",
+            "stored account credential is invalid",
+        )
+    })?;
+    Ok(no_store_json(RevealedAccountIdentity {
+        account_id,
+        identity: credential.chatgpt_account_id,
+    }))
+}
+
+pub async fn export_accounts(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<AccountExportRequest>,
+) -> Result<Response, ManagementError> {
+    input
+        .validate()
+        .map_err(|error| validation_error(error.to_string()))?;
+    let mut accounts = Vec::with_capacity(input.account_ids.len());
+    for account_id in &input.account_ids {
+        let record = find_account(&state, account_id)?;
+        let secret = state
+            .vault
+            .load(&record.secret_ref)
+            .map_err(vault_error)?
+            .ok_or_else(|| {
+                ManagementError::internal(
+                    "account_secret_missing",
+                    "stored account credential is unavailable",
+                )
+            })?;
+        let credential: AccountCredential = serde_json::from_str(&secret).map_err(|_| {
+            ManagementError::internal(
+                "account_secret_invalid",
+                "stored account credential is invalid",
+            )
+        })?;
+        accounts.push(AccountExportCredential {
+            label: record.label,
+            email: None,
+            access_token: credential.access_token,
+            refresh_token: credential.refresh_token,
+            id_token: credential.id_token,
+            account_id: Some(credential.chatgpt_account_id),
+            user_id: None,
+            organization_id: None,
+            plan_type: record.subscription.plan_type.clone(),
+            expires_at_ms: credential.expires_at_ms,
+            issued_at_ms: credential.issued_at_ms,
+            subscription_active_until_ms: record.subscription.active_until_ms,
+            created_at_ms: credential.issued_at_ms,
+            priority: record.priority,
+            enabled: record.enabled,
+        });
+    }
+    let document: AccountExportDocument = build_account_export(input.format, &accounts, now_ms())
+        .map_err(|_| {
+        ManagementError::internal(
+            "account_export_failed",
+            "account export could not be created",
+        )
+    })?;
+    Ok(no_store_json(document))
+}
+
+fn no_store_json<T: Serialize>(value: T) -> Response {
+    let mut response = Json(value).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, header::HeaderValue::from_static("no-cache"));
+    response
 }
 
 #[derive(Deserialize)]

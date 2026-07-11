@@ -1,5 +1,6 @@
 use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientProtocolRange, Feature, ProtocolError, CURRENT_PROTOCOL_VERSION,
+    negotiate, Capabilities, ClientProtocolRange, Feature, ProtocolError, RevealedAccountIdentity,
+    CURRENT_PROTOCOL_VERSION,
 };
 
 #[test]
@@ -9,8 +10,20 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
 
     assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
     assert!(capabilities.supports(Feature::Accounts));
+    assert!(capabilities.supports(Feature::AccountIdentityReveal));
     assert!(capabilities.supports(Feature::Sources));
     assert!(!capabilities.supports(Feature::ProfileAttach));
+}
+
+#[test]
+fn revealed_account_identity_debug_output_is_redacted() {
+    let identity = RevealedAccountIdentity {
+        account_id: "account-1".into(),
+        identity: "private@example.test".into(),
+    };
+    let debug = format!("{identity:?}");
+    assert!(debug.contains("[redacted]"));
+    assert!(!debug.contains("private@example.test"));
 }
 
 #[test]

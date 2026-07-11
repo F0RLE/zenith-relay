@@ -7,6 +7,9 @@ use crate::local_pool::{
         credentials::{
             CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
         },
+        exports::{
+            finish_account_export, normalize_account_ids, AccountExportInput, AccountExportResult,
+        },
         import_session::{
             ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
         },
@@ -41,13 +44,15 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
+    accounts::{build_account_export, AccountExportCredential},
     accounts::{AccountAuthMode, AccountAuthState, TokenSet},
     automations::AccountSelector,
     discover_source_models,
+    protocol::RevealedAccountIdentity,
     quota::{QuotaRefreshFailure, QuotaTransition},
     ProviderSource, ProxyConfig, WireApi,
 };
@@ -134,6 +139,93 @@ pub struct AssignAccountProxiesInput {
 pub struct ProxyAssignmentResult {
     assigned: usize,
     unused: usize,
+}
+
+#[tauri::command]
+pub fn reveal_local_account_identity(
+    account_id: String,
+    state: State<'_, DesktopState>,
+) -> CommandResult<RevealedAccountIdentity> {
+    let account_id = normalize_account_ids(vec![account_id])?
+        .pop()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "account id is required"))?;
+    {
+        let store = state.store()?;
+        if store.account(&account_id).is_none() {
+            return Err(LocalPoolError::new(ErrorCode::NotFound, "account was not found").into());
+        }
+    }
+    let credentials = CredentialStore::from_backend(NativeSecretBackend)
+        .require(&account_id)
+        .map_err(credential_local_error)?;
+    let identity = revealable_account_identity(&credentials)
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account identity is unavailable"))?
+        .to_string();
+    Ok(RevealedAccountIdentity {
+        account_id,
+        identity,
+    })
+}
+
+fn revealable_account_identity(credentials: &StoredCodexCredentials) -> Option<&str> {
+    credentials
+        .email()
+        .or_else(|| credentials.provider_account_id())
+        .or_else(|| credentials.provider_user_id())
+}
+
+#[tauri::command]
+pub fn export_local_accounts(
+    input: AccountExportInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<AccountExportResult> {
+    let account_ids = normalize_account_ids(input.account_ids)?;
+    let records = {
+        let store = state.store()?;
+        account_ids
+            .iter()
+            .map(|account_id| {
+                store.account(account_id).cloned().ok_or_else(|| {
+                    LocalPoolError::new(ErrorCode::NotFound, "account export item was not found")
+                })
+            })
+            .collect::<LocalResult<Vec<_>>>()?
+    };
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let accounts = records
+        .iter()
+        .map(|record| {
+            let credentials = credential_store
+                .require(&record.account.id)
+                .map_err(credential_local_error)?;
+            Ok(AccountExportCredential {
+                label: record.account.label.clone(),
+                email: credentials.email().map(str::to_string),
+                access_token: credentials.access_token().to_string(),
+                refresh_token: credentials.refresh_token().map(str::to_string),
+                id_token: credentials.id_token().map(str::to_string),
+                account_id: credentials.provider_account_id().map(str::to_string),
+                user_id: credentials.provider_user_id().map(str::to_string),
+                organization_id: credentials.organization_id().map(str::to_string),
+                plan_type: record
+                    .account
+                    .subscription
+                    .plan_type
+                    .clone()
+                    .or_else(|| credentials.plan_type().map(str::to_string)),
+                expires_at_ms: credentials.expires_at_ms(),
+                issued_at_ms: credentials.issued_at_ms(),
+                subscription_active_until_ms: record.account.subscription.active_until_ms,
+                created_at_ms: record.account.created_at_ms,
+                priority: record.priority,
+                enabled: record.account.enabled,
+            })
+        })
+        .collect::<LocalResult<Vec<_>>>()?;
+    let document = build_account_export(input.format, &accounts, current_time_ms())
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    finish_account_export(document, input.destination, &app, &state)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2983,6 +3075,51 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn revealable_identity_prefers_email_and_falls_back_to_provider_account() {
+        let with_email = StoredCodexCredentials::new(
+            "account_email",
+            "access-private".into(),
+            None,
+            None,
+            None,
+            1,
+            0,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            Some("provider-user".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            revealable_account_identity(&with_email),
+            Some("private@example.test")
+        );
+
+        let without_email = StoredCodexCredentials::new(
+            "account_provider",
+            "access-private".into(),
+            None,
+            None,
+            None,
+            1,
+            0,
+            None,
+            Some("provider-account".into()),
+            Some("provider-user".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            revealable_account_identity(&without_email),
+            Some("provider-account")
+        );
     }
 
     #[test]

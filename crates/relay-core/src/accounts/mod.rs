@@ -1,6 +1,11 @@
+mod export;
 mod record;
 mod token_authority;
 
+pub use export::{
+    build_account_export, AccountExportCredential, AccountExportDocument, AccountExportFormat,
+    AccountExportRequest, MAX_ACCOUNT_EXPORT_BYTES, MAX_ACCOUNT_EXPORT_ITEMS,
+};
 pub use record::{
     AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     ReauthReason,

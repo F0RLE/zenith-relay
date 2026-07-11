@@ -109,6 +109,7 @@ mod tests {
                     observed_at_ms,
                 }),
                 secondary: None,
+                supplemental: Vec::new(),
                 subscription: Some(SubscriptionInput {
                     plan_type: Some("plus".into()),
                     active_until_ms: None,

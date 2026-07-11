@@ -3,7 +3,7 @@ import { KeyRound, Pencil, Plus, Power, RotateCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, KeySummary, SourceSummary } from "../../api/types";
-import { Button, Dialog, EmptyState, IconButton, PageHeader, QuotaMeter, StatusBadge, Tabs } from "../../components/Ui";
+import { Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "members" | "keys" | "models";
@@ -31,7 +31,7 @@ export function PoolPage() {
 
 function MembersView() {
   const { t } = useTranslation();
-  const { mode, runtime, setPage } = useRelayState();
+  const { mode, runtime, setPage, quotaWindows } = useRelayState();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const members: Member[] = [
@@ -40,8 +40,8 @@ function MembersView() {
   ];
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={() => setPage("connections")}>{t("pool.addMember")}</Button>} />;
-  const counts = { healthy: members.filter((item) => item.enabled && item.health === "healthy").length, limited: members.filter((item) => item.kind === "account" && item.quota.primary?.availableBasisPoints === 0).length, disabled: members.filter((item) => !item.enabled).length };
-  return <><div className="pool-summary"><div><span>{t("pool.healthy")}</span><strong>{counts.healthy}</strong></div><div><span>{t("pool.limited")}</span><strong>{counts.limited}</strong></div><div><span>{t("common.disabled")}</span><strong>{counts.disabled}</strong></div><div><span>{t("common.models")}</span><strong>{runtime?.gateway.visibleModelIds.length ?? 0}</strong></div></div><div className="relay-table-wrap"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.type")}</th><th>{t("common.name")}</th><th>{t("common.health")}</th><th>{t("common.quota")}</th><th>{t("pool.priority")}</th><th>{t("pool.weight")}</th></tr></thead><tbody>{members.map((member) => <tr key={`${member.kind}-${member.id}`} className={selectedId === `${member.kind}:${member.id}` ? "selected" : ""}><td><StatusBadge status={member.enabled ? "ready" : "disabled"} label={member.enabled ? t("common.enabled") : t("common.disabled")} /></td><td>{t(`pool.types.${member.kind}`)}</td><td><button type="button" className="request-link" onClick={() => setSelectedId(`${member.kind}:${member.id}`)}><strong>{member.kind === "source" ? member.name : member.label}</strong></button></td><td>{t(`health.${member.health}`, { defaultValue: member.health })}</td><td>{member.kind === "account" ? <QuotaMeter window={member.quota.primary} label={t("quota.primary")} /> : t("common.unsupported")}</td><td>{member.priority}</td><td>{member.weight}</td></tr>)}</tbody></table></div>{selected ? <MemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : <p className="form-note">{t("pool.selectMemberHint")}</p>}</>;
+  const counts = { healthy: members.filter((item) => item.enabled && item.health === "healthy").length, limited: members.filter((item) => item.kind === "account" && [item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0)).length, disabled: members.filter((item) => !item.enabled).length };
+  return <><div className="pool-summary"><div><span>{t("pool.healthy")}</span><strong>{counts.healthy}</strong></div><div><span>{t("pool.limited")}</span><strong>{counts.limited}</strong></div><div><span>{t("common.disabled")}</span><strong>{counts.disabled}</strong></div><div><span>{t("common.models")}</span><strong>{runtime?.gateway.visibleModelIds.length ?? 0}</strong></div></div><div className="relay-table-wrap"><table className="relay-table pool-members-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.type")}</th><th>{t("common.name")}</th><th>{t("common.health")}</th><th>{t("common.quota")}</th><th>{t("pool.priority")}</th><th>{t("pool.weight")}</th></tr></thead><tbody>{members.map((member) => <tr key={`${member.kind}-${member.id}`} className={selectedId === `${member.kind}:${member.id}` ? "selected" : ""}><td><StatusBadge status={member.enabled ? "ready" : "disabled"} label={member.enabled ? t("common.enabled") : t("common.disabled")} /></td><td>{t(`pool.types.${member.kind}`)}</td><td><button type="button" className="request-link" onClick={() => setSelectedId(`${member.kind}:${member.id}`)}><strong>{member.kind === "source" ? member.name : member.label}</strong></button></td><td>{t(`health.${member.health}`, { defaultValue: member.health })}</td><td>{member.kind === "account" ? <QuotaStack snapshot={member.quota} visibility={quotaWindows} /> : t("common.unsupported")}</td><td>{member.priority}</td><td>{member.weight}</td></tr>)}</tbody></table></div>{selected ? <MemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : <p className="form-note">{t("pool.selectMemberHint")}</p>}</>;
 }
 
 function MemberEditor({ member, onClose }: { member: Member; onClose: () => void }) {

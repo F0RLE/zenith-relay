@@ -279,6 +279,7 @@ mod tests {
                 observed_at_ms: 1,
                 full_transition_fingerprint: None,
             }),
+            supplemental: Vec::new(),
             reset_credits_available: None,
             updated_at_ms: Some(1),
             error: None,

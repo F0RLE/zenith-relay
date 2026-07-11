@@ -10,12 +10,24 @@ export type QuotaWindow = {
   observedAtMs: number;
 };
 
+export type SupplementalQuotaWindow = {
+  id: string;
+  label: string;
+  window: QuotaWindow;
+};
+
 export type QuotaSnapshot = {
   primary: QuotaWindow | null;
   secondary: QuotaWindow | null;
+  supplemental?: SupplementalQuotaWindow[];
   resetCreditsAvailable: number | null;
   updatedAtMs: number | null;
   error: { code: string; observedAtMs: number } | null;
+};
+
+export type QuotaWindowVisibility = {
+  primary: boolean;
+  secondary: boolean;
 };
 
 export type SourceSummary = {
@@ -53,6 +65,11 @@ export type AccountSummary = {
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
   lastErrorCode: string | null;
+};
+
+export type RevealedAccountIdentity = {
+  accountId: string;
+  identity: string;
 };
 
 export type KeySummary = {
@@ -118,6 +135,22 @@ export type RuntimeSnapshot = {
 export type ProxyAssignmentResult = {
   assigned: number;
   unused: number;
+};
+
+export type AccountExportFormat = "cpa" | "sub2api" | "cockpit" | "9router" | "codex" | "axon_hub" | "codex_manager";
+
+export type AccountExportInput = {
+  accountIds: string[];
+  format: AccountExportFormat;
+  destination: "copy" | "download";
+};
+
+export type AccountExportResult = {
+  format: AccountExportFormat;
+  accountCount: number;
+  fileName: string;
+  content?: string;
+  path?: string;
 };
 
 export type LocalUsage = {

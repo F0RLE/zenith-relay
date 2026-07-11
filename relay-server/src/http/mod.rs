@@ -25,6 +25,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/sources/{id}/test", post(management_api::test_source))
         .route("/accounts", get(management_api::list_accounts))
+        .route("/accounts/export", post(management_api::export_accounts))
+        .route(
+            "/accounts/{id}/identity/reveal",
+            post(management_api::reveal_account_identity),
+        )
         .route("/proxies/common", post(management_api::set_common_proxy))
         .route(
             "/accounts/proxies/assign",

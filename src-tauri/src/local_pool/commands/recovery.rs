@@ -1,3 +1,4 @@
+use crate::files::atomic_write;
 use crate::local_pool::{
     accounts::{credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend},
     error::{CommandError, ErrorCode, LocalPoolError},
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
+use zenith_relay_core::accounts::AccountExportDocument;
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -211,6 +213,39 @@ fn write_export(
     );
     let path = directory.join(filename);
     save_json(&path, value)?;
+    app.opener()
+        .reveal_item_in_dir(&path)
+        .map_err(|error| io_error(error.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn write_account_export(
+    document: &AccountExportDocument,
+    app: &AppHandle,
+    state: &DesktopState,
+) -> Result<String, CommandError> {
+    document
+        .validate()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    let directory = state.root().join("exports");
+    fs::create_dir_all(&directory).map_err(io_error)?;
+    let filename = format!(
+        "{}-{}-{}.json",
+        if document.account_count == 1 {
+            "account"
+        } else {
+            "accounts"
+        },
+        document.format.slug(),
+        chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
+    );
+    let path = directory.join(filename);
+    atomic_write(&path, &document.content).map_err(io_error)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
+    }
     app.opener()
         .reveal_item_in_dir(&path)
         .map_err(|error| io_error(error.to_string()))?;

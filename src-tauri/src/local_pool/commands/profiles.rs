@@ -1,5 +1,6 @@
 use super::runtime_from_store;
 use crate::{
+    launcher::launch_codex_with_profile,
     local_pool::{
         commands::accounts::prepare_account_credentials,
         error::{CommandError, ErrorCode, LocalPoolError},
@@ -134,6 +135,27 @@ pub async fn attach_codex_to_account(
         prepared.provider_account_id(),
     )
     .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn launch_codex_account(
+    account_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<codex::ProfileBinding, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let profile_dir = default_codex_home();
+    let prepared = prepare_account_credentials(&state, &account_id).await?;
+    let binding = codex::attach_account(
+        &profile_dir,
+        &state.profile_backup_root(),
+        &account_id,
+        prepared.tokens(),
+        prepared.provider_account_id(),
+    )?;
+    launch_codex_with_profile().map_err(|error| {
+        LocalPoolError::new(ErrorCode::Io, format!("failed to launch Codex: {error}"))
+    })?;
+    Ok(binding)
 }
 
 #[tauri::command]

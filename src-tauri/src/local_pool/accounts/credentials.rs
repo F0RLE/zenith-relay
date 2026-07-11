@@ -120,9 +120,12 @@ impl StoredCodexCredentials {
         self.refresh_token.as_deref()
     }
 
-    #[cfg(test)]
     pub fn id_token(&self) -> Option<&str> {
         self.id_token.as_deref()
+    }
+
+    pub fn expires_at_ms(&self) -> Option<u64> {
+        self.expires_at_ms
     }
 
     pub fn issued_at_ms(&self) -> u64 {
@@ -141,8 +144,16 @@ impl StoredCodexCredentials {
         self.provider_user_id.as_deref()
     }
 
+    pub fn organization_id(&self) -> Option<&str> {
+        self.organization_id.as_deref()
+    }
+
     pub fn email(&self) -> Option<&str> {
         self.email.as_deref()
+    }
+
+    pub fn plan_type(&self) -> Option<&str> {
+        self.plan_type.as_deref()
     }
 
     pub fn proxy_url(&self) -> Option<&str> {

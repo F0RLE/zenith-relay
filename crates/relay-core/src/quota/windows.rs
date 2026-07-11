@@ -55,6 +55,14 @@ pub struct QuotaWindow {
     pub full_transition_fingerprint: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupplementalQuotaWindow {
+    pub id: String,
+    pub label: String,
+    pub window: QuotaWindow,
+}
+
 impl QuotaWindow {
     pub fn normalize(
         input: QuotaWindowInput,
@@ -207,6 +215,8 @@ impl QuotaErrorState {
 pub struct QuotaSnapshot {
     pub primary: Option<QuotaWindow>,
     pub secondary: Option<QuotaWindow>,
+    #[serde(default)]
+    pub supplemental: Vec<SupplementalQuotaWindow>,
     pub reset_credits_available: Option<u32>,
     pub updated_at_ms: Option<u64>,
     pub error: Option<QuotaErrorState>,
@@ -225,6 +235,7 @@ impl QuotaSnapshot {
 pub enum QuotaNormalizationError {
     InvalidPercentage,
     MismatchedWindowKind,
+    InvalidSupplementalWindow,
 }
 
 impl fmt::Display for QuotaNormalizationError {
@@ -235,6 +246,9 @@ impl fmt::Display for QuotaNormalizationError {
             }
             Self::MismatchedWindowKind => {
                 formatter.write_str("quota window kind does not match its slot")
+            }
+            Self::InvalidSupplementalWindow => {
+                formatter.write_str("supplemental quota window is invalid")
             }
         }
     }

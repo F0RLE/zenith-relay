@@ -1,4 +1,7 @@
 use crate::local_pool::{
+    accounts::exports::{
+        finish_account_export, normalize_account_ids, AccountExportInput, AccountExportResult,
+    },
     error::{CommandError, ErrorCode, LocalPoolError},
     remote::{
         self,
@@ -11,9 +14,11 @@ use crate::local_pool::{
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::State;
+use tauri::{AppHandle, State};
+use zenith_relay_core::accounts::AccountExportRequest;
 use zenith_relay_core::protocol::{
-    Capabilities, GatewayDiagnostic, HealthResponse, RuntimeStateSnapshot, UsagePage, UsageQuery,
+    Capabilities, GatewayDiagnostic, HealthResponse, RevealedAccountIdentity, RuntimeStateSnapshot,
+    UsagePage, UsageQuery,
 };
 
 #[derive(Deserialize)]
@@ -184,6 +189,47 @@ pub async fn diagnose_remote_gateway(
         );
     };
     client.diagnose(stream).await.map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn export_remote_accounts(
+    input: AccountExportInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<AccountExportResult, CommandError> {
+    let account_ids = normalize_account_ids(input.account_ids)?;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    let document = client
+        .export_accounts(&AccountExportRequest {
+            account_ids,
+            format: input.format,
+        })
+        .await
+        .map_err(remote_error)?;
+    finish_account_export(document, input.destination, &app, &state)
+}
+
+#[tauri::command]
+pub async fn reveal_remote_account_identity(
+    account_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<RevealedAccountIdentity, CommandError> {
+    let account_id = normalize_account_ids(vec![account_id])?
+        .pop()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "account id is required"))?;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    client
+        .reveal_account_identity(&account_id)
+        .await
+        .map_err(remote_error)
 }
 
 #[tauri::command]

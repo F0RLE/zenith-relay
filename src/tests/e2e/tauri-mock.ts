@@ -6,6 +6,8 @@ export type MockOptions = {
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
   populated?: boolean;
+  accountCount?: number;
+  supplementalQuota?: boolean;
   importResult?: "success" | "item_failure" | "not_found";
   remoteConnected?: boolean;
   remoteFeatures?: string[];
@@ -19,9 +21,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     localStorage.setItem("relay.mode", input.mode ?? "local");
     localStorage.setItem("relay.theme", input.theme ?? "light");
 
-    const quota = {
+    type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
+    const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
       primary: { kind: "primary", availableBasisPoints: 0, explicitlyFull: false, resetAtMs: Date.now() + 90 * 60_000, windowMinutes: 300, observedAtMs: Date.now() },
       secondary: { kind: "secondary", availableBasisPoints: 6400, explicitlyFull: false, resetAtMs: Date.now() + 3 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() },
+      supplemental: input.supplementalQuota ? [
+        { id: "code_review:primary", label: "Code Review", window: { kind: "primary", availableBasisPoints: 7200, explicitlyFull: false, resetAtMs: Date.now() + 2 * 60 * 60_000, windowMinutes: 300, observedAtMs: Date.now() } },
+        { id: "code_review:secondary", label: "Code Review", window: { kind: "secondary", availableBasisPoints: 8600, explicitlyFull: false, resetAtMs: Date.now() + 5 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() } },
+        { id: "additional:0:primary", label: "GPT-5.4 priority", window: { kind: "primary", availableBasisPoints: 4100, explicitlyFull: false, resetAtMs: Date.now() + 12 * 60 * 60_000, windowMinutes: 1_440, observedAtMs: Date.now() } },
+      ] : [],
       resetCreditsAvailable: 1,
       updatedAtMs: Date.now(),
       error: null,
@@ -54,13 +62,37 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       excludedModels: [],
       priority: 20,
       weight: 100,
-      subscription: { planType: "Plus", activeUntilMs: null, status: "active", updatedAtMs: Date.now() },
+      subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: null, status: "active", updatedAtMs: Date.now() },
       quota,
       secretAvailable: true,
       proxyMode: "common",
       proxyAvailable: true,
       lastErrorCode: null,
     };
+    const accountCount = Math.max(1, Math.min(input.accountCount ?? 1, 6));
+    const accountVariants = [
+      { label: "Personal Plus", plan: "plus", proxyMode: "common", models: ["gpt-5.4", "gpt-5.4-mini"], primary: 0, primaryMinutes: 300, secondary: 6400 },
+      { label: "Business Workspace", plan: "team", proxyMode: "account", models: ["gpt-5.4", "gpt-5.4-mini", "o3"], primary: 3800, primaryMinutes: 50_400, secondary: null },
+      { label: "Backup account", plan: "free", proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 9100, primaryMinutes: 300, secondary: null },
+    ] as const;
+    const accounts = Array.from({ length: accountCount }, (_, index) => {
+      if (index === 0) return account;
+      const variant = accountVariants[index % accountVariants.length];
+      const item = structuredClone(account);
+      item.id = `account_synthetic_${index + 1}`;
+      item.label = variant.label;
+      item.identityHint = `ac••••${String(index + 42).padStart(2, "0")}`;
+      item.subscription.planType = variant.plan;
+      item.proxyMode = variant.proxyMode;
+      item.models = [...variant.models];
+      if (item.quota.primary) {
+        item.quota.primary.availableBasisPoints = variant.primary;
+        item.quota.primary.windowMinutes = variant.primaryMinutes;
+      }
+      if (variant.secondary === null) item.quota.secondary = null;
+      else if (item.quota.secondary) item.quota.secondary.availableBasisPoints = variant.secondary;
+      return item;
+    });
     const key = {
       id: "key_synthetic",
       label: "Codex",
@@ -90,11 +122,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const localRuntime = {
       schemaVersion: 5,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: populated ? 2 : 0, visibleModelIds: populated ? ["gpt-5.4", "gpt-5.4-mini"] : [], commonProxyConfigured: true, commonProxyAvailable: true },
+      gateway: { running: true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: populated ? accounts.length + 1 : 0, visibleModelIds: populated ? ["gpt-5.4", "gpt-5.4-mini"] : [], commonProxyConfigured: true, commonProxyAvailable: true },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal"] },
       sources: populated ? [source] : [],
-      accounts: populated ? [account] : [],
+      accounts: populated ? accounts : [],
       keys: populated ? [key] : [],
       automations: populated ? [automation] : [],
       wakeHistory: populated ? [{ taskId: automation.id, accountId: account.id, windowKind: "primary", modelId: "gpt-5.4-mini", outcome: "confirmed", startedAtMs: Date.now() - 120_000, completedAtMs: Date.now() - 118_000, errorCode: null }] : [],
@@ -104,7 +136,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies"] };
 
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
@@ -183,6 +215,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             account.proxyAvailable = true;
             return { assigned: request.accountIds.length, unused: request.proxyUrls.length - request.accountIds.length };
           }
+          case "export_local_accounts":
+          case "export_remote_accounts": {
+            const request = args.input as { accountIds: string[]; format: string; destination: "copy" | "download" };
+            const result = {
+              format: request.format,
+              accountCount: request.accountIds.length,
+              fileName: `${request.accountIds.length === 1 ? "account" : "accounts"}-${request.format}.json`,
+            };
+            return request.destination === "copy"
+              ? { ...result, content: JSON.stringify({ access_token: "synthetic-export-token", account_ids: request.accountIds }) }
+              : { ...result, path: `C:\\Temp\\${result.fileName}` };
+          }
+          case "reveal_local_account_identity":
+          case "reveal_remote_account_identity": return { accountId: String(args.accountId), identity: "person@example.test" };
           case "start_codex_oauth": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "get_codex_oauth_status": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://127.0.0.1:14521/callback", expiresAtMs: Date.now() + 600_000, status: "callback_received" };
@@ -225,6 +271,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "restore_opencode_profile":
           case "attach_codex_to_account":
           case "restore_codex_account_profile": return null;
+          case "launch_codex_account": return { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId) };
           case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
           case "preview_codex_history_repair": return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: "zenith_relay_local", profileCount: 1, rolloutFileCount: 2, rolloutRecordCount: 2, sqliteRowCount: 1, codexRunning: false, expiresAtMs: Date.now() + 60_000 };
           case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };

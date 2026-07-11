@@ -193,7 +193,7 @@ test("connection search and request ID filters change visible rows", async ({ pa
   await connectionSearch.fill("no such account");
   await expect(page.getByText("No matching results")).toBeVisible();
   await connectionSearch.fill("Personal Plus");
-  await expect(page.getByText("Personal Plus")).toBeVisible();
+  await expect(page.getByText("Personal Plus", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   const requestFilter = page.getByRole("textbox", { name: "Request ID" });
@@ -201,6 +201,116 @@ test("connection search and request ID filters change visible rows", async ({ pa
   await expect(page.getByText("No matching results")).toBeVisible();
   await requestFilter.fill("req_synthetic_local");
   await expect(page.getByText("req_synthetic_local")).toBeVisible();
+});
+
+test("account export supports bulk copy and per-account download", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Export all" }).click();
+  let dialog = page.getByRole("dialog", { name: "Export accounts" });
+  await expect(dialog.getByRole("radio")).toHaveCount(7);
+  await expect(dialog.getByRole("button", { name: "Copy JSON" })).toBeDisabled();
+  await dialog.getByRole("radio", { name: "Codex", exact: true }).click();
+  await dialog.getByLabel(/I understand that anyone/).check();
+  await dialog.getByRole("button", { name: "Copy JSON" }).click();
+  await expect(page.getByText("Account export copied.")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("synthetic-export-token");
+
+  await page.locator(".account-card .account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: "Export Personal Plus" }).click();
+  dialog = page.getByRole("dialog", { name: "Export accounts" });
+  await dialog.getByRole("radio", { name: "9router" }).click();
+  await dialog.getByLabel(/I understand that anyone/).check();
+  await dialog.getByRole("button", { name: "Download JSON" }).click();
+  await expect(page.getByText("Account export saved.")).toBeVisible();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "export_local_accounts"));
+  expect(calls.map((call) => call.args.input)).toEqual([
+    { accountIds: ["account_synthetic"], format: "codex", destination: "copy" },
+    { accountIds: ["account_synthetic"], format: "9router", destination: "download" },
+  ]);
+});
+
+test("secondary account actions stay in the row menu", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.locator(".account-card .account-row-menu summary").click();
+  const menu = page.getByRole("menu");
+  await expect(menu.getByRole("menuitem", { name: "Refresh quota" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Drain" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Disable" })).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+});
+
+test("account identity reveal is explicit and reversible", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  await expect(page.getByText("ac••••42")).toBeVisible();
+  await page.getByRole("button", { name: "Show full identity" }).click();
+  await expect(page.getByText("person@example.test")).toBeVisible();
+  await page.getByRole("button", { name: "Hide full identity" }).click();
+  await expect(page.getByText("ac••••42")).toBeVisible();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.find((item) => item.command === "reveal_local_account_identity"));
+  expect(call?.args).toEqual({ accountId: "account_synthetic" });
+});
+
+test("remote account identity reveal uses the negotiated server capability", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Show full identity" }).click();
+  await expect(page.getByText("person@example.test")).toBeVisible();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.find((item) => item.command === "reveal_remote_account_identity"));
+  expect(call?.args).toEqual({ accountId: "account_synthetic" });
+});
+
+test("selected account launch and quota window preferences are explicit", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  await expect(page.getByRole("button", { name: "Launch selected" })).toHaveCount(0);
+  await page.locator(".quota-display-menu summary").click();
+  const quotaMenu = page.locator(".quota-display-menu > div");
+  await expect(quotaMenu.getByLabel("5 hours")).toBeChecked();
+  await expect(quotaMenu.getByLabel("Weekly")).toBeChecked();
+  await quotaMenu.getByLabel("Weekly").uncheck();
+  await expect(page.locator(".account-list .quota-meter")).toHaveCount(1);
+  expect(await page.evaluate(() => localStorage.getItem("relay.quota.secondary"))).toBe("0");
+
+  await page.getByLabel("Select Personal Plus").check();
+  await expect(page.locator(".quota-display-menu")).toHaveCount(0);
+  const launch = page.getByRole("button", { name: "Launch selected" });
+  await expect(launch).toBeEnabled();
+  await launch.click();
+  await expect(page.getByText("Client launched.")).toBeVisible();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "launch_codex_account"));
+  expect(call?.args).toEqual({ accountId: "account_synthetic" });
+});
+
+test("remote account export uses the capability-gated server command", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Export all" }).click();
+  const dialog = page.getByRole("dialog", { name: "Export accounts" });
+  await expect(dialog.getByRole("radio", { name: "sub2api" })).toHaveAttribute("aria-checked", "true");
+  await dialog.getByLabel(/I understand that anyone/).check();
+  await dialog.getByRole("button", { name: "Download JSON" }).click();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "export_remote_accounts"));
+  expect(call?.args.input).toEqual({ accountIds: ["account_synthetic"], format: "sub2api", destination: "download" });
 });
 
 test("common, account, and bulk proxy controls keep saved addresses hidden", async ({ page }) => {
@@ -215,7 +325,7 @@ test("common, account, and bulk proxy controls keep saved addresses hidden", asy
   await expect(page.getByText(commonProxy)).toHaveCount(0);
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByRole("button", { name: "Common", exact: true }).click();
+  await page.getByRole("button", { name: "Common proxy", exact: true }).click();
   const accountProxy = "account-user:account-pass@us-account.example:8081";
   const accountDialog = page.getByRole("dialog", { name: "Proxy for Personal Plus" });
   await accountDialog.getByLabel("HTTP(S) proxy").fill(accountProxy);
@@ -223,7 +333,8 @@ test("common, account, and bulk proxy controls keep saved addresses hidden", asy
   await expect(page.getByText(accountProxy)).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Account proxy", exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Assign proxies" }).click();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Assign proxies" }).click();
   const bulkDialog = page.getByRole("dialog", { name: "Assign account proxies" });
   const bulkList = "bulk-user:bulk-pass@us-01.example:9001\nspare-user:spare-pass@us-02.example:9002";
   await bulkDialog.getByLabel("Proxy list").fill(bulkList);
@@ -247,11 +358,12 @@ test("remote proxy controls use the capability-gated management actions", async 
   await page.locator(".proxy-settings").getByRole("button", { name: "Save" }).click();
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByRole("button", { name: "Common", exact: true }).click();
+  await page.getByRole("button", { name: "Common proxy", exact: true }).click();
   const accountDialog = page.getByRole("dialog", { name: "Proxy for Personal Plus" });
   await accountDialog.getByLabel("HTTP(S) proxy").fill("remote-account:secret@us-account.example:8081");
   await accountDialog.getByRole("button", { name: "Save" }).click();
-  await page.getByRole("button", { name: "Assign proxies" }).click();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.getByRole("menuitem", { name: "Assign proxies" }).click();
   const bulkDialog = page.getByRole("dialog", { name: "Assign account proxies" });
   await bulkDialog.getByLabel("Proxy list").fill("remote-bulk:secret@us-bulk.example:8082");
   await bulkDialog.getByRole("button", { name: "Assign", exact: true }).click();
@@ -361,7 +473,14 @@ test("remote capability omissions disable or hide unsupported operations", async
   await page.goto("/");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Assign proxies" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Import", exact: true })).toHaveCount(1);
+  await page.locator(".account-bulk-menu summary").click();
+  await expect(page.getByRole("menuitem", { name: "Assign proxies" })).toBeDisabled();
+  await expect(page.getByRole("menuitem", { name: "Export all" })).toBeDisabled();
+  await page.locator(".account-bulk-menu summary").click();
+  await page.locator(".account-card .account-row-menu summary").click();
+  await expect(page.getByRole("menuitem", { name: "Export Personal Plus" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Show full identity" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await expect(page.locator(".proxy-settings")).toContainText("Unsupported");

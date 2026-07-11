@@ -6,6 +6,7 @@ use crate::{
     WireApi,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +90,23 @@ pub struct AccountSummary {
     #[serde(default)]
     pub proxy_available: bool,
     pub last_error_code: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealedAccountIdentity {
+    pub account_id: String,
+    pub identity: String,
+}
+
+impl fmt::Debug for RevealedAccountIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RevealedAccountIdentity")
+            .field("account_id", &self.account_id)
+            .field("identity", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

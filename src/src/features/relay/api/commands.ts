@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccountExportInput,
+  AccountExportResult,
   ConfirmAccountImportResponse,
   GatewayDiagnostic,
   HistoryRepairPreview,
@@ -11,6 +13,7 @@ import type {
   OAuthFlow,
   ProfileBinding,
   ProxyAssignmentResult,
+  RevealedAccountIdentity,
   RemoteTarget,
   RemoteUsagePage,
   RemoteUsageQuery,
@@ -49,6 +52,10 @@ export const relayCommands = {
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
   setAccountProxy: (accountId: string, proxyUrl: string | null) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl } }),
   assignAccountProxies: (accountIds: string[], proxyUrls: string[]) => invoke<ProxyAssignmentResult>("assign_local_account_proxies", { input: { accountIds, proxyUrls } }),
+  exportLocalAccounts: (input: AccountExportInput) => invoke<AccountExportResult>("export_local_accounts", { input }),
+  exportRemoteAccounts: (input: AccountExportInput) => invoke<AccountExportResult>("export_remote_accounts", { input }),
+  revealLocalAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_local_account_identity", { accountId }),
+  revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
   startOAuth: () => invoke<OAuthFlow>("start_codex_oauth"),
   resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
@@ -86,6 +93,7 @@ export const relayCommands = {
   applyHistoryRepair: (sessionId: string) => invoke<HistoryRepairResult>("apply_codex_history_repair", { sessionId }),
   rollbackHistoryRepair: (backupId: string) => invoke<{ backupId: string; filesRestored: number }>("rollback_codex_history_repair", { backupId }),
   attachCodexAccount: (accountId: string, profileDir?: string) => invoke("attach_codex_to_account", { accountId, profileDir: profileDir || null }),
+  launchCodexAccount: (accountId: string) => invoke("launch_codex_account", { accountId }),
   profileBindings: () => invoke<ProfileBinding[]>("list_codex_account_bindings"),
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   openFolder: (folder: "data" | "profile_backups") => invoke("open_relay_folder", { folder }),
