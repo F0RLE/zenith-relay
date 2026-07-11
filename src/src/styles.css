@@ -1788,12 +1788,23 @@ textarea {
 }
 
 .request-link {
+  min-width: 0;
   max-width: 190px;
   padding: 0;
+  overflow: hidden;
   border: 0;
   background: transparent;
   color: var(--relay-text);
   cursor: pointer;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.request-link code,
+.request-link strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .request-link:hover,
@@ -2538,6 +2549,27 @@ textarea {
 
 .relay-table tbody tr:focus-within td {
   background: var(--relay-subtle);
+}
+
+.usage-request-table {
+  table-layout: fixed;
+}
+
+.usage-request-table th,
+.usage-request-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-request-table th:nth-child(1) { width: 124px; }
+.usage-request-table th:nth-child(2) { width: 96px; }
+.usage-request-table th:nth-child(5) { width: 84px; }
+.usage-request-table th:nth-child(6) { width: 70px; }
+.usage-request-table th:nth-child(7) { width: 160px; }
+
+.usage-request-table .request-link {
+  width: 100%;
+  max-width: 100%;
 }
 
 .relay-table td small,
