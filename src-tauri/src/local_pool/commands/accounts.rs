@@ -1093,7 +1093,6 @@ async fn prepare_import_preview(
                         code: ImportIssueCode::RefreshExchangeFailed,
                         message: error.message,
                     });
-                    prepared_values.push(original);
                     continue;
                 }
             };
@@ -1105,7 +1104,6 @@ async fn prepare_import_preview(
                 code: ImportIssueCode::InvalidCredentials,
                 message: "Codex account identity is missing".into(),
             });
-            prepared_values.push(original);
             continue;
         };
         row.identity = masked_account_identity(provider_account_id);

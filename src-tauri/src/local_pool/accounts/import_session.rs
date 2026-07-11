@@ -1005,6 +1005,36 @@ mod tests {
     }
 
     #[test]
+    fn prepared_preview_accepts_a_row_rejected_during_preparation() {
+        let root = temp_root("prepared-newly-invalid-row");
+        let secrets = MemorySecrets::default();
+        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let started = store
+            .start(r#"{"refresh_token":"refresh"}"#, None, &[])
+            .unwrap();
+        let mut final_preview = started.preview.clone();
+        let row = &mut final_preview.rows[0];
+        row.status = crate::local_pool::accounts::imports::ImportPreviewStatus::Invalid;
+        row.selectable = false;
+        row.default_selected = false;
+        row.error = Some(crate::local_pool::accounts::imports::ImportIssue {
+            code: crate::local_pool::accounts::imports::ImportIssueCode::RefreshExchangeFailed,
+            message: "refresh exchange failed".into(),
+        });
+
+        let prepared = store
+            .prepare(&started.session_id, Some("[]"), final_preview.clone(), &[])
+            .unwrap();
+        assert!(prepared.items.is_empty());
+        assert_eq!(prepared.preview, final_preview);
+        let resumed = store.resume(&started.session_id, &[]).unwrap();
+        assert!(resumed.items.is_empty());
+        assert_eq!(resumed.preview, final_preview);
+        store.cancel(&started.session_id).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn prepared_preview_reuses_original_secret_when_credentials_are_unchanged() {
         let root = temp_root("prepared-reused-secret");
         let secrets = MemorySecrets::default();
