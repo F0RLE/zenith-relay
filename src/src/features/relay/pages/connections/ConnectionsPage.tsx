@@ -511,6 +511,16 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
     if (ok && result.current) acceptSession(result.current);
     else if (!ok) setCommandFailed(true);
   };
+  const chooseFiles = async () => {
+    const result: { current: ImportSession | null } = { current: null };
+    const ok = await perform("import-files", async () => {
+      result.current = mode === "local"
+        ? await relayCommands.previewImportFiles()
+        : await relayCommands.previewRemoteImportFiles();
+    });
+    if (ok && result.current) acceptSession(result.current);
+    else if (!ok) setCommandFailed(true);
+  };
   const resume = async () => {
     const result: { current: ImportSession | null } = { current: null };
     const ok = await perform("import-resume", async () => { result.current = await relayCommands.resumeImport(resumeId.trim()); });
@@ -564,7 +574,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const body = completed ? <div role="alert" className="relay-form"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul>{completed.map((failure) => <li key={failure.itemId}><code>{failure.code}</code></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
     return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>;
-  })}</tbody></table></div> : <div className="relay-form"><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label> : null}</div>;
+  })}</tbody></table></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={chooseFiles}>{t("accounts.chooseImportFiles")}</Button></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label> : null}</div>;
   return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }
 

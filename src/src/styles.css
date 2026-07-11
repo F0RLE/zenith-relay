@@ -3850,6 +3850,12 @@ textarea {
   gap: 14px;
 }
 
+.import-file-picker {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .secret-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 32px;

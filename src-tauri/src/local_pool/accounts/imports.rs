@@ -392,6 +392,64 @@ pub fn parse_import(
     })
 }
 
+pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportError> {
+    if documents.is_empty() {
+        return Err(ImportError::new(
+            ImportErrorCode::EmptyInput,
+            "import content is empty",
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    let mut values = Vec::new();
+    for document in documents {
+        if document.trim().is_empty() {
+            return Err(ImportError::new(
+                ImportErrorCode::EmptyInput,
+                "import content is empty",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(document.len()).ok_or_else(|| {
+            ImportError::new(
+                ImportErrorCode::InputTooLarge,
+                "import content exceeds the size limit",
+            )
+        })?;
+        if total_bytes > MAX_IMPORT_BYTES {
+            return Err(ImportError::new(
+                ImportErrorCode::InputTooLarge,
+                "import content exceeds the size limit",
+            ));
+        }
+
+        let (_, entries, _) = parse_entries(document)?;
+        for entry in entries {
+            let Some(value) = entry.value else {
+                return Err(ImportError::new(
+                    ImportErrorCode::MalformedJson,
+                    "import JSON is malformed",
+                ));
+            };
+            values.push(value);
+            check_item_count(values.len())?;
+        }
+    }
+
+    let combined = serde_json::to_string(&values).map_err(|_| {
+        ImportError::new(
+            ImportErrorCode::MalformedJson,
+            "failed to combine import documents",
+        )
+    })?;
+    if combined.len() > MAX_IMPORT_BYTES {
+        return Err(ImportError::new(
+            ImportErrorCode::InputTooLarge,
+            "import content exceeds the size limit",
+        ));
+    }
+    Ok(combined)
+}
+
 struct InputEntry {
     ordinal: usize,
     value: Option<Value>,
@@ -1341,6 +1399,37 @@ mod tests {
     const ID: &str = "id-super-secret";
     const API_KEY: &str = "sk-super-secret";
     const EMAIL: &str = "private.user@example.test";
+
+    #[test]
+    fn combines_multiple_files_and_nested_account_containers() {
+        let documents = vec![
+            format!(
+                r#"{{"account_id":"account-one","email":"one@example.test","access_token":"{ACCESS}"}}"#
+            ),
+            format!(
+                r#"[{{"account_id":"account-two","email":"two@example.test","access_token":"{ACCESS}-two"}},{{"account_id":"account-three","email":"three@example.test","access_token":"{ACCESS}-three"}}]"#
+            ),
+            format!(
+                r#"{{"accounts":[{{"account_id":"account-four","email":"four@example.test","access_token":"{ACCESS}-four"}}]}}"#
+            ),
+        ];
+
+        let combined = combine_import_documents(&documents).unwrap();
+        let parsed = parse_import(&combined, None, &[]).unwrap();
+
+        assert_eq!(parsed.preview.format, ImportFormat::JsonArray);
+        assert_eq!(parsed.preview.rows.len(), 4);
+        assert_eq!(parsed.items.len(), 4);
+        assert_eq!(
+            parsed
+                .items
+                .iter()
+                .map(|item| item.identity_key.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            4
+        );
+    }
 
     #[test]
     fn parses_codex_auth_json_token_and_api_key_shapes() {

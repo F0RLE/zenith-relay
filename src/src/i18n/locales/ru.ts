@@ -406,6 +406,7 @@ const relayRu = {
     resume: "Вернуть в работу",
     plan: "Подписка",
     identity: "Учётная запись",
+    chooseImportFiles: "Выбрать JSON-файлы",
     importData: "Данные импорта учётной записи",
     resumeImportId: "Идентификатор незавершённого импорта",
     importPlaceholder: "Вставьте поддерживаемый экспорт личной учётной записи или auth JSON",

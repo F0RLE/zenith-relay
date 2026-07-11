@@ -21,6 +21,8 @@ use zenith_relay_core::protocol::{
     UsagePage, UsageQuery,
 };
 
+use super::accounts::pick_account_import_documents;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectRemoteServerInput {
@@ -281,6 +283,31 @@ pub fn prepare_remote_server_deployment(
     state: State<'_, DesktopState>,
 ) -> Result<DeploymentPlan, CommandError> {
     deployment::prepare(&state.root, &input.public_base_url).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn preview_remote_account_import_files(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<serde_json::Value>, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    let Some(documents) = pick_account_import_documents(&app)? else {
+        return Ok(None);
+    };
+    let payload = serde_json::json!({ "documents": documents });
+    let preview = client
+        .mutate(
+            Method::POST,
+            "/accounts/import/batch/preview",
+            Some(&payload),
+        )
+        .await
+        .map_err(remote_error)?;
+    Ok(Some(preview))
 }
 
 #[tauri::command]

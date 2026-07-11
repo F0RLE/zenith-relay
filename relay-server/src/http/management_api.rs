@@ -746,7 +746,10 @@ fn prepare_account_import(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BatchImportPreviewInput {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    documents: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -802,7 +805,7 @@ pub async fn preview_account_batch_import(
     Json(input): Json<BatchImportPreviewInput>,
 ) -> Result<(StatusCode, Json<BatchImportSession>), ManagementError> {
     cleanup_expired_imports(&state)?;
-    let (format, values, warnings) = parse_batch_import(&input.content)?;
+    let (format, values, warnings) = parse_batch_import_input(input)?;
     let session_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
     let mut rows = Vec::with_capacity(values.len());
     for (ordinal, value) in values.into_iter().enumerate() {
@@ -845,6 +848,52 @@ pub async fn preview_account_batch_import(
             },
         }),
     ))
+}
+
+fn parse_batch_import_input(
+    input: BatchImportPreviewInput,
+) -> Result<(String, Vec<Value>, Vec<BatchImportWarning>), ManagementError> {
+    let content = input.content.filter(|value| !value.trim().is_empty());
+    if input.documents.is_empty() {
+        return parse_batch_import(content.as_deref().unwrap_or_default());
+    }
+    if content.is_some() {
+        return Err(ManagementError::validation(
+            "import_input_conflict",
+            "paste content and file documents cannot be imported together",
+        ));
+    }
+    if input.documents.len() > MAX_IMPORT_ITEMS {
+        return Err(ManagementError::validation(
+            "import_item_count",
+            "import must contain between 1 and 256 items",
+        ));
+    }
+
+    let mut total_bytes = 0usize;
+    let mut values = Vec::new();
+    let mut warnings = Vec::new();
+    for document in input.documents {
+        total_bytes = total_bytes.checked_add(document.len()).ok_or_else(|| {
+            ManagementError::validation("import_too_large", "import input exceeds the size limit")
+        })?;
+        if total_bytes > MAX_IMPORT_BYTES {
+            return Err(ManagementError::validation(
+                "import_too_large",
+                "import input exceeds the size limit",
+            ));
+        }
+        let (_, mut document_values, mut document_warnings) = parse_batch_import(&document)?;
+        values.append(&mut document_values);
+        warnings.append(&mut document_warnings);
+        if values.len() > MAX_IMPORT_ITEMS {
+            return Err(ManagementError::validation(
+                "import_item_count",
+                "import must contain between 1 and 256 items",
+            ));
+        }
+    }
+    Ok(("json_documents".to_string(), values, warnings))
 }
 
 #[derive(Deserialize)]

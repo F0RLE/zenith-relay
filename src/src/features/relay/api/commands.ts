@@ -40,6 +40,8 @@ export const relayCommands = {
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
 
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),
+  previewImportFiles: () => invoke<ImportSession | null>("preview_local_account_import_files"),
+  previewRemoteImportFiles: () => invoke<ImportSession | null>("preview_remote_account_import_files"),
   resumeImport: (sessionId: string) => invoke<ImportSession>("resume_local_account_import", { sessionId }),
   prepareImport: (sessionId: string, probeQuota = true) => invoke<ImportSession>("prepare_local_account_import", { input: { sessionId, probeQuota } }),
   confirmImport: (sessionId: string, selectedItemIds: string[]) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: true, probeQuota: true, models: [] } }),

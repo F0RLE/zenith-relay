@@ -1221,6 +1221,7 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
         .setup(|app| {
@@ -1286,6 +1287,7 @@ fn main() {
             local_pool::commands::connections::rotate_local_source_key,
             local_pool::commands::connections::test_local_source,
             local_pool::commands::accounts::start_local_account_import,
+            local_pool::commands::accounts::preview_local_account_import_files,
             local_pool::commands::accounts::resume_local_account_import,
             local_pool::commands::accounts::prepare_local_account_import,
             local_pool::commands::accounts::cancel_local_account_import,
@@ -1352,6 +1354,7 @@ fn main() {
             local_pool::commands::remote_server::refresh_remote_server_capabilities,
             local_pool::commands::remote_server::disconnect_remote_server,
             local_pool::commands::remote_server::prepare_remote_server_deployment,
+            local_pool::commands::remote_server::preview_remote_account_import_files,
             local_pool::commands::remote_server::execute_remote_server_action
         ])
         .build(tauri::generate_context!())

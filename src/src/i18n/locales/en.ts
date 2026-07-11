@@ -406,6 +406,7 @@ const relayEn = {
     resume: "Resume",
     plan: "Plan",
     identity: "Identity",
+    chooseImportFiles: "Choose JSON files",
     importData: "Account import data",
     resumeImportId: "Resume import session ID",
     importPlaceholder: "Paste a supported personal account export or auth JSON",

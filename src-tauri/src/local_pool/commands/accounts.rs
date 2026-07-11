@@ -14,8 +14,9 @@ use crate::local_pool::{
             ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
         },
         imports::{
-            ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview, ImportPreviewStatus,
-            ImportQuotaStatus, ParsedImportItem, MAX_IMPORT_ITEMS,
+            combine_import_documents, ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview,
+            ImportPreviewStatus, ImportQuotaStatus, ParsedImportItem, MAX_IMPORT_BYTES,
+            MAX_IMPORT_ITEMS,
         },
         models::{CodexModelsClient, ModelDiscoveryFailureCode},
         oauth::CodexOAuthClient,
@@ -40,11 +41,12 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
@@ -76,7 +78,10 @@ type ItemResult<T> = std::result::Result<T, ImportItemError>;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartAccountImportInput {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    documents: Vec<String>,
     #[serde(default)]
     source_file: Option<String>,
 }
@@ -494,16 +499,144 @@ pub async fn start_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
+    let (content, source_file) = normalize_import_input(input)?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
     let session = ImportSessionStore::new(state.root.clone(), NativeSecretBackend)
         .start(
-            &input.content,
-            input.source_file.as_deref(),
+            &content,
+            source_file.as_deref(),
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
     Ok(session.into())
+}
+
+#[tauri::command]
+pub async fn preview_local_account_import_files(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Option<ImportSessionResponse>> {
+    let Some(documents) = pick_account_import_documents(&app)? else {
+        return Ok(None);
+    };
+    let _mutation = state.setup_guard().await;
+    let (content, _) = normalize_import_input(StartAccountImportInput {
+        content: None,
+        documents,
+        source_file: None,
+    })?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let existing = existing_identity_index(&state, &credentials)?;
+    let sessions = ImportSessionStore::new(state.root.clone(), NativeSecretBackend);
+    let session = sessions
+        .start(
+            &content,
+            None,
+            &existing.keys().cloned().collect::<Vec<_>>(),
+        )
+        .map_err(import_session_error)?;
+    let session_id = session.session_id.clone();
+    let prepared = async {
+        let (content, preview) =
+            prepare_import_preview(&state, &credentials, session, true).await?;
+        sessions
+            .prepare(
+                &session_id,
+                content.as_deref(),
+                preview,
+                &existing.keys().cloned().collect::<Vec<_>>(),
+            )
+            .map_err(import_session_error)
+    }
+    .await;
+    match prepared {
+        Ok(session) => Ok(Some(session.into())),
+        Err(error) => {
+            let _ = sessions.cancel(&session_id);
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn pick_account_import_documents(app: &AppHandle) -> CommandResult<Option<Vec<String>>> {
+    let Some(files) = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_files()
+    else {
+        return Ok(None);
+    };
+    let paths = files
+        .into_iter()
+        .map(|file| {
+            file.into_path().map_err(|_| {
+                LocalPoolError::new(ErrorCode::InvalidState, "selected file path is invalid")
+            })
+        })
+        .collect::<LocalResult<Vec<_>>>()?;
+    read_import_documents(paths).map(Some).map_err(Into::into)
+}
+
+fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
+    if paths.is_empty() || paths.len() > MAX_IMPORT_ITEMS {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "select between 1 and 256 import files",
+        ));
+    }
+    let mut total_bytes = 0usize;
+    let mut documents = Vec::with_capacity(paths.len());
+    for path in paths {
+        let metadata = std::fs::metadata(&path).map_err(|_| {
+            LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
+        })?;
+        if !metadata.is_file() {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "selected import path is not a file",
+            ));
+        }
+        let length = usize::try_from(metadata.len()).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "selected import file is too large")
+        })?;
+        total_bytes = total_bytes.checked_add(length).ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "selected import files are too large",
+            )
+        })?;
+        if total_bytes > MAX_IMPORT_BYTES {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "selected import files are too large",
+            ));
+        }
+        documents.push(std::fs::read_to_string(path).map_err(|_| {
+            LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
+        })?);
+    }
+    Ok(documents)
+}
+
+fn normalize_import_input(
+    input: StartAccountImportInput,
+) -> CommandResult<(String, Option<String>)> {
+    let content = input.content.filter(|value| !value.trim().is_empty());
+    if !input.documents.is_empty() {
+        if content.is_some() || input.source_file.is_some() {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "paste content and file documents cannot be imported together",
+            )
+            .into());
+        }
+        let content = combine_import_documents(&input.documents)
+            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;
+        return Ok((content, None));
+    }
+    Ok((content.unwrap_or_default(), input.source_file))
 }
 
 #[tauri::command]
@@ -566,10 +699,17 @@ pub async fn confirm_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let _mutation = state.setup_guard().await;
+    confirm_local_account_import_inner(input, &state).await
+}
+
+async fn confirm_local_account_import_inner(
+    input: ConfirmAccountImportInput,
+    state: &DesktopState,
+) -> CommandResult<ConfirmAccountImportResponse> {
     let selected_item_ids = normalize_selected_item_ids(input.selected_item_ids)?;
     let configured_models = normalize_models(input.models.clone())?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
+    let existing = existing_identity_index(state, &credentials)?;
     let sessions = ImportSessionStore::new(state.root.clone(), NativeSecretBackend);
     let session = sessions
         .resume(
@@ -647,14 +787,13 @@ pub async fn confirm_local_account_import(
             continue;
         };
         if context.auth_mode == ImportAuthMode::ApiKey {
-            match import_source_item(&state, item, input.discover_models, &configured_models).await
-            {
+            match import_source_item(state, item, input.discover_models, &configured_models).await {
                 Ok(source) => results.push(ImportItemResult::source_success(item_id, source)),
                 Err(error) => results.push(ImportItemResult::failure(item_id, error)),
             }
         } else {
             match import_account_item(
-                &state,
+                state,
                 &credentials,
                 item,
                 context,
@@ -3138,6 +3277,114 @@ mod tests {
             ]
         );
         assert!(normalize_selected_item_ids(vec!["../secret".into()]).is_err());
+    }
+
+    #[test]
+    fn selected_import_files_are_read_and_combined_only_in_rust() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-files-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = (1..=3)
+            .map(|index| {
+                let path = root.join(format!("account-{index}.json"));
+                std::fs::write(
+                    &path,
+                    serde_json::json!({
+                        "account_id": format!("provider-{index}"),
+                        "access_token": format!("synthetic-access-{index}")
+                    })
+                    .to_string(),
+                )
+                .unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+
+        let documents = read_import_documents(paths).unwrap();
+        let combined = combine_import_documents(&documents).unwrap();
+        let parsed = parse_import(&combined, None, &[]).unwrap();
+
+        assert_eq!(parsed.items.len(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_confirm_persists_every_selected_account_and_credential() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-batch-import-{}",
+            Uuid::new_v4().simple()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let documents = (1..=3)
+            .map(|index| {
+                serde_json::json!({
+                    "name": format!("Imported {index}"),
+                    "credentials": {
+                        "access_token": format!("synthetic-access-{index}"),
+                        "refresh_token": format!("synthetic-refresh-{index}"),
+                        "chatgpt_account_id": format!("synthetic-provider-{index}"),
+                        "email": format!("member-{index}@example.test")
+                    }
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>();
+        let (content, _) = normalize_import_input(StartAccountImportInput {
+            content: None,
+            documents,
+            source_file: None,
+        })
+        .unwrap();
+        let sessions = ImportSessionStore::new(root.clone(), NativeSecretBackend);
+        let session = sessions.start(&content, None, &[]).unwrap();
+        let selected_item_ids = session
+            .preview
+            .rows
+            .iter()
+            .map(|row| row.item_id.clone())
+            .collect::<Vec<_>>();
+
+        let response = confirm_local_account_import_inner(
+            ConfirmAccountImportInput {
+                session_id: session.session_id,
+                selected_item_ids,
+                discover_models: false,
+                probe_quota: false,
+                models: vec!["gpt-test".into()],
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.results.len(), 3);
+        assert!(response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded));
+        let accounts = state.store().unwrap().accounts().to_vec();
+        assert_eq!(accounts.len(), 3);
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|account| account.account.id.as_str())
+                .collect::<HashSet<_>>()
+                .len(),
+            3
+        );
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let mut provider_ids = HashSet::new();
+        for account in &accounts {
+            let credentials = credential_store.require(&account.account.id).unwrap();
+            provider_ids.insert(credentials.provider_account_id().unwrap().to_string());
+            credential_store.delete(&account.account.id).unwrap();
+        }
+        assert_eq!(provider_ids.len(), 3);
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

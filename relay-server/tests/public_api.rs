@@ -11,6 +11,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     path::Path,
     sync::{
@@ -586,6 +587,86 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     let database = String::from_utf8_lossy(&database);
     assert!(!database.contains("synthetic-proxy-secret-never-import"));
     assert!(!database.contains("synthetic-source-secret-never-import"));
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn batch_import_accepts_multiple_documents_and_confirms_every_selected_account() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let documents = (1..=3)
+        .map(|index| {
+            json!({
+                "name": format!("Document {index}"),
+                "credentials": {
+                    "access_token": format!("synthetic-document-access-{index}"),
+                    "refresh_token": format!("synthetic-document-refresh-{index}"),
+                    "chatgpt_account_id": format!("synthetic-document-account-{index}")
+                },
+                "models": ["gpt-test"]
+            })
+            .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    let preview_response = client
+        .post(format!("{}/accounts/import/batch/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"documents": documents}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preview_response.status(), StatusCode::CREATED);
+    let preview_text = preview_response.text().await.unwrap();
+    assert!(!preview_text.contains("synthetic-document-access"));
+    assert!(!preview_text.contains("synthetic-document-refresh"));
+    let preview: Value = serde_json::from_str(&preview_text).unwrap();
+    assert_eq!(preview["preview"]["format"], "json_documents");
+    let rows = preview["preview"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row["defaultSelected"] == true));
+    let selected_item_ids = rows
+        .iter()
+        .map(|row| row["itemId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    let confirmed: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sessionId": preview["sessionId"],
+            "selectedItemIds": selected_item_ids
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(confirmed["results"].as_array().unwrap().len(), 3);
+    assert!(confirmed["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|result| result["status"] == "succeeded"));
+    let accounts = server.state.store.accounts().unwrap();
+    assert_eq!(accounts.len(), 3);
+    assert_eq!(
+        accounts
+            .iter()
+            .map(|account| account.secret_ref.as_str())
+            .collect::<HashSet<_>>()
+            .len(),
+        3
+    );
+    assert!(accounts.iter().all(|account| server
+        .state
+        .vault
+        .load(&account.secret_ref)
+        .unwrap()
+        .is_some()));
     server.task.abort();
 }
 
