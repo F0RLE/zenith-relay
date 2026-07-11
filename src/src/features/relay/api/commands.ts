@@ -53,6 +53,8 @@ export const relayCommands = {
   deleteKey: (keyId: string) => invoke("delete_local_gateway_key", { keyId }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),
+  restartGateway: () => invoke("restart_local_gateway"),
+  updateGatewayPort: (port: number) => invoke("update_local_gateway_port", { port }),
   diagnoseGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_local_gateway", { stream }),
 
   createAutomation: (input: Record<string, unknown>) => invoke("create_quota_wake_automation", { input }),

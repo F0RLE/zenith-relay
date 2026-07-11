@@ -1233,6 +1233,8 @@ fn main() {
             local_pool::commands::pool::update_local_routing,
             local_pool::commands::gateway::start_local_gateway,
             local_pool::commands::gateway::stop_local_gateway,
+            local_pool::commands::gateway::restart_local_gateway,
+            local_pool::commands::gateway::update_local_gateway_port,
             local_pool::commands::gateway::diagnose_local_gateway,
             local_pool::commands::usage::get_local_usage,
             local_pool::commands::profiles::attach_codex_to_local_gateway,

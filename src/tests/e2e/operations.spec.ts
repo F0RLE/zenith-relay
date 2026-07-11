@@ -62,6 +62,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(page.getByText("zlr_synthetic_rotated_key")).toBeVisible();
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await page.getByRole("button", { name: "Restart endpoint" }).click();
+  await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
+  await page.getByRole("button", { name: "Apply and restart" }).click();
+  await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
   await page.getByRole("tab", { name: "Client Setup" }).click();
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
@@ -71,6 +75,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" }).click();
   const diagnosticCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { stream?: boolean } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "diagnose_local_gateway").map((call) => call.args.stream));
   expect(diagnosticCalls).toEqual([false, true]);
+  const gatewayCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { port?: number } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "restart_local_gateway" || call.command === "update_local_gateway_port"));
+  expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
 });
 
 test("import failures remain actionable without reusing a consumed session", async ({ page }) => {

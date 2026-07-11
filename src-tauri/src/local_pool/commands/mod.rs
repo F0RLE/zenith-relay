@@ -222,6 +222,7 @@ async fn restart_or_rollback(
     let Some(address) = state.gateway.address().await else {
         return Ok(());
     };
+    let next_port = state.store()?.gateway().port;
     let mut rollback = Some(rollback);
     let runtime = match runtime_from_store(state).await {
         Ok(runtime) => runtime,
@@ -232,7 +233,7 @@ async fn restart_or_rollback(
     };
 
     state.gateway.stop().await;
-    if let Err(error) = state.gateway.start(runtime, address.port()).await {
+    if let Err(error) = state.gateway.start(runtime, next_port).await {
         apply_rollback(state, rollback.take().unwrap()).await?;
         let old_runtime = match runtime_from_store(state).await {
             Ok(runtime) => runtime,
@@ -344,6 +345,89 @@ mod tests {
         assert!(response.text().await.unwrap().contains("old-model"));
 
         state.gateway.stop().await;
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn occupied_new_port_restores_settings_and_previous_listener() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-port-rollback-{id}"));
+        let source_secret_ref = format!("source:port-rollback-{id}");
+        let key_secret_ref = format!("key:port-rollback-{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        secret_store::save(&key_secret_ref, "local-secret").unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_source(ProviderSourceRecord {
+                id: "source_1".into(),
+                name: "Synthetic".into(),
+                enabled: true,
+                draining: false,
+                base_url: "http://127.0.0.1:9/v1".into(),
+                secret_ref: source_secret_ref.clone(),
+                wire_api: zenith_relay_core::WireApi::Responses,
+                models: vec!["gpt-test".into()],
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                priority: 0,
+                weight: 1,
+                last_used_at: None,
+                last_test_at: None,
+                last_test_status: None,
+                last_error: None,
+            })
+            .unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_key(LocalGatewayKeyRecord {
+                id: "key_1".into(),
+                label: "Default".into(),
+                enabled: true,
+                secret_ref: key_secret_ref.clone(),
+                source_ids: None,
+                account_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
+                created_at: "2026-07-11T00:00:00Z".into(),
+                last_used_at: None,
+            })
+            .unwrap();
+        let address = state
+            .gateway
+            .start(runtime_from_store(&state).await.unwrap(), 0)
+            .await
+            .unwrap();
+        let mut old_gateway = state.store().unwrap().gateway().clone();
+        old_gateway.port = address.port();
+        state
+            .store()
+            .unwrap()
+            .replace_gateway(old_gateway.clone())
+            .unwrap();
+        let occupied = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let mut next_gateway = old_gateway.clone();
+        next_gateway.port = occupied.local_addr().unwrap().port();
+        state
+            .store()
+            .unwrap()
+            .replace_gateway(next_gateway)
+            .unwrap();
+
+        assert!(sync_gateway_or_rollback(&state, old_gateway.clone())
+            .await
+            .is_err());
+        assert_eq!(state.store().unwrap().gateway().port, old_gateway.port);
+        assert_eq!(state.gateway.address().await, Some(address));
+
+        drop(occupied);
+        state.gateway.stop().await;
+        secret_store::delete(&source_secret_ref).unwrap();
+        secret_store::delete(&key_secret_ref).unwrap();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

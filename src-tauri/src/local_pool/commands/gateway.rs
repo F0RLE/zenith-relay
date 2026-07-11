@@ -1,4 +1,4 @@
-use super::runtime_from_store;
+use super::{runtime_from_store, sync_gateway_or_rollback};
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError},
     models::LocalPoolSnapshot,
@@ -54,6 +54,36 @@ pub async fn stop_local_gateway(
     let _mutation = state.setup_guard().await;
     state.store()?.set_gateway_enabled(false)?;
     state.gateway.stop().await;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn restart_local_gateway(
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    if state.gateway.address().await.is_none() {
+        return Err(gateway_not_running().into());
+    }
+    let gateway = state.store()?.gateway().clone();
+    sync_gateway_or_rollback(&state, gateway).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_local_gateway_port(
+    port: u16,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let old_gateway = state.store()?.gateway().clone();
+    if old_gateway.port == port {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    let mut gateway = old_gateway.clone();
+    gateway.port = port;
+    state.store()?.replace_gateway(gateway)?;
+    sync_gateway_or_rollback(&state, old_gateway).await?;
     state.snapshot().await.map_err(Into::into)
 }
 
