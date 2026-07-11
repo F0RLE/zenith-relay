@@ -397,6 +397,10 @@ export async function updateAndRelaunch(onProgress?: (downloaded: number, total?
   return "installed" as const;
 }
 
+export function restartApplication() {
+  return relaunch();
+}
+
 export function onStateChanged(callback: () => void) {
   return listen("zenith-state-changed", callback);
 }

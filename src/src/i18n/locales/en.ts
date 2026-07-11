@@ -616,6 +616,7 @@ const relayEn = {
     restoreBackup: "Restore backup",
     resetData: "Reset local pool data",
     resetDataHint: "This removes local pool records after confirmation. Client profile backups are handled separately.",
+    resetDataConfirm: "Reset all local pool accounts, sources, keys, automations, and usage? Profile backups will be kept.",
   },
   quota: {
     primary: "Primary",
@@ -664,6 +665,9 @@ const relayEn = {
     refreshFailed: "Could not refresh the selected runtime.",
     upToDate: "The application is up to date.",
     topUpOpened: "Top-up opened in Telegram.",
+    opened: "Folder opened.",
+    exported: "Redacted export created.",
+    reset: "Local pool data reset.",
   },
   errors: {
     general: "The action failed. Review the values and try again.",

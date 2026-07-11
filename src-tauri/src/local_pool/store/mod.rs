@@ -326,6 +326,16 @@ impl LocalPoolStore {
         self.replace_gateway(next)
     }
 
+    pub fn reset_local_records(&mut self) -> Result<()> {
+        self.replace_gateway(GatewaySettings::default())?;
+        self.replace_all_records(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            AutomationRecords::default(),
+        )
+    }
+
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
@@ -631,6 +641,30 @@ mod tests {
             LocalPoolStore::open(root.clone()).unwrap().accounts().len(),
             MAX_LOCAL_ACCOUNTS
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_clears_runtime_records_but_keeps_profile_backups() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        store
+            .replace_accounts_and_keys(vec![account_record("account-reset")], Vec::new())
+            .unwrap();
+        let backup = root.join("backups").join("profiles").join("config.toml");
+        fs::create_dir_all(backup.parent().unwrap()).unwrap();
+        fs::write(&backup, "preserved").unwrap();
+
+        store.reset_local_records().unwrap();
+        drop(store);
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert!(reopened.accounts().is_empty());
+        assert!(reopened.sources().is_empty());
+        assert!(reopened.keys().is_empty());
+        assert!(reopened.automations().tasks.is_empty());
+        assert!(!reopened.gateway().enabled);
+        assert_eq!(fs::read_to_string(backup).unwrap(), "preserved");
         fs::remove_dir_all(root).unwrap();
     }
 

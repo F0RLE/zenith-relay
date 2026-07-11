@@ -194,6 +194,15 @@ impl TelemetryDb {
             .map_err(db_error)?;
         Ok(logs)
     }
+
+    pub fn clear(&self) -> Result<()> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .execute("DELETE FROM request_logs", [])
+            .map(|_| ())
+            .map_err(db_error)
+    }
 }
 
 fn sql_u64(value: u64) -> i64 {

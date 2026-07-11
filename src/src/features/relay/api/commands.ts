@@ -8,6 +8,8 @@ import type {
   RemoteTarget,
   RemoteUsagePage,
   RuntimeSnapshot,
+  SupportExportContext,
+  UsageExportRow,
   WakeTask,
 } from "./types";
 
@@ -63,6 +65,10 @@ export const relayCommands = {
   attachCodexAccount: (accountId: string, profileDir?: string) => invoke("attach_codex_to_account", { accountId, profileDir: profileDir || null }),
   profileBindings: () => invoke<ProfileBinding[]>("list_codex_account_bindings"),
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
+  openFolder: (folder: "data" | "profile_backups") => invoke("open_relay_folder", { folder }),
+  resetLocalData: () => invoke("reset_local_pool_data"),
+  exportUsage: (rows: UsageExportRow[]) => invoke<string>("export_usage", { rows }),
+  exportSupportBundle: (context: SupportExportContext) => invoke<string>("export_support_bundle", { context }),
 
   connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),
   disconnectRemote: () => invoke("disconnect_remote_server"),

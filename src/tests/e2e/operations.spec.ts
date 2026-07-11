@@ -109,3 +109,31 @@ test("Ready API top-up uses the stored-key backend command", async ({ page }) =>
   await page.getByRole("button", { name: "Open top-up" }).click();
   await expect(page.getByText("Top-up opened in Telegram.")).toBeVisible();
 });
+
+test("recovery and export controls call the Rust-owned operations", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+  await expect(page.getByText("Redacted export created.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await page.getByRole("tab", { name: "Diagnostics" }).click();
+  await page.getByRole("button", { name: "Export", exact: true }).click();
+
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await page.getByRole("tab", { name: "Backups" }).click();
+  await page.getByRole("button", { name: "Open folder" }).click();
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Storage", exact: true }).click();
+  await page.getByRole("button", { name: "Open data folder" }).click();
+  await page.getByRole("button", { name: "Recovery", exact: true }).click();
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Reset local pool data" }).click();
+
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).toEqual(expect.arrayContaining(["export_usage", "export_support_bundle", "open_relay_folder"]));
+  expect(commands).not.toContain("reset_local_pool_data");
+});

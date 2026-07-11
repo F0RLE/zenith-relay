@@ -125,6 +125,30 @@ export type LocalUsage = {
   totalTokens: number | null;
 };
 
+export type UsageExportRow = {
+  time: string;
+  success: boolean;
+  model: string | null;
+  connection: string;
+  latencyMs: number;
+  tokens: number | null;
+  requestId: string | null;
+  httpStatus: number | null;
+  errorCategory: string | null;
+};
+
+export type SupportExportContext = {
+  mode: RelayMode;
+  schemaVersion: number | null;
+  gatewayRunning: boolean;
+  sourceCount: number;
+  accountCount: number;
+  keyCount: number;
+  automationCount: number;
+  usageCount: number;
+  warningCount: number;
+};
+
 export type RemoteUsage = {
   id: number;
   requestId: string;

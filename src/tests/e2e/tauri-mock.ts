@@ -185,6 +185,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "restore_codex_profile":
           case "attach_codex_to_account":
           case "restore_codex_account_profile": return null;
+          case "open_relay_folder": return null;
+          case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
+          case "export_usage": return "C:\\Temp\\usage.json";
+          case "export_support_bundle": return "C:\\Temp\\support.json";
           case "list_codex_account_bindings": return populated ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "disconnect_remote_server": return null;

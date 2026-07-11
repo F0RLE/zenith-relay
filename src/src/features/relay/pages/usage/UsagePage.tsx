@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Download, RefreshCw, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { relayCommands } from "../../api/commands";
 import { Button, EmptyState, IconButton, PageHeader, StatusBadge, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
@@ -20,7 +21,7 @@ type UsageRow = {
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, localUsage, remoteUsage, readyUsage, refresh, loading } = useRelayState();
+  const { mode, localUsage, remoteUsage, readyUsage, refresh, loading, busy, perform } = useRelayState();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
   const [selected, setSelected] = useState<UsageRow | null>(null);
@@ -32,10 +33,21 @@ export function UsagePage() {
   const filtered = status === "all" ? rows : rows.filter((item) => status === "success" ? item.success : !item.success);
   const success = rows.filter((item) => item.success).length;
   const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(rows.map((row) => ({
+    time: row.time,
+    success: row.success,
+    model: row.model,
+    connection: row.connection,
+    latencyMs: row.latency,
+    tokens: row.tokens,
+    requestId: row.requestId,
+    httpStatus: row.httpStatus,
+    errorCategory: row.errorCategory,
+  }))), "feedback.exported");
 
   return (
     <section className="relay-page">
-      <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><Button variant="secondary" icon={<Download aria-hidden />} disabled>{t("common.export")}</Button><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading} onClick={refresh}>{t("common.refresh")}</Button></>} />
+      <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><Button variant="secondary" icon={<Download aria-hidden />} busy={busy === "usage-export"} onClick={exportRows}>{t("common.export")}</Button><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading} onClick={refresh}>{t("common.refresh")}</Button></>} />
       <Tabs value={view} onChange={(id) => { setView(id as View); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("nav.connections") }, { id: "errors", label: t("overview.errors") }]} />
       <div className="metric-band usage-metrics"><div><span>{t("usage.requests")}</span><strong>{rows.length}</strong></div><div><span>{t("common.success")}</span><strong>{success}</strong></div><div><span>{t("usage.tokens")}</span><strong>{rows.reduce((sum, item) => sum + (item.tokens ?? 0), 0)}</strong></div><div><span>{t("usage.latency")}</span><strong>{rows.length ? `${Math.round(rows.reduce((sum, item) => sum + item.latency, 0) / rows.length)} ms` : "-"}</strong></div></div>
       {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={setStatus} formatTime={formatTime} onSelect={setSelected} /> : null}
