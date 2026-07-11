@@ -4,7 +4,12 @@ services:
       context: ..
       dockerfile: relay-server/Dockerfile
     restart: unless-stopped
-    env_file: .env
+    environment:
+      ZENITH_RELAY_BIND: 0.0.0.0:14999
+      ZENITH_RELAY_PUBLIC_BASE_URL: ${ZENITH_RELAY_PUBLIC_BASE_URL:?set in a protected shell or secret manager}
+      ZENITH_RELAY_DATA_DIR: /var/lib/zenith-relay
+      ZENITH_RELAY_MANAGEMENT_TOKEN: ${ZENITH_RELAY_MANAGEMENT_TOKEN:?set in a protected shell or secret manager}
+      ZENITH_RELAY_VAULT_KEY: ${ZENITH_RELAY_VAULT_KEY:?set in a protected shell or secret manager}
     ports:
       - "14999:14999"
     volumes:

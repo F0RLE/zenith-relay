@@ -7,6 +7,7 @@ export type MockOptions = {
   theme?: "system" | "light" | "dark";
   populated?: boolean;
   importResult?: "success" | "item_failure" | "not_found";
+  remoteConnected?: boolean;
 };
 
 export async function installTauriMock(page: Page, options: MockOptions = {}) {
@@ -100,7 +101,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: ["sources", "oauth_accounts", "quota_wake", "usage", "backup_restore"] };
+    remoteRuntime.capabilities = { features: ["sources", "accounts", "quota", "models", "usage", "local_gateway", "keys", "wake_tasks"] };
 
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
     const remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
@@ -133,7 +134,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "reset_key": readyKey = ""; return "reset";
           case "prepare_top_up_amount": return { amountCents: 1000, amountUsd: 10, valid: true };
           case "get_local_runtime_state": return structuredClone(localRuntime);
-          case "get_remote_server_state": return structuredClone(remoteRuntime);
+          case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
           case "get_local_usage": return structuredClone(localUsage);
           case "get_remote_server_usage": return { events: structuredClone(remoteUsage), total: remoteUsage.length, page: 1, pageSize: 100, totalPages: 1 };
           case "create_local_source": localRuntime.sources = [source]; return structuredClone(source);
@@ -205,7 +206,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
-          case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", composeCommand: "docker compose up -d" };
+          case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };
           case "execute_remote_server_action": return remoteAction(args);
           case "plugin:event|listen": return 1;
           case "plugin:event|unlisten":

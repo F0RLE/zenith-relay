@@ -13,9 +13,9 @@ openssl rand -base64 32
 openssl rand -base64 32
 ```
 
-Copy `.env.example` to `.env`, set the public HTTPS origin, management token,
-and vault key, then start the binary or Docker Compose deployment. Keep `.env`
-root-readable and never commit it.
+Set the public HTTPS origin, management token, and vault key through a protected
+shell or server secret manager. The repository and generated deployment bundle
+intentionally contain no secret-bearing `.env` file.
 
 The public listener defaults to `127.0.0.1:14999`. For Internet access, place a
 TLS reverse proxy in front of the server. Zenith Relay rejects insecure remote
@@ -30,6 +30,9 @@ cargo run --manifest-path relay-server/Cargo.toml --release
 or:
 
 ```bash
+ZENITH_RELAY_PUBLIC_BASE_URL=https://relay.example.com \
+ZENITH_RELAY_MANAGEMENT_TOKEN="$MANAGEMENT_TOKEN" \
+ZENITH_RELAY_VAULT_KEY="$VAULT_KEY" \
 docker compose -f relay-server/compose.yaml up -d
 ```
 

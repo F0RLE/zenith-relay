@@ -82,7 +82,7 @@ export const relayCommands = {
   connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),
   disconnectRemote: () => invoke("disconnect_remote_server"),
   refreshRemoteCapabilities: () => invoke("refresh_remote_server_capabilities"),
-  prepareRemoteDeployment: (publicBaseUrl: string) => invoke<{ directory: string; publicBaseUrl: string; managementToken: string; composeCommand: string }>("prepare_remote_server_deployment", { input: { publicBaseUrl } }),
+  prepareRemoteDeployment: (publicBaseUrl: string) => invoke<{ directory: string; publicBaseUrl: string; managementToken: string; vaultKey: string; composeCommand: string }>("prepare_remote_server_deployment", { input: { publicBaseUrl } }),
   remoteAction: (action: Record<string, unknown>, payload?: unknown) => invoke("execute_remote_server_action", { input: { action, payload: payload ?? null } }),
 };
 

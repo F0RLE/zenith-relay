@@ -2,16 +2,30 @@ use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::RngCore;
 use serde::Serialize;
-use std::{fs, path::Path};
+use std::{fmt, fs, path::Path};
 use url::Url;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeploymentPlan {
     pub directory: String,
     pub public_base_url: String,
     pub management_token: String,
+    pub vault_key: String,
     pub compose_command: String,
+}
+
+impl fmt::Debug for DeploymentPlan {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeploymentPlan")
+            .field("directory", &self.directory)
+            .field("public_base_url", &self.public_base_url)
+            .field("management_token", &"[redacted]")
+            .field("vault_key", &"[redacted]")
+            .field("compose_command", &self.compose_command)
+            .finish()
+    }
 }
 
 pub fn prepare(root: &Path, public_base_url: &str) -> Result<DeploymentPlan> {
@@ -22,27 +36,16 @@ pub fn prepare(root: &Path, public_base_url: &str) -> Result<DeploymentPlan> {
     let management_token = random_urlsafe(32);
     let mut vault_key = [0_u8; 32];
     rand::rng().fill_bytes(&mut vault_key);
-    let environment = format!(
-        "ZENITH_RELAY_BIND=0.0.0.0:14999\nZENITH_RELAY_PUBLIC_BASE_URL={}\nZENITH_RELAY_DATA_DIR=/var/lib/zenith-relay\nZENITH_RELAY_MANAGEMENT_TOKEN={}\nZENITH_RELAY_VAULT_KEY={}\n",
-        public_base_url,
-        management_token,
-        STANDARD.encode(vault_key),
-    );
-    let compose = "services:\n  relay:\n    image: ghcr.io/f0rle/zenith-relay-server:latest\n    restart: unless-stopped\n    env_file: .env\n    ports:\n      - \"14999:14999\"\n    volumes:\n      - relay-data:/var/lib/zenith-relay\nvolumes:\n  relay-data:\n";
-    let readme = "Upload this directory to your server, configure HTTPS in front of port 14999, then run: docker compose up -d\nDo not commit or share .env. Connect Zenith Relay using the public URL and the one-time management token shown by the app.\n";
-    fs::write(directory.join(".env"), environment).map_err(io_error)?;
+    let vault_key = STANDARD.encode(vault_key);
+    let compose = format!("services:\n  relay:\n    image: ghcr.io/f0rle/zenith-relay-server:latest\n    restart: unless-stopped\n    environment:\n      ZENITH_RELAY_BIND: 0.0.0.0:14999\n      ZENITH_RELAY_PUBLIC_BASE_URL: {}\n      ZENITH_RELAY_DATA_DIR: /var/lib/zenith-relay\n      ZENITH_RELAY_MANAGEMENT_TOKEN: ${{ZENITH_RELAY_MANAGEMENT_TOKEN:?set in a protected shell or secret manager}}\n      ZENITH_RELAY_VAULT_KEY: ${{ZENITH_RELAY_VAULT_KEY:?set in a protected shell or secret manager}}\n    ports:\n      - \"14999:14999\"\n    volumes:\n      - relay-data:/var/lib/zenith-relay\nvolumes:\n  relay-data:\n", public_base_url);
+    let readme = "Upload this directory to your server and configure HTTPS in front of port 14999. Set ZENITH_RELAY_MANAGEMENT_TOKEN and ZENITH_RELAY_VAULT_KEY in a protected shell or secret manager, then run docker compose up -d. The bundle intentionally contains no secrets.\n";
     fs::write(directory.join("compose.yaml"), compose).map_err(io_error)?;
     fs::write(directory.join("README.txt"), readme).map_err(io_error)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(directory.join(".env"), fs::Permissions::from_mode(0o600))
-            .map_err(io_error)?;
-    }
     Ok(DeploymentPlan {
         directory: directory.display().to_string(),
         public_base_url,
         management_token,
+        vault_key,
         compose_command: "docker compose up -d".to_string(),
     })
 }
@@ -85,13 +88,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn deployment_bundle_keeps_vault_key_out_of_returned_state() {
+    fn deployment_bundle_contains_no_plaintext_secrets() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-deploy-{}", uuid::Uuid::new_v4()));
         let plan = prepare(&root, "https://relay.example.test").unwrap();
-        let environment = fs::read_to_string(Path::new(&plan.directory).join(".env")).unwrap();
-        assert!(environment.contains("ZENITH_RELAY_VAULT_KEY="));
-        assert!(!format!("{plan:?}").contains("ZENITH_RELAY_VAULT_KEY"));
+        let directory = Path::new(&plan.directory);
+        assert!(!directory.join(".env").exists());
+        for file in ["compose.yaml", "README.txt"] {
+            let content = fs::read_to_string(directory.join(file)).unwrap();
+            assert!(!content.contains(&plan.management_token));
+            assert!(!content.contains(&plan.vault_key));
+        }
+        let debug = format!("{plan:?}");
+        assert!(!debug.contains(&plan.management_token));
+        assert!(!debug.contains(&plan.vault_key));
         fs::remove_dir_all(root).unwrap();
     }
 }

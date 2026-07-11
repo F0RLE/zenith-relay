@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { Download, MoreHorizontal, Plus, RefreshCw } from "lucide-react";
+import { Copy, Download, MoreHorizontal, Plus, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
@@ -13,6 +13,7 @@ import {
   SecretField,
   StatusBadge,
   Tabs,
+  copyText,
 } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
@@ -27,6 +28,8 @@ export function ConnectionsPage() {
   const [query, setQuery] = useState("");
   const [editingSource, setEditingSource] = useState<SourceSummary | null>(null);
   const [editingAutomation, setEditingAutomation] = useState<WakeTask | null>(null);
+  const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
+  const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
 
   useEffect(() => {
     setView(mode === "zenith" ? "api" : "accounts");
@@ -37,12 +40,18 @@ export function ConnectionsPage() {
 
   useEffect(() => setQuery(""), [mode, view]);
 
+  useEffect(() => {
+    if (mode !== "remote") return;
+    if (!runtime) { if (view !== "remote") setView("remote"); return; }
+    if ((view === "accounts" && !supports("accounts")) || (view === "sources" && !supports("sources")) || (view === "automations" && !supports("wake_tasks"))) setView("remote");
+  }, [mode, runtime, view]);
+
   const tabs = mode === "zenith"
     ? [{ id: "api", label: t("connections.api") }]
     : [
-        { id: "accounts", label: t("connections.accounts") },
-        { id: "sources", label: t("connections.sources") },
-        { id: "automations", label: t("connections.automations") },
+        ...(supports("accounts") ? [{ id: "accounts", label: t("connections.accounts") }] : []),
+        ...(supports("sources") ? [{ id: "sources", label: t("connections.sources") }] : []),
+        ...(supports("wake_tasks") ? [{ id: "automations", label: t("connections.automations") }] : []),
         ...(mode === "remote" ? [{ id: "remote", label: t("connections.remoteServer") }] : []),
       ];
 
@@ -432,17 +441,20 @@ function RemoteDialog({ onClose }: { onClose: () => void }) {
   const { perform, busy } = useRelayState();
   const [baseUrl, setBaseUrl] = useState("");
   const [token, setToken] = useState("");
-  const connect = async () => { const ok = await perform("remote-connect", () => relayCommands.connectRemote({ baseUrl, managementToken: token, allowInsecureHttp: baseUrl.startsWith("http://"), confirmIdentityChange: false }), "feedback.connected"); if (ok) onClose(); };
-  return <Dialog title={t("remote.connectExisting")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "remote-connect"} disabled={!baseUrl || !token} onClick={connect}>{t("remote.testAndConnect")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("remote.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://relay.example.com" /></label><SecretField label={t("remote.token")} value={token} onChange={setToken} /><p className="form-note">{t("remote.identityHint")}</p></div></Dialog>;
+  const [allowInsecure, setAllowInsecure] = useState(false);
+  const [confirmIdentityChange, setConfirmIdentityChange] = useState(false);
+  const insecure = baseUrl.trim().toLowerCase().startsWith("http://");
+  const connect = async () => { const ok = await perform("remote-connect", () => relayCommands.connectRemote({ baseUrl, managementToken: token, allowInsecureHttp: insecure && allowInsecure, confirmIdentityChange }), "feedback.connected"); if (ok) onClose(); };
+  return <Dialog title={t("remote.connectExisting")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "remote-connect"} disabled={!baseUrl || !token || (insecure && !allowInsecure)} onClick={connect}>{t("remote.testAndConnect")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("remote.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://relay.example.com" /></label><SecretField label={t("remote.token")} value={token} onChange={setToken} />{insecure ? <label className="check-line"><input type="checkbox" checked={allowInsecure} onChange={(event) => setAllowInsecure(event.target.checked)} /><span>{t("remote.allowInsecure")}</span></label> : null}<label className="check-line"><input type="checkbox" checked={confirmIdentityChange} onChange={(event) => setConfirmIdentityChange(event.target.checked)} /><span>{t("remote.confirmIdentityChange")}</span></label><p className="form-note">{t("remote.identityHint")}</p></div></Dialog>;
 }
 
 function DeployDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { perform, busy } = useRelayState();
   const [url, setUrl] = useState("");
-  const [plan, setPlan] = useState<{ directory: string; managementToken: string; composeCommand: string } | null>(null);
+  const [plan, setPlan] = useState<{ directory: string; managementToken: string; vaultKey: string; composeCommand: string } | null>(null);
   const generate = async () => { const result: { current: typeof plan } = { current: null }; const ok = await perform("remote-deploy", async () => { result.current = await relayCommands.prepareRemoteDeployment(url); }, "feedback.deploymentPrepared"); if (ok) setPlan(result.current); };
-  return <Dialog title={t("remote.deployNew")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.close")}</Button>{!plan ? <Button variant="primary" busy={busy === "remote-deploy"} disabled={!url} onClick={generate}>{t("remote.generate")}</Button> : null}</>}>{plan ? <div className="deployment-result"><StatusBadge status="ready" label={t("common.ready")} /><label><span>{t("remote.bundlePath")}</span><code>{plan.directory}</code></label><label><span>{t("remote.token")}</span><code>{plan.managementToken}</code></label><label><span>{t("remote.command")}</span><code>{plan.composeCommand}</code></label><p>{t("remote.deployHint")}</p></div> : <label className="relay-field"><span>{t("remote.publicUrl")}</span><input type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://relay.example.com" /></label>}</Dialog>;
+  return <Dialog title={t("remote.deployNew")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.close")}</Button>{!plan ? <Button variant="primary" busy={busy === "remote-deploy"} disabled={!url} onClick={generate}>{t("remote.generate")}</Button> : null}</>}>{plan ? <div className="deployment-result"><StatusBadge status="ready" label={t("common.ready")} /><label><span>{t("remote.bundlePath")}</span><code>{plan.directory}</code></label><div className="relay-field"><span>{t("remote.token")}</span><div className="endpoint-line"><input aria-label={t("remote.token")} type="password" value={plan.managementToken} readOnly /><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => copyText(plan.managementToken)}>{t("common.copy")}</Button></div></div><div className="relay-field"><span>{t("remote.vaultKey")}</span><div className="endpoint-line"><input aria-label={t("remote.vaultKey")} type="password" value={plan.vaultKey} readOnly /><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => copyText(plan.vaultKey)}>{t("common.copy")}</Button></div></div><label><span>{t("remote.command")}</span><code>{plan.composeCommand}</code></label><p>{t("remote.secretOnce")}</p><p>{t("remote.deployHint")}</p></div> : <label className="relay-field"><span>{t("remote.publicUrl")}</span><input type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://relay.example.com" /></label>}</Dialog>;
 }
 
 function ReadyApiDialog({ onClose }: { onClose: () => void }) {

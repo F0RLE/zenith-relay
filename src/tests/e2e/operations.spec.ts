@@ -173,3 +173,29 @@ test("connection search and request ID filters change visible rows", async ({ pa
   await requestFilter.fill("req_synthetic_local");
   await expect(page.getByText("req_synthetic_local")).toBeVisible();
 });
+
+test("remote trust and deployment secrets require explicit actions", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, remoteConnected: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Remote Server" }).click();
+  await page.getByRole("button", { name: "Connect existing server" }).click();
+  await page.getByLabel("Server address").fill("http://127.0.0.1:14999");
+  await page.getByLabel("Management token").fill("synthetic-management-token-000000");
+  await expect(page.getByRole("button", { name: "Test and connect" })).toBeDisabled();
+  await page.getByLabel("Allow this unencrypted HTTP connection.").check();
+  await page.getByLabel("Trust this server if its saved identity has changed.").check();
+  await page.getByRole("button", { name: "Test and connect" }).click();
+  const connectInput = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "connect_remote_server")?.args.input;
+  });
+  expect(connectInput).toMatchObject({ allowInsecureHttp: true, confirmIdentityChange: true });
+
+  await page.getByRole("button", { name: "Deploy new server" }).click();
+  await page.getByLabel("Public server URL").fill("https://relay.example.invalid");
+  await page.getByRole("button", { name: "Generate bundle" }).click();
+  await expect(page.getByLabel("Management token")).toHaveAttribute("type", "password");
+  await expect(page.getByLabel("Vault key")).toHaveAttribute("type", "password");
+  await expect(page.getByText("These values are shown once.")).toBeVisible();
+});
