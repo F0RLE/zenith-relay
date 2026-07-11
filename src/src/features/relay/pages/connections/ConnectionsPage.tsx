@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { CirclePause, Copy, Download, Eye, EyeOff, MoreHorizontal, Network, Play, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
+import { CirclePause, Copy, Download, Eye, EyeOff, Network, Pencil, Play, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
@@ -92,7 +92,7 @@ export function ConnectionsPage() {
   };
 
   return (
-    <section className="relay-page">
+    <section className="relay-page" data-view={view}>
       <PageHeader
         title={t("nav.connections")}
         subtitle={t(`connections.subtitles.${mode}`)}
@@ -161,10 +161,10 @@ function SourcesTable({ query, onAdd, onEdit }: { query: string; onAdd: () => vo
             <td>{source.models.length}</td>
             <td>{source.priority}</td>
             <td className="row-actions">
-              <Button variant="ghost" busy={busy === `test-${source.id}`} disabled={!canTest} title={!canTest ? t("remote.capabilityUnavailable") : undefined} onClick={() => perform(`test-${source.id}`, () => mode === "local" ? relayCommands.testSource(source.id) : relayCommands.remoteAction({ type: "test_source", id: source.id }), "feedback.checked")}>{t("common.test")}</Button>
-              <Button variant="ghost" onClick={() => onEdit(source)}>{t("common.edit")}</Button>
-              <Button variant="ghost" icon={<MoreHorizontal aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => mode === "local" ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</Button>
-              <Button variant="ghost" onClick={() => { if (window.confirm(t("sources.deleteConfirm"))) void perform(`delete-${source.id}`, () => mode === "local" ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"); }}>{t("common.delete")}</Button>
+              <IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={!canTest || busy === `test-${source.id}`} title={!canTest ? t("remote.capabilityUnavailable") : t("common.test")} onClick={() => perform(`test-${source.id}`, () => mode === "local" ? relayCommands.testSource(source.id) : relayCommands.remoteAction({ type: "test_source", id: source.id }), "feedback.checked")} />
+              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
+              <IconButton label={source.enabled ? t("common.disable") : t("common.enable")} icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => mode === "local" ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")} />
+              <IconButton label={t("common.delete")} icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("sources.deleteConfirm"))) void perform(`delete-${source.id}`, () => mode === "local" ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"); }} />
             </td>
           </tr>
         ))}</tbody>
@@ -274,7 +274,7 @@ function AutomationsTable({ query, onAdd, onEdit }: { query: string; onAdd: () =
                 <td>{task.windowKinds.map((item) => t(`quota.${item}`)).join(", ")}</td>
                 <td>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</td>
                 <td>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</td>
-                <td className="row-actions"><Button variant="ghost" onClick={() => onEdit(task)}>{t("common.edit")}</Button><Button variant="ghost" busy={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")}>{t("common.test")}</Button><Button variant="ghost" onClick={() => { if (window.confirm(t("automations.deleteConfirm"))) void perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"); }}>{t("common.delete")}</Button></td>
+                <td className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")} /><IconButton label={t("common.delete")} icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("automations.deleteConfirm"))) void perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"); }} /></td>
               </tr>
             );
           })}</tbody>

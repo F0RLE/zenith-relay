@@ -19,14 +19,35 @@ for (const locale of locales) {
           await expect(nav).toHaveCount(expectedPages);
           for (let index = 0; index < expectedPages; index += 1) {
             await nav.nth(index).click();
-            await expect(page.locator(".relay-page-header h1")).toBeVisible();
-            await expect(page.locator("body")).not.toContainText(/(?:common|nav|overview|connections|pool|gateway|usage|profiles|settings)\.[a-z]/);
-            expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-            expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-page button:not(.relay-table button), .relay-page input:not(.relay-table input), .relay-page select:not(.relay-table select)")].filter((element) => {
-              const rect = element.getBoundingClientRect();
-              return rect.width > 0 && rect.height > 0 && (rect.left < 0 || rect.right > innerWidth);
-            }).map((element) => element.outerHTML.slice(0, 160)))).toEqual([]);
-            await page.screenshot({ path: `output/playwright/${locale}-${mode}-${theme}-${viewport.width}x${viewport.height}-page-${index + 1}.png` });
+            const settingsSections = page.locator(".settings-layout > nav button");
+            const tabControls = page.locator(".relay-tabs [role=tab]");
+            const stateControls = await settingsSections.count() ? settingsSections : tabControls;
+            const stateCount = Math.max(1, await stateControls.count());
+
+            for (let state = 0; state < stateCount; state += 1) {
+              if (await stateControls.count()) await stateControls.nth(state).click();
+              await expect(page.locator(".relay-page-header h1")).toBeVisible();
+              await expect(page.locator("body")).not.toContainText(/(?:common|nav|overview|connections|pool|gateway|usage|profiles|settings)\.[a-z]/);
+              expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-page button, .relay-page input, .relay-page select")].filter((element) => {
+                const rect = element.getBoundingClientRect();
+                const intersectsViewport = rect.right > 0 && rect.left < innerWidth && rect.bottom > 36 && rect.top < innerHeight;
+                return intersectsViewport && (rect.left < 0 || rect.right > innerWidth);
+              }).map((element) => element.outerHTML.slice(0, 160)))).toEqual([]);
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-table td.row-actions, [data-page='profiles'] .relay-table tbody td:last-child")].filter((cell) => {
+                const wrap = cell.closest<HTMLElement>(".relay-table-wrap");
+                if (!wrap) return false;
+                const cellRect = cell.getBoundingClientRect();
+                const wrapRect = wrap.getBoundingClientRect();
+                return cellRect.left < wrapRect.left - 1 || cellRect.right > wrapRect.right + 1;
+              }).map((cell) => cell.outerHTML.slice(0, 160)))).toEqual([]);
+
+              const stateSuffix = stateCount > 1 ? `-tab-${state + 1}` : "";
+              await page.screenshot({ path: `output/playwright/${locale}-${mode}-${theme}-${viewport.width}x${viewport.height}-page-${index + 1}${stateSuffix}.png` });
+              if (state === 0 && stateCount > 1) {
+                await page.screenshot({ path: `output/playwright/${locale}-${mode}-${theme}-${viewport.width}x${viewport.height}-page-${index + 1}.png` });
+              }
+            }
           }
         });
       }
