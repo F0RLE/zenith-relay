@@ -168,11 +168,20 @@ export type ImportSession = {
       defaultSelected: boolean;
       selectable: boolean;
       existing: boolean;
-      warnings: Array<{ code: string; message: string }>;
+      warnings: Array<{ code: string; count?: number }>;
       error?: { code: string; message: string };
     }>;
-    warnings: Array<{ code: string; message: string }>;
+    warnings: Array<{ code: string; count?: number }>;
   };
+};
+
+export type ConfirmAccountImportResponse = {
+  sessionId: string;
+  results: Array<{
+    itemId: string;
+    status: "succeeded" | "failed";
+    error?: { code: string; message: string };
+  }>;
 };
 
 export type OAuthFlow = {

@@ -18,7 +18,7 @@ use crate::local_pool::{
         },
         quota::CodexQuotaClient,
         quota_service::apply_quota_success,
-        records::{new_account_record, CODEX_SOURCE_ID},
+        records::{self, new_account_record, CODEX_SOURCE_ID},
         NativeSecretBackend,
     },
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
@@ -26,7 +26,6 @@ use crate::local_pool::{
     state::DesktopState,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, fmt};
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
@@ -152,11 +151,15 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         .map_err(quota_error)?;
 
     let (old_accounts, old_keys) = current_accounts(state)?;
-    let existing = find_existing_account(&old_accounts, &checkpoint.identity_hash())?;
+    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+    let existing = find_existing_account(
+        &old_accounts,
+        &credential_store,
+        &checkpoint.identity_hash(),
+    )?;
     let local_account_id = existing
         .map(|account| account.account.id.clone())
         .unwrap_or_else(|| format!("account_{}", Uuid::new_v4().simple()));
-    let credential_store = CredentialStore::from_backend(NativeSecretBackend);
     let previous_credentials = credential_store
         .load(&local_account_id)
         .map_err(credential_error)?;
@@ -480,14 +483,10 @@ impl OAuthCompletionCheckpoint {
     }
 
     fn identity_hash(&self) -> String {
-        format!(
-            "{:x}",
-            Sha256::digest(
-                self.provider_account_id
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_bytes()
-            )
+        records::identity_hash(
+            &self.provider_account_id,
+            self.provider_user_id.as_deref(),
+            self.email.as_deref(),
         )
     }
 }
@@ -623,26 +622,60 @@ fn completion_secret_error() -> LocalPoolError {
 
 fn find_existing_account<'a>(
     accounts: &'a [LocalAccountRecord],
+    credentials: &CredentialStore<NativeSecretBackend>,
     identity_hash: &str,
 ) -> LocalResult<Option<&'a LocalAccountRecord>> {
-    let mut matches = accounts.iter().filter(|account| {
-        account.account.source_id == CODEX_SOURCE_ID
-            && account.account.identity.identity_hash == identity_hash
-    });
-    let existing = matches.next();
-    if matches.next().is_some() {
+    let direct = accounts
+        .iter()
+        .filter(|account| {
+            account.account.source_id == CODEX_SOURCE_ID
+                && account.account.identity.identity_hash == identity_hash
+        })
+        .collect::<Vec<_>>();
+    if direct.len() > 1 {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "multiple local accounts have the same Codex identity",
         ));
     }
-    Ok(existing)
+    if let Some(account) = direct.into_iter().next() {
+        return Ok(Some(account));
+    }
+    let mut matches = Vec::new();
+    for account in accounts {
+        if account.account.source_id != CODEX_SOURCE_ID {
+            continue;
+        }
+        let Some(stored) = credentials
+            .load(&account.account.id)
+            .map_err(credential_error)?
+        else {
+            continue;
+        };
+        let Some(provider_account_id) = stored.provider_account_id() else {
+            continue;
+        };
+        if records::identity_hash(
+            provider_account_id,
+            stored.provider_user_id(),
+            stored.email(),
+        ) == identity_hash
+        {
+            matches.push(account);
+        }
+    }
+    if matches.len() > 1 {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "multiple local accounts have the same Codex identity",
+        ));
+    }
+    Ok(matches.pop())
 }
 
 fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAccountRecord) {
     next.account.id = current.account.id.clone();
     next.account.label = current.account.label.clone();
-    next.account.identity = current.account.identity.clone();
     next.account.tags = current.account.tags.clone();
     next.account.enabled = current.account.enabled;
     next.account.draining = current.account.draining;
@@ -889,17 +922,27 @@ mod tests {
         current.priority = -10;
         current.weight = 4;
 
-        let identity_hash = format!("{:x}", Sha256::digest("provider-account".as_bytes()));
-        let existing = find_existing_account(std::slice::from_ref(&current), &identity_hash)
-            .unwrap()
-            .unwrap();
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+        let identity_hash =
+            records::identity_hash("provider-account", None, Some("private@example.test"));
+        let existing =
+            find_existing_account(std::slice::from_ref(&current), &credentials, &identity_hash)
+                .unwrap()
+                .unwrap();
         let mut next = account("account_existing", "provider-account", "new-refresh");
         next.models = vec!["new-model".into()];
         preserve_existing_settings(&mut next, existing);
 
         assert_eq!(next.account.id, "account_existing");
         assert_eq!(next.account.label, "My Codex");
-        assert_eq!(next.account.identity, current.account.identity);
+        assert_eq!(
+            next.account.identity.identity_hash,
+            current.account.identity.identity_hash
+        );
+        assert_ne!(
+            next.account.identity.stable_index,
+            current.account.identity.stable_index
+        );
         assert_eq!(next.account.tags, current.account.tags);
         assert!(!next.account.enabled);
         assert!(next.account.draining);
@@ -919,8 +962,10 @@ mod tests {
             account("account_one", provider_account_id, "refresh-one"),
             account("account_two", provider_account_id, "refresh-two"),
         ];
-        let identity_hash = format!("{:x}", Sha256::digest(provider_account_id.as_bytes()));
-        let error = find_existing_account(&accounts, &identity_hash).unwrap_err();
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
+        let identity_hash =
+            records::identity_hash(provider_account_id, None, Some("private@example.test"));
+        let error = find_existing_account(&accounts, &credentials, &identity_hash).unwrap_err();
         assert!(matches!(error.code, ErrorCode::RecoveryRequired));
         assert!(!format!("{error:?} {error}").contains(provider_account_id));
     }

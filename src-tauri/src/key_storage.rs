@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::{
+    sync::{Mutex, MutexGuard, OnceLock},
+    thread,
+    time::Duration,
+};
 
 const KEYRING_SERVICE: &str = "Zenith Relay";
 const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
@@ -10,6 +14,8 @@ const CHUNK_UTF16_UNITS: usize = 1024;
 const MAX_CHUNKS: usize = 4096;
 const MANIFEST_PREFIX: &str = "__zenith_relay_secret_manifest__:";
 const MANIFEST_VERSION: u8 = 1;
+const READBACK_ATTEMPTS: usize = 3;
+const READBACK_DELAY: Duration = Duration::from_millis(20);
 
 #[derive(Debug, Deserialize, Serialize)]
 struct SecretManifest {
@@ -87,12 +93,17 @@ fn keyring_entry_for_service(service: &str, user: &str) -> keyring::Entry {
 }
 
 fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String> {
-    let previous_manifest = load_raw_from_service(service, user)?
+    let previous_raw = load_raw_from_service(service, user)?;
+    let previous_manifest = previous_raw
         .as_deref()
         .and_then(|stored| decode_manifest(stored).ok());
 
     if value.encode_utf16().count() <= CHUNK_UTF16_UNITS {
         set_password(service, user, value)?;
+        if let Err(error) = verify_saved_secret(service, user, value) {
+            restore_raw_secret(service, user, previous_raw.as_deref())?;
+            return Err(error);
+        }
         if let Some(manifest) = previous_manifest {
             delete_manifest_chunks(service, user, &manifest);
         }
@@ -130,11 +141,40 @@ fn save_to_service(service: &str, user: &str, value: &str) -> Result<(), String>
         }
         return Err(error);
     }
+    if let Err(error) = verify_saved_secret(service, user, value) {
+        let restore = restore_raw_secret(service, user, previous_raw.as_deref());
+        delete_manifest_chunks(service, user, &manifest);
+        restore?;
+        return Err(error);
+    }
 
     if let Some(previous) = previous_manifest {
         delete_manifest_chunks(service, user, &previous);
     }
     Ok(())
+}
+
+fn verify_saved_secret(service: &str, user: &str, expected: &str) -> Result<(), String> {
+    let mut last_error = None;
+    for attempt in 0..READBACK_ATTEMPTS {
+        if attempt > 0 {
+            thread::sleep(READBACK_DELAY);
+        }
+        match load_secret_from_service(service, user) {
+            Ok(Some(value)) if value == expected => return Ok(()),
+            Ok(_) => last_error = None,
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| "Не удалось проверить сохранённый секрет в хранилище ОС".to_string()))
+}
+
+fn restore_raw_secret(service: &str, user: &str, previous: Option<&str>) -> Result<(), String> {
+    match previous {
+        Some(value) => set_password(service, user, value),
+        None => delete_from_service(service, user),
+    }
 }
 
 fn load_secret_from_service(service: &str, user: &str) -> Result<Option<String>, String> {

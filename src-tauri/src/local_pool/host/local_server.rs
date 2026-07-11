@@ -150,8 +150,9 @@ mod tests {
             )
             .await
             .unwrap();
+        let restarted_client = reqwest::Client::new();
         assert_eq!(
-            client
+            restarted_client
                 .get(&models_url)
                 .bearer_auth("key-one")
                 .send()
@@ -160,7 +161,7 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let second_models = client
+        let second_models = restarted_client
             .get(&models_url)
             .bearer_auth("key-two")
             .send()

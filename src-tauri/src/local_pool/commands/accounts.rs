@@ -411,11 +411,12 @@ pub async fn prepare_local_account_import(
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
-    let (content, preview) = prepare_import_preview(&state, session, input.probe_quota).await?;
+    let (content, preview) =
+        prepare_import_preview(&state, &credentials, session, input.probe_quota).await?;
     let session = sessions
         .prepare(
             &input.session_id,
-            &content,
+            content.as_deref(),
             preview,
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
@@ -1032,10 +1033,18 @@ pub(crate) fn next_quota_refresh_at(
 
 async fn prepare_import_preview(
     state: &DesktopState,
+    credentials: &CredentialStore<NativeSecretBackend>,
     session: ImportSession,
     probe_quota: bool,
-) -> CommandResult<(String, ImportPreview)> {
-    if session.items.len() != session.preview.rows.len() {
+) -> CommandResult<(Option<String>, ImportPreview)> {
+    if session.items.len()
+        != session
+            .preview
+            .rows
+            .iter()
+            .filter(|row| row.selectable)
+            .count()
+    {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "import preview does not match its credential items",
@@ -1044,8 +1053,13 @@ async fn prepare_import_preview(
     }
     let mut preview = session.preview;
     let mut prepared_values = Vec::with_capacity(session.items.len());
+    let mut credentials_changed = false;
     let now_ms = current_time_ms();
-    for (item, row) in session.items.into_iter().zip(preview.rows.iter_mut()) {
+    for (item, row) in session
+        .items
+        .into_iter()
+        .zip(preview.rows.iter_mut().filter(|row| row.selectable))
+    {
         let original = parsed_item_value(&item, row.auth_mode, None);
         if row.auth_mode == ImportAuthMode::ApiKey {
             if let (Some(base_url), Some(api_key)) =
@@ -1064,6 +1078,8 @@ async fn prepare_import_preview(
         }
 
         let plan_hint = row.plan.clone();
+        credentials_changed |=
+            item.secrets().access_token().is_none() && item.secrets().refresh_token().is_some();
         let material =
             match build_import_credential_material(item, now_ms, plan_hint.as_deref()).await {
                 Ok(material) => material,
@@ -1093,9 +1109,15 @@ async fn prepare_import_preview(
         row.identity = masked_account_identity(provider_account_id);
         row.plan = material.plan_type.clone().or_else(|| row.plan.clone());
         row.expires_at = material.expires_at_ms.and_then(timestamp_from_ms);
-        if find_existing_account(state, provider_account_id)
-            .map_err(import_item_command_error)?
-            .is_some()
+        if find_existing_account(
+            state,
+            credentials,
+            provider_account_id,
+            material.provider_user_id.as_deref(),
+            material.email.as_deref(),
+        )
+        .map_err(import_item_command_error)?
+        .is_some()
         {
             row.existing = true;
             row.status = ImportPreviewStatus::Existing;
@@ -1128,12 +1150,15 @@ async fn prepare_import_preview(
         }
         prepared_values.push(parsed_item_value_from_material(original, &material));
     }
-    let content = serde_json::to_string(&prepared_values).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "failed to encode prepared import credentials",
-        )
-    })?;
+    let content = credentials_changed
+        .then(|| serde_json::to_string(&prepared_values))
+        .transpose()
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "failed to encode prepared import credentials",
+            )
+        })?;
     Ok((content, preview))
 }
 
@@ -1611,7 +1636,13 @@ async fn import_account_item(
             "Codex account id is missing from imported credentials",
         )
     })?;
-    let existing_account = find_existing_account(state, provider_account_id)?;
+    let existing_account = find_existing_account(
+        state,
+        credential_store,
+        provider_account_id,
+        material.provider_user_id.as_deref(),
+        material.email.as_deref(),
+    )?;
     let local_account_id = existing_account
         .as_ref()
         .map(|account| account.account.id.clone())
@@ -1720,7 +1751,7 @@ async fn build_import_credential_material(
             refresh_token: original_refresh,
             id_token: secrets.id_token().map(str::to_string),
             expires_at_ms: imported_identity.access_expires_at_ms,
-            email: imported_identity.email.or(email),
+            email: email.or(imported_identity.email),
             provider_account_id: imported_identity.provider_account_id.or(item_account_id),
             provider_user_id: imported_identity.provider_user_id.or(item_user_id),
             organization_id,
@@ -1774,7 +1805,7 @@ async fn build_import_credential_material(
         refresh_token: rotated_refresh.or(Some(refresh_token)),
         id_token,
         expires_at_ms,
-        email: oauth_email.or(imported_identity.email).or(email),
+        email: email.or(oauth_email).or(imported_identity.email),
         provider_account_id: oauth_account_id
             .or(imported_identity.provider_account_id)
             .or(item_account_id),
@@ -2201,56 +2232,99 @@ fn existing_identity_index(
             continue;
         };
         existing
-            .entry(provider_identity_key(provider_account_id))
+            .entry(provider_identity_key(
+                provider_account_id,
+                credentials.provider_user_id(),
+                credentials.email(),
+            ))
             .or_insert(account_id);
     }
     Ok(existing)
 }
 
-fn provider_identity_key(provider_account_id: &str) -> String {
+fn provider_identity_key(
+    provider_account_id: &str,
+    provider_user_id: Option<&str>,
+    email: Option<&str>,
+) -> String {
+    let account = provider_account_id.trim().to_ascii_lowercase();
+    let user = provider_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let email = email
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let identity = match (email, user) {
+        (Some(email), _) => format!("account:{account}:email:{email}"),
+        (None, Some(user)) => format!("account:{account}:user:{user}"),
+        (None, None) => format!("account:{account}"),
+    };
     format!(
         "{:x}",
-        Sha256::digest(
-            format!(
-                "account:account:{}",
-                provider_account_id.trim().to_ascii_lowercase()
-            )
-            .as_bytes()
-        )
+        Sha256::digest(format!("account:{identity}").as_bytes())
     )
 }
 
 fn find_existing_account(
     state: &DesktopState,
+    credential_store: &CredentialStore<NativeSecretBackend>,
     provider_account_id: &str,
+    provider_user_id: Option<&str>,
+    email: Option<&str>,
 ) -> ItemResult<Option<LocalAccountRecord>> {
     let accounts = state
         .store()
         .map_err(|_| ImportItemError::new("account_store_failed", "account store is unavailable"))?
         .accounts()
         .to_vec();
-    find_existing_account_in(&accounts, provider_account_id)
-}
-
-fn find_existing_account_in(
-    accounts: &[LocalAccountRecord],
-    provider_account_id: &str,
-) -> ItemResult<Option<LocalAccountRecord>> {
-    let identity_hash = format!(
-        "{:x}",
-        Sha256::digest(provider_account_id.trim().to_ascii_lowercase().as_bytes())
-    );
-    let mut matches = accounts.iter().filter(|account| {
-        account.account.source_id == records::CODEX_SOURCE_ID
-            && account.account.identity.identity_hash == identity_hash
-    });
-    let existing = matches.next().cloned();
-    if matches.next().is_some() {
+    let target = records::identity_hash(provider_account_id, provider_user_id, email);
+    let direct = accounts
+        .iter()
+        .filter(|account| {
+            account.account.source_id == records::CODEX_SOURCE_ID
+                && account.account.identity.identity_hash == target
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if direct.len() > 1 {
         return Err(ImportItemError::recovery(
             "multiple local accounts have the same Codex identity",
         ));
     }
-    Ok(existing)
+    if let Some(account) = direct.into_iter().next() {
+        return Ok(Some(account));
+    }
+    let mut matching = Vec::new();
+    for account in accounts {
+        if account.account.source_id != records::CODEX_SOURCE_ID {
+            continue;
+        }
+        let Some(credentials) = credential_store
+            .load(&account.account.id)
+            .map_err(credential_item_error)?
+        else {
+            continue;
+        };
+        let Some(account_id) = credentials.provider_account_id() else {
+            continue;
+        };
+        if records::identity_hash(
+            account_id,
+            credentials.provider_user_id(),
+            credentials.email(),
+        ) == target
+        {
+            matching.push(account);
+        }
+    }
+    if matching.len() > 1 {
+        return Err(ImportItemError::recovery(
+            "multiple local accounts have the same Codex identity",
+        ));
+    }
+    Ok(matching.pop())
 }
 
 fn prune_key_account_scopes(keys: &mut [LocalGatewayKeyRecord], accounts: &[LocalAccountRecord]) {
@@ -2610,9 +2684,8 @@ fn model_item_error(
 
 fn import_session_error(error: ImportSessionError) -> CommandError {
     let code = match error.code {
-        ImportSessionErrorCode::SessionNotFound | ImportSessionErrorCode::SecretMissing => {
-            ErrorCode::NotFound
-        }
+        ImportSessionErrorCode::SessionNotFound => ErrorCode::NotFound,
+        ImportSessionErrorCode::SecretMissing => ErrorCode::RecoveryRequired,
         ImportSessionErrorCode::SecretStoreUnavailable => ErrorCode::SecretStoreUnavailable,
         ImportSessionErrorCode::CleanupIncomplete | ImportSessionErrorCode::RecoveryRequired => {
             ErrorCode::RecoveryRequired
@@ -2822,10 +2895,7 @@ mod tests {
         existing.account.label = "My account".into();
         existing.account.token_generation = 7;
         existing.priority = 9;
-        let resolved =
-            find_existing_account_in(std::slice::from_ref(&existing), "provider-private")
-                .unwrap()
-                .unwrap();
+        let resolved = existing.clone();
         let credentials = ImportedCredentialMaterial {
             access_token: "access-rotated".into(),
             refresh_token: Some("refresh-rotated".into()),
@@ -2865,12 +2935,16 @@ mod tests {
     #[test]
     fn provider_identity_hash_matches_import_parser_without_exposing_id() {
         let parsed = parse_import(
-            r#"{"account_id":"Provider-Private","access_token":"access-private"}"#,
+            r#"{"account_id":"Provider-Private","chatgpt_user_id":"User-Private","email":"private@example.test","access_token":"access-private"}"#,
             None,
             &[],
         )
         .unwrap();
-        let key = provider_identity_key("Provider-Private");
+        let key = provider_identity_key(
+            "Provider-Private",
+            Some("User-Private"),
+            Some("private@example.test"),
+        );
         assert_eq!(parsed.items[0].identity_key, key);
         assert!(!key.contains("provider"));
     }
@@ -3187,6 +3261,35 @@ mod tests {
         assert!(!format!("{:x}", Sha256::digest(token.as_bytes())).contains("private"));
     }
 
+    #[tokio::test]
+    async fn imported_explicit_email_wins_over_shared_token_email() {
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "email": "shared@example.test",
+                "https://api.openai.com/auth": {
+                    "chatgpt_user_id": "shared-user",
+                    "chatgpt_account_id": "shared-team"
+                }
+            })
+            .to_string(),
+        );
+        let token = format!("header.{payload}.signature");
+        let mut parsed = parse_import(
+            &serde_json::json!({
+                "email": "member@example.test",
+                "access_token": token
+            })
+            .to_string(),
+            None,
+            &[],
+        )
+        .unwrap();
+        let material = build_import_credential_material(parsed.items.remove(0), 1, None)
+            .await
+            .unwrap();
+        assert_eq!(material.email.as_deref(), Some("member@example.test"));
+    }
+
     #[test]
     fn quota_response_types_are_safe_and_serializable() {
         let response = AccountQuotaOutcome::Failed {
@@ -3197,5 +3300,18 @@ mod tests {
         assert!(serialized.contains("quota_transport"));
         assert!(!serialized.contains("Bearer"));
         let _ = WireApi::Responses;
+    }
+
+    #[test]
+    fn missing_import_secret_requires_recovery() {
+        let error = import_session_error(ImportSessionError {
+            code: ImportSessionErrorCode::SecretMissing,
+            message: "import session secret is missing".into(),
+            session_id: None,
+            import_code: None,
+        });
+        assert!(serde_json::to_string(&error)
+            .unwrap()
+            .contains("recovery_required"));
     }
 }

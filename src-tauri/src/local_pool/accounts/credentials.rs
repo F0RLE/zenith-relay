@@ -135,6 +135,14 @@ impl StoredCodexCredentials {
         self.provider_account_id.as_deref()
     }
 
+    pub fn provider_user_id(&self) -> Option<&str> {
+        self.provider_user_id.as_deref()
+    }
+
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+
     pub fn expire_access_at(&mut self, now_ms: u64) {
         self.expires_at_ms = Some(now_ms);
     }

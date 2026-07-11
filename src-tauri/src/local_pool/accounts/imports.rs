@@ -413,6 +413,9 @@ fn parse_entries(
                 if is_portable_bundle(object) {
                     return parse_portable_bundle(object);
                 }
+                if object.get("accounts").is_some_and(Value::is_array) {
+                    return parse_account_container(object);
+                }
                 return Ok((
                     ImportFormat::JsonObject,
                     vec![InputEntry {
@@ -543,6 +546,32 @@ fn parse_portable_bundle(
     Ok((ImportFormat::PortableAccountBundleV1, entries, warnings))
 }
 
+fn parse_account_container(
+    object: &Map<String, Value>,
+) -> Result<(ImportFormat, Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
+    let accounts = object
+        .get("accounts")
+        .and_then(Value::as_array)
+        .expect("account container checked by caller");
+    check_item_count(accounts.len())?;
+    let entries = accounts
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(ordinal, value)| InputEntry {
+            ordinal,
+            value: Some(value),
+            issue: None,
+        })
+        .collect();
+    let proxy_count = object.get("proxies").map(container_count).unwrap_or(0);
+    let warnings = (proxy_count > 0)
+        .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
+        .into_iter()
+        .collect();
+    Ok((ImportFormat::JsonArray, entries, warnings))
+}
+
 fn bundle_version(value: &Value) -> Option<u64> {
     value
         .as_u64()
@@ -574,6 +603,11 @@ fn parse_item(
         .get("credentials")
         .and_then(Value::as_object)
         .unwrap_or(object);
+    let provider_data = object
+        .get("providerSpecificData")
+        .or_else(|| object.get("provider_specific_data"))
+        .and_then(Value::as_object);
+    let meta = object.get("meta").and_then(Value::as_object);
     let tokens = object
         .get("tokens")
         .and_then(Value::as_object)
@@ -581,11 +615,12 @@ fn parse_item(
 
     let api_key = credential_string(object, credentials, tokens, API_KEY_FIELDS);
     let access_token = credential_string(object, credentials, tokens, ACCESS_TOKEN_FIELDS);
-    let refresh_token = credential_string(object, credentials, tokens, REFRESH_TOKEN_FIELDS);
+    let refresh_token = credential_string(object, credentials, tokens, REFRESH_TOKEN_FIELDS)
+        .filter(|value| value != "__missing_refresh_token__");
     let id_token = credential_string(object, credentials, tokens, ID_TOKEN_FIELDS);
     let has_api_key = api_key.is_some();
     let has_tokens = access_token.is_some() || refresh_token.is_some() || id_token.is_some();
-    let explicit_auth_mode = string_field(object, &["auth_mode", "authMode"]);
+    let explicit_auth_mode = string_field(object, &["auth_mode", "authMode", "authType"]);
     let explicit_oauth = explicit_auth_mode.is_some_and(is_oauth_mode);
     let explicit_api_key = explicit_auth_mode.is_some_and(is_api_key_mode);
     let mut warnings = Vec::new();
@@ -644,29 +679,35 @@ fn parse_item(
         warnings.push(ImportWarning::new(ImportWarningCode::ConcurrencyIgnored));
     }
 
-    let email = credential_string(object, credentials, None, EMAIL_FIELDS);
-    let account_id = safe_identifier(credential_str(object, credentials, None, ACCOUNT_ID_FIELDS));
-    let chatgpt_user_id =
-        safe_identifier(credential_str(object, credentials, None, USER_ID_FIELDS));
-    let organization_id = safe_identifier(credential_str(
-        object,
-        credentials,
-        None,
-        ORGANIZATION_ID_FIELDS,
-    ));
-    let mut plan = safe_metadata(credential_str(object, credentials, None, PLAN_FIELDS));
-    let mut expires_at = safe_expiry(credential_value(
-        object,
-        credentials,
-        None,
-        EXPIRES_AT_FIELDS,
-    ));
-    let mut subscription_expires_at = safe_expiry(credential_value(
-        object,
-        credentials,
-        None,
-        SUBSCRIPTION_EXPIRES_AT_FIELDS,
-    ));
+    let email = credential_string(object, credentials, None, EMAIL_FIELDS).or_else(|| {
+        provider_data
+            .and_then(|data| string_field(data, EMAIL_FIELDS))
+            .map(str::to_string)
+    });
+    let account_id_value = credential_str(object, credentials, None, ACCOUNT_ID_FIELDS)
+        .or_else(|| provider_data.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)))
+        .or_else(|| meta.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)));
+    let account_id = safe_identifier(account_id_value);
+    let chatgpt_user_id_value = credential_str(object, credentials, None, USER_ID_FIELDS)
+        .or_else(|| provider_data.and_then(|data| string_field(data, USER_ID_FIELDS)))
+        .or_else(|| meta.and_then(|data| string_field(data, USER_ID_FIELDS)));
+    let chatgpt_user_id = safe_identifier(chatgpt_user_id_value);
+    let organization_id_value = credential_str(object, credentials, None, ORGANIZATION_ID_FIELDS)
+        .or_else(|| provider_data.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)))
+        .or_else(|| meta.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)));
+    let organization_id = safe_identifier(organization_id_value);
+    let plan_value = credential_value(object, credentials, None, PLAN_FIELDS)
+        .or_else(|| provider_data.and_then(|data| value_field(data, PLAN_FIELDS)))
+        .or_else(|| meta.and_then(|data| value_field(data, PLAN_FIELDS)));
+    let mut plan = safe_metadata(plan_value.and_then(Value::as_str));
+    let expires_at_value = credential_value(object, credentials, None, EXPIRES_AT_FIELDS)
+        .or_else(|| provider_data.and_then(|data| value_field(data, EXPIRES_AT_FIELDS)));
+    let mut expires_at = safe_expiry(expires_at_value);
+    let subscription_expires_at_value =
+        credential_value(object, credentials, None, SUBSCRIPTION_EXPIRES_AT_FIELDS).or_else(|| {
+            provider_data.and_then(|data| value_field(data, SUBSCRIPTION_EXPIRES_AT_FIELDS))
+        });
+    let mut subscription_expires_at = safe_expiry(subscription_expires_at_value);
     let base_url_value = value_field(object, &["base_url", "baseUrl", "api_base", "apiBase"]);
     let base_url_supplied = base_url_value.is_some();
     let base_url = safe_base_url(base_url_value.and_then(Value::as_str));
@@ -679,9 +720,10 @@ fn parse_item(
         .and_then(|value| i32::try_from(value).ok());
     if metadata_was_rejected(
         object,
-        credentials,
         base_url.as_deref(),
         protocol.as_deref(),
+        plan_value,
+        plan.as_deref(),
     ) {
         warnings.push(ImportWarning::new(
             ImportWarningCode::InvalidMetadataIgnored,
@@ -689,12 +731,20 @@ fn parse_item(
     }
 
     let email_value = email.as_deref();
-    let identity_seed = account_id
-        .as_deref()
-        .map(|value| format!("account:{}", value.to_ascii_lowercase()))
-        .or_else(|| {
-            email_value.map(|value| format!("email:{}", value.trim().to_ascii_lowercase()))
-        });
+    let identity_seed = if use_api_key {
+        account_id
+            .as_deref()
+            .map(|value| format!("account:{}", value.to_ascii_lowercase()))
+            .or_else(|| {
+                email_value.map(|value| format!("email:{}", value.trim().to_ascii_lowercase()))
+            })
+    } else {
+        token_identity_seed(
+            account_id.as_deref(),
+            chatgpt_user_id.as_deref(),
+            email_value,
+        )
+    };
     let credential_fingerprint = if use_api_key {
         api_key.as_deref()
     } else {
@@ -753,8 +803,9 @@ fn parse_item(
         ImportAuthMode::ApiKey => format!("API source {}", ordinal + 1),
         _ => format!("Account {}", ordinal + 1),
     };
-    let mut label =
-        safe_label(string_field(object, &["name", "label"])).unwrap_or_else(|| identity.clone());
+    let label_value = string_field(object, &["name", "label"])
+        .or_else(|| meta.and_then(|data| string_field(data, &["name", "label"])));
+    let mut label = safe_label(label_value).unwrap_or_else(|| identity.clone());
     if label == "unknown" || label.is_empty() {
         label = fallback_label;
     }
@@ -845,6 +896,24 @@ fn parse_item(
         secrets,
     };
     Ok(ParsedItem { preview, item })
+}
+
+fn token_identity_seed(
+    account_id: Option<&str>,
+    user_id: Option<&str>,
+    email: Option<&str>,
+) -> Option<String> {
+    let account = account_id.map(|value| value.trim().to_ascii_lowercase());
+    let user = user_id.map(|value| value.trim().to_ascii_lowercase());
+    let email = email.map(|value| value.trim().to_ascii_lowercase());
+    match (account, email, user) {
+        (Some(account), Some(email), _) => Some(format!("account:{account}:email:{email}")),
+        (Some(account), None, Some(user)) => Some(format!("account:{account}:user:{user}")),
+        (Some(account), None, None) => Some(format!("account:{account}")),
+        (None, Some(email), _) => Some(format!("email:{email}")),
+        (None, None, Some(user)) => Some(format!("user:{user}")),
+        (None, None, None) => None,
+    }
 }
 
 fn invalid_row(
@@ -1049,16 +1118,16 @@ fn safe_protocol(value: Option<&str>) -> Option<String> {
 
 fn metadata_was_rejected(
     object: &Map<String, Value>,
-    credentials: &Map<String, Value>,
     base_url: Option<&str>,
     protocol: Option<&str>,
+    plan_value: Option<&Value>,
+    plan: Option<&str>,
 ) -> bool {
     (value_field(object, &["base_url", "baseUrl", "api_base", "apiBase"]).is_some()
         && base_url.is_none())
         || (value_field(object, &["protocol", "wire_api", "wireApi"]).is_some()
             && protocol.is_none())
-        || (credential_value(object, credentials, None, PLAN_FIELDS).is_some()
-            && safe_metadata(credential_str(object, credentials, None, PLAN_FIELDS)).is_none())
+        || (plan_value.is_some() && plan.is_none())
 }
 
 fn safe_label(value: Option<&str>) -> Option<String> {
@@ -1244,11 +1313,22 @@ const REFRESH_TOKEN_FIELDS: &[&str] = &["refresh_token", "refreshToken"];
 const ID_TOKEN_FIELDS: &[&str] = &["id_token", "idToken"];
 const API_KEY_FIELDS: &[&str] = &["OPENAI_API_KEY", "openai_api_key", "api_key", "apiKey"];
 const EMAIL_FIELDS: &[&str] = &["email", "identity_email"];
-const ACCOUNT_ID_FIELDS: &[&str] = &["chatgpt_account_id", "account_id", "accountId"];
-const USER_ID_FIELDS: &[&str] = &["chatgpt_user_id", "user_id", "userId"];
+const ACCOUNT_ID_FIELDS: &[&str] = &[
+    "chatgpt_account_id",
+    "chatgptAccountId",
+    "account_id",
+    "accountId",
+];
+const USER_ID_FIELDS: &[&str] = &["chatgpt_user_id", "chatgptUserId", "user_id", "userId"];
 const ORGANIZATION_ID_FIELDS: &[&str] = &["organization_id", "organizationId", "org_id", "orgId"];
-const PLAN_FIELDS: &[&str] = &["plan_type", "planType", "plan"];
-const EXPIRES_AT_FIELDS: &[&str] = &["expires_at", "expiresAt"];
+const PLAN_FIELDS: &[&str] = &[
+    "chatgpt_plan_type",
+    "chatgptPlanType",
+    "plan_type",
+    "planType",
+    "plan",
+];
+const EXPIRES_AT_FIELDS: &[&str] = &["expires_at", "expiresAt", "expired"];
 const SUBSCRIPTION_EXPIRES_AT_FIELDS: &[&str] =
     &["subscription_expires_at", "subscriptionExpiresAt"];
 
@@ -1416,6 +1496,78 @@ mod tests {
     }
 
     #[test]
+    fn parses_current_public_account_export_shapes() {
+        let fixtures = [
+            format!(
+                r#"{{"type":"codex","access_token":"{ACCESS}","refresh_token":"{REFRESH}","id_token":"{ID}","email":"{EMAIL}","account_id":"acct_cpa","plan_type":"plus","expired":"2026-08-10T00:00:00Z"}}"#
+            ),
+            format!(
+                r#"{{"exported_at":"2026-07-10T00:00:00Z","proxies":[],"accounts":[{{"name":"sub2api account","platform":"openai","type":"oauth","credentials":{{"access_token":"{ACCESS}","email":"{EMAIL}","chatgpt_account_id":"acct_sub2api","plan_type":"plus"}}}}]}}"#
+            ),
+            format!(
+                r#"{{"type":"codex","id_token":"{ID}","access_token":"{ACCESS}","refresh_token":"{REFRESH}","account_id":"acct_cockpit","email":"{EMAIL}","expired":"2026-08-10T00:00:00Z"}}"#
+            ),
+            format!(
+                r#"{{"accessToken":"{ACCESS}","refreshToken":"{REFRESH}","email":"{EMAIL}","name":"9router account","authType":"oauth","providerSpecificData":{{"chatgptAccountId":"acct_9router","chatgptPlanType":"plus"}}}}"#
+            ),
+            format!(
+                r#"{{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{{"id_token":"{ID}","access_token":"{ACCESS}","refresh_token":"{REFRESH}","account_id":"acct_codex"}},"last_refresh":"2026-07-10T00:00:00Z"}}"#
+            ),
+            format!(
+                r#"{{"auth_mode":"chatgpt","tokens":{{"access_token":"{ACCESS}","refresh_token":"__missing_refresh_token__","id_token":"{ID}"}},"last_refresh":"2026-07-10T00:00:00Z"}}"#
+            ),
+            format!(
+                r#"{{"tokens":{{"access_token":"{ACCESS}","refresh_token":"","id_token":"","chatgpt_account_id":"acct_manager"}},"meta":{{"label":"Manager account","workspace_id":"workspace_1","chatgpt_account_id":"acct_manager"}}}}"#
+            ),
+        ];
+
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let parsed = parse_import(fixture, None, &[])
+                .unwrap_or_else(|error| panic!("fixture {index} failed: {error}"));
+            assert_eq!(parsed.items.len(), 1, "fixture {index}");
+            assert_eq!(
+                parsed.items[0].secrets().access_token(),
+                Some(ACCESS),
+                "fixture {index}"
+            );
+            let preview = serde_json::to_string(&parsed.preview).unwrap();
+            for secret in [ACCESS, REFRESH, ID, EMAIL] {
+                assert!(!preview.contains(secret), "fixture {index}");
+            }
+        }
+
+        let nine_router = parse_import(&fixtures[3], None, &[]).unwrap();
+        assert_eq!(nine_router.preview.format, ImportFormat::JsonObject);
+        assert_eq!(
+            nine_router.items[0].account_id.as_deref(),
+            Some("acct_9router")
+        );
+        assert_eq!(nine_router.preview.rows[0].plan.as_deref(), Some("plus"));
+        let wrapped_nine_router =
+            parse_import(&format!(r#"{{"accounts":[{}]}}"#, fixtures[3]), None, &[]).unwrap();
+        assert_eq!(wrapped_nine_router.preview.format, ImportFormat::JsonArray);
+        assert_eq!(wrapped_nine_router.items.len(), 1);
+
+        let axon_hub = parse_import(&fixtures[5], None, &[]).unwrap();
+        assert_eq!(axon_hub.items[0].secrets().refresh_token(), None);
+        assert!(axon_hub.preview.rows[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
+
+        let manager = parse_import(&fixtures[6], None, &[]).unwrap();
+        assert_eq!(manager.preview.rows[0].label, "Manager account");
+        assert_eq!(manager.items[0].account_id.as_deref(), Some("acct_manager"));
+        for access_only in [parse_import(&fixtures[1], None, &[]).unwrap(), manager] {
+            assert_eq!(access_only.items[0].secrets().refresh_token(), None);
+            assert!(access_only.preview.rows[0]
+                .warnings
+                .iter()
+                .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
+        }
+    }
+
+    #[test]
     fn duplicates_and_existing_items_have_safe_selection_states() {
         let input = format!(
             r#"[{{"email":"{EMAIL}","access_token":"{ACCESS}"}},{{"email":"{EMAIL}","access_token":"different-secret"}}]"#
@@ -1456,6 +1608,17 @@ mod tests {
             different_kinds.preview.rows[0].item_id,
             different_kinds.preview.rows[1].item_id
         );
+    }
+
+    #[test]
+    fn shared_team_account_id_does_not_merge_distinct_users() {
+        let input = format!(
+            r#"[{{"account_id":"shared-team","email":"one@example.test","access_token":"{ACCESS}"}},{{"account_id":"shared-team","email":"two@example.test","access_token":"different-secret"}}]"#
+        );
+        let parsed = parse_import(&input, None, &[]).unwrap();
+        assert_eq!(parsed.items.len(), 2);
+        assert_ne!(parsed.items[0].identity_key, parsed.items[1].identity_key);
+        assert!(parsed.preview.rows.iter().all(|row| row.selectable));
     }
 
     #[test]

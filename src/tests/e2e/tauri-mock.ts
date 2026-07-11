@@ -6,6 +6,7 @@ export type MockOptions = {
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
   populated?: boolean;
+  importResult?: "success" | "item_failure" | "not_found";
 };
 
 export async function installTauriMock(page: Page, options: MockOptions = {}) {
@@ -104,6 +105,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, outputTokens: 8, totalTokens: 28 }] : [];
     const remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
     let readyKey = "zrk_synthetic_ready_key";
+    const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallback = 1;
 
@@ -116,6 +118,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       unregisterCallback(id: number) { callbacks.delete(id); },
       convertFileSrc(path: string) { return path; },
       async invoke(command: string, args: Record<string, unknown> = {}) {
+        invocations.push({ command, args: structuredClone(args) });
         switch (command) {
           case "get_system_locale": return locale;
           case "get_platform": return "windows";
@@ -138,10 +141,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "set_local_source_enabled": source.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
           case "delete_local_source": localRuntime.sources = []; return structuredClone(localRuntime);
           case "test_local_source": return structuredClone(source);
-          case "start_local_account_import": return importSession("import_synthetic");
-          case "resume_local_account_import": return importSession(String(args.sessionId ?? "import_synthetic"));
-          case "prepare_local_account_import": return importSession(String((args.input as { sessionId?: string })?.sessionId ?? "import_synthetic"));
-          case "confirm_local_account_import": return structuredClone(localRuntime);
+          case "start_local_account_import": return importSession("11111111-2222-4333-8444-555555555555");
+          case "resume_local_account_import": return importSession(String(args.sessionId ?? "11111111-2222-4333-8444-555555555555"));
+          case "prepare_local_account_import": return importSession(String((args.input as { sessionId?: string })?.sessionId ?? "11111111-2222-4333-8444-555555555555"));
+          case "confirm_local_account_import": {
+            if (input.importResult === "not_found") throw { code: "not_found" };
+            const request = args.input as { sessionId?: string; selectedItemIds?: string[] };
+            const itemIds = request.selectedItemIds ?? [];
+            return {
+              sessionId: request.sessionId ?? "11111111-2222-4333-8444-555555555555",
+              results: itemIds.map((itemId, index) => input.importResult === "item_failure" && index === 0
+                ? { itemId, status: "failed", error: { code: "item_not_found", message: "synthetic failure" } }
+                : { itemId, status: "succeeded" }),
+            };
+          }
           case "cancel_local_account_import": return null;
           case "refresh_local_account_quota": return structuredClone(localRuntime);
           case "refresh_all_local_account_quotas": return structuredClone(localRuntime);
@@ -191,7 +204,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     };
 
     function importSession(sessionId: string) {
-      return { sessionId, prepared: true, preview: { format: "portable", rows: [{ itemId: "account_imported", label: "Imported account", identity: "im••••ed", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "Plus", defaultSelected: true, selectable: true, existing: false, warnings: [] }], warnings: [] } };
+      return { sessionId, prepared: true, preview: { format: "portable", rows: [
+        { itemId: "import_0123456789abcdef", label: "Imported account", identity: "im••••ed", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "Plus", defaultSelected: true, selectable: true, existing: false, warnings: [] },
+        { itemId: "import_fedcba9876543210", label: "Existing account", identity: "ex••••ng", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "existing", plan: "Plus", defaultSelected: false, selectable: true, existing: true, warnings: [] },
+      ], warnings: [] } };
     }
 
     function remoteAction(args: Record<string, unknown>) {
@@ -204,5 +220,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: tauri });
+    Object.defineProperty(window, "__TAURI_TEST_INVOKES__", { configurable: true, value: invocations });
   }, options);
 }

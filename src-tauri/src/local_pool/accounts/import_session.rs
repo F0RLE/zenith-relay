@@ -190,14 +190,18 @@ impl<B: SecretBackend> ImportSessionStore<B> {
                     )
                     .for_session(&session_id)
                 })?;
-            if final_preview.rows.len() != parsed.items.len() {
+            if selectable_row_count(&final_preview) != parsed.items.len() {
                 return Err(ImportSessionError::new(
                     ImportSessionErrorCode::SnapshotMismatch,
                     "prepared import preview does not match its secret",
                 )
                 .for_session(&session_id));
             }
-            for (item, row) in parsed.items.iter_mut().zip(&final_preview.rows) {
+            for (item, row) in parsed
+                .items
+                .iter_mut()
+                .zip(final_preview.rows.iter().filter(|row| row.selectable))
+            {
                 item.item_id = row.item_id.clone();
             }
             parsed.preview = final_preview;
@@ -213,16 +217,41 @@ impl<B: SecretBackend> ImportSessionStore<B> {
     pub fn prepare(
         &self,
         session_id: &str,
-        content: &str,
+        content: Option<&str>,
         final_preview: ImportPreview,
         existing_identity_keys: &[String],
     ) -> Result<ImportSession, ImportSessionError> {
         let session_id = validate_session_id(session_id)?;
         let original = read_snapshot(&self.root, &session_id, false)?;
         self.clear_prepared(&session_id)?;
+        let original_content = if content.is_none() {
+            Some(
+                self.secrets
+                    .load(&original.secret_ref)
+                    .map_err(|_| {
+                        ImportSessionError::new(
+                            ImportSessionErrorCode::SecretStoreUnavailable,
+                            "import session secret is unavailable",
+                        )
+                        .for_session(&session_id)
+                    })?
+                    .ok_or_else(|| {
+                        ImportSessionError::new(
+                            ImportSessionErrorCode::SecretMissing,
+                            "import session secret is missing",
+                        )
+                        .for_session(&session_id)
+                    })?,
+            )
+        } else {
+            None
+        };
+        let content = content
+            .or(original_content.as_deref())
+            .expect("prepared import content is available");
         let (base, stable_source_file) =
             parse_stable(content, original.source_file.as_deref(), &[])?;
-        if base.items.len() != final_preview.rows.len() {
+        if base.items.len() != selectable_row_count(&final_preview) {
             return Err(ImportSessionError::new(
                 ImportSessionErrorCode::SnapshotMismatch,
                 "prepared import preview does not match prepared credentials",
@@ -232,7 +261,12 @@ impl<B: SecretBackend> ImportSessionStore<B> {
         let preview = preview_value(&base.preview)?;
         let final_preview = preview_value(&final_preview)?;
         validate_preview(&final_preview)?;
-        let secret_ref = prepared_secret_ref(&session_id);
+        let stores_prepared_secret = original_content.is_none();
+        let secret_ref = if stores_prepared_secret {
+            prepared_secret_ref(&session_id)
+        } else {
+            original.secret_ref.clone()
+        };
         let snapshot = SessionSnapshot {
             version: SNAPSHOT_VERSION,
             session_id: session_id.clone(),
@@ -242,16 +276,18 @@ impl<B: SecretBackend> ImportSessionStore<B> {
             preview,
             final_preview: Some(final_preview),
         };
-        self.secrets.save(&secret_ref, content).map_err(|_| {
-            ImportSessionError::new(
-                ImportSessionErrorCode::SecretStoreUnavailable,
-                "failed to save prepared import credentials",
-            )
-            .for_session(&session_id)
-        })?;
+        if stores_prepared_secret {
+            self.secrets.save(&secret_ref, content).map_err(|_| {
+                ImportSessionError::new(
+                    ImportSessionErrorCode::SecretStoreUnavailable,
+                    "failed to save prepared import credentials",
+                )
+                .for_session(&session_id)
+            })?;
+        }
         let path = prepared_snapshot_path(&self.root, &session_id)?;
         if let Err(error) = write_snapshot_new(&path, &snapshot) {
-            if self.secrets.delete(&secret_ref).is_err() {
+            if stores_prepared_secret && self.secrets.delete(&secret_ref).is_err() {
                 return Err(ImportSessionError::new(
                     ImportSessionErrorCode::RecoveryRequired,
                     "failed to roll back prepared import credentials",
@@ -474,6 +510,10 @@ fn preview_value(preview: &ImportPreview) -> Result<Value, ImportSessionError> {
     })
 }
 
+fn selectable_row_count(preview: &ImportPreview) -> usize {
+    preview.rows.iter().filter(|row| row.selectable).count()
+}
+
 fn read_snapshot(
     root: &Path,
     session_id: &str,
@@ -541,13 +581,15 @@ fn validate_snapshot(
         )
         .for_session(expected_session_id));
     }
-    let expected_secret_ref = if prepared {
-        prepared_secret_ref(expected_session_id)
+    let original_secret_ref = secret_ref(expected_session_id);
+    let valid_secret_ref = if prepared {
+        snapshot.secret_ref == prepared_secret_ref(expected_session_id)
+            || snapshot.secret_ref == original_secret_ref
     } else {
-        secret_ref(expected_session_id)
+        snapshot.secret_ref == original_secret_ref
     };
     if snapshot.session_id != expected_session_id
-        || snapshot.secret_ref != expected_secret_ref
+        || !valid_secret_ref
         || snapshot.created_at_ms == 0
         || prepared != snapshot.final_preview.is_some()
     {
@@ -918,7 +960,7 @@ mod tests {
         let prepared = store
             .prepare(
                 &started.session_id,
-                r#"{"account_id":"provider-account","access_token":"access-exchanged","refresh_token":"refresh-original"}"#,
+                Some(r#"{"account_id":"provider-account","access_token":"access-exchanged","refresh_token":"refresh-original"}"#),
                 final_preview.clone(),
                 &[],
             )
@@ -936,6 +978,51 @@ mod tests {
         assert_eq!(resumed.items[0].item_id, original_item_id);
         reopened.cancel(&started.session_id).unwrap();
         assert!(!secrets.contains(&prepared_secret_ref(&started.session_id)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_preview_keeps_rejected_rows_without_recovery_error() {
+        let root = temp_root("prepared-invalid-row");
+        let secrets = MemorySecrets::default();
+        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let input = r#"[{"email":"same@example.test","access_token":"first"},{"email":"same@example.test","access_token":"second"}]"#;
+        let started = store.start(input, None, &[]).unwrap();
+        assert_eq!(started.items.len(), 1);
+        assert_eq!(started.preview.rows.len(), 2);
+        let prepared = store
+            .prepare(
+                &started.session_id,
+                Some(r#"[{"email":"same@example.test","access_token":"first"}]"#),
+                started.preview.clone(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(prepared.items.len(), 1);
+        assert_eq!(prepared.preview.rows.len(), 2);
+        store.cancel(&started.session_id).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_preview_reuses_original_secret_when_credentials_are_unchanged() {
+        let root = temp_root("prepared-reused-secret");
+        let secrets = MemorySecrets::default();
+        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let started = store
+            .start(
+                r#"{"email":"same@example.test","access_token":"access"}"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let prepared = store
+            .prepare(&started.session_id, None, started.preview.clone(), &[])
+            .unwrap();
+        assert!(prepared.prepared);
+        assert!(!secrets.contains(&prepared_secret_ref(&started.session_id)));
+        assert!(secrets.contains(&secret_ref(&started.session_id)));
+        store.cancel(&started.session_id).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

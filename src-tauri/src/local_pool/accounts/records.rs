@@ -30,7 +30,11 @@ pub fn new_account_record(
             "Codex credentials do not contain a ChatGPT account id",
         )
     })?;
-    let identity_hash = hash(provider_account_id.trim().to_ascii_lowercase().as_bytes());
+    let identity_hash = identity_hash(
+        provider_account_id,
+        credentials.provider_user_id(),
+        credentials.email(),
+    );
     let secret_fingerprint = hash(
         credentials
             .refresh_token()
@@ -102,6 +106,28 @@ pub fn new_account_record(
         ));
     }
     Ok(record)
+}
+
+pub fn identity_hash(
+    provider_account_id: &str,
+    provider_user_id: Option<&str>,
+    email: Option<&str>,
+) -> String {
+    let account = provider_account_id.trim().to_ascii_lowercase();
+    let user = provider_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let email = email
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase);
+    let value = match (email, user) {
+        (Some(email), _) => format!("account:{account}\0email:{email}"),
+        (None, Some(user)) => format!("account:{account}\0user:{user}"),
+        (None, None) => format!("account:{account}"),
+    };
+    hash(value.as_bytes())
 }
 
 pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {
@@ -202,6 +228,14 @@ mod tests {
         assert!(!serialized.contains("access-secret"));
         assert!(!serialized.contains("refresh-secret"));
         assert!(serialized.contains("p***@e***.test"));
+    }
+
+    #[test]
+    fn team_members_have_distinct_account_identities() {
+        let first = identity_hash("shared-team", Some("shared-user"), Some("one@example.test"));
+        let second = identity_hash("shared-team", Some("shared-user"), Some("two@example.test"));
+        assert_ne!(first, second);
+        assert!(!first.contains("shared-team"));
     }
 
     #[test]

@@ -15,6 +15,25 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(page.getByLabel(/Callback URL/)).toBeVisible();
   await page.getByRole("button", { name: "Cancel" }).click();
 
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const importDialog = page.getByRole("dialog", { name: "Import account" });
+  await importDialog.getByLabel("Account import data").fill('{"accounts":[]}');
+  await importDialog.getByRole("button", { name: "Preview import" }).click();
+  const imported = importDialog.getByLabel("Select Imported account for import");
+  const existing = importDialog.getByLabel("Select Existing account for import");
+  await expect(imported).toBeChecked();
+  await expect(existing).not.toBeChecked();
+  await imported.uncheck();
+  await expect(importDialog.getByRole("button", { name: "Import 0 account(s)" })).toBeDisabled();
+  await existing.check();
+  await importDialog.getByRole("button", { name: "Import 1 account(s)" }).click();
+  await expect(importDialog).toBeHidden();
+  const confirmedIds = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { selectedItemIds?: string[] } } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "confirm_local_account_import")?.args.input?.selectedItemIds;
+  });
+  expect(confirmedIds).toEqual(["import_fedcba9876543210"]);
+
   await page.getByRole("tab", { name: "Automations" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
   const automation = page.getByRole("dialog", { name: "Edit automation" });
@@ -46,6 +65,38 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Client Setup" }).click();
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
+});
+
+test("import failures remain actionable without reusing a consumed session", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importResult: "item_failure" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import account" });
+  await dialog.getByLabel("Account import data").fill('{"accounts":[]}');
+  await dialog.getByRole("button", { name: "Preview import" }).click();
+  await dialog.getByRole("button", { name: "Import 1 account(s)" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Some accounts were not imported");
+  await expect(dialog.getByText("item_not_found")).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).last().click();
+  const canceled = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__;
+    return calls.some((call) => call.command === "cancel_local_account_import");
+  });
+  expect(canceled).toBe(false);
+});
+
+test("missing import session keeps the dialog open with recovery guidance", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importResult: "not_found" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Import account" });
+  await dialog.getByLabel("Account import data").fill('{"accounts":[]}');
+  await dialog.getByRole("button", { name: "Preview import" }).click();
+  await dialog.getByRole("button", { name: "Import 1 account(s)" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("Start a fresh preview");
+  await expect(dialog.getByLabel("Resume import session ID")).toHaveValue("11111111-2222-4333-8444-555555555555");
 });
 
 test("Ready API top-up uses the stored-key backend command", async ({ page }) => {

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ConfirmAccountImportResponse,
   ImportSession,
   LocalUsage,
   OAuthFlow,
@@ -26,7 +27,7 @@ export const relayCommands = {
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),
   resumeImport: (sessionId: string) => invoke<ImportSession>("resume_local_account_import", { sessionId }),
   prepareImport: (sessionId: string, probeQuota = true) => invoke<ImportSession>("prepare_local_account_import", { input: { sessionId, probeQuota } }),
-  confirmImport: (sessionId: string, selectedItemIds: string[]) => invoke("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: true, probeQuota: true, models: [] } }),
+  confirmImport: (sessionId: string, selectedItemIds: string[]) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: true, probeQuota: true, models: [] } }),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
   refreshAllAccountQuotas: () => invoke("refresh_all_local_account_quotas"),

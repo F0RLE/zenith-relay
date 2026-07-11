@@ -297,35 +297,89 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(null);
   const [resumeId, setResumeId] = useState("");
-  const selected = useMemo(() => session?.preview.rows.filter((row) => row.selectable && row.defaultSelected).map((row) => row.itemId) ?? [], [session]);
+  const [ownedSessionId, setOwnedSessionId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [commandFailed, setCommandFailed] = useState(false);
+  const [completed, setCompleted] = useState<Array<{ itemId: string; code: string }> | null>(null);
+  const acceptSession = (next: ImportSession) => {
+    setSession(next);
+    setOwnedSessionId(next.sessionId);
+    setCommandFailed(false);
+    setCompleted(null);
+    setSelected(next.preview.rows
+      .filter((row) => row.selectable && row.defaultSelected)
+      .map((row) => row.itemId));
+  };
   const cancel = async () => {
-    if (mode === "local" && session) await perform("import-cancel", () => relayCommands.cancelImport(session.sessionId));
+    const sessionId = session?.sessionId ?? ownedSessionId;
+    if (mode === "local" && sessionId && !completed) await perform("import-cancel", () => relayCommands.cancelImport(sessionId));
     onClose();
   };
   const preview = async () => {
     if (mode === "local") {
       const result: { current: ImportSession | null } = { current: null };
-      const ok = await perform("import-preview", async () => { const started = await relayCommands.startImport(content); result.current = await relayCommands.prepareImport(started.sessionId, true); });
-      if (ok) setSession(result.current);
+      const ok = await perform("import-preview", async () => {
+        const started = await relayCommands.startImport(content);
+        setResumeId(started.sessionId);
+        setOwnedSessionId(started.sessionId);
+        result.current = await relayCommands.prepareImport(started.sessionId, true);
+      });
+      if (ok && result.current) acceptSession(result.current);
+      else if (!ok) setCommandFailed(true);
       return;
     }
-    const payload = JSON.parse(content);
     const result: { current: Record<string, unknown> | null } = { current: null };
-    const ok = await perform("import-preview", async () => { result.current = await relayCommands.remoteAction({ type: "preview_account_import" }, payload) as Record<string, unknown>; });
+    const ok = await perform("import-preview", async () => {
+      const payload = JSON.parse(content);
+      result.current = await relayCommands.remoteAction({ type: "preview_account_import" }, payload) as Record<string, unknown>;
+    });
     const value = result.current;
-    if (ok && value) setSession({ sessionId: String(value.sessionId), prepared: true, preview: { format: "portable", rows: [{ itemId: String(value.accountId), label: String(value.label), identity: String(value.identityHint), authMode: "oauth", sourceName: "OpenAI", quotaStatus: "unknown", status: "ready", defaultSelected: true, selectable: true, existing: Boolean(value.duplicateAccountId), warnings: [] }], warnings: [] } });
+    if (ok && value) {
+      const existing = Boolean(value.duplicateAccountId);
+      acceptSession({ sessionId: String(value.sessionId), prepared: true, preview: { format: "portable", rows: [{ itemId: String(value.accountId), label: String(value.label), identity: String(value.identityHint), authMode: "oauth", sourceName: "OpenAI", quotaStatus: "unknown", status: existing ? "existing" : "ready", defaultSelected: !existing, selectable: true, existing, warnings: [] }], warnings: [] } });
+    } else if (!ok) setCommandFailed(true);
   };
   const resume = async () => {
     const result: { current: ImportSession | null } = { current: null };
     const ok = await perform("import-resume", async () => { result.current = await relayCommands.resumeImport(resumeId.trim()); });
-    if (ok) setSession(result.current);
+    if (ok && result.current) acceptSession(result.current);
+    else if (!ok) setCommandFailed(true);
   };
   const confirm = async () => {
     if (!session) return;
-    const ok = await perform("import-confirm", () => mode === "local" ? relayCommands.confirmImport(session.sessionId, selected) : relayCommands.remoteAction({ type: "confirm_account_import" }, { sessionId: session.sessionId }), "feedback.accountAdded");
-    if (ok) { setSession(null); onClose(); }
+    if (mode === "local") {
+      const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
+      const ok = await perform("import-confirm", async () => { result.current = await relayCommands.confirmImport(session.sessionId, selected); });
+      if (!ok) {
+        setSession(null);
+        setSelected([]);
+        setCommandFailed(true);
+        return;
+      }
+      const failures = (result.current?.results ?? [])
+        .filter((item) => item.status === "failed")
+        .map((item) => ({ itemId: item.itemId, code: item.error?.code ?? "unknown" }));
+      if (failures.length) {
+        setCompleted(failures);
+        return;
+      }
+      onClose();
+      return;
+    }
+    const ok = await perform("import-confirm", () => relayCommands.remoteAction({ type: "confirm_account_import" }, { sessionId: session.sessionId }), "feedback.accountAdded");
+    if (ok) onClose();
   };
-  return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={<><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{session ? <Button variant="primary" busy={busy === "import-confirm"} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>}>{session ? <div className="import-preview"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => <tr key={row.itemId}><td><StatusBadge status={row.selectable ? "ready" : "error"} label={row.status} /></td><td>{row.label}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>)}</tbody></table></div> : <div className="relay-form"><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label> : null}</div>}</Dialog>;
+  const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
+    ? current.filter((id) => id !== itemId)
+    : [...current, itemId]);
+  const footer = completed
+    ? <Button variant="primary" onClick={cancel}>{t("common.close")}</Button>
+    : <><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
+  const body = completed ? <div role="alert" className="relay-form"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul>{completed.map((failure) => <li key={failure.itemId}><code>{failure.code}</code></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
+    const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
+    return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>;
+  })}</tbody></table></div> : <div className="relay-form"><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label> : null}</div>;
+  return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }
 
 function AutomationDialog({ task, onClose }: { task: WakeTask | null; onClose: () => void }) {
