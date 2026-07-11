@@ -547,6 +547,32 @@ impl GatewayRuntime {
             .collect()
     }
 
+    pub fn visible_models_for_secret(
+        &self,
+        secret: &str,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Vec<String> {
+        let candidate: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
+        let Some(key) = self
+            .keys
+            .iter()
+            .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
+        else {
+            return Vec::new();
+        };
+        self.visible_models(
+            &AuthenticatedKey {
+                id: key.id.clone(),
+                scope: key.scope.clone(),
+                model_rules: key.model_rules.clone(),
+                model_prefix: key.model_prefix.clone(),
+            },
+            allowed_protocols,
+            now_ms,
+        )
+    }
+
     pub(crate) fn select(
         &self,
         key: &AuthenticatedKey,
@@ -1040,6 +1066,13 @@ mod tests {
             runtime.visible_models(&authenticated, &[WireApi::Responses], current_time_ms()),
             vec!["team/gpt-a"]
         );
+        assert_eq!(
+            runtime.visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms()),
+            vec!["team/gpt-a"]
+        );
+        assert!(runtime
+            .visible_models_for_secret("wrong", &[WireApi::Responses], current_time_ms())
+            .is_empty());
         assert_eq!(
             runtime
                 .resolve_model(&authenticated, "TEAM/gpt-a")

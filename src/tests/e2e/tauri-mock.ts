@@ -190,10 +190,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "delete_quota_wake_automation": localRuntime.automations = []; return structuredClone(localRuntime);
           case "run_due_quota_wake_confirmations": return 1;
           case "attach_codex_to_local_gateway":
+          case "attach_opencode_to_local_gateway":
           case "launch_saved_codex":
           case "restore_codex_profile":
+          case "restore_opencode_profile":
           case "attach_codex_to_account":
           case "restore_codex_account_profile": return null;
+          case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
           case "open_relay_folder": return null;
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";

@@ -69,6 +69,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Client Setup" }).click();
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
+  await page.getByRole("button", { name: "OpenCode" }).click();
+  await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
   await expect(page.getByText(/gpt-5.4-mini completed in 321 ms/)).toBeVisible();
@@ -77,6 +79,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(diagnosticCalls).toEqual([false, true]);
   const gatewayCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { port?: number } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "restart_local_gateway" || call.command === "update_local_gateway_port"));
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
+  const profileCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "attach_codex_to_local_gateway" || call.command === "attach_opencode_to_local_gateway").map((call) => call.command));
+  expect(profileCalls).toEqual(["attach_codex_to_local_gateway", "attach_opencode_to_local_gateway"]);
 });
 
 test("import failures remain actionable without reusing a consumed session", async ({ page }) => {
@@ -135,6 +139,7 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   await page.getByRole("button", { name: "Export", exact: true }).click();
 
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await expect(page.getByRole("row").filter({ hasText: "OpenCode" })).toBeVisible();
   await page.getByRole("tab", { name: "Backups" }).click();
   await page.getByRole("button", { name: "Open folder" }).click();
 

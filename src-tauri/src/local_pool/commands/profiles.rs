@@ -1,14 +1,16 @@
+use super::runtime_from_store;
 use crate::{
     local_pool::{
         commands::accounts::prepare_account_credentials,
         error::{CommandError, ErrorCode, LocalPoolError},
-        profiles::codex,
+        profiles::{codex, opencode},
         state::DesktopState,
         store::secret_store,
     },
-    platform::default_codex_home,
+    platform::{default_codex_home, default_opencode_auth, default_opencode_config},
 };
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 #[tauri::command]
@@ -47,6 +49,71 @@ pub async fn attach_codex_to_local_gateway(
 pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn attach_opencode_to_local_gateway(
+    key_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    let (key, port) = {
+        let store = state.store()?;
+        let key = store
+            .key(&key_id)
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key not found"))?;
+        (key, store.gateway().port)
+    };
+    if !key.enabled || !super::pool::has_usable_source(&state, &key)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "local key is not available for any enabled candidate",
+        )
+        .into());
+    }
+    let secret = secret_store::load(&key.secret_ref)?
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key secret is missing"))?;
+    let models = runtime_from_store(&state).await?.visible_models_for_secret(
+        &secret,
+        &[
+            zenith_relay_core::WireApi::Responses,
+            zenith_relay_core::WireApi::ChatCompletions,
+        ],
+        now_ms(),
+    );
+    opencode::attach(
+        &default_opencode_config(),
+        &default_opencode_auth(),
+        &state.profile_backup_root(),
+        &format!("http://127.0.0.1:{port}/v1"),
+        &secret,
+        &models,
+    )
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn restore_opencode_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    opencode::restore(
+        &default_opencode_config(),
+        &default_opencode_auth(),
+        &state.profile_backup_root(),
+    )
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub fn get_opencode_profile_state(
+    state: State<'_, DesktopState>,
+) -> Result<opencode::ProfileState, CommandError> {
+    opencode::state(
+        &default_opencode_config(),
+        &default_opencode_auth(),
+        &state.profile_backup_root(),
+    )
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -113,4 +180,13 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
         .into());
     }
     Ok(canonical)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

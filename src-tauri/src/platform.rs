@@ -42,16 +42,34 @@ pub fn ui_text(en: &'static str, ru: &'static str) -> &'static str {
 }
 
 pub fn default_codex_home() -> PathBuf {
+    user_home().join(".codex")
+}
+
+pub fn default_opencode_config() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home().join(".config"))
+        .join("opencode")
+        .join("opencode.json")
+}
+
+pub fn default_opencode_auth() -> PathBuf {
+    env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_home().join(".local").join("share"))
+        .join("opencode")
+        .join("auth.json")
+}
+
+fn user_home() -> PathBuf {
     if cfg!(windows) {
         env::var_os("USERPROFILE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".codex")
     } else {
         env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".codex")
     }
 }
 

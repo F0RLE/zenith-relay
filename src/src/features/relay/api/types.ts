@@ -238,3 +238,10 @@ export type ProfileBinding = {
   credentialKind: string;
   credentialId: string;
 };
+
+export type OpenCodeProfileState = {
+  attached: boolean;
+  backupAvailable: boolean;
+  changed: boolean;
+  configPath: string;
+};

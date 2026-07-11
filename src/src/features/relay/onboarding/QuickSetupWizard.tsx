@@ -97,6 +97,11 @@ export function QuickSetupWizard() {
       const ok = await perform("onboarding-client", () => relayCommands.attachCodexGateway(localKeyId), "feedback.profileAttached");
       if (!ok) return;
     }
+    if (step === 4 && client === "opencode" && mode === "local") {
+      if (!localKeyId) return;
+      const ok = await perform("onboarding-client", () => relayCommands.attachOpenCodeGateway(localKeyId), "feedback.profileAttached");
+      if (!ok) return;
+    }
     if (step === 5) finishOnboarding(mode);
     else setStep((value) => value + 1);
   };
