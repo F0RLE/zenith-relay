@@ -125,6 +125,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_state": return { providerActive: Boolean(readyKey), codexRunning: false, hasSavedApiKey: Boolean(readyKey) };
           case "get_key_stats": return { balance: 42.5, spent: 7.5, requests: 18, totalTokens: 2500, inputTokens: 1700, cachedTokens: 300, reasoningTokens: 100, outputTokens: 400 };
           case "get_saved_key_stats": return { balance: 42.5, spent: 7.5, requests: 18, totalTokens: 2500, inputTokens: 1700, cachedTokens: 300, reasoningTokens: 100, outputTokens: 400 };
+          case "get_saved_key_models": return ["gpt-5.4", "gpt-5.4-mini"];
           case "get_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, totalTokens: 30, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "get_saved_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, totalTokens: 30, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "create_saved_top_up_intent_and_open": return null;

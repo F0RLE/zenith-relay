@@ -12,6 +12,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     env,
     io::Write,
     net::{TcpListener, TcpStream},
@@ -40,6 +41,7 @@ const TOP_UP_BOT_DOMAIN: &str = "zenith_service_bot";
 const MAX_TOP_UP_AMOUNT_CENTS: i64 = 1_000_000;
 const USAGE_HISTORY_LIMIT: u8 = 8;
 const STATS_WATCH_INTERVAL: Duration = Duration::from_secs(15);
+const MAX_MODELS_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,6 +193,16 @@ struct ApiEnvelope<T> {
     data: T,
 }
 
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PreparedTopUpAmount {
@@ -231,6 +243,64 @@ async fn get_key_stats(api_key: String) -> Result<KeyStats, String> {
 async fn get_saved_key_stats() -> Result<KeyStats, String> {
     let api_key = stored_api_key()?;
     fetch_key_stats(&api_key).await
+}
+
+#[tauri::command]
+async fn get_saved_key_models() -> Result<Vec<String>, String> {
+    let api_key = stored_api_key()?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| "Models request could not be initialized.".to_string())?;
+    let response = api_get(&client, "/models", &api_key).await?;
+    if !response.status().is_success() {
+        return Err(api_error_message(response, "Models request failed.").await);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_MODELS_RESPONSE_BYTES as u64)
+    {
+        return Err("Models response is too large.".to_string());
+    }
+    let mut response = response;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Models response could not be read.".to_string())?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_MODELS_RESPONSE_BYTES {
+            return Err("Models response is too large.".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    parse_model_ids(&body)
+}
+
+fn parse_model_ids(body: &[u8]) -> Result<Vec<String>, String> {
+    let response: ModelsResponse =
+        serde_json::from_slice(body).map_err(|_| "Models response is invalid.".to_string())?;
+    let models = response
+        .data
+        .into_iter()
+        .map(|model| model.id)
+        .filter(|id| {
+            !id.is_empty()
+                && id.len() <= 256
+                && !id.chars().any(char::is_control)
+                && !id.chars().any(char::is_whitespace)
+        })
+        .take(2_048)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        Err("Models response contains no usable models.".to_string())
+    } else {
+        Ok(models)
+    }
 }
 
 async fn fetch_key_stats(api_key: &str) -> Result<KeyStats, String> {
@@ -940,7 +1010,7 @@ fn is_valid_top_up_start(start: &str) -> bool {
 mod tests {
     use super::{
         extract_top_up_start, extract_top_up_start_from_url, fallback_api_date, format_api_date,
-        format_money_microusd, is_allowed_top_up_url, key_stats_from_value,
+        format_money_microusd, is_allowed_top_up_url, key_stats_from_value, parse_model_ids,
         sanitize_api_error_message, telegram_start_url, validate_top_up_amount_cents,
         TopUpIntentData, UiState, MAX_TOP_UP_AMOUNT_CENTS,
     };
@@ -971,6 +1041,17 @@ mod tests {
         assert_eq!(value["hasSavedApiKey"], true);
         assert!(!rendered.contains("savedApiKey"));
         assert!(!rendered.contains("api_key"));
+    }
+
+    #[test]
+    fn model_catalog_returns_only_bounded_single_line_ids() {
+        let models = parse_model_ids(
+            br#"{"data":[{"id":"gpt-test"},{"id":"gpt test"},{"id":"gpt-test"},{"id":"bad\nmodel"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(models, ["gpt-test"]);
+        assert!(parse_model_ids(br#"{"data":[]}"#).is_err());
+        assert!(parse_model_ids(b"not-json").is_err());
     }
 
     #[test]
@@ -1185,6 +1266,7 @@ fn main() {
             get_system_locale,
             get_key_stats,
             get_saved_key_stats,
+            get_saved_key_models,
             get_key_usage_history,
             get_saved_key_usage_history,
             get_key_usage_version,

@@ -315,6 +315,10 @@ export function saveKey(apiKey: string) {
   return invoke<string>("save_key", { apiKey });
 }
 
+export function getSavedKeyModels() {
+  return invoke<string[]>("get_saved_key_models");
+}
+
 export function resetKey() {
   return invoke<string>("reset_key");
 }
