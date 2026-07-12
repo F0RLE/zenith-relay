@@ -3376,6 +3376,8 @@ textarea {
 }
 
 .account-facts .relay-status {
+  width: 100%;
+  min-width: 0;
   overflow: hidden;
   gap: 3px;
   font-size: 11px;
