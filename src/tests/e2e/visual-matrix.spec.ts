@@ -194,7 +194,20 @@ for (const viewport of viewports) {
       const facts = [...item.querySelectorAll<HTMLElement>(".account-facts > div")].map((fact) => fact.getBoundingClientRect().width);
       return facts.length === 2 && Math.abs(facts[0] - facts[1]) <= 1;
     }))).toBe(true);
-    expect(await page.locator(".account-facts span").evaluateAll((labels) => labels.every((label) => label.scrollWidth <= label.clientWidth))).toBe(true);
+    const overflowingLabels = await page.locator(".account-facts span").evaluateAll((labels) => labels.flatMap((label) => {
+      if (label.scrollWidth <= label.clientWidth) return [];
+      const style = getComputedStyle(label);
+      return [{
+        text: label.textContent?.trim() ?? "",
+        className: label.className,
+        clientWidth: label.clientWidth,
+        scrollWidth: label.scrollWidth,
+        renderedWidth: label.getBoundingClientRect().width,
+        fontFamily: style.fontFamily,
+        fontSize: style.fontSize,
+      }];
+    }));
+    expect(overflowingLabels).toEqual([]);
   });
 
   test(`quota windows ${viewport.width}x${viewport.height}`, async ({ page }) => {
