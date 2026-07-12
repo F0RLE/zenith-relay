@@ -3257,7 +3257,7 @@ textarea {
 .account-card-main {
   min-height: 60px;
   display: grid;
-  grid-template-columns: auto minmax(140px, 1fr) minmax(210px, 0.9fr) auto;
+  grid-template-columns: auto minmax(140px, 1fr) minmax(220px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
