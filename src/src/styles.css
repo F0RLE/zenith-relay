@@ -3387,8 +3387,7 @@ textarea {
 }
 
 .account-facts .relay-status svg {
-  width: 12px;
-  height: 12px;
+  display: none;
 }
 
 .account-row-action-list {
