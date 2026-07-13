@@ -22,6 +22,7 @@ use url::Url;
 
 pub(crate) const MAX_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
@@ -328,16 +329,8 @@ impl GatewayRuntime {
             ));
         }
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .read_timeout(Duration::from_secs(300))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let bounded_client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(900))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
+        let client = runtime_client(None, false)?;
+        let bounded_client = runtime_client(None, true)?;
         let discovery_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -1022,6 +1015,10 @@ fn normalized_responses_url(value: &str) -> Result<Url> {
 fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest::Client> {
     let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
+        .http2_adaptive_window(true)
         .redirect(reqwest::redirect::Policy::none());
     let builder = if bounded {
         builder.timeout(Duration::from_secs(900))

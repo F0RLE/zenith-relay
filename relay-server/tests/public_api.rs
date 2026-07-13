@@ -1,6 +1,6 @@
 use axum::{
     body::{to_bytes, Body},
-    extract::Request,
+    extract::{Request, State},
     http::{
         header::{AUTHORIZATION, CONTENT_TYPE},
         StatusCode,
@@ -19,6 +19,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
 use zenith_relay_server::{
@@ -564,6 +565,136 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert!(!String::from_utf8_lossy(&vault).contains(&pool_key));
 
     second.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_gateway_serves_two_hundred_concurrent_requests_and_flushes_usage() {
+    const REQUESTS: usize = 200;
+    let root = TempDir::new().unwrap();
+    let (upstream, load, upstream_task) = spawn_load_upstream(REQUESTS).await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Concurrent upstream",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "models": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let source_id = source["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({"sourceIds": [source_id], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let generated: Value = client
+        .post(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "label": "Concurrent client",
+            "sourceIds": null,
+            "accountIds": null,
+            "allowedModels": [],
+            "excludedModels": [],
+            "modelPrefix": null
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_key = generated["secret"].as_str().unwrap().to_string();
+
+    let start = Arc::new(tokio::sync::Barrier::new(REQUESTS + 1));
+    let tasks = (0..REQUESTS)
+        .map(|index| {
+            let client = client.clone();
+            let origin = server.origin.clone();
+            let pool_key = pool_key.clone();
+            let start = start.clone();
+            tokio::spawn(async move {
+                start.wait().await;
+                client
+                    .post(format!("{origin}/v1/responses"))
+                    .bearer_auth(pool_key)
+                    .json(&json!({
+                        "model": "gpt-test",
+                        "input": format!("concurrent request {index}")
+                    }))
+                    .send()
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait().await;
+    let responses = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut responses = Vec::with_capacity(REQUESTS);
+        for task in tasks {
+            responses.push(task.await.unwrap());
+        }
+        responses
+    })
+    .await
+    .expect("200 concurrent requests timed out");
+
+    assert!(responses
+        .iter()
+        .all(|response| response.status() == StatusCode::OK));
+    assert_eq!(load.total.load(Ordering::Relaxed), REQUESTS);
+    assert_eq!(load.max_active.load(Ordering::Relaxed), REQUESTS);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let usage: Value = client
+            .get(format!("{}/usage?page=1&pageSize=1", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if usage["total"].as_u64() == Some(REQUESTS as u64) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "usage queue did not drain");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let snapshot: Value = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!snapshot["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|warning| warning == "usage_persistence_failed"));
+
+    server.task.abort();
     upstream_task.abort();
 }
 
@@ -1379,6 +1510,33 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
     (format!("http://{address}"), task)
 }
 
+#[derive(Clone)]
+struct LoadUpstreamState {
+    active: Arc<AtomicUsize>,
+    max_active: Arc<AtomicUsize>,
+    total: Arc<AtomicUsize>,
+    barrier: Arc<tokio::sync::Barrier>,
+}
+
+async fn spawn_load_upstream(
+    requests: usize,
+) -> (String, LoadUpstreamState, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let state = LoadUpstreamState {
+        active: Arc::new(AtomicUsize::new(0)),
+        max_active: Arc::new(AtomicUsize::new(0)),
+        total: Arc::new(AtomicUsize::new(0)),
+        barrier: Arc::new(tokio::sync::Barrier::new(requests)),
+    };
+    let router = Router::new()
+        .route("/v1/models", get(models_response))
+        .route("/v1/responses", post(load_upstream_response))
+        .with_state(state.clone());
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}"), state, task)
+}
+
 async fn spawn_account_proxy(
     response_id: &'static str,
 ) -> (SocketAddr, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
@@ -1447,6 +1605,36 @@ async fn upstream_response(request: Request) -> Response {
             "object":"response",
             "model":"gpt-test",
             "error": null,
+            "output":[],
+            "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+        })),
+    )
+        .into_response()
+}
+
+async fn load_upstream_response(
+    State(state): State<LoadUpstreamState>,
+    request: Request,
+) -> Response {
+    assert_eq!(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer synthetic-upstream-api-key")
+    );
+    let _ = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+    let active = state.active.fetch_add(1, Ordering::Relaxed) + 1;
+    state.max_active.fetch_max(active, Ordering::Relaxed);
+    state.total.fetch_add(1, Ordering::Relaxed);
+    state.barrier.wait().await;
+    state.active.fetch_sub(1, Ordering::Relaxed);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id":"concurrent-response",
+            "object":"response",
+            "model":"gpt-test",
             "output":[],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         })),

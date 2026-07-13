@@ -1458,6 +1458,15 @@ Rules:
 - final successful attempt emits token and latency details;
 - local estimated cost is computed by local telemetry sink, not executor.
 
+The personal server adapter uses one bounded queue with capacity for 16,384
+events. Its SQLite writer drains up to 256 events per transaction, coalesces
+account-state writes within the same batch, and reports
+`usage_persistence_failed` if the queue or sink cannot accept an event. A
+single writer is intentional for SQLite; adding parallel writers increases
+lock contention. PostgreSQL and multi-instance coordination belong to a
+separate scaled service boundary and are not dependencies of the public
+personal server.
+
 Usage detail fields:
 
 ```text

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, RwLock},
+    sync::{atomic::AtomicU64, Arc, RwLock},
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
@@ -119,6 +119,7 @@ pub struct AppState {
     pub capabilities: Capabilities,
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
+    pub(crate) failed_usage_writes: AtomicU64,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
 }
 
@@ -136,6 +137,7 @@ impl AppState {
             capabilities: Capabilities::personal_server(server_id, fingerprint),
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
+            failed_usage_writes: AtomicU64::new(0),
             runtime: RwLock::new(None),
         }))
     }

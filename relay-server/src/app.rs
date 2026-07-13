@@ -6,8 +6,8 @@ use futures_util::future::BoxFuture;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{atomic::Ordering, mpsc, Arc},
     time::Duration,
 };
 use zenith_relay_core::{
@@ -21,13 +21,20 @@ use zenith_relay_core::{
     },
     ApiEquivalentSummary, CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions,
     LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth,
-    RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
+const USAGE_QUEUE_CAPACITY: usize = 16_384;
+const USAGE_BATCH_SIZE: usize = 256;
+
+struct QueuedUsage {
+    event: UsageEvent,
+    observed_at_ms: u64,
+}
 
 impl AppState {
     pub async fn prepare_account_tokens(
@@ -137,50 +144,7 @@ impl AppState {
         let persistence = Arc::new(ServerTokenPersistence {
             state: self.clone(),
         });
-        let weak_state = Arc::downgrade(self);
-        let usage = Arc::new(move |event| {
-            let Some(state) = weak_state.upgrade() else {
-                return;
-            };
-            let observed_at_ms = now_ms();
-            let _ = state.store.record_usage(&event, observed_at_ms);
-            let Some(account_id) = event.account_id.clone() else {
-                return;
-            };
-            if let Ok(mut accounts) = state.store.accounts() {
-                if let Some(mut account) = accounts.drain(..).find(|value| value.id == account_id) {
-                    if event.success {
-                        account.last_used_at_ms = Some(observed_at_ms);
-                        account.health = AccountHealthState::Healthy;
-                        account.consecutive_failures = 0;
-                        account.last_error_code = None;
-                    } else {
-                        account.consecutive_failures = event
-                            .consecutive_failures
-                            .unwrap_or_else(|| account.consecutive_failures.saturating_add(1));
-                        account.health = AccountHealthState::Degraded;
-                        account.last_error_code = event.error_category.clone();
-                    }
-                    let _ = state.store.save_account(&account);
-                }
-            }
-            if event.success {
-                tokio::spawn(async move {
-                    let _guard = state.wake_lock.lock().await;
-                    let Ok(wake_state) = state.store.wake_state() else {
-                        return;
-                    };
-                    let Ok(mut coordinator) =
-                        zenith_relay_core::automations::WakeCoordinator::from_state(wake_state)
-                    else {
-                        return;
-                    };
-                    if coordinator.mark_natural_use_for_account(&account_id, observed_at_ms) > 0 {
-                        let _ = state.store.save_wake_state(coordinator.state());
-                    }
-                });
-            }
-        });
+        let usage = self.usage_callback()?;
         let runtime = GatewayRuntime::from_mixed_pool(
             sources,
             accounts,
@@ -201,6 +165,42 @@ impl AppState {
         self.replace_runtime(Some(Arc::new(runtime)))
     }
 
+    fn usage_callback(self: &Arc<Self>) -> Result<UsageCallback, String> {
+        let (sender, receiver) = mpsc::sync_channel::<QueuedUsage>(USAGE_QUEUE_CAPACITY);
+        let weak_state = Arc::downgrade(self);
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "usage writer requires an async runtime".to_string())?;
+        std::thread::Builder::new()
+            .name("relay-usage-writer".to_string())
+            .spawn(move || {
+                while let Ok(first) = receiver.recv() {
+                    let Some(state) = weak_state.upgrade() else {
+                        break;
+                    };
+                    let mut batch = Vec::with_capacity(USAGE_BATCH_SIZE);
+                    batch.push(first);
+                    batch.extend(receiver.try_iter().take(USAGE_BATCH_SIZE - 1));
+                    persist_usage_batch(&state, &batch, &runtime);
+                }
+            })
+            .map_err(|error| format!("failed to start usage writer: {error}"))?;
+
+        let weak_state = Arc::downgrade(self);
+        Ok(Arc::new(move |event| {
+            if sender
+                .try_send(QueuedUsage {
+                    event,
+                    observed_at_ms: now_ms(),
+                })
+                .is_err()
+            {
+                if let Some(state) = weak_state.upgrade() {
+                    state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }))
+    }
+
     pub fn snapshot(&self) -> Result<RuntimeStateSnapshot, String> {
         let sources = self.store.sources()?;
         let accounts = self.store.accounts()?;
@@ -213,6 +213,9 @@ impl AppState {
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
         let mut warnings = Vec::new();
+        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
+            warnings.push("usage_persistence_failed".to_string());
+        }
         let source_summaries = sources
             .iter()
             .map(|record| {
@@ -326,6 +329,97 @@ impl AppState {
             warnings,
         })
     }
+}
+
+fn persist_usage_batch(
+    state: &Arc<AppState>,
+    batch: &[QueuedUsage],
+    runtime: &tokio::runtime::Handle,
+) {
+    let records = batch
+        .iter()
+        .map(|queued| (&queued.event, queued.observed_at_ms))
+        .collect::<Vec<_>>();
+    if state.store.record_usage_batch(&records).is_err() {
+        state
+            .failed_usage_writes
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+    }
+
+    let mut account_events = BTreeMap::<String, Vec<&QueuedUsage>>::new();
+    for queued in batch {
+        if let Some(account_id) = queued.event.account_id.as_ref() {
+            account_events
+                .entry(account_id.clone())
+                .or_default()
+                .push(queued);
+        }
+    }
+    let mut updated_accounts = Vec::with_capacity(account_events.len());
+    let mut natural_uses = Vec::new();
+    for (account_id, events) in account_events {
+        let Ok(Some(mut account)) = state.store.account(&account_id) else {
+            state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        let mut natural_use_at_ms = None;
+        for queued in events {
+            let event = &queued.event;
+            if event.success {
+                account.last_used_at_ms = Some(queued.observed_at_ms);
+                account.health = AccountHealthState::Healthy;
+                account.consecutive_failures = 0;
+                account.last_error_code = None;
+                natural_use_at_ms = Some(queued.observed_at_ms);
+            } else {
+                account.consecutive_failures = event
+                    .consecutive_failures
+                    .unwrap_or_else(|| account.consecutive_failures.saturating_add(1));
+                account.health = AccountHealthState::Degraded;
+                account.last_error_code = event.error_category.clone();
+            }
+        }
+        updated_accounts.push(account);
+        if let Some(observed_at_ms) = natural_use_at_ms {
+            natural_uses.push((account_id, observed_at_ms));
+        }
+    }
+    if !updated_accounts.is_empty() && state.store.save_accounts(&updated_accounts).is_err() {
+        state
+            .failed_usage_writes
+            .fetch_add(updated_accounts.len() as u64, Ordering::Relaxed);
+    }
+    mark_natural_use(state.clone(), natural_uses, runtime);
+}
+
+fn mark_natural_use(
+    state: Arc<AppState>,
+    events: Vec<(String, u64)>,
+    runtime: &tokio::runtime::Handle,
+) {
+    if events.is_empty() {
+        return;
+    }
+    runtime.spawn(async move {
+        let _guard = state.wake_lock.lock().await;
+        let Ok(wake_state) = state.store.wake_state() else {
+            return;
+        };
+        let Ok(mut coordinator) =
+            zenith_relay_core::automations::WakeCoordinator::from_state(wake_state)
+        else {
+            return;
+        };
+        let changed = events
+            .into_iter()
+            .map(|(account_id, observed_at_ms)| {
+                coordinator.mark_natural_use_for_account(&account_id, observed_at_ms)
+            })
+            .sum::<usize>();
+        if changed > 0 {
+            let _ = state.store.save_wake_state(coordinator.state());
+        }
+    });
 }
 
 pub(crate) fn account_proxy_config(

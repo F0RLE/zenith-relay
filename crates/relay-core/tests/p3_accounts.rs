@@ -574,6 +574,7 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
 
 #[tokio::test]
 async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
+    const REQUESTS: usize = 200;
     let (first_upstream, first_state) = spawn_delayed_upstream(Duration::from_millis(100)).await;
     let (second_upstream, second_state) = spawn_delayed_upstream(Duration::from_millis(100)).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -592,13 +593,13 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
     )
     .await;
 
-    let responses = join_all((0..8).map(|_| request(&gateway, false))).await;
+    let responses = join_all((0..REQUESTS).map(|_| request(&gateway, false))).await;
 
     assert!(responses
         .iter()
         .all(|response| response.status() == StatusCode::OK));
-    assert_eq!(first_state.requests.lock().unwrap().len(), 4);
-    assert_eq!(second_state.requests.lock().unwrap().len(), 4);
+    assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
+    assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
 }
 
 #[tokio::test]

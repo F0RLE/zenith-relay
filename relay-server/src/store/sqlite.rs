@@ -267,8 +267,45 @@ impl Store {
         self.list_records("accounts")
     }
 
+    pub fn account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
+        self.lock()?
+            .query_row(
+                "SELECT data_json FROM accounts WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .map(|value| parse_json(&value))
+            .transpose()
+    }
+
     pub fn save_account(&self, record: &ServerAccountRecord) -> Result<(), String> {
         self.save_record("accounts", &record.id, &record.secret_ref, record)
+    }
+
+    pub fn save_accounts(&self, records: &[ServerAccountRecord]) -> Result<(), String> {
+        let encoded = records
+            .iter()
+            .map(|record| Ok((record, to_json(record)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
+                )
+                .map_err(db_error)?;
+            for (record, data_json) in encoded {
+                statement
+                    .execute(params![record.id, data_json, record.secret_ref])
+                    .map_err(db_error)?;
+            }
+        }
+        transaction.commit().map_err(db_error)
     }
 
     pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
@@ -445,44 +482,58 @@ impl Store {
     }
 
     pub fn record_usage(&self, event: &UsageEvent, created_at_ms: u64) -> Result<(), String> {
-        let candidate_id = event
-            .account_id
-            .as_deref()
-            .or(event.candidate_id.as_deref())
-            .unwrap_or(&event.source_id);
-        let candidate_kind = if event.account_id.is_some() {
-            "account"
-        } else {
-            "source"
-        };
-        let candidate_hint =
-            format!("{:x}", Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
-        self.lock()?
-            .execute(
-                "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-                params![
-                    event.request_id,
-                    event.local_key_id,
-                    candidate_kind,
-                    candidate_hint,
-                    event.requested_model,
-                    event.resolved_model,
-                    wire_api_name(event.wire_api),
-                    i64::from(event.success),
-                    i64::from(event.http_status),
-                    event.error_category,
-                    event.latency_ms as i64,
-                    event.input_tokens.map(|value| value as i64),
-                    event.cached_input_tokens.map(|value| value as i64),
-                    event.reasoning_tokens.map(|value| value as i64),
-                    event.output_tokens.map(|value| value as i64),
-                    event.total_tokens.map(|value| value as i64),
-                    created_at_ms as i64,
-                ],
-            )
+        self.record_usage_batch(&[(event, created_at_ms)])
+    }
+
+    pub fn record_usage_batch(&self, events: &[(&UsageEvent, u64)]) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
-        Ok(())
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                )
+                .map_err(db_error)?;
+            for (event, created_at_ms) in events {
+                let candidate_id = event
+                    .account_id
+                    .as_deref()
+                    .or(event.candidate_id.as_deref())
+                    .unwrap_or(&event.source_id);
+                let candidate_kind = if event.account_id.is_some() {
+                    "account"
+                } else {
+                    "source"
+                };
+                let candidate_hint =
+                    format!("{:x}", Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
+                statement
+                    .execute(params![
+                        event.request_id,
+                        event.local_key_id,
+                        candidate_kind,
+                        candidate_hint,
+                        event.requested_model,
+                        event.resolved_model,
+                        wire_api_name(event.wire_api),
+                        i64::from(event.success),
+                        i64::from(event.http_status),
+                        event.error_category,
+                        event.latency_ms as i64,
+                        event.input_tokens.map(|value| value as i64),
+                        event.cached_input_tokens.map(|value| value as i64),
+                        event.reasoning_tokens.map(|value| value as i64),
+                        event.output_tokens.map(|value| value as i64),
+                        event.total_tokens.map(|value| value as i64),
+                        *created_at_ms as i64,
+                    ])
+                    .map_err(db_error)?;
+            }
+        }
+        transaction.commit().map_err(db_error)
     }
 
     pub fn usage_page(&self, query: &UsageQuery) -> Result<UsagePage, String> {
