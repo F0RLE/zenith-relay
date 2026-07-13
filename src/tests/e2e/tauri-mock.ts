@@ -356,7 +356,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_usage": return "C:\\Temp\\usage.json";
           case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 7, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
-          case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId === undefined ? account.id : input.codexBoundOauthAccountId }] : [];
+          case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };

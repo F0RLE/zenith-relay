@@ -82,7 +82,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Apply and restart" }).click();
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
   await page.getByRole("tab", { name: "Client Setup" }).click();
-  await expect(page.getByLabel("Account for the Codex app")).toHaveValue("account_synthetic");
+  await expect(page.getByLabel("OAuth account for Codex (optional)")).toHaveValue("");
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
   await page.getByRole("button", { name: "OpenCode" }).click();
@@ -97,7 +97,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
   const profileCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "attach_codex_to_local_gateway" || call.command === "attach_opencode_to_local_gateway"));
   expect(profileCalls).toEqual([
-    { command: "attach_codex_to_local_gateway", args: { keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" } },
+    { command: "attach_codex_to_local_gateway", args: { keyId: "key_synthetic", boundOauthAccountId: null } },
     { command: "attach_opencode_to_local_gateway", args: { keyId: "key_synthetic" } },
   ]);
   const policyCalls = await page.evaluate(() => {
@@ -834,7 +834,7 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ label: "Codex pool" });
-  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
+  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null });
 });
 
 test("runtime state refreshes when the app regains focus", async ({ page }) => {

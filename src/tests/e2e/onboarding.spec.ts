@@ -31,8 +31,9 @@ test("local quick setup verifies runtime and applies Codex only after explicit c
   await page.getByRole("button", { name: "Codex" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByText("http://127.0.0.1:14998/v1")).toBeVisible();
-  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
-  expect(commands).toEqual(expect.arrayContaining(["complete_codex_oauth", "get_local_runtime_state", "attach_codex_to_local_gateway"]));
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["complete_codex_oauth", "get_local_runtime_state", "attach_codex_to_local_gateway"]));
+  expect(calls.findLast((call) => call.command === "attach_codex_to_local_gateway")?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null });
 });
 
 test("remote quick setup requires explicit consent for plain HTTP", async ({ page }) => {

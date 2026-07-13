@@ -49,12 +49,12 @@ function EndpointView({ running, endpoint }: { running: boolean; endpoint: strin
 }
 
 function ClientSetup({ endpoint }: { endpoint: string }) {
-  const { t } = useTranslation(); const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState(); const [client, setClient] = useState("codex"); const [boundOauthAccountId, setBoundOauthAccountId] = useState<string>(); const key = runtime?.keys[0];
+  const { t } = useTranslation(); const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState(); const [client, setClient] = useState("codex"); const [boundOauthAccountId, setBoundOauthAccountId] = useState(""); const key = runtime?.keys[0];
   const eligibleAccounts = (runtime?.accounts ?? []).filter((account) => account.enabled && account.secretAvailable && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active");
   const eligibleAccountIds = eligibleAccounts.map((account) => account.id).join("\0");
   useEffect(() => {
     const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
-    setBoundOauthAccountId((current) => current === undefined || (current && !ids.includes(current)) ? ids[0] ?? "" : current);
+    setBoundOauthAccountId((current) => current && !ids.includes(current) ? "" : current);
   }, [eligibleAccountIds]);
   const config = client === "codex" ? `base_url = "${endpoint}"\nwire_api = "responses"\nrequires_openai_auth = true` : client === "opencode" ? JSON.stringify({provider:{zenith_relay_local:{npm:"@ai-sdk/openai-compatible",name:"Zenith Relay Local",options:{baseURL:endpoint}}}}, null, 2) : `OPENAI_BASE_URL=${endpoint}`;
   const attach = () => key && (client === "opencode" ? perform("profile-attach", () => relayCommands.attachOpenCodeGateway(key.id), "feedback.profileAttached") : activateCodexProfile("profile-attach", () => relayCommands.attachCodexGateway(key.id, boundOauthAccountId || null)));
@@ -63,7 +63,7 @@ function ClientSetup({ endpoint }: { endpoint: string }) {
     <div className="segmented">{["codex","opencode","other"].map((value) => <button type="button" key={value} className={client === value ? "active" : ""} onClick={() => setClient(value)}>{t(`clients.${value}`)}</button>)}</div>
     {client === "codex" && mode === "local" ? <section className="client-oauth-binding">
       <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={boundOauthAccountId ? "ready" : "warning"} label={boundOauthAccountId ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingOptional")} /></header>
-      <label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={boundOauthAccountId ?? ""} onChange={(event) => setBoundOauthAccountId(event.target.value)}><option value="">{t("gateway.oauthBindingNone")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.subscription.planType ? ` - ${account.subscription.planType.toUpperCase()}` : ""}</option>)}</select></label>
+      <label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={boundOauthAccountId} onChange={(event) => setBoundOauthAccountId(event.target.value)}><option value="">{t("gateway.oauthBindingNone")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.subscription.planType ? ` - ${account.subscription.planType.toUpperCase()}` : ""}</option>)}</select></label>
       {!eligibleAccounts.length ? <p className="form-note warning-text">{t("gateway.oauthBindingUnavailable")}</p> : null}
     </section> : null}
     <section className="config-preview"><header><h2>{t("gateway.generatedConfig")}</h2><Button variant="ghost" icon={<Copy aria-hidden />} onClick={() => copyText(config)}>{t("common.copy")}</Button></header><pre>{config}</pre></section>

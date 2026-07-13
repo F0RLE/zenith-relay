@@ -2556,6 +2556,62 @@ mod tests {
     }
 
     #[test]
+    fn local_gateway_can_replace_bound_oauth_with_local_key() {
+        let (root, home, backups) = profile_dirs("local-gateway-remove-oauth-binding");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new(
+            "bound-access",
+            Some("bound-refresh".into()),
+            Some("bound-id".into()),
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+
+        switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            Some(BoundOAuthProfile {
+                account_id: "account-local",
+                tokens: &tokens,
+                provider_account_id: "provider-account",
+            }),
+            &secrets,
+        )
+        .unwrap();
+        let binding = switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            None,
+            &secrets,
+        )
+        .unwrap();
+
+        assert_eq!(binding.bound_oauth_account_id, None);
+        let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
+        assert!(projected.contains("zlr_key"));
+        assert!(!projected.contains("bound-access"));
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn local_gateway_keeps_api_key_projection_when_bound_oauth_has_no_id_token() {
         let (root, home, backups) = profile_dirs("local-gateway-bound-access-only");
         let secrets = MemorySecrets::default();
