@@ -39,6 +39,8 @@ struct ProfileBackup {
     managed_oauth_access_hash: Option<String>,
     #[serde(default)]
     managed_bearer_in_config: bool,
+    #[serde(default)]
+    managed_supports_websockets: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -302,7 +304,7 @@ fn read_managed_account_token_update(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(None);
     };
-    if value.get("auth_mode").and_then(serde_json::Value::as_str) != Some("chatgpt") {
+    if auth_credential_kind(&value) != Some(ProfileCredentialKind::OAuthAccount) {
         return Ok(None);
     }
     let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
@@ -634,6 +636,7 @@ fn attach_local_locked(
         bound_oauth_account_id: None,
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
+        managed_supports_websockets: false,
     });
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
@@ -672,6 +675,7 @@ fn attach_local_locked(
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
     backup.managed_bearer_in_config = true;
+    backup.managed_supports_websockets = true;
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,
         Err(error) => {
@@ -1175,7 +1179,6 @@ fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<
         .to_rfc3339_opts(SecondsFormat::Millis, true);
     let content = serde_json::to_string_pretty(&serde_json::json!({
         "OPENAI_API_KEY": null,
-        "auth_mode": "chatgpt",
         "last_refresh": last_refresh,
         "tokens": token_values,
     }))
@@ -1194,15 +1197,14 @@ fn account_auth_matches_snapshot(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(false);
     };
-    Ok(value
-        .get("auth_mode")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|mode| mode == "chatgpt")
-        && value
-            .get("tokens")
-            .and_then(|tokens| tokens.get("access_token"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|token| key_hash(token.trim()) == expected_hash))
+    Ok(
+        auth_credential_kind(&value) == Some(ProfileCredentialKind::OAuthAccount)
+            && value
+                .get("tokens")
+                .and_then(|tokens| tokens.get("access_token"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|token| key_hash(token.trim()) == expected_hash),
+    )
 }
 
 fn account_backup_for_profile(codex_home: &Path, backup_root: &Path) -> Result<Option<PathBuf>> {
@@ -1245,13 +1247,30 @@ fn credential_kind_locked(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
         return Ok(None);
     };
-    Ok(
-        match value.get("auth_mode").and_then(serde_json::Value::as_str) {
-            Some("chatgpt") => Some(ProfileCredentialKind::OAuthAccount),
-            Some("apikey") => Some(ProfileCredentialKind::ApiKey),
-            _ => None,
-        },
-    )
+    Ok(auth_credential_kind(&value))
+}
+
+fn auth_credential_kind(value: &serde_json::Value) -> Option<ProfileCredentialKind> {
+    match value.get("auth_mode").and_then(serde_json::Value::as_str) {
+        Some("chatgpt") => Some(ProfileCredentialKind::OAuthAccount),
+        Some("apikey") => Some(ProfileCredentialKind::ApiKey),
+        Some(_) => None,
+        None if value
+            .get("OPENAI_API_KEY")
+            .and_then(serde_json::Value::as_str)
+            .is_some() =>
+        {
+            Some(ProfileCredentialKind::ApiKey)
+        }
+        None if value
+            .get("tokens")
+            .and_then(serde_json::Value::as_object)
+            .is_some() =>
+        {
+            Some(ProfileCredentialKind::OAuthAccount)
+        }
+        None => None,
+    }
 }
 
 fn account_backup_path(backup_root: &Path, profile_dir: &Path) -> PathBuf {
@@ -1480,7 +1499,8 @@ fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> b
                         .get("experimental_bearer_token")
                         .and_then(Item::as_str)
                         .is_some_and(|token| key_hash(token.trim()) == backup.managed_key_hash))
-                && provider.get("supports_websockets").and_then(Item::as_bool) == Some(true)
+                && provider.get("supports_websockets").and_then(Item::as_bool)
+                    == Some(backup.managed_supports_websockets)
         })
 }
 
@@ -2089,8 +2109,23 @@ mod tests {
         )
         .unwrap();
 
-        let external_config = fs::read_to_string(home.join(CONFIG_FILE))
+        let legacy_config = fs::read_to_string(home.join(CONFIG_FILE))
             .unwrap()
+            .replace("supports_websockets = true", "supports_websockets = false");
+        let backup_path = backup_path(&backups);
+        let mut legacy_backup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        legacy_backup
+            .as_object_mut()
+            .unwrap()
+            .remove("managedSupportsWebsockets");
+        fs::write(
+            &backup_path,
+            serde_json::to_string_pretty(&legacy_backup).unwrap(),
+        )
+        .unwrap();
+
+        let external_config = legacy_config
             .replacen(
                 "model_provider = \"zenith_relay_local\"",
                 "model_provider = \"codex_local_access\"",
@@ -2098,11 +2133,8 @@ mod tests {
             )
             + "\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
         fs::write(home.join(CONFIG_FILE), external_config).unwrap();
-        fs::write(
-            home.join(AUTH_FILE),
-            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
-        )
-        .unwrap();
+        let external_auth = "{\"OPENAI_API_KEY\":null,\"tokens\":{\"access_token\":\"fresh\"}}";
+        fs::write(home.join(AUTH_FILE), external_auth).unwrap();
 
         attach_with(
             &home,
@@ -2115,14 +2147,21 @@ mod tests {
         assert!(fs::read_to_string(home.join(CONFIG_FILE))
             .unwrap()
             .starts_with("model_provider = \"zenith_relay_local\""));
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("supports_websockets = true"));
+        let upgraded_backup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        assert_eq!(upgraded_backup["managedSupportsWebsockets"], true);
 
         restore_with(&home, &backups, &secrets).unwrap();
         let restored_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
         assert!(restored_config.starts_with("model_provider = \"codex_local_access\""));
         assert!(!restored_config.contains("[model_providers.zenith_relay_local]"));
-        assert!(fs::read_to_string(home.join(AUTH_FILE))
-            .unwrap()
-            .contains("fresh"));
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            external_auth
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2710,7 +2749,7 @@ mod tests {
         assert!(!projected.contains("zlr_key"));
         let projected_value = serde_json::from_str::<serde_json::Value>(&projected).unwrap();
         assert!(projected_value["OPENAI_API_KEY"].is_null());
-        assert_eq!(projected_value["auth_mode"], "chatgpt");
+        assert!(projected_value.get("auth_mode").is_none());
         assert_eq!(projected_value["tokens"]["account_id"], "provider-account");
         DateTime::parse_from_rfc3339(projected_value["last_refresh"].as_str().unwrap()).unwrap();
 
