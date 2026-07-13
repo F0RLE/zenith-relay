@@ -1600,6 +1600,7 @@ fn usage_event(
         latency_ms,
         ttft_ms: None,
         input_tokens: None,
+        cached_input_tokens: None,
         output_tokens: None,
         total_tokens: None,
     }
@@ -1931,6 +1932,17 @@ fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_u64);
+    event.cached_input_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cached_tokens"))
+        })
+        .or_else(|| usage.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .map(|cached| cached.min(event.input_tokens.unwrap_or(cached)));
     event.output_tokens = usage
         .get("output_tokens")
         .or_else(|| usage.get("completion_tokens"))
@@ -1975,6 +1987,7 @@ mod tests {
                 latency_ms: 0,
                 ttft_ms: None,
                 input_tokens: None,
+                cached_input_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
             },
@@ -1994,6 +2007,43 @@ mod tests {
             events[0].error_category.as_deref(),
             Some("stream_event_too_large")
         );
+    }
+
+    #[test]
+    fn non_stream_usage_captures_and_clamps_cached_input_tokens() {
+        let mut event = test_usage_event();
+        populate_tokens(
+            &mut event,
+            br#"{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30},"output_tokens":5,"total_tokens":21}}"#,
+        );
+
+        assert_eq!(event.input_tokens, Some(16));
+        assert_eq!(event.cached_input_tokens, Some(16));
+        assert_eq!(event.output_tokens, Some(5));
+        assert_eq!(event.total_tokens, Some(21));
+    }
+
+    #[test]
+    fn streaming_chat_usage_captures_cached_prompt_tokens() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let mut stream = UsageStream::new(
+            futures_util::stream::empty::<std::result::Result<Bytes, Infallible>>(),
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_| {}),
+        );
+        stream.ingest_sse(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"total_tokens\":38}}}\n\n",
+        );
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, Some(32));
+        assert_eq!(events[0].cached_input_tokens, Some(9));
+        assert_eq!(events[0].output_tokens, Some(6));
+        assert_eq!(events[0].total_tokens, Some(38));
     }
 
     #[test]
@@ -2025,5 +2075,31 @@ mod tests {
         assert_eq!(exponential_backoff_ms(2), 2_000);
         assert_eq!(exponential_backoff_ms(3), 4_000);
         assert_eq!(exponential_backoff_ms(32), MAX_RATE_LIMIT_COOLDOWN_MS);
+    }
+
+    fn test_usage_event() -> UsageEvent {
+        UsageEvent {
+            request_id: "request".into(),
+            attempt: 1,
+            local_key_id: "key".into(),
+            source_id: "source".into(),
+            candidate_id: Some("source".into()),
+            account_id: None,
+            requested_model: Some("model".into()),
+            resolved_model: Some("model".into()),
+            wire_api: crate::WireApi::Responses,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 0,
+            ttft_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+        }
     }
 }

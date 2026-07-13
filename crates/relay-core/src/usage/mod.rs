@@ -30,6 +30,7 @@ pub struct UsageEvent {
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
@@ -80,6 +81,7 @@ struct ModelPrice {
 pub fn estimate_api_equivalent(
     model: Option<&str>,
     input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 ) -> ApiEquivalentSummary {
@@ -94,11 +96,21 @@ pub fn estimate_api_equivalent(
         };
     };
     let input_tokens = input_tokens.unwrap_or_default();
+    let cached_input_tokens = cached_input_tokens.unwrap_or_default().min(input_tokens);
+    let uncached_input_tokens = input_tokens.saturating_sub(cached_input_tokens);
     let output_tokens = output_tokens.unwrap_or_default();
     ApiEquivalentSummary {
-        micro_usd: token_cost(input_tokens, price.input_micro_usd_per_million).saturating_add(
-            token_cost(output_tokens, price.output_micro_usd_per_million),
-        ),
+        micro_usd: token_cost(uncached_input_tokens, price.input_micro_usd_per_million)
+            .saturating_add(token_cost(
+                cached_input_tokens,
+                price
+                    .cached_input_micro_usd_per_million
+                    .unwrap_or(price.input_micro_usd_per_million),
+            ))
+            .saturating_add(token_cost(
+                output_tokens,
+                price.output_micro_usd_per_million,
+            )),
         priced_tokens: measured_tokens,
         unpriced_tokens: total_tokens.saturating_sub(measured_tokens),
     }
@@ -161,9 +173,15 @@ mod pricing_tests {
 
     #[test]
     fn official_catalog_prices_known_models_without_floating_point() {
-        let estimate = estimate_api_equivalent(Some("gpt-5.4"), Some(20), Some(8), Some(28));
-        assert_eq!(estimate.micro_usd, 170);
-        assert_eq!(estimate.priced_tokens, 28);
+        let estimate = estimate_api_equivalent(
+            Some("gpt-5.4"),
+            Some(1_000_000),
+            Some(400_000),
+            Some(100_000),
+            Some(1_100_000),
+        );
+        assert_eq!(estimate.micro_usd, 3_100_000);
+        assert_eq!(estimate.priced_tokens, 1_100_000);
         assert_eq!(estimate.unpriced_tokens, 0);
         assert_eq!(api_model_price("GPT-5.4").unwrap().catalog_rank, 5);
         let catalog = price_catalog().unwrap();
@@ -186,7 +204,7 @@ mod pricing_tests {
     #[test]
     fn unknown_or_unsplit_usage_is_never_silently_priced() {
         assert_eq!(
-            estimate_api_equivalent(Some("private-model"), Some(2), Some(3), Some(5)),
+            estimate_api_equivalent(Some("private-model"), Some(2), Some(1), Some(3), Some(5)),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -194,12 +212,17 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(Some("gpt-5.4"), None, None, Some(9)),
+            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, Some(9)),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
                 unpriced_tokens: 9
             }
+        );
+        assert_eq!(
+            estimate_api_equivalent(Some("gpt-5.4"), Some(10), Some(100), Some(0), Some(10))
+                .micro_usd,
+            3
         );
         assert!(api_model_price("gpt-future-codex").is_none());
     }

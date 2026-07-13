@@ -828,6 +828,7 @@ mod tests {
             latency_ms: 7,
             ttft_ms: None,
             input_tokens: Some(2),
+            cached_input_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
         });
@@ -1432,6 +1433,7 @@ mod tests {
             latency_ms: 7,
             ttft_ms: None,
             input_tokens: success.then_some(2),
+            cached_input_tokens: None,
             output_tokens: success.then_some(3),
             total_tokens: success.then_some(5),
         }
@@ -1463,6 +1465,7 @@ mod tests {
             latency_ms: 7,
             ttft_ms: None,
             input_tokens: None,
+            cached_input_tokens: None,
             output_tokens: None,
             total_tokens: None,
         }

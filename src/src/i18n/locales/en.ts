@@ -802,6 +802,7 @@ const relayEn = {
     requests: "Requests",
     tokens: "Tokens",
     inputTokens: "Input tokens",
+    cachedInputTokens: "Cached input",
     outputTokens: "Output tokens",
     totalTokens: "Total tokens",
     latency: "Latency",

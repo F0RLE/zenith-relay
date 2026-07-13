@@ -273,6 +273,7 @@ pub struct UsageSummary {
     pub error_category: Option<String>,
     pub latency_ms: u64,
     pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub created_at_ms: u64,

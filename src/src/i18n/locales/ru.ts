@@ -802,6 +802,7 @@ const relayRu = {
     requests: "Запросы",
     tokens: "Токены",
     inputTokens: "Входные токены",
+    cachedInputTokens: "Кэшированные",
     outputTokens: "Выходные токены",
     totalTokens: "Всего токенов",
     latency: "Задержка",

@@ -187,6 +187,7 @@ export type LocalUsage = {
   errorCategory: string | null;
   latencyMs: number;
   inputTokens: number | null;
+  cachedInputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
 };
@@ -198,6 +199,7 @@ export type UsageExportRow = {
   connection: string;
   latencyMs: number;
   inputTokens: number | null;
+  cachedInputTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
   requestId: string | null;
@@ -239,6 +241,7 @@ export type RemoteUsage = {
   errorCategory: string | null;
   latencyMs: number;
   inputTokens: number | null;
+  cachedInputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
   createdAtMs: number;

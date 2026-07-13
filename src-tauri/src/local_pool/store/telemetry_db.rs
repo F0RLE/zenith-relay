@@ -49,6 +49,13 @@ PRAGMA user_version = 3;
 COMMIT;
 "#;
 
+const MIGRATION_004: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN cached_input_tokens INTEGER;
+PRAGMA user_version = 4;
+COMMIT;
+"#;
+
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
 }
@@ -73,6 +80,7 @@ pub struct UsageLog {
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,
+    pub cached_input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
@@ -92,10 +100,10 @@ impl TelemetryDb {
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
-        if version > 3 {
+        if version > 4 {
             return Err(LocalPoolError::new(
                 ErrorCode::UnsupportedSchema,
-                format!("usage database schema {version} is newer than supported schema 3"),
+                format!("usage database schema {version} is newer than supported schema 4"),
             ));
         }
         if version == 0 {
@@ -106,6 +114,9 @@ impl TelemetryDb {
         }
         if version <= 2 {
             connection.execute_batch(MIGRATION_003).map_err(db_error)?;
+        }
+        if version <= 3 {
+            connection.execute_batch(MIGRATION_004).map_err(db_error)?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -126,8 +137,9 @@ impl TelemetryDb {
                 "INSERT OR IGNORE INTO request_logs (
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
-                    error_category, latency_ms, ttft_ms, input_tokens, output_tokens, total_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens,
+                    output_tokens, total_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     event.request_id,
                     event.attempt,
@@ -144,6 +156,7 @@ impl TelemetryDb {
                     sql_u64(event.latency_ms),
                     event.ttft_ms.map(sql_u64),
                     event.input_tokens.map(sql_u64),
+                    event.cached_input_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
                 ],
@@ -162,7 +175,7 @@ impl TelemetryDb {
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, input_tokens, output_tokens, total_tokens
+                    ttft_ms, input_tokens, cached_input_tokens, output_tokens, total_tokens
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -171,8 +184,9 @@ impl TelemetryDb {
                 let latency_ms: i64 = row.get(14)?;
                 let ttft_ms: Option<i64> = row.get(15)?;
                 let input_tokens: Option<i64> = row.get(16)?;
-                let output_tokens: Option<i64> = row.get(17)?;
-                let total_tokens: Option<i64> = row.get(18)?;
+                let cached_input_tokens: Option<i64> = row.get(17)?;
+                let output_tokens: Option<i64> = row.get(18)?;
+                let total_tokens: Option<i64> = row.get(19)?;
                 Ok(UsageLog {
                     id: row.get(0)?,
                     created_at: row.get(1)?,
@@ -191,6 +205,7 @@ impl TelemetryDb {
                     latency_ms: rust_u64(latency_ms),
                     ttft_ms: ttft_ms.map(rust_u64),
                     input_tokens: input_tokens.map(rust_u64),
+                    cached_input_tokens: cached_input_tokens.map(rust_u64),
                     output_tokens: output_tokens.map(rust_u64),
                     total_tokens: total_tokens.map(rust_u64),
                 })
@@ -210,7 +225,7 @@ impl TelemetryDb {
             .prepare(
                 "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model),
-                    SUM(input_tokens), SUM(output_tokens), SUM(total_tokens)
+                    SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens), SUM(total_tokens)
                  FROM request_logs
                  GROUP BY 1, 2, 3",
             )
@@ -218,14 +233,16 @@ impl TelemetryDb {
         let rows = statement
             .query_map([], |row| {
                 let input_tokens: Option<i64> = row.get(3)?;
-                let output_tokens: Option<i64> = row.get(4)?;
-                let total_tokens: Option<i64> = row.get(5)?;
+                let cached_input_tokens: Option<i64> = row.get(4)?;
+                let output_tokens: Option<i64> = row.get(5)?;
+                let total_tokens: Option<i64> = row.get(6)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     estimate_api_equivalent(
                         row.get::<_, Option<String>>(2)?.as_deref(),
                         input_tokens.map(rust_u64),
+                        cached_input_tokens.map(rust_u64),
                         output_tokens.map(rust_u64),
                         total_tokens.map(rust_u64),
                     ),
@@ -300,6 +317,7 @@ mod tests {
             latency_ms: 12,
             ttft_ms: None,
             input_tokens: Some(2),
+            cached_input_tokens: Some(1),
             output_tokens: Some(3),
             total_tokens: Some(5),
         };
@@ -309,6 +327,7 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
+        assert_eq!(logs[0].cached_input_tokens, Some(1));
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
@@ -343,6 +362,7 @@ mod tests {
             latency_ms: 5,
             ttft_ms: None,
             input_tokens: None,
+            cached_input_tokens: None,
             output_tokens: None,
             total_tokens: None,
         };
@@ -391,6 +411,7 @@ mod tests {
             latency_ms: 12,
             ttft_ms: None,
             input_tokens: Some(20),
+            cached_input_tokens: Some(10),
             output_tokens: Some(8),
             total_tokens: Some(28),
         };
@@ -399,7 +420,7 @@ mod tests {
         assert_eq!(
             equivalents.accounts.get("account_1"),
             Some(&ApiEquivalentSummary {
-                micro_usd: 170,
+                micro_usd: 148,
                 priced_tokens: 28,
                 unpriced_tokens: 0,
             })
@@ -437,7 +458,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -480,7 +501,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 4).unwrap();
+        connection.pragma_update(None, "user_version", 5).unwrap();
         drop(connection);
 
         assert!(matches!(
@@ -491,7 +512,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -76,6 +76,7 @@ export type LocalUsageLog = {
   latencyMs: number;
   ttftMs: number | null;
   inputTokens: number | null;
+  cachedInputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
 };

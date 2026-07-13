@@ -410,6 +410,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap();
     assert_eq!(account_event["candidateLabel"], "Synthetic OAuth account");
     assert_eq!(account_event["inputTokens"], 1);
+    assert_eq!(account_event["cachedInputTokens"], 1);
     assert_eq!(account_event["outputTokens"], 1);
     assert_eq!(account_event["totalTokens"], 2);
 
@@ -1476,7 +1477,7 @@ async fn account_response(request: Request) -> Response {
     Response::builder()
         .status(StatusCode::OK)
         .body(Body::from(
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response-test\",\"object\":\"response\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response-test\",\"object\":\"response\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ))
         .unwrap()
 }

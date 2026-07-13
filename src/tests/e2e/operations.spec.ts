@@ -653,12 +653,13 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Connections" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "20", "8", "28", "428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "20", "12", "8", "28", "428 ms"]);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Input tokens20");
+  await expect(details).toContainText("Cached input12");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
 });
