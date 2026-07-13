@@ -7,7 +7,7 @@ use zenith_relay_core::{
     WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
@@ -60,6 +60,8 @@ pub struct GatewaySettings {
     pub quota_refresh_interval_seconds: u64,
     #[serde(default = "default_quota_request_timeout_seconds")]
     pub quota_request_timeout_seconds: u64,
+    #[serde(default)]
+    pub use_free_accounts: bool,
     #[serde(default)]
     pub hidden_models: Vec<String>,
 }
@@ -175,6 +177,7 @@ impl Default for GatewaySettings {
             account_proxy_required: false,
             quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
             quota_request_timeout_seconds: DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS,
+            use_free_accounts: false,
             hidden_models: Vec::new(),
         }
     }

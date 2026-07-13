@@ -16,8 +16,8 @@ use zenith_relay_core::{
         TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
     },
     protocol::{
-        AccountSummary, GatewaySummary, KeySummary, ProxyMode, RuntimeStateSnapshot,
-        RuntimeTargetSummary, SourceSummary,
+        AccountRoutingExclusion, AccountSummary, GatewaySummary, KeySummary, ProxyMode,
+        RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
     },
     ApiEquivalentSummary, CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions,
     LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth,
@@ -68,6 +68,7 @@ impl AppState {
         let account_records = self.store.accounts()?;
         let key_records = self.store.keys()?;
         let hidden_models = self.store.hidden_models()?;
+        let use_free_accounts = self.store.quota_policy()?.2;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -122,7 +123,12 @@ impl AppState {
             } else {
                 direct_refresh_accounts.insert(record.id.clone());
             }
-            accounts.push(runtime_account(record, &credential, proxy));
+            accounts.push(runtime_account(
+                record,
+                &credential,
+                proxy,
+                use_free_accounts,
+            ));
         }
 
         let mut keys = Vec::new();
@@ -208,7 +214,7 @@ impl AppState {
         let common_proxy_configured = self.store.common_proxy_configured()?;
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
         let account_proxy_required = self.store.account_proxy_required()?;
-        let (quota_refresh_interval_seconds, quota_request_timeout_seconds) =
+        let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
             self.store.quota_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
@@ -258,6 +264,7 @@ impl AppState {
                     secret_available,
                     proxy_mode,
                     proxy_available,
+                    use_free_accounts,
                     equivalents
                         .get(&identity_hint(&record.id))
                         .copied()
@@ -309,6 +316,7 @@ impl AppState {
                                 && !record.draining
                                 && record.secret_available
                                 && record.proxy_available
+                                && record.routing_exclusion.is_none()
                         })
                         .count(),
                 visible_model_ids,
@@ -318,6 +326,7 @@ impl AppState {
                 account_proxy_required,
                 quota_refresh_interval_seconds,
                 quota_request_timeout_seconds,
+                use_free_accounts,
             },
             platform: std::env::consts::OS.to_string(),
             capabilities: self.capabilities.clone(),
@@ -495,15 +504,19 @@ fn runtime_account(
     record: ServerAccountRecord,
     credential: &AccountCredential,
     proxy: Option<ProxyConfig>,
+    use_free_accounts: bool,
 ) -> RuntimeAccount {
     let quota = candidate_quota(&record.quota, now_ms());
+    let enabled = record.enabled
+        && record.in_pool
+        && (use_free_accounts || !record.subscription.is_free_plan());
     RuntimeAccount {
         id: record.id,
         source_id: record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
         models: record.models,
-        enabled: record.enabled && record.in_pool,
+        enabled,
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
@@ -597,8 +610,11 @@ fn account_summary(
     secret_available: bool,
     proxy_mode: ProxyMode,
     proxy_available: bool,
+    use_free_accounts: bool,
     api_equivalent: ApiEquivalentSummary,
 ) -> AccountSummary {
+    let routing_exclusion = (!use_free_accounts && record.subscription.is_free_plan())
+        .then_some(AccountRoutingExclusion::FreePlanPolicy);
     AccountSummary {
         id: record.id.clone(),
         label: record.label.clone(),
@@ -619,6 +635,7 @@ fn account_summary(
         secret_available,
         proxy_mode,
         proxy_available,
+        routing_exclusion,
         last_error_code: record.last_error_code.clone(),
     }
 }
@@ -870,7 +887,7 @@ fn safe_provider_code(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+    use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription};
 
     #[test]
     fn refresh_errors_keep_distinct_reauthentication_reasons() {
@@ -937,6 +954,64 @@ mod tests {
             candidate_quota(&quota, QUOTA_STALE_AFTER_MS + 1_001),
             CandidateQuota::Stale
         );
+    }
+
+    #[test]
+    fn free_accounts_require_explicit_routing_opt_in() {
+        let record = ServerAccountRecord {
+            id: "account-free".into(),
+            label: "Free".into(),
+            identity_hint: "free-account".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "codex".into(),
+            secret_ref: "account:free".into(),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Subscription {
+                plan_type: Some("free".into()),
+                ..Subscription::default()
+            },
+            quota: QuotaSnapshot::default(),
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+            last_used_at_ms: None,
+            last_error_code: None,
+        };
+        let credential = AccountCredential {
+            access_token: "access".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms: 1,
+            generation: 0,
+            chatgpt_account_id: "provider-account".into(),
+            responses_url: "https://example.test/responses".into(),
+            proxy_url: None,
+        };
+
+        assert!(!runtime_account(record.clone(), &credential, None, false).enabled);
+        assert!(runtime_account(record.clone(), &credential, None, true).enabled);
+        let summary = account_summary(
+            &record,
+            true,
+            ProxyMode::Direct,
+            true,
+            false,
+            ApiEquivalentSummary::default(),
+        );
+        assert_eq!(
+            summary.routing_exclusion,
+            Some(AccountRoutingExclusion::FreePlanPolicy)
+        );
+        assert!(summary.enabled);
+        assert!(summary.in_pool);
     }
 
     #[tokio::test]

@@ -188,7 +188,7 @@ impl Store {
         )
     }
 
-    pub fn quota_policy(&self) -> Result<(u64, u64), String> {
+    pub fn quota_policy(&self) -> Result<(u64, u64, bool), String> {
         let refresh = self.metadata("quota_refresh_interval_seconds")?.map_or(
             Ok(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
             |value| {
@@ -206,13 +206,17 @@ impl Store {
             },
         )?;
         validate_quota_policy(refresh, timeout)?;
-        Ok((refresh, timeout))
+        let use_free_accounts = self
+            .metadata("use_free_accounts")?
+            .is_some_and(|value| value == "true");
+        Ok((refresh, timeout, use_free_accounts))
     }
 
     pub fn set_quota_policy(
         &self,
         refresh_interval_seconds: u64,
         request_timeout_seconds: u64,
+        use_free_accounts: bool,
     ) -> Result<(), String> {
         validate_quota_policy(refresh_interval_seconds, request_timeout_seconds)?;
         let mut connection = self.lock()?;
@@ -220,13 +224,20 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         for (key, value) in [
-            ("quota_refresh_interval_seconds", refresh_interval_seconds),
-            ("quota_request_timeout_seconds", request_timeout_seconds),
+            (
+                "quota_refresh_interval_seconds",
+                refresh_interval_seconds.to_string(),
+            ),
+            (
+                "quota_request_timeout_seconds",
+                request_timeout_seconds.to_string(),
+            ),
+            ("use_free_accounts", use_free_accounts.to_string()),
         ] {
             transaction
                 .execute(
                     "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![key, value.to_string()],
+                    params![key, value],
                 )
                 .map_err(db_error)?;
         }
@@ -1169,14 +1180,14 @@ mod tests {
         let root = test_root("quota-policy");
         let path = root.join("relay.sqlite");
         let store = Store::open(path.clone()).unwrap();
-        assert_eq!(store.quota_policy().unwrap(), (300, 20));
-        assert!(store.set_quota_policy(119, 20).is_err());
-        assert!(store.set_quota_policy(120, 9).is_err());
-        store.set_quota_policy(120, 10).unwrap();
+        assert_eq!(store.quota_policy().unwrap(), (300, 20, false));
+        assert!(store.set_quota_policy(119, 20, false).is_err());
+        assert!(store.set_quota_policy(120, 9, false).is_err());
+        store.set_quota_policy(120, 10, true).unwrap();
         drop(store);
 
         let reopened = Store::open(path).unwrap();
-        assert_eq!(reopened.quota_policy().unwrap(), (120, 10));
+        assert_eq!(reopened.quota_policy().unwrap(), (120, 10, true));
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }

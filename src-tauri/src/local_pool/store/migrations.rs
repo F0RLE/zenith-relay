@@ -49,6 +49,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 4 => migrate_v4_to_v5(root, &gateway_path)?,
                 5 => migrate_v5_to_v6(root, &gateway_path)?,
                 6 => migrate_v6_to_v7(root, &gateway_path)?,
+                7 => migrate_v7_to_v8(root, &gateway_path)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -68,6 +69,22 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v7_to_v8(root: &Path, gateway_path: &Path) -> Result<()> {
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway
+        .entry("useFreeAccounts")
+        .or_insert_with(|| Value::Bool(false));
+    save_json(gateway_path, gateway)
 }
 
 fn migrate_v6_to_v7(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -566,6 +583,33 @@ mod tests {
         assert_eq!(accounts[0]["account"]["label"], "Preserved");
         let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
         assert_eq!(gateway["hiddenModels"], Value::Array(Vec::new()));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v7_with_free_accounts_excluded_by_default() {
+        let root = temp_root();
+        let gateway_path = root.join("settings").join("gateway.json");
+        save_json(
+            &gateway_path,
+            &serde_json::to_value(crate::local_pool::models::GatewaySettings::default()).unwrap(),
+        )
+        .unwrap();
+        let mut gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        gateway.as_object_mut().unwrap().remove("useFreeAccounts");
+        save_json(&gateway_path, &gateway).unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 7 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        assert_eq!(gateway["useFreeAccounts"], false);
         fs::remove_dir_all(root).unwrap();
     }
 

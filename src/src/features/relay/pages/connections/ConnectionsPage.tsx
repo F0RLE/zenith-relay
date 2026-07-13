@@ -340,6 +340,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       {accounts.map((account) => {
         const errorCode = accountErrorCode(account);
         const participates = accountParticipates(account);
+        const excludedByFreePolicy = account.routingExclusion === "free_plan_policy";
         const subscriptionEnded = account.subscription.activeUntilMs != null && account.subscription.activeUntilMs <= Date.now();
         const subscriptionEnd = subscriptionEndDisplay(account.subscription.activeUntilMs, i18n.resolvedLanguage ?? i18n.language, t, nowMs);
         return (
@@ -355,7 +356,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
             <div className="account-facts">
               <div><CreditCard className="account-fact-icon" aria-hidden /><span>{t("accounts.plan")}</span><strong>{formatAccountPlan(account.subscription.planType, t("common.unknown"))}</strong></div>
               <div><Network className="account-fact-icon" aria-hidden /><span>{t("proxies.proxy")}</span><button type="button" className="proxy-status-button" disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : t("proxies.changeAccount")} onClick={() => onProxy(account)}><StatusBadge status={account.proxyAvailable === false ? "error" : account.proxyMode === "account" ? "info" : "ready"} label={account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /><Pencil aria-hidden /></button></div>
-              <div><Layers3 className="account-fact-icon" aria-hidden /><span>{t("accounts.poolParticipation")}</span><label className="account-pool-switch" title={participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool")}><input type="checkbox" role="switch" checked={participates} disabled={busy === `pool-${account.id}`} aria-label={t("accounts.poolParticipationFor", { name: account.label })} onChange={(event) => void perform(`pool-${account.id}`, () => updateParticipation(account, event.target.checked), "feedback.saved")} /><strong>{participates ? t("accounts.participation.included") : t("accounts.participation.excluded")}</strong></label></div>
+              <div><Layers3 className="account-fact-icon" aria-hidden /><span>{t("accounts.poolParticipation")}</span><label className="account-pool-switch" title={excludedByFreePolicy ? t("accounts.participation.freePolicyHint") : participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool")}><input type="checkbox" role="switch" checked={participates} disabled={busy === `pool-${account.id}`} aria-label={t("accounts.poolParticipationFor", { name: account.label })} onChange={(event) => void perform(`pool-${account.id}`, () => updateParticipation(account, event.target.checked), "feedback.saved")} /><strong>{excludedByFreePolicy && participates ? t("accounts.participation.freePolicy") : participates ? t("accounts.participation.included") : t("accounts.participation.excluded")}</strong></label></div>
             </div>
             <div className="account-row-action-list">
               <ActionMenu className="account-row-menu">
@@ -806,7 +807,7 @@ function compareAccounts(
   unknownPlanRank: number,
 ) {
   if (sortBy === "pool") {
-    return Number(accountParticipates(right)) - Number(accountParticipates(left))
+    return Number(accountRouted(right)) - Number(accountRouted(left))
       || right.priority - left.priority
       || compareOptional(quotaFloor(left), quotaFloor(right), "desc")
       || right.weight - left.weight
@@ -837,6 +838,10 @@ function compareAccounts(
 
 function accountParticipates(account: AccountSummary) {
   return account.inPool;
+}
+
+function accountRouted(account: AccountSummary) {
+  return account.inPool && account.routingExclusion == null;
 }
 
 function quotaFloor(account: AccountSummary) {

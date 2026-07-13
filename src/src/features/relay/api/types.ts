@@ -69,6 +69,7 @@ export type AccountSummary = {
   secretAvailable: boolean;
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
+  routingExclusion?: "free_plan_policy" | null;
   lastErrorCode: string | null;
 };
 
@@ -139,6 +140,7 @@ export type RuntimeSnapshot = {
     accountProxyRequired?: boolean;
     quotaRefreshIntervalSeconds?: number;
     quotaRequestTimeoutSeconds?: number;
+    useFreeAccounts?: boolean;
   };
   platform: string;
   capabilities: { features: string[]; [key: string]: unknown };

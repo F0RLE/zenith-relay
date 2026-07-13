@@ -60,6 +60,7 @@ pub struct PoolMembershipInput {
 pub struct QuotaPolicyInput {
     refresh_interval_seconds: u64,
     request_timeout_seconds: u64,
+    use_free_accounts: bool,
 }
 
 #[derive(Deserialize)]
@@ -119,13 +120,22 @@ pub async fn update_local_quota_policy(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    let mut gateway = state.store()?.gateway().clone();
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
     gateway.quota_refresh_interval_seconds = input.refresh_interval_seconds;
     gateway.quota_request_timeout_seconds = input.request_timeout_seconds;
+    gateway.use_free_accounts = input.use_free_accounts;
     gateway
         .validate()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
+    if gateway == old_gateway {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    let routing_changed = gateway.use_free_accounts != old_gateway.use_free_accounts;
     state.store()?.replace_gateway(gateway)?;
+    if routing_changed {
+        sync_gateway_or_rollback(&state, old_gateway).await?;
+    }
     state.snapshot().await.map_err(Into::into)
 }
 

@@ -1987,6 +1987,8 @@ pub async fn quota(
 pub struct QuotaPolicyInput {
     refresh_interval_seconds: u64,
     request_timeout_seconds: u64,
+    #[serde(default)]
+    use_free_accounts: Option<bool>,
 }
 
 pub async fn set_quota_policy(
@@ -2011,13 +2013,30 @@ pub async fn set_quota_policy(
             "quota request timeout must be between 10 and 20 seconds",
         ));
     }
+    let previous = state.store.quota_policy().map_err(store_error)?;
+    let use_free_accounts = input.use_free_accounts.unwrap_or(previous.2);
     state
         .store
         .set_quota_policy(
             input.refresh_interval_seconds,
             input.request_timeout_seconds,
+            use_free_accounts,
         )
         .map_err(store_error)?;
+    if use_free_accounts != previous.2 {
+        if let Err(error) = state.rebuild_runtime().await {
+            state
+                .store
+                .set_quota_policy(previous.0, previous.1, previous.2)
+                .map_err(store_error)?;
+            if let Err(restore) = state.rebuild_runtime().await {
+                return Err(store_error(format!(
+                    "{error}; failed to restore previous runtime: {restore}"
+                )));
+            }
+            return Err(store_error(error));
+        }
+    }
     state.snapshot().map(Json).map_err(store_error)
 }
 

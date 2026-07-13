@@ -16,6 +16,7 @@ export type MockOptions = {
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
+  freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
   poolKeyPresent?: boolean;
   poolMembers?: boolean;
@@ -85,13 +86,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       secretAvailable: true,
       proxyMode: "common",
       proxyAvailable: true,
+      routingExclusion: null as "free_plan_policy" | null,
       lastErrorCode: input.accountAuthReason ? "quota_token_prepare" : null as string | null,
     };
     const accountCount = Math.max(1, Math.min(input.accountCount ?? 1, 6));
     const accountVariants = [
       { label: "Personal Plus", plan: "plus", activeUntilMs: Date.now() + 37 * dayMs, proxyMode: "common", models: ["gpt-5.4", "gpt-5.4-mini"], primary: 0, primaryMinutes: 300, secondary: 6400, priority: 20, health: "healthy", error: null },
       { label: "Business Workspace", plan: "team", activeUntilMs: Date.now() + 203 * dayMs, proxyMode: "account", models: ["gpt-5.4", "gpt-5.4-mini", "o3"], primary: 3800, primaryMinutes: 50_400, secondary: null, priority: 30, health: "healthy", error: null },
-      { label: "Backup account", plan: "free", activeUntilMs: null, proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 9100, primaryMinutes: 300, secondary: null, priority: 10, health: "degraded", error: "quota_transport" },
+      { label: "Backup account", plan: "free", activeUntilMs: null, proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 9500, primaryMinutes: 43_200, secondary: null, priority: 10, health: "degraded", error: "quota_transport" },
       { label: "Pro account", plan: "pro", activeUntilMs: Date.now() + 172 * dayMs, proxyMode: "common", models: ["gpt-5.4", "gpt-5.4-mini", "o3"], primary: 7600, primaryMinutes: 300, secondary: 8200, priority: 25, health: "healthy", error: null },
     ] as const;
     const accounts = Array.from({ length: accountCount }, (_, index) => {
@@ -108,9 +110,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.priority = variant.priority;
       item.apiEquivalent.microUsd = 170 * (index + 1);
       item.apiEquivalent.pricedTokens = 28 * (index + 1);
-      item.health = variant.health;
-      item.lastErrorCode = variant.error;
-      item.quota.error = variant.error ? { code: variant.error, observedAtMs: Date.now() } : null;
+      const healthyFree = variant.plan === "free" && input.freeAccountHealthy;
+      item.health = healthyFree ? "healthy" : variant.health;
+      item.routingExclusion = variant.plan === "free" ? "free_plan_policy" : null;
+      item.lastErrorCode = healthyFree ? null : variant.error;
+      item.quota.error = healthyFree ? null : variant.error ? { code: variant.error, observedAtMs: Date.now() } : null;
       if (item.quota.primary) {
         item.quota.primary.availableBasisPoints = variant.primary;
         item.quota.primary.windowMinutes = variant.primaryMinutes;
@@ -151,11 +155,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       updatedAtMs: Date.now() - 60_000,
     };
     const localRuntime = {
-      schemaVersion: 7,
+      schemaVersion: 8,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: populated && (input.poolMembers ?? true) ? accounts.length + 1 : 0, visibleModelIds: [] as string[], models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20 },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy"] },
       sources: populated ? [source] : [],
       accounts: populated ? accounts : [],
       keys: populated && input.poolKeyPresent !== false ? [key] : [],
@@ -165,11 +169,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     };
     refreshGatewayModels(localRuntime);
     const remoteRuntime = structuredClone(localRuntime);
-    remoteRuntime.schemaVersion = 6;
+    remoteRuntime.schemaVersion = 8;
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy"] };
 
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28 }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", candidateLabel: account.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
@@ -263,9 +267,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "update_local_quota_policy": {
-            const request = args.input as { refreshIntervalSeconds: number; requestTimeoutSeconds: number };
+            const request = args.input as { refreshIntervalSeconds: number; requestTimeoutSeconds: number; useFreeAccounts: boolean };
             localRuntime.gateway.quotaRefreshIntervalSeconds = request.refreshIntervalSeconds;
             localRuntime.gateway.quotaRequestTimeoutSeconds = request.requestTimeoutSeconds;
+            localRuntime.gateway.useFreeAccounts = request.useFreeAccounts;
+            applyFreeRoutingPolicy(localRuntime);
             return structuredClone(localRuntime);
           }
           case "delete_local_account": localRuntime.accounts = []; return structuredClone(localRuntime);
@@ -360,7 +366,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
-          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 7, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
+          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 8, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
           case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
@@ -403,8 +409,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
 
     function refreshGatewayModels(runtime: typeof localRuntime) {
       const enabled = new Map(runtime.gateway.models.map((model) => [model.id.toLowerCase(), model.enabled]));
-      const members: Array<{ enabled: boolean; inPool: boolean; draining: boolean; secretAvailable: boolean; models: string[]; proxyAvailable?: boolean }> = [...runtime.sources, ...runtime.accounts];
-      const eligible = members.filter((member) => member.enabled && member.inPool && !member.draining && member.secretAvailable && member.proxyAvailable !== false);
+      const members: Array<{ enabled: boolean; inPool: boolean; draining: boolean; secretAvailable: boolean; models: string[]; proxyAvailable?: boolean; routingExclusion?: string | null }> = [...runtime.sources, ...runtime.accounts];
+      const eligible = members.filter((member) => member.enabled && member.inPool && !member.draining && member.secretAvailable && member.proxyAvailable !== false && member.routingExclusion == null);
+      runtime.gateway.candidateCount = eligible.length;
       const ids = [...new Map(eligible.flatMap((member) => member.models).map((id) => [id.toLowerCase(), id])).values()];
       runtime.gateway.models = ids.map((id) => ({
         id,
@@ -413,6 +420,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         ...(modelPrices[id.toLowerCase()] ?? { catalogRank: null, inputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null }),
       })).sort((left, right) => (left.catalogRank ?? Number.MAX_SAFE_INTEGER) - (right.catalogRank ?? Number.MAX_SAFE_INTEGER) || left.id.localeCompare(right.id));
       runtime.gateway.visibleModelIds = runtime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
+    }
+
+    function applyFreeRoutingPolicy(runtime: typeof localRuntime) {
+      for (const item of runtime.accounts) {
+        const free = item.subscription.planType?.toLowerCase().includes("free") ?? false;
+        item.routingExclusion = free && !runtime.gateway.useFreeAccounts ? "free_plan_policy" : null;
+      }
+      refreshGatewayModels(runtime);
     }
 
     function remoteAction(args: Record<string, unknown>) {
@@ -480,6 +495,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "set_quota_policy") {
         remoteRuntime.gateway.quotaRefreshIntervalSeconds = Number(input.payload?.refreshIntervalSeconds);
         remoteRuntime.gateway.quotaRequestTimeoutSeconds = Number(input.payload?.requestTimeoutSeconds);
+        remoteRuntime.gateway.useFreeAccounts = Boolean(input.payload?.useFreeAccounts);
+        applyFreeRoutingPolicy(remoteRuntime);
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_pool_quotas") return { refreshed: remoteRuntime.accounts.filter((item) => item.inPool && item.enabled).length, failed: 0, snapshot: structuredClone(remoteRuntime) };

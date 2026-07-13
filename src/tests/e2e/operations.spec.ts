@@ -510,7 +510,7 @@ test("pool display order defaults to routing priority and can be changed to quot
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Business Workspace", "Personal Plus", "Backup account", "Example compatible API"]);
+  expect(await names()).toEqual(["Business Workspace", "Personal Plus", "Example compatible API", "Backup account"]);
   await page.getByLabel("Display order").selectOption("quota");
   expect(await names()).toEqual(["Backup account", "Business Workspace", "Personal Plus", "Example compatible API"]);
 });
@@ -562,9 +562,12 @@ test("pool member layouts switch between compact, detailed, and grid views", asy
 });
 
 test("local pool refreshes only pool quotas and saves bounded refresh settings", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const freeMember = page.locator('[data-member-label="Backup account"]');
+  await expect(freeMember).toContainText("Excluded by Free policy");
 
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await expect(page.getByText("Updated.", { exact: true })).toBeVisible();
@@ -572,15 +575,17 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
   await dialog.getByLabel("Background refresh interval").selectOption("120");
   await dialog.getByLabel("Request timeout").selectOption("10");
+  await dialog.getByLabel("Use Free accounts").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(freeMember).toContainText("Ready");
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "refresh_local_pool_account_quotas")).toBe(true);
-  expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 10 } });
+  expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 10, useFreeAccounts: true } });
 });
 
 test("remote pool uses the same quota refresh controls", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
@@ -589,13 +594,38 @@ test("remote pool uses the same quota refresh controls", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
   await dialog.getByLabel("Background refresh interval").selectOption("600");
   await dialog.getByLabel("Request timeout").selectOption("15");
+  await dialog.getByLabel("Use Free accounts").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
   expect(actions).toEqual(expect.arrayContaining([
     { action: { type: "refresh_pool_quotas" }, payload: null },
-    { action: { type: "set_quota_policy" }, payload: { refreshIntervalSeconds: 600, requestTimeoutSeconds: 15 } },
+    { action: { type: "set_quota_policy" }, payload: { refreshIntervalSeconds: 600, requestTimeoutSeconds: 15, useFreeAccounts: true } },
   ]));
+});
+
+test("legacy remote servers keep the unsupported Free policy read-only", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "remote",
+    locale: "en",
+    populated: true,
+    remoteFeatures: ["accounts", "quota"],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
+  await expect(page.getByRole("dialog").getByLabel("Use Free accounts")).toBeDisabled();
+  await expect(page.getByRole("dialog")).toContainText("Update the server");
+});
+
+test("connections distinguish pool membership from Free-policy routing", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const freeAccount = page.locator(".account-card").filter({ hasText: "Backup account" });
+  await expect(freeAccount).toContainText("Not routed: Free policy");
+  await expect(freeAccount).toContainText("95%");
+  await expect(freeAccount).toContainText("30 days");
 });
 
 test("page navigation resets the shared content scroll position", async ({ page }) => {

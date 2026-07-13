@@ -164,4 +164,24 @@ mod tests {
             "quota_transport"
         );
     }
+
+    #[test]
+    fn provider_access_denial_blocks_without_erasing_quota() {
+        let mut account = account();
+        let mut data = refresh(95.0, 10);
+        data.allowed = Some(false);
+        data.limit_reached = Some(false);
+        apply_quota_success(&mut account, data).unwrap();
+        assert_eq!(account.account.health, AccountHealthState::Blocked);
+        assert_eq!(
+            account
+                .account
+                .quota
+                .primary
+                .as_ref()
+                .unwrap()
+                .available_basis_points,
+            Some(9_500)
+        );
+    }
 }

@@ -725,6 +725,28 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .unwrap();
     assert_eq!(updated["gateway"]["quotaRefreshIntervalSeconds"], 120);
     assert_eq!(updated["gateway"]["quotaRequestTimeoutSeconds"], 10);
+    assert_eq!(updated["gateway"]["useFreeAccounts"], false);
+
+    let free_enabled: Value = client
+        .post(format!("{}/quota/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "refreshIntervalSeconds": 120,
+            "requestTimeoutSeconds": 10,
+            "useFreeAccounts": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(free_enabled["gateway"]["useFreeAccounts"], true);
+    assert!(free_enabled["capabilities"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "free_account_policy"));
 
     let refreshed: Value = client
         .post(format!("{}/pool/quota/refresh", server.origin))
@@ -741,6 +763,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         refreshed["snapshot"]["gateway"]["quotaRefreshIntervalSeconds"],
         120
     );
+    assert_eq!(refreshed["snapshot"]["gateway"]["useFreeAccounts"], true);
 
     server.task.abort();
 }

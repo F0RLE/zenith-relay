@@ -90,7 +90,8 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const ready = poolMemberReady(member);
-        const statusKey = !member.enabled ? "disabled" : ready ? "ready" : "limited";
+        const excludedByFreePolicy = member.kind === "account" && member.routingExclusion === "free_plan_policy";
+        const statusKey = !member.enabled ? "disabled" : excludedByFreePolicy ? "freePolicy" : ready ? "ready" : "limited";
         const statusTone = !member.enabled ? "disabled" : ready ? "ready" : "warning";
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
@@ -119,14 +120,16 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
   const { mode, runtime, perform, busy } = useRelayState();
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(runtime?.gateway.quotaRefreshIntervalSeconds ?? 300);
   const [requestTimeoutSeconds, setRequestTimeoutSeconds] = useState(runtime?.gateway.quotaRequestTimeoutSeconds ?? 20);
+  const [useFreeAccounts, setUseFreeAccounts] = useState(runtime?.gateway.useFreeAccounts ?? mode === "remote");
+  const supportsFreePolicy = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("free_account_policy"));
   const save = async () => {
-    const payload = { refreshIntervalSeconds, requestTimeoutSeconds };
+    const payload = { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts };
     const ok = await perform("quota-policy", () => mode === "local"
-      ? relayCommands.updateQuotaPolicy(refreshIntervalSeconds, requestTimeoutSeconds)
+      ? relayCommands.updateQuotaPolicy(refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts)
       : relayCommands.remoteAction({ type: "set_quota_policy" }, payload), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("pool.refreshPolicyTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "quota-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("pool.refreshInterval")}</span><select value={refreshIntervalSeconds} onChange={(event) => setRefreshIntervalSeconds(Number(event.target.value))}><option value={120}>{t("pool.refreshIntervals.twoMinutes")}</option><option value={300}>{t("pool.refreshIntervals.fiveMinutes")}</option><option value={600}>{t("pool.refreshIntervals.tenMinutes")}</option><option value={1800}>{t("pool.refreshIntervals.thirtyMinutes")}</option><option value={3600}>{t("pool.refreshIntervals.oneHour")}</option></select></label><label className="relay-field"><span>{t("pool.requestTimeout")}</span><select value={requestTimeoutSeconds} onChange={(event) => setRequestTimeoutSeconds(Number(event.target.value))}><option value={10}>{t("pool.requestTimeouts.tenSeconds")}</option><option value={15}>{t("pool.requestTimeouts.fifteenSeconds")}</option><option value={20}>{t("pool.requestTimeouts.twentySeconds")}</option></select></label><p className="form-note">{t("pool.refreshPolicyHint")}</p></div></Dialog>;
+  return <Dialog title={t("pool.refreshPolicyTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "quota-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("pool.refreshInterval")}</span><select value={refreshIntervalSeconds} onChange={(event) => setRefreshIntervalSeconds(Number(event.target.value))}><option value={120}>{t("pool.refreshIntervals.twoMinutes")}</option><option value={300}>{t("pool.refreshIntervals.fiveMinutes")}</option><option value={600}>{t("pool.refreshIntervals.tenMinutes")}</option><option value={1800}>{t("pool.refreshIntervals.thirtyMinutes")}</option><option value={3600}>{t("pool.refreshIntervals.oneHour")}</option></select></label><label className="relay-field"><span>{t("pool.requestTimeout")}</span><select value={requestTimeoutSeconds} onChange={(event) => setRequestTimeoutSeconds(Number(event.target.value))}><option value={10}>{t("pool.requestTimeouts.tenSeconds")}</option><option value={15}>{t("pool.requestTimeouts.fifteenSeconds")}</option><option value={20}>{t("pool.requestTimeouts.twentySeconds")}</option></select></label><label className="toggle-row"><input type="checkbox" checked={useFreeAccounts} disabled={!supportsFreePolicy} title={!supportsFreePolicy ? t("remote.capabilityUnavailable") : undefined} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t("pool.useFreeAccounts")}</span></label><p className="form-note">{supportsFreePolicy ? t("pool.useFreeAccountsHint") : t("pool.useFreeAccountsLegacyHint")}</p><p className="form-note">{t("pool.refreshPolicyHint")}</p></div></Dialog>;
 }
 
 function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {
@@ -337,7 +340,7 @@ function comparePoolMembers(left: Member, right: Member, sortBy: MemberSort) {
   if (sortBy === "name") return memberName(left).localeCompare(memberName(right));
   if (sortBy === "quota") return comparePoolQuota(right, left) || right.priority - left.priority || memberName(left).localeCompare(memberName(right));
   if (sortBy === "priority") return right.priority - left.priority || memberName(left).localeCompare(memberName(right));
-  return right.priority - left.priority || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
+  return Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right)) || right.priority - left.priority || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
 }
 function comparePoolQuota(left: Member, right: Member) {
   const leftQuota = memberQuota(left);
@@ -355,7 +358,8 @@ function memberQuota(member: Member) {
   return values.length ? Math.min(...values) : null;
 }
 function memberName(member: Member) { return member.kind === "source" ? member.name : member.label; }
+function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
 function poolMemberReady(member: Member) {
-  if (!member.enabled || member.draining || member.health !== "healthy" || !member.secretAvailable) return false;
+  if (!member.enabled || member.draining || member.health !== "healthy" || !member.secretAvailable || memberRoutingExcluded(member)) return false;
   return member.kind === "source" || (member.proxyAvailable !== false && ![member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0));
 }

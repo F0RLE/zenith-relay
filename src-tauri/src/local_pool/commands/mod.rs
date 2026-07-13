@@ -25,8 +25,8 @@ use super::{
 };
 use std::{sync::Arc, time::Duration};
 use zenith_relay_core::{
-    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeAccount,
-    RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
+    quota::Subscription, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+    RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
 };
 
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
@@ -68,6 +68,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     let mut refresh_proxies = Vec::new();
     for account in account_records {
         let account_id = account.account.id.clone();
+        let routing_allowed = account_routing_allowed(&settings, &account.account.subscription);
         let Some(secret) = credentials
             .load(&account_id)
             .map_err(account_credential_error)?
@@ -96,7 +97,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
             models: account.models,
-            enabled: account.account.enabled && account.account.in_pool,
+            enabled: account.account.enabled && account.account.in_pool && routing_allowed,
             draining: account.account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -163,6 +164,13 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     )
     .map(Arc::new)
     .map_err(core_error)
+}
+
+pub(crate) fn account_routing_allowed(
+    settings: &GatewaySettings,
+    subscription: &Subscription,
+) -> bool {
+    settings.use_free_accounts || !subscription.is_free_plan()
 }
 
 fn timestamp_ms(value: &str) -> Option<u64> {
@@ -301,6 +309,18 @@ mod tests {
     fn persisted_lru_timestamp_maps_to_epoch_milliseconds() {
         assert_eq!(timestamp_ms("1970-01-01T00:00:00.001Z"), Some(1));
         assert_eq!(timestamp_ms("not-a-date"), None);
+    }
+
+    #[test]
+    fn free_account_routing_requires_explicit_opt_in() {
+        let subscription = Subscription {
+            plan_type: Some("free".into()),
+            ..Subscription::default()
+        };
+        let mut settings = GatewaySettings::default();
+        assert!(!account_routing_allowed(&settings, &subscription));
+        settings.use_free_accounts = true;
+        assert!(account_routing_allowed(&settings, &subscription));
     }
 
     #[tokio::test]

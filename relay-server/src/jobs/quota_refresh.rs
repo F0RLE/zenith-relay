@@ -77,7 +77,7 @@ pub async fn refresh_one(
     let result = refresh_data(state, &account, force_subscription_refresh).await;
     let previous = account.quota.clone();
     let transitions = match result {
-        Ok((mut data, subscription_error)) => {
+        Ok((mut data, subscription_error, allowed, limit_reached)) => {
             data.preserve_subscription_metadata(&account.subscription);
             let (quota, subscription) = data
                 .normalize(&previous)
@@ -94,7 +94,7 @@ pub async fn refresh_one(
             if let Some(subscription) = subscription {
                 account.subscription = subscription;
             }
-            account.health = AccountHealthState::Healthy;
+            account.health = successful_quota_health(allowed, limit_reached);
             account.last_error_code = subscription_error;
             transitions
         }
@@ -117,11 +117,22 @@ pub async fn refresh_one(
     Ok((account, transitions))
 }
 
+fn successful_quota_health(
+    allowed: Option<bool>,
+    limit_reached: Option<bool>,
+) -> AccountHealthState {
+    if allowed == Some(false) && limit_reached != Some(true) {
+        AccountHealthState::Blocked
+    } else {
+        AccountHealthState::Healthy
+    }
+}
+
 async fn refresh_data(
     state: &Arc<AppState>,
     account: &ServerAccountRecord,
     force_subscription_refresh: bool,
-) -> Result<(QuotaRefreshData, Option<String>), (String, bool)> {
+) -> Result<(QuotaRefreshData, Option<String>, Option<bool>, Option<bool>), (String, bool)> {
     let tokens = state
         .prepare_account_tokens(&account.id)
         .await
@@ -179,7 +190,7 @@ async fn refresh_data(
         });
     }
     let observed_at_ms = now_ms();
-    let mut data = parse_payload(&bytes, observed_at_ms).map_err(|code| (code, false))?;
+    let mut parsed = parse_payload(&bytes, observed_at_ms).map_err(|code| (code, false))?;
     let refresh_subscription = force_subscription_refresh
         || subscription_refresh_due(
             account.subscription.active_until_ms,
@@ -189,12 +200,15 @@ async fn refresh_data(
     let subscription_error = if refresh_subscription {
         let subscription = CodexSubscriptionClient::new(client.clone())
             .map_err(|failure| (failure.code, failure.retryable))?;
-        let input = data.subscription.get_or_insert_with(|| SubscriptionInput {
-            plan_type: account.subscription.plan_type.clone(),
-            active_until_ms: account.subscription.active_until_ms,
-            forbidden: false,
-            observed_at_ms,
-        });
+        let input = parsed
+            .quota
+            .subscription
+            .get_or_insert_with(|| SubscriptionInput {
+                plan_type: account.subscription.plan_type.clone(),
+                active_until_ms: account.subscription.active_until_ms,
+                forbidden: false,
+                observed_at_ms,
+            });
         match subscription
             .fetch(
                 tokens.access_token(),
@@ -214,7 +228,7 @@ async fn refresh_data(
             Err(failure) => Some(failure.code),
         }
     } else {
-        if let Some(input) = data.subscription.as_mut() {
+        if let Some(input) = parsed.quota.subscription.as_mut() {
             if input.plan_type == account.subscription.plan_type && input.active_until_ms.is_none()
             {
                 input.observed_at_ms = account.subscription.updated_at_ms.unwrap_or(observed_at_ms);
@@ -222,7 +236,12 @@ async fn refresh_data(
         }
         None
     };
-    Ok((data, subscription_error))
+    Ok((
+        parsed.quota,
+        subscription_error,
+        parsed.allowed,
+        parsed.limit_reached,
+    ))
 }
 
 fn apply_discovered_models(
@@ -387,6 +406,10 @@ struct UsagePayload {
 
 #[derive(Deserialize)]
 struct RateLimit {
+    #[serde(default)]
+    allowed: Option<bool>,
+    #[serde(default)]
+    limit_reached: Option<bool>,
     primary_window: Option<RateLimitWindow>,
     secondary_window: Option<RateLimitWindow>,
 }
@@ -418,11 +441,18 @@ struct ResetCredits {
     available_count: i64,
 }
 
-fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, String> {
+#[derive(Debug)]
+struct ParsedQuotaData {
+    quota: QuotaRefreshData,
+    allowed: Option<bool>,
+    limit_reached: Option<bool>,
+}
+
+fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<ParsedQuotaData, String> {
     let payload: UsagePayload =
         serde_json::from_slice(body).map_err(|_| "quota_invalid_response".to_string())?;
     let supplemental = collect_supplemental_windows(&payload, observed_at_ms);
-    let (primary, secondary) = match payload.rate_limit {
+    let (primary, secondary, allowed, limit_reached) = match payload.rate_limit {
         Some(rate_limit) => (
             rate_limit
                 .primary_window
@@ -432,8 +462,10 @@ fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, S
                 .secondary_window
                 .map(|window| map_window(window, QuotaWindowKind::Secondary, observed_at_ms))
                 .transpose()?,
+            rate_limit.allowed,
+            rate_limit.limit_reached,
         ),
-        None => (None, None),
+        None => (None, None, None, None),
     };
     let subscription = payload
         .plan_type
@@ -444,15 +476,19 @@ fn parse_payload(body: &[u8], observed_at_ms: u64) -> Result<QuotaRefreshData, S
             forbidden: false,
             observed_at_ms,
         });
-    Ok(QuotaRefreshData {
-        primary,
-        secondary,
-        supplemental,
-        subscription,
-        reset_credits_available: payload
-            .rate_limit_reset_credits
-            .and_then(|value| u32::try_from(value.available_count).ok()),
-        observed_at_ms,
+    Ok(ParsedQuotaData {
+        quota: QuotaRefreshData {
+            primary,
+            secondary,
+            supplemental,
+            subscription,
+            reset_credits_available: payload
+                .rate_limit_reset_credits
+                .and_then(|value| u32::try_from(value.available_count).ok()),
+            observed_at_ms,
+        },
+        allowed,
+        limit_reached,
     })
 }
 
@@ -652,7 +688,9 @@ mod tests {
             1_000,
         )
         .unwrap();
-        let (quota, subscription) = data.normalize(&Default::default()).unwrap();
+        assert_eq!(data.allowed, None);
+        assert_eq!(data.limit_reached, None);
+        let (quota, subscription) = data.quota.normalize(&Default::default()).unwrap();
         assert_eq!(quota.primary.unwrap().available_basis_points, Some(7_500));
         assert_eq!(
             quota.secondary.unwrap().available_basis_points,
@@ -670,6 +708,37 @@ mod tests {
     }
 
     #[test]
+    fn free_quota_keeps_its_thirty_day_window_and_access_signal() {
+        let data = parse_payload(
+            br#"{
+                "plan_type":"free",
+                "rate_limit":{
+                    "allowed":false,
+                    "limit_reached":false,
+                    "primary_window":{"used_percent":5,"limit_window_seconds":2592000}
+                }
+            }"#,
+            1_000,
+        )
+        .unwrap();
+        assert_eq!(data.allowed, Some(false));
+        assert_eq!(data.limit_reached, Some(false));
+        let (quota, subscription) = data.quota.normalize(&Default::default()).unwrap();
+        let primary = quota.primary.unwrap();
+        assert_eq!(primary.available_basis_points, Some(9_500));
+        assert_eq!(primary.window_minutes, Some(43_200));
+        assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("free"));
+        assert_eq!(
+            successful_quota_health(data.allowed, data.limit_reached),
+            AccountHealthState::Blocked
+        );
+        assert_eq!(
+            successful_quota_health(Some(false), Some(true)),
+            AccountHealthState::Healthy
+        );
+    }
+
+    #[test]
     fn optional_quota_windows_are_absent_or_skipped_when_unusable() {
         let data = parse_payload(
             br#"{
@@ -683,9 +752,10 @@ mod tests {
             1_000,
         )
         .unwrap();
-        assert!(data.supplemental.is_empty());
+        assert!(data.quota.supplemental.is_empty());
         assert_eq!(
-            data.normalize(&Default::default())
+            data.quota
+                .normalize(&Default::default())
                 .unwrap()
                 .0
                 .primary
@@ -699,7 +769,7 @@ mod tests {
             1_000,
         )
         .unwrap();
-        assert!(without_optional.supplemental.is_empty());
+        assert!(without_optional.quota.supplemental.is_empty());
     }
 
     #[test]

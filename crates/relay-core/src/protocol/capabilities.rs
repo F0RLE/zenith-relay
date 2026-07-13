@@ -21,6 +21,7 @@ pub enum Feature {
     WakeTasks,
     Backups,
     AccountProxies,
+    FreeAccountPolicy,
 }
 
 impl Feature {
@@ -41,6 +42,7 @@ impl Feature {
             Self::WakeTasks => "wake_tasks",
             Self::Backups => "backups",
             Self::AccountProxies => "account_proxies",
+            Self::FreeAccountPolicy => "free_account_policy",
         }
     }
 }
@@ -96,6 +98,7 @@ impl Capabilities {
             Feature::WakeTasks,
             Feature::Backups,
             Feature::AccountProxies,
+            Feature::FreeAccountPolicy,
         ]
         .into_iter()
         .map(|feature| feature.as_str().to_string())

@@ -638,6 +638,27 @@ mod tests {
     }
 
     #[test]
+    fn free_quota_keeps_its_thirty_day_window() {
+        let data = parse_usage_payload(
+            br#"{
+                "plan_type":"free",
+                "rate_limit":{
+                    "allowed":true,
+                    "limit_reached":false,
+                    "primary_window":{"used_percent":5,"limit_window_seconds":2592000}
+                }
+            }"#,
+            1_000,
+        )
+        .unwrap();
+        let (quota, subscription) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+        let primary = quota.primary.unwrap();
+        assert_eq!(primary.available_basis_points, Some(9_500));
+        assert_eq!(primary.window_minutes, Some(43_200));
+        assert_eq!(subscription.unwrap().plan_type.as_deref(), Some("free"));
+    }
+
+    #[test]
     fn primary_window_rejects_missing_or_invalid_usage_percentage() {
         for body in [
             br#"{"rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{}}}"#.as_slice(),

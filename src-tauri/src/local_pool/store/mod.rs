@@ -469,12 +469,14 @@ mod tests {
         let mut gateway = store.gateway().clone();
         gateway.quota_refresh_interval_seconds = 120;
         gateway.quota_request_timeout_seconds = 10;
+        gateway.use_free_accounts = true;
         store.replace_gateway(gateway).unwrap();
         drop(store);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(reopened.gateway().quota_refresh_interval_seconds, 120);
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
+        assert!(reopened.gateway().use_free_accounts);
         fs::remove_dir_all(root).unwrap();
     }
 

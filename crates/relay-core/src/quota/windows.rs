@@ -192,6 +192,12 @@ impl Subscription {
             updated_at_ms: Some(input.observed_at_ms),
         }
     }
+
+    pub fn is_free_plan(&self) -> bool {
+        self.plan_type
+            .as_deref()
+            .is_some_and(|plan| plan.trim().to_ascii_lowercase().contains("free"))
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -365,5 +371,17 @@ mod tests {
             20
         );
         assert_eq!(ResetTime::RelativeSeconds(20).normalize_ms(1_000), 21_000);
+    }
+
+    #[test]
+    fn free_plan_detection_is_case_insensitive_and_keeps_paid_plans_distinct() {
+        let subscription = |plan: &str| Subscription {
+            plan_type: Some(plan.to_string()),
+            ..Subscription::default()
+        };
+        assert!(subscription("Free").is_free_plan());
+        assert!(subscription("chatgpt_free_tier").is_free_plan());
+        assert!(!subscription("plus").is_free_plan());
+        assert!(!Subscription::default().is_free_plan());
     }
 }

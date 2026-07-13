@@ -510,6 +510,10 @@ impl DesktopState {
                 account.account.enabled
                     && account.account.in_pool
                     && !account.account.draining
+                    && crate::local_pool::commands::account_routing_allowed(
+                        &gateway,
+                        &account.account.subscription,
+                    )
                     && accounts_with_secrets.contains(account.account.id.as_str())
                     && key
                         .account_ids

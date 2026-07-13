@@ -1,3 +1,4 @@
+use super::account_routing_allowed;
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
@@ -11,8 +12,8 @@ use crate::local_pool::{
 };
 use tauri::State;
 use zenith_relay_core::protocol::{
-    pool_model_summaries, AccountSummary, Capabilities, GatewaySummary, KeySummary,
-    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+    pool_model_summaries, AccountRoutingExclusion, AccountSummary, Capabilities, GatewaySummary,
+    KeySummary, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::ApiEquivalentSummary;
 
@@ -85,6 +86,7 @@ pub async fn get_local_runtime_state(
                     && !record.draining
                     && record.secret_available
                     && record.proxy_available
+                    && record.routing_exclusion.is_none()
             })
             .count();
     let base_url = format!(
@@ -114,6 +116,7 @@ pub async fn get_local_runtime_state(
             account_proxy_required: snapshot.gateway.account_proxy_required,
             quota_refresh_interval_seconds: snapshot.gateway.quota_refresh_interval_seconds,
             quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
+            use_free_accounts: snapshot.gateway.use_free_accounts,
         },
         platform: snapshot.platform.to_string(),
         capabilities: Capabilities::desktop_local(),
@@ -175,6 +178,8 @@ fn local_account_summary(
         .as_ref()
         .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
         .unwrap_or((zenith_relay_core::protocol::ProxyMode::Direct, false));
+    let routing_exclusion = (!account_routing_allowed(settings, &record.account.subscription))
+        .then_some(AccountRoutingExclusion::FreePlanPolicy);
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -201,6 +206,7 @@ fn local_account_summary(
         secret_available,
         proxy_mode,
         proxy_available,
+        routing_exclusion,
         last_error_code: record.account.last_error_code.clone(),
     })
 }
@@ -252,6 +258,7 @@ mod parity_tests {
                 account_proxy_required: false,
                 quota_refresh_interval_seconds: 300,
                 quota_request_timeout_seconds: 20,
+                use_free_accounts: false,
             },
             platform: "test".into(),
             capabilities: Capabilities::desktop_local(),

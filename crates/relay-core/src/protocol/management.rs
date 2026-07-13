@@ -50,6 +50,12 @@ pub struct GatewaySummary {
     pub quota_refresh_interval_seconds: u64,
     #[serde(default)]
     pub quota_request_timeout_seconds: u64,
+    #[serde(default = "legacy_use_free_accounts")]
+    pub use_free_accounts: bool,
+}
+
+fn legacy_use_free_accounts() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -70,6 +76,12 @@ pub enum ProxyMode {
     Direct,
     Common,
     Account,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountRoutingExclusion {
+    FreePlanPolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -120,6 +132,8 @@ pub struct AccountSummary {
     pub proxy_mode: ProxyMode,
     #[serde(default)]
     pub proxy_available: bool,
+    #[serde(default)]
+    pub routing_exclusion: Option<AccountRoutingExclusion>,
     pub last_error_code: Option<String>,
 }
 
@@ -194,6 +208,7 @@ pub fn pool_model_summaries(
             && !account.draining
             && account.secret_available
             && account.proxy_available
+            && account.routing_exclusion.is_none()
     }) {
         add_member_models(
             &mut models,
@@ -398,5 +413,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn legacy_runtime_fields_keep_remote_servers_compatible() {
+        let gateway: GatewaySummary = serde_json::from_str(
+            r#"{"running":true,"baseUrl":"https://relay.test/v1","candidateCount":1,"visibleModelIds":["gpt-test"]}"#,
+        )
+        .unwrap();
+        assert!(gateway.use_free_accounts);
+
+        let account = AccountSummary {
+            id: "account_1".into(),
+            label: "Account".into(),
+            identity_hint: "masked".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            auth_state: AccountAuthState::Active,
+            health: "healthy".into(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            api_equivalent: ApiEquivalentSummary::default(),
+            subscription: Subscription::default(),
+            quota: QuotaSnapshot::default(),
+            secret_available: true,
+            proxy_mode: ProxyMode::Direct,
+            proxy_available: true,
+            routing_exclusion: None,
+            last_error_code: None,
+        };
+        let mut value = serde_json::to_value(account).unwrap();
+        value.as_object_mut().unwrap().remove("routingExclusion");
+        let restored: AccountSummary = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.routing_exclusion, None);
     }
 }
