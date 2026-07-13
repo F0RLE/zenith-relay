@@ -65,6 +65,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "007_cached_input_tokens",
         sql: include_str!("../../migrations/007_cached_input_tokens.sql"),
     },
+    Migration {
+        version: 8,
+        name: "008_reasoning_tokens",
+        sql: include_str!("../../migrations/008_reasoning_tokens.sql"),
+    },
 ];
 
 struct Migration {
@@ -454,8 +459,8 @@ impl Store {
             format!("{:x}", Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
         self.lock()?
             .execute(
-                "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, output_tokens, total_tokens, created_at_ms)\
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     event.request_id,
                     event.local_key_id,
@@ -470,6 +475,7 @@ impl Store {
                     event.latency_ms as i64,
                     event.input_tokens.map(|value| value as i64),
                     event.cached_input_tokens.map(|value| value as i64),
+                    event.reasoning_tokens.map(|value| value as i64),
                     event.output_tokens.map(|value| value as i64),
                     event.total_tokens.map(|value| value as i64),
                     created_at_ms as i64,
@@ -497,7 +503,7 @@ impl Store {
             .max(0) as u64;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, output_tokens, total_tokens, created_at_ms \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -523,9 +529,10 @@ impl Store {
                     latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
                     input_tokens: optional_u64(row.get(12)?),
                     cached_input_tokens: optional_u64(row.get(13)?),
-                    output_tokens: optional_u64(row.get(14)?),
-                    total_tokens: optional_u64(row.get(15)?),
-                    created_at_ms: row.get::<_, i64>(16)?.max(0) as u64,
+                    reasoning_tokens: optional_u64(row.get(14)?),
+                    output_tokens: optional_u64(row.get(15)?),
+                    total_tokens: optional_u64(row.get(16)?),
+                    created_at_ms: row.get::<_, i64>(17)?.max(0) as u64,
                 })
             })
             .map_err(db_error)?;
@@ -1154,8 +1161,8 @@ mod tests {
         first.set_common_proxy_configured(true).unwrap();
         first.set_account_proxy_required(true).unwrap();
         assert_eq!(
-            first.metadata("schema_version").unwrap().as_deref(),
-            Some("7")
+            first.metadata("schema_version").unwrap(),
+            Some(SERVER_SCHEMA_VERSION.to_string())
         );
         drop(first);
         let second = Store::open(path).unwrap();
@@ -1175,8 +1182,8 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(store.server_id().unwrap(), "stable-server-id");
         assert_eq!(
-            store.metadata("schema_version").unwrap().as_deref(),
-            Some("7")
+            store.metadata("schema_version").unwrap(),
+            Some(SERVER_SCHEMA_VERSION.to_string())
         );
         let ledger = {
             let connection = store.lock().unwrap();
@@ -1200,7 +1207,8 @@ mod tests {
                 (4, "004_account_proxies".to_string()),
                 (5, "005_pool_membership".to_string()),
                 (6, "006_model_rules".to_string()),
-                (7, "007_cached_input_tokens".to_string())
+                (7, "007_cached_input_tokens".to_string()),
+                (8, "008_reasoning_tokens".to_string())
             ]
         );
         drop(store);
@@ -1263,8 +1271,8 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(store.server_id().unwrap(), "original-server-id");
         assert_eq!(
-            store.metadata("schema_version").unwrap().as_deref(),
-            Some("7")
+            store.metadata("schema_version").unwrap(),
+            Some(SERVER_SCHEMA_VERSION.to_string())
         );
         assert!(!sibling_path(&path, ".migration-in-progress").exists());
         drop(store);
@@ -1318,6 +1326,7 @@ mod tests {
                         ttft_ms: None,
                         input_tokens: Some(1),
                         cached_input_tokens: Some(1),
+                        reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),
                     },

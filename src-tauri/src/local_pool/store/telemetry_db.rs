@@ -56,6 +56,13 @@ PRAGMA user_version = 4;
 COMMIT;
 "#;
 
+const MIGRATION_005: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN reasoning_tokens INTEGER;
+PRAGMA user_version = 5;
+COMMIT;
+"#;
+
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
 }
@@ -81,6 +88,7 @@ pub struct UsageLog {
     pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }
@@ -100,10 +108,10 @@ impl TelemetryDb {
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
-        if version > 4 {
+        if version > 5 {
             return Err(LocalPoolError::new(
                 ErrorCode::UnsupportedSchema,
-                format!("usage database schema {version} is newer than supported schema 4"),
+                format!("usage database schema {version} is newer than supported schema 5"),
             ));
         }
         if version == 0 {
@@ -117,6 +125,9 @@ impl TelemetryDb {
         }
         if version <= 3 {
             connection.execute_batch(MIGRATION_004).map_err(db_error)?;
+        }
+        if version <= 4 {
+            connection.execute_batch(MIGRATION_005).map_err(db_error)?;
         }
         Ok(Self {
             connection: Mutex::new(connection),
@@ -138,8 +149,8 @@ impl TelemetryDb {
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens,
-                    output_tokens, total_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    reasoning_tokens, output_tokens, total_tokens
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 params![
                     event.request_id,
                     event.attempt,
@@ -157,6 +168,7 @@ impl TelemetryDb {
                     event.ttft_ms.map(sql_u64),
                     event.input_tokens.map(sql_u64),
                     event.cached_input_tokens.map(sql_u64),
+                    event.reasoning_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
                 ],
@@ -175,7 +187,8 @@ impl TelemetryDb {
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, input_tokens, cached_input_tokens, output_tokens, total_tokens
+                    ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens,
+                    total_tokens
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -185,8 +198,9 @@ impl TelemetryDb {
                 let ttft_ms: Option<i64> = row.get(15)?;
                 let input_tokens: Option<i64> = row.get(16)?;
                 let cached_input_tokens: Option<i64> = row.get(17)?;
-                let output_tokens: Option<i64> = row.get(18)?;
-                let total_tokens: Option<i64> = row.get(19)?;
+                let reasoning_tokens: Option<i64> = row.get(18)?;
+                let output_tokens: Option<i64> = row.get(19)?;
+                let total_tokens: Option<i64> = row.get(20)?;
                 Ok(UsageLog {
                     id: row.get(0)?,
                     created_at: row.get(1)?,
@@ -206,6 +220,7 @@ impl TelemetryDb {
                     ttft_ms: ttft_ms.map(rust_u64),
                     input_tokens: input_tokens.map(rust_u64),
                     cached_input_tokens: cached_input_tokens.map(rust_u64),
+                    reasoning_tokens: reasoning_tokens.map(rust_u64),
                     output_tokens: output_tokens.map(rust_u64),
                     total_tokens: total_tokens.map(rust_u64),
                 })
@@ -318,6 +333,7 @@ mod tests {
             ttft_ms: None,
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
+            reasoning_tokens: Some(2),
             output_tokens: Some(3),
             total_tokens: Some(5),
         };
@@ -328,6 +344,7 @@ mod tests {
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
+        assert_eq!(logs[0].reasoning_tokens, Some(2));
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
@@ -363,6 +380,7 @@ mod tests {
             ttft_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
+            reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
         };
@@ -412,6 +430,7 @@ mod tests {
             ttft_ms: None,
             input_tokens: Some(20),
             cached_input_tokens: Some(10),
+            reasoning_tokens: Some(3),
             output_tokens: Some(8),
             total_tokens: Some(28),
         };
@@ -458,7 +477,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -501,7 +520,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 5).unwrap();
+        connection.pragma_update(None, "user_version", 6).unwrap();
         drop(connection);
 
         assert!(matches!(
@@ -512,7 +531,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

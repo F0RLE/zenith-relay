@@ -31,6 +31,7 @@ pub struct UsageEvent {
     pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
 }

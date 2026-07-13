@@ -274,6 +274,8 @@ pub struct UsageSummary {
     pub latency_ms: u64,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub created_at_ms: u64,
@@ -386,5 +388,15 @@ mod tests {
         assert!(models[0].output_micro_usd_per_million.is_some());
         assert!(models[2].catalog_rank.is_none());
         assert!(models[2].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn usage_summary_accepts_servers_without_reasoning_telemetry() {
+        let summary: UsageSummary = serde_json::from_str(
+            r#"{"id":1,"requestId":"req","localKeyId":"key","candidateKind":"source","candidateHint":"abc","requestedModel":null,"resolvedModel":null,"wireApi":"responses","success":true,"httpStatus":200,"errorCategory":null,"latencyMs":1,"inputTokens":2,"cachedInputTokens":null,"outputTokens":3,"totalTokens":5,"createdAtMs":1}"#,
+        )
+        .unwrap();
+
+        assert_eq!(summary.reasoning_tokens, None);
     }
 }

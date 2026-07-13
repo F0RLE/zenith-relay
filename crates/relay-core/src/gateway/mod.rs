@@ -1601,6 +1601,7 @@ fn usage_event(
         ttft_ms: None,
         input_tokens: None,
         cached_input_tokens: None,
+        reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
     }
@@ -1610,10 +1611,7 @@ fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {
     let Ok(body) = serde_json::from_slice::<Value>(body) else {
         return;
     };
-    let Some(usage) = body.get("usage").or_else(|| {
-        body.get("response")
-            .and_then(|response| response.get("usage"))
-    }) else {
+    let Some(usage) = find_usage(&body) else {
         return;
     };
     apply_usage(event, usage);
@@ -1858,14 +1856,7 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         Some("response.failed" | "response.incomplete" | "error") => Some(TerminalOutcome::Failure),
         _ => None,
     };
-    let usage = value
-        .get("usage")
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("usage"))
-        })
-        .cloned();
+    let usage = find_usage(&value).cloned();
     let response = value.get("response").cloned();
     let output_item = (value.get("type").and_then(Value::as_str)
         == Some("response.output_item.done"))
@@ -1928,10 +1919,15 @@ fn now_ms() -> u64 {
 }
 
 fn apply_usage(event: &mut UsageEvent, usage: &Value) {
-    event.input_tokens = usage
+    let input_tokens = usage
         .get("input_tokens")
         .or_else(|| usage.get("prompt_tokens"))
         .and_then(Value::as_u64);
+    let output_tokens = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("completion_tokens"))
+        .and_then(Value::as_u64);
+    event.input_tokens = input_tokens;
     event.cached_input_tokens = usage
         .get("input_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
@@ -1942,12 +1938,41 @@ fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         })
         .or_else(|| usage.get("cached_tokens"))
         .and_then(Value::as_u64)
-        .map(|cached| cached.min(event.input_tokens.unwrap_or(cached)));
-    event.output_tokens = usage
-        .get("output_tokens")
-        .or_else(|| usage.get("completion_tokens"))
-        .and_then(Value::as_u64);
-    event.total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+        .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
+    event.reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .or_else(|| {
+            usage
+                .get("output_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+        })
+        .or_else(|| {
+            usage
+                .get("completion_tokens_details")
+                .and_then(|details| details.get("reasoning_tokens"))
+        })
+        .and_then(Value::as_u64)
+        .map(|reasoning| reasoning.min(output_tokens.unwrap_or(reasoning)));
+    event.output_tokens = output_tokens;
+    let reported_total = usage.get("total_tokens").and_then(Value::as_u64);
+    event.total_tokens = match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => {
+            let measured = input.saturating_add(output);
+            Some(reported_total.unwrap_or(measured).max(measured))
+        }
+        _ => reported_total,
+    };
+}
+
+fn find_usage(value: &Value) -> Option<&Value> {
+    value.get("usage").or_else(|| {
+        let response = value.get("response")?;
+        response.get("usage").or_else(|| {
+            response
+                .get("response")
+                .and_then(|nested| nested.get("usage"))
+        })
+    })
 }
 
 impl<S> Drop for UsageStream<S> {
@@ -1988,6 +2013,7 @@ mod tests {
                 ttft_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
+                reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
             },
@@ -2010,15 +2036,16 @@ mod tests {
     }
 
     #[test]
-    fn non_stream_usage_captures_and_clamps_cached_input_tokens() {
+    fn non_stream_usage_normalizes_cached_reasoning_and_total_tokens() {
         let mut event = test_usage_event();
         populate_tokens(
             &mut event,
-            br#"{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30},"output_tokens":5,"total_tokens":21}}"#,
+            br#"{"response":{"response":{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":10}}}}"#,
         );
 
         assert_eq!(event.input_tokens, Some(16));
         assert_eq!(event.cached_input_tokens, Some(16));
+        assert_eq!(event.reasoning_tokens, Some(5));
         assert_eq!(event.output_tokens, Some(5));
         assert_eq!(event.total_tokens, Some(21));
     }
@@ -2035,13 +2062,14 @@ mod tests {
             Arc::new(|_| {}),
         );
         stream.ingest_sse(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"total_tokens\":38}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
         );
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, Some(32));
         assert_eq!(events[0].cached_input_tokens, Some(9));
+        assert_eq!(events[0].reasoning_tokens, Some(4));
         assert_eq!(events[0].output_tokens, Some(6));
         assert_eq!(events[0].total_tokens, Some(38));
     }
@@ -2098,6 +2126,7 @@ mod tests {
             ttft_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
+            reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
         }
