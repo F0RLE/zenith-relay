@@ -1766,7 +1766,15 @@ textarea {
 .titlebar-drag {
   display: flex;
   align-items: center;
+  gap: 7px;
   padding: 0 12px;
+}
+
+.titlebar-logo {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 4px;
 }
 
 .titlebar-drag strong {

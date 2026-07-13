@@ -28,6 +28,7 @@ export function TitleBar({ platform }: TitleBarProps) {
     <header className={`titlebar titlebar-${platform}`} data-tauri-drag-region>
       {macos ? controls : null}
       <div className="titlebar-drag" data-tauri-drag-region>
+        <img className="titlebar-logo" src="/icons/zenith-sword.png" alt="" data-tauri-drag-region />
         <strong data-tauri-drag-region>{t("app.label")}</strong>
       </div>
       {!macos ? controls : null}
