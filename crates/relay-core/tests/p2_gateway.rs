@@ -574,7 +574,11 @@ async fn chat_only_source_is_visible_and_executes_through_responses_adapter() {
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "chat-model", "input": "hello"}))
+        .json(&json!({
+            "model": "chat-model",
+            "input": "hello",
+            "service_tier": "priority"
+        }))
         .send()
         .await
         .unwrap();
@@ -605,6 +609,7 @@ async fn chat_only_source_is_visible_and_executes_through_responses_adapter() {
         .iter()
         .all(|request| request.authorization.as_deref() == Some("Bearer chat-key")));
     assert_eq!(requests[0].body["messages"][0]["content"], "hello");
+    assert_eq!(requests[0].body["service_tier"], "priority");
     assert_eq!(requests[1].body["stream"], false);
     drop(requests);
     let events = events.lock().unwrap();
@@ -668,7 +673,8 @@ async fn responses_only_source_executes_through_chat_completions_adapter() {
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": MODEL,
-            "messages": [{"role": "user", "content": "hello"}]
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "priority"
         }))
         .send()
         .await
@@ -706,6 +712,7 @@ async fn responses_only_source_executes_through_chat_completions_adapter() {
         .all(|request| { request.authorization.as_deref() == Some("Bearer responses-key") }));
     assert_eq!(requests[0].body["input"][0]["role"], "user");
     assert_eq!(requests[0].body["input"][0]["content"], "hello");
+    assert_eq!(requests[0].body["service_tier"], "priority");
     assert_eq!(requests[1].body["stream"], false);
     drop(requests);
     let events = events.lock().unwrap();

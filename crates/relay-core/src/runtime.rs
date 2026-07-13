@@ -595,6 +595,33 @@ impl GatewayRuntime {
             .collect()
     }
 
+    pub(crate) fn codex_models_route(&self, key: &AuthenticatedKey) -> Option<(String, Url)> {
+        let scheduler = self.lock_scheduler();
+        self.accounts
+            .values()
+            .filter_map(|account| {
+                let candidate = scheduler.candidate(&account.id)?;
+                let visible_models = account
+                    .configured_models
+                    .iter()
+                    .filter(|model| {
+                        key.model_rules.allows(model)
+                            && candidate.is_visible(model, &[WireApi::Responses], &key.scope)
+                    })
+                    .count();
+                if visible_models == 0 {
+                    return None;
+                }
+                let mut url = account.responses_url.clone();
+                let mut segments = url.path_segments_mut().ok()?;
+                segments.pop_if_empty().pop().push("models");
+                drop(segments);
+                Some((account.id.clone(), url, visible_models))
+            })
+            .max_by_key(|(_, _, visible_models)| *visible_models)
+            .map(|(account_id, url, _)| (account_id, url))
+    }
+
     pub fn visible_models_for_secret(
         &self,
         secret: &str,

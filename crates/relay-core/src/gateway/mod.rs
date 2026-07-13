@@ -5,22 +5,23 @@ use axum::extract::State;
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, RETRY_AFTER, WWW_AUTHENTICATE,
 };
-use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{stream, Stream, StreamExt};
 use serde_json::{json, Value};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
@@ -34,7 +35,11 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .with_state(runtime)
 }
 
-async fn models(State(runtime): State<Arc<GatewayRuntime>>, headers: HeaderMap) -> Response<Body> {
+async fn models(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response<Body> {
     if !valid_local_host(&headers) {
         return invalid_host();
     }
@@ -46,6 +51,25 @@ async fn models(State(runtime): State<Arc<GatewayRuntime>>, headers: HeaderMap) 
         &[WireApi::Responses, WireApi::ChatCompletions],
         now_ms(),
     );
+    let client_version = uri.query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find(|(key, _)| key == "client_version")
+            .map(|(_, value)| value.into_owned())
+    });
+    if let Some(client_version) = client_version.as_deref() {
+        if !valid_codex_client_version(client_version) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "client_version is invalid",
+                "invalid_request",
+            );
+        }
+        if let Some(catalog) =
+            codex_models_response(runtime.as_ref(), &key, &models, client_version).await
+        {
+            return Json(catalog).into_response();
+        }
+    }
     Json(json!({
         "object": "list",
         "data": models.into_iter().map(|id| json!({
@@ -55,6 +79,96 @@ async fn models(State(runtime): State<Arc<GatewayRuntime>>, headers: HeaderMap) 
         })).collect::<Vec<_>>()
     }))
     .into_response()
+}
+
+async fn codex_models_response(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    client_version: &str,
+) -> Option<Value> {
+    let (candidate_id, mut url) = runtime.codex_models_route(key)?;
+    url.query_pairs_mut()
+        .append_pair("client_version", client_version);
+    let prepared = runtime
+        .prepare_authorization(&candidate_id, now_ms())
+        .await
+        .ok()?;
+    let mut request = runtime
+        .request_client(&candidate_id, false)
+        .get(url)
+        .header(AUTHORIZATION, prepared.authorization)
+        .timeout(Duration::from_secs(10));
+    if let Some(account_id) = prepared.chatgpt_account_id {
+        request = request.header("ChatGPT-Account-Id", account_id);
+    }
+    if let Some(originator) = prepared.originator {
+        request = request.header("originator", originator);
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = crate::runtime::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES)
+        .await
+        .ok()?;
+    filter_codex_models_response(runtime, key, visible_models, &body)
+}
+
+fn filter_codex_models_response(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    body: &[u8],
+) -> Option<Value> {
+    let payload: Value = serde_json::from_slice(body).ok()?;
+    let models = payload.get("models")?.as_array()?;
+    if models.len() > 4_096 {
+        return None;
+    }
+    let visible = visible_models
+        .iter()
+        .filter_map(|display_id| {
+            runtime
+                .resolve_model(key, display_id)
+                .map(|upstream_id| (upstream_id.to_ascii_lowercase(), display_id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut seen = HashSet::new();
+    let models = models
+        .iter()
+        .filter_map(|model| {
+            let mut model = model.as_object()?.clone();
+            let slug = model.get("slug")?.as_str()?.trim();
+            if slug.is_empty()
+                || slug.len() > 256
+                || slug.chars().any(char::is_control)
+                || model.get("supported_in_api") == Some(&Value::Bool(false))
+                || model
+                    .get("visibility")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("hide"))
+            {
+                return None;
+            }
+            let normalized = slug.to_ascii_lowercase();
+            let display_id = visible.get(&normalized)?;
+            if !seen.insert(normalized) {
+                return None;
+            }
+            model.insert("slug".to_string(), Value::String(display_id.clone()));
+            Some(Value::Object(model))
+        })
+        .collect::<Vec<_>>();
+    (!models.is_empty()).then(|| json!({ "models": models }))
+}
+
+fn valid_codex_client_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
 
 async fn responses(
@@ -746,7 +860,13 @@ fn translate_responses_request(
         ("messages".to_string(), Value::Array(messages)),
         ("stream".to_string(), Value::Bool(stream)),
     ]);
-    for field in ["temperature", "top_p", "stop", "parallel_tool_calls"] {
+    for field in [
+        "temperature",
+        "top_p",
+        "stop",
+        "parallel_tool_calls",
+        "service_tier",
+    ] {
         if let Some(value) = object.get(field) {
             translated.insert(field.to_string(), value.clone());
         }
@@ -834,7 +954,12 @@ fn translate_chat_request(
         ("input".to_string(), Value::Array(input)),
         ("stream".to_string(), Value::Bool(stream)),
     ]);
-    for field in ["temperature", "top_p", "parallel_tool_calls"] {
+    for field in [
+        "temperature",
+        "top_p",
+        "parallel_tool_calls",
+        "service_tier",
+    ] {
         if let Some(value) = object.get(field) {
             translated.insert(field.to_string(), value.clone());
         }

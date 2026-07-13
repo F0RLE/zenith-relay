@@ -2,8 +2,8 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode};
-use axum::routing::post;
-use axum::Router;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use futures_util::future::{join_all, BoxFuture};
 use futures_util::stream;
 use serde_json::{json, Value};
@@ -169,6 +169,62 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("provider-account-private"));
     assert!(!serialized.contains("account-access"));
+}
+
+#[tokio::test]
+async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
+    let (upstream, state) = spawn_upstream(Vec::new()).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version=1.2.3",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "hello",
+            "service_tier": "priority"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer account-access")
+    );
+    assert_eq!(
+        requests[0].chatgpt_account_id.as_deref(),
+        Some("provider-account")
+    );
+    assert_eq!(requests[0].body["client_version"], "1.2.3");
+    assert_eq!(requests[1].body["service_tier"], "priority");
 }
 
 #[tokio::test]
@@ -781,6 +837,7 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
         delay: Duration::ZERO,
     };
     let app = Router::new()
+        .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream))
         .with_state(state.clone());
     (spawn(app).await, state)
@@ -792,6 +849,7 @@ async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) 
         ..UpstreamState::default()
     };
     let app = Router::new()
+        .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream))
         .with_state(state.clone());
     (spawn(app).await, state)
@@ -851,6 +909,37 @@ async fn upstream(
                 .unwrap()
         }
     }
+}
+
+async fn upstream_models(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Json<Value> {
+    let client_version = uri
+        .query()
+        .and_then(|query| query.strip_prefix("client_version="))
+        .unwrap_or_default();
+    state.requests.lock().unwrap().push(ObservedRequest {
+        authorization: header(&headers, AUTHORIZATION.as_str()),
+        chatgpt_account_id: header(&headers, "chatgpt-account-id"),
+        originator: header(&headers, "originator"),
+        body: json!({ "client_version": client_version }),
+    });
+    Json(json!({
+        "models": [{
+            "slug": MODEL,
+            "display_name": "GPT P3",
+            "visibility": "list",
+            "supported_in_api": true,
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "Synthetic fast tier"
+            }],
+            "additional_speed_tiers": ["fast"]
+        }]
+    }))
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {
