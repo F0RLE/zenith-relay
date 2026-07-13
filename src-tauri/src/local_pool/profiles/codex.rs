@@ -1404,7 +1404,7 @@ fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     provider["experimental_bearer_token"] = value(local_key);
-    provider["supports_websockets"] = value(false);
+    provider["supports_websockets"] = value(true);
 }
 
 fn restore_config(document: &mut DocumentMut, previous_model_provider: Option<&str>) {
@@ -1480,7 +1480,7 @@ fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> b
                         .get("experimental_bearer_token")
                         .and_then(Item::as_str)
                         .is_some_and(|token| key_hash(token.trim()) == backup.managed_key_hash))
-                && provider.get("supports_websockets").and_then(Item::as_bool) == Some(false)
+                && provider.get("supports_websockets").and_then(Item::as_bool) == Some(true)
         })
 }
 

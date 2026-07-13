@@ -75,6 +75,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "009_ttft_ms",
         sql: include_str!("../../migrations/009_ttft_ms.sql"),
     },
+    Migration {
+        version: 10,
+        name: "010_reset_legacy_cooldowns",
+        sql: include_str!("../../migrations/010_reset_legacy_cooldowns.sql"),
+    },
 ];
 
 struct Migration {
@@ -1146,6 +1151,28 @@ mod tests {
     }
 
     #[test]
+    fn cooldown_migration_clears_legacy_long_delays() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS[0].sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO accounts(id, data_json, secret_ref) VALUES ('account_1', '{\"id\":\"account_1\",\"cooldowns\":{\"*\":1784000000000,\"gpt-5.6-luna\":1784001013965},\"consecutiveFailures\":7}', 'account:1')",
+                [],
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATIONS[9].sql).unwrap();
+        let (cooldowns, failures): (String, u32) = connection
+            .query_row(
+                "SELECT json_extract(data_json, '$.cooldowns'), json_extract(data_json, '$.consecutiveFailures') FROM accounts WHERE id = 'account_1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cooldowns, "{}");
+        assert_eq!(failures, 0);
+    }
+
+    #[test]
     fn pool_membership_batch_rolls_back_when_one_record_is_missing() {
         let root = test_root("pool-membership-rollback");
         let store = Store::open(root.join("relay.sqlite")).unwrap();
@@ -1278,7 +1305,8 @@ mod tests {
                 (6, "006_model_rules".to_string()),
                 (7, "007_cached_input_tokens".to_string()),
                 (8, "008_reasoning_tokens".to_string()),
-                (9, "009_ttft_ms".to_string())
+                (9, "009_ttft_ms".to_string()),
+                (10, "010_reset_legacy_cooldowns".to_string())
             ]
         );
         drop(store);

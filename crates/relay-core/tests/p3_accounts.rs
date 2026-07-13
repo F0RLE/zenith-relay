@@ -1,4 +1,5 @@
 use axum::body::{Body, Bytes};
+use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode};
@@ -6,6 +7,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::future::{join_all, BoxFuture};
 use futures_util::stream;
+use futures_util::{SinkExt, StreamExt};
+use reqwest_websocket::{Message as ClientWsMessage, RequestBuilderExt};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io;
@@ -55,6 +58,12 @@ struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     delay: Duration,
+}
+
+#[derive(Clone, Default)]
+struct WebSocketUpstreamState {
+    headers: Arc<Mutex<Vec<HeaderMap>>>,
+    requests: Arc<Mutex<Vec<Value>>>,
 }
 
 struct TestServer {
@@ -317,6 +326,110 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
     assert_eq!(requests[0].body["parallel_tool_calls"], false);
+}
+
+#[tokio::test]
+async fn account_websocket_preserves_codex_headers_and_reports_usage() {
+    let (upstream, state) = spawn_websocket_upstream().await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let rejected = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth("wrong-local-key")
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+    assert!(state.headers.lock().unwrap().is_empty());
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("originator", "codex_test")
+        .header("openai-beta", "existing_feature=1")
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+    let mut socket = upgraded.into_websocket().await.unwrap();
+
+    for index in 0..2 {
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": MODEL,
+                    "input": format!("hello {index}"),
+                    "parallel_tool_calls": true
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let completed = receive_websocket_completion(&mut socket).await;
+        assert_eq!(completed["response"]["usage"]["input_tokens"], 11);
+    }
+
+    let headers = state.headers.lock().unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        header(&headers[0], AUTHORIZATION.as_str()).as_deref(),
+        Some("Bearer account-access")
+    );
+    assert_eq!(
+        header(&headers[0], "chatgpt-account-id").as_deref(),
+        Some("provider-account")
+    );
+    assert_eq!(
+        header(&headers[0], "originator").as_deref(),
+        Some("codex_test")
+    );
+    assert_eq!(
+        header(&headers[0], "x-openai-internal-codex-responses-lite").as_deref(),
+        Some("true")
+    );
+    let beta = headers[0]
+        .get_all("openai-beta")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(beta.contains("existing_feature=1"));
+    assert!(beta.contains("responses_websockets=2026-02-06"));
+    drop(headers);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["type"], "response.create");
+    assert_eq!(requests[0]["store"], false);
+    assert_eq!(requests[0]["stream"], true);
+    assert_eq!(requests[0]["parallel_tool_calls"], false);
+    assert!(requests[0]["input"].is_array());
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert!(events.iter().all(|event| event.input_tokens == Some(11)));
+    assert!(events
+        .iter()
+        .all(|event| event.cached_input_tokens == Some(7)));
+    assert!(events.iter().all(|event| event.output_tokens == Some(5)));
+    assert!(events.iter().all(|event| event.reasoning_tokens == Some(2)));
+    assert!(events.iter().all(|event| event.total_tokens == Some(16)));
+    assert!(events.iter().all(|event| event.ttft_ms.is_some()));
 }
 
 #[tokio::test]
@@ -935,6 +1048,14 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
     (spawn(app).await, state)
 }
 
+async fn spawn_websocket_upstream() -> (TestServer, WebSocketUpstreamState) {
+    let state = WebSocketUpstreamState::default();
+    let app = Router::new()
+        .route("/v1/responses", get(upstream_websocket))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
 async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         delay,
@@ -1000,6 +1121,85 @@ async fn upstream(
                 .status(StatusCode::OK)
                 .body(Body::from_stream(chunks))
                 .unwrap()
+        }
+    }
+}
+
+async fn upstream_websocket(
+    State(state): State<WebSocketUpstreamState>,
+    headers: HeaderMap,
+    websocket: WebSocketUpgrade,
+) -> Response<Body> {
+    state.headers.lock().unwrap().push(headers);
+    websocket.on_upgrade(move |mut socket| async move {
+        while let Some(Ok(message)) = socket.recv().await {
+            let request = match message {
+                AxumWsMessage::Text(text) => serde_json::from_slice(text.as_bytes()),
+                AxumWsMessage::Binary(bytes) => serde_json::from_slice(&bytes),
+                AxumWsMessage::Close(_) => break,
+                AxumWsMessage::Ping(payload) => {
+                    if socket.send(AxumWsMessage::Pong(payload)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                AxumWsMessage::Pong(_) => continue,
+            };
+            let Ok(request) = request else {
+                break;
+            };
+            state.requests.lock().unwrap().push(request);
+            tokio::time::sleep(Duration::from_millis(2)).await;
+            if socket
+                .send(AxumWsMessage::Text(
+                    json!({"type": "response.output_text.delta", "delta": "hello"})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            if socket
+                .send(AxumWsMessage::Text(
+                    json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "ws-response",
+                            "usage": {
+                                "input_tokens": 11,
+                                "input_tokens_details": {"cached_tokens": 7},
+                                "output_tokens": 5,
+                                "output_tokens_details": {"reasoning_tokens": 2},
+                                "total_tokens": 16
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
+async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let ClientWsMessage::Text(text) = message {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            if value["type"] == "response.completed" {
+                return value;
+            }
         }
     }
 }

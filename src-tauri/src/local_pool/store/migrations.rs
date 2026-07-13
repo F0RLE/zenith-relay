@@ -50,6 +50,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 5 => migrate_v5_to_v6(root, &gateway_path)?,
                 6 => migrate_v6_to_v7(root, &gateway_path)?,
                 7 => migrate_v7_to_v8(root, &gateway_path)?,
+                8 => migrate_v8_to_v9(root)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -69,6 +70,29 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v8_to_v9(root: &Path) -> Result<()> {
+    let path = root.join("records").join("accounts.json");
+    let mut records =
+        load_json_or_quarantine::<Value>(root, &path)?.unwrap_or_else(|| Value::Array(Vec::new()));
+    let records = records.as_array_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "accounts.json must contain an array",
+        )
+    })?;
+    for record in records.iter_mut() {
+        let record = record.as_object_mut().ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "accounts.json must contain objects",
+            )
+        })?;
+        record.insert("cooldowns".to_string(), Value::Object(Default::default()));
+        record.insert("consecutiveFailures".to_string(), Value::from(0));
+    }
+    save_json(&path, records)
 }
 
 fn migrate_v7_to_v8(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -610,6 +634,42 @@ mod tests {
         );
         let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
         assert_eq!(gateway["useFreeAccounts"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v8_by_clearing_legacy_long_cooldowns() {
+        let root = temp_root();
+        let records = root.join("records");
+        fs::create_dir_all(&records).unwrap();
+        save_json(
+            &root.join("settings").join("gateway.json"),
+            &serde_json::to_value(crate::local_pool::models::GatewaySettings::default()).unwrap(),
+        )
+        .unwrap();
+        save_json(
+            &records.join("accounts.json"),
+            &vec![serde_json::json!({
+                "account": {"id": "account_1"},
+                "cooldowns": {"*": 1_784_000_000_000_u64, "gpt-5.6-luna": 1_784_001_013_965_u64},
+                "consecutiveFailures": 7
+            })],
+        )
+        .unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 8 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let accounts: Value = load_json(&records.join("accounts.json")).unwrap().unwrap();
+        assert_eq!(accounts[0]["cooldowns"], serde_json::json!({}));
+        assert_eq!(accounts[0]["consecutiveFailures"], 0);
+        assert_eq!(accounts[0]["account"]["id"], "account_1");
         fs::remove_dir_all(root).unwrap();
     }
 

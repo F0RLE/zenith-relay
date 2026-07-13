@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod websocket;
+
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
@@ -32,7 +34,7 @@ type CompletionCallback = Arc<dyn Fn(&mut UsageEvent) + Send + Sync>;
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
         .route("/v1/models", get(models))
-        .route("/v1/responses", post(responses))
+        .route("/v1/responses", get(websocket::responses).post(responses))
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(runtime)
 }

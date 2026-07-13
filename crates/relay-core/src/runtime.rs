@@ -175,6 +175,7 @@ impl Default for GatewayRuntimeOptions {
 pub struct GatewayRuntime {
     pub(crate) client: reqwest::Client,
     pub(crate) bounded_client: reqwest::Client,
+    websocket_client: reqwest::Client,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceExecutor>,
     accounts: BTreeMap<String, AccountExecutor>,
@@ -241,6 +242,7 @@ struct AccountExecutor {
     refresh_skew_ms: u64,
     client: Option<reqwest::Client>,
     bounded_client: Option<reqwest::Client>,
+    websocket_client: Option<reqwest::Client>,
 }
 
 #[derive(Clone)]
@@ -333,6 +335,7 @@ impl GatewayRuntime {
 
         let client = runtime_client(None, false)?;
         let bounded_client = runtime_client(None, true)?;
+        let websocket_client = runtime_websocket_client(None)?;
         let discovery_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -415,6 +418,11 @@ impl GatewayRuntime {
                 .as_ref()
                 .map(|proxy| runtime_client(Some(proxy), true))
                 .transpose()?;
+            let websocket_client = account
+                .proxy
+                .as_ref()
+                .map(|proxy| runtime_websocket_client(Some(proxy)))
+                .transpose()?;
             let mut chatgpt_account_id = HeaderValue::from_str(&account.chatgpt_account_id)
                 .map_err(|_| {
                     Error::Validation(
@@ -461,6 +469,7 @@ impl GatewayRuntime {
                     refresh_skew_ms: auth.refresh_skew_ms,
                     client,
                     bounded_client,
+                    websocket_client,
                 },
             );
         }
@@ -529,6 +538,7 @@ impl GatewayRuntime {
         Ok(Self {
             client,
             bounded_client,
+            websocket_client,
             discovery_client,
             sources: source_executors,
             accounts: account_executors,
@@ -830,6 +840,22 @@ impl GatewayRuntime {
         }
     }
 
+    pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
+        self.accounts
+            .get(candidate_id)
+            .and_then(|account| account.websocket_client.as_ref())
+            .unwrap_or(&self.websocket_client)
+    }
+
+    pub(crate) fn reserve_candidate(&self, candidate_id: &str) -> Option<CandidateLease> {
+        let mut scheduler = self.lock_scheduler();
+        scheduler.reserve(candidate_id).then(|| CandidateLease {
+            scheduler: self.scheduler.clone(),
+            candidate_id: candidate_id.to_string(),
+            released: AtomicBool::new(false),
+        })
+    }
+
     pub(crate) fn max_retry_candidates(&self) -> usize {
         self.max_retry_candidates
     }
@@ -1109,6 +1135,22 @@ fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest:
         None => builder,
     };
     builder.build().map_err(Error::from)
+}
+
+fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {
+    let builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_nodelay(true)
+        .http1_only()
+        .redirect(reqwest::redirect::Policy::none());
+    match proxy {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(Error::from)
 }
 
 fn redacted_runtime_url(value: &str) -> String {
