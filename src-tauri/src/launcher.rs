@@ -39,7 +39,6 @@ pub fn launch_codex() -> String {
 }
 
 pub fn launch_codex_with_profile() -> Result<(), String> {
-    stop_codex_and_wait()?;
     launch_codex_checked(false)
 }
 
@@ -61,17 +60,18 @@ pub fn is_codex_running() -> bool {
 }
 
 pub fn stop_codex_and_wait() -> Result<bool, String> {
-    if !is_codex_running() {
+    let pids = codex_process_pids();
+    if pids.is_empty() {
         return Ok(false);
     }
 
     #[cfg(target_os = "windows")]
-    stop_codex_windows()?;
+    stop_codex_windows(&pids)?;
 
     #[cfg(not(target_os = "windows"))]
-    stop_codex_processes();
+    stop_codex_processes(&pids);
 
-    if wait_for_codex_state(false, CODEX_STOP_TIMEOUT) {
+    if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT) {
         Ok(true)
     } else {
         Err("Codex did not exit before the profile switch timeout".to_string())
@@ -79,35 +79,28 @@ pub fn stop_codex_and_wait() -> Result<bool, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn stop_codex_processes() {
+fn stop_codex_processes(pids: &[u32]) {
     let system = codex_process_system();
     for process in system
         .processes()
         .values()
-        .filter(|process| is_codex_process(process))
+        .filter(|process| pids.contains(&process.pid().as_u32()))
     {
         let _ = process.kill();
     }
 }
 
 #[cfg(target_os = "windows")]
-fn stop_codex_windows() -> Result<(), String> {
-    let system = codex_process_system();
-    let pids = system
-        .processes()
-        .values()
-        .filter(|process| is_codex_process(process))
-        .map(|process| process.pid().as_u32())
-        .collect::<Vec<_>>();
-    for pid in &pids {
+fn stop_codex_windows(pids: &[u32]) -> Result<(), String> {
+    for pid in pids {
         let _ = windows_hidden_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T"])
             .status();
     }
-    if wait_for_codex_state(false, Duration::from_secs(2)) {
+    if wait_for_pids_exit(pids, Duration::from_secs(2)) {
         return Ok(());
     }
-    for pid in pids {
+    for pid in running_target_pids(pids) {
         let _ = windows_hidden_command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .status();
@@ -308,6 +301,26 @@ fn codex_process_system() -> System {
     system
 }
 
+fn codex_process_pids() -> Vec<u32> {
+    let system = codex_process_system();
+    system
+        .processes()
+        .values()
+        .filter(|process| is_codex_process(process))
+        .map(|process| process.pid().as_u32())
+        .collect()
+}
+
+fn running_target_pids(targets: &[u32]) -> Vec<u32> {
+    let system = codex_process_system();
+    system
+        .processes()
+        .keys()
+        .map(|pid| pid.as_u32())
+        .filter(|pid| targets.contains(pid))
+        .collect()
+}
+
 fn is_codex_process(process: &sysinfo::Process) -> bool {
     let name = process.name().to_string_lossy();
     let executable = process.exe();
@@ -368,6 +381,19 @@ fn wait_for_codex_state(running: bool, timeout: Duration) -> bool {
     }
 }
 
+fn wait_for_pids_exit(pids: &[u32], timeout: Duration) -> bool {
+    let started = Instant::now();
+    loop {
+        if running_target_pids(pids).is_empty() {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,6 +412,13 @@ mod tests {
         assert!(environment
             .iter()
             .any(|(key, value)| { *key == OsStr::new("OPENAI_BASE_URL") && value.is_none() }));
+    }
+
+    #[test]
+    fn target_pid_probe_ignores_unrelated_processes() {
+        let current = std::process::id();
+        assert_eq!(running_target_pids(&[current]), vec![current]);
+        assert!(running_target_pids(&[u32::MAX]).is_empty());
     }
 
     #[cfg(target_os = "windows")]

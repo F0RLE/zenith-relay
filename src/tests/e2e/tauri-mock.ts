@@ -12,6 +12,7 @@ export type MockOptions = {
   codexBoundOauthAccountId?: string | null;
   profileRepairRecommended?: boolean;
   historyRepairChanges?: boolean;
+  historyRepairError?: boolean;
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
@@ -346,7 +347,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "attach_codex_to_account":
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
           case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
-          case "preview_codex_history_repair": { const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: false, expiresAtMs: Date.now() + 60_000 }; }
+          case "preview_codex_history_repair": { if (input.historyRepairError) throw { code: "recovery_required", message: "Synthetic history preview failure" }; const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: false, expiresAtMs: Date.now() + 60_000 }; }
           case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };
           case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
           case "open_relay_folder": return null;

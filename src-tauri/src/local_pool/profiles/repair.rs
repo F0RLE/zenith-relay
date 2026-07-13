@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs::{self, File, OpenOptions},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,8 +15,9 @@ const SNAPSHOT_VERSION: u32 = 1;
 const PREVIEW_TTL_MS: u64 = 30 * 60 * 1_000;
 const MAX_PROFILES: usize = 8;
 const MAX_ROLLOUT_FILES: usize = 4_096;
-const MAX_ROLLOUT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_TOTAL_ROLLOUT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ROLLOUT_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -322,30 +323,49 @@ fn collect_rollouts(
 }
 
 fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
-    let bytes = fs::read(path).map_err(io_error)?;
-    if bytes.len() as u64 > MAX_ROLLOUT_BYTES {
+    let file = File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
         return Err("Codex rollout file is too large".to_string());
     }
-    let content =
-        std::str::from_utf8(&bytes).map_err(|_| "Codex rollout is not UTF-8".to_string())?;
-    let mut records = 0;
-    for line in content.lines().filter(|line| !line.trim().is_empty()) {
-        let value: Value = serde_json::from_str(line)
-            .map_err(|_| "Codex rollout contains malformed JSON".to_string())?;
-        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            let provider = value
-                .get("payload")
-                .and_then(|payload| payload.get("model_provider"))
-                .and_then(Value::as_str);
-            if target.is_empty() || provider != Some(target) {
-                records += 1;
-            }
+    let mut reader = BufReader::new(file);
+    let mut first_line = Vec::new();
+    reader
+        .read_until(b'\n', &mut first_line)
+        .map_err(io_error)?;
+    if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
+        return Err("Codex rollout session metadata is too large".to_string());
+    }
+    let records = usize::from(
+        rollout_provider(&first_line)
+            .is_some_and(|provider| target.is_empty() || provider.as_deref() != Some(target)),
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(&first_line);
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
         }
+        hasher.update(&buffer[..read]);
     }
     Ok(RolloutSnapshot {
         path: path_string(path),
-        hash: hex_hash(&bytes),
+        hash: format!("{:x}", hasher.finalize()),
         records,
+    })
+}
+
+fn rollout_provider(first_line: &[u8]) -> Option<Option<String>> {
+    let first_line = first_line.strip_suffix(b"\n").unwrap_or(first_line);
+    let first_line = first_line.strip_suffix(b"\r").unwrap_or(first_line);
+    let value: Value = serde_json::from_slice(first_line).ok()?;
+    (value.get("type").and_then(Value::as_str) == Some("session_meta")).then(|| {
+        value
+            .get("payload")
+            .and_then(|payload| payload.get("model_provider"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
     })
 }
 
@@ -526,47 +546,56 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
 }
 
 fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), String> {
-    let content = fs::read_to_string(path).map_err(io_error)?;
-    let mut changed = 0;
-    let mut output = String::with_capacity(content.len());
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            output.push('\n');
-            continue;
-        }
-        let mut value: Value = serde_json::from_str(line)
-            .map_err(|_| "Codex rollout contains malformed JSON".to_string())?;
-        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            let provider = value
-                .get("payload")
-                .and_then(|payload| payload.get("model_provider"))
-                .and_then(Value::as_str);
-            if provider != Some(target) {
-                let payload = value
-                    .get_mut("payload")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(|| "Codex session metadata is invalid".to_string())?;
-                payload.insert(
-                    "model_provider".to_string(),
-                    Value::String(target.to_string()),
-                );
-                output.push_str(
-                    &serde_json::to_string(&value)
-                        .map_err(|_| "Codex session serialization failed".to_string())?,
-                );
-                changed += 1;
-            } else {
-                output.push_str(line);
-            }
-        } else {
-            output.push_str(line);
-        }
-        output.push('\n');
+    let file = File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
+        return Err("Codex rollout file is too large".to_string());
     }
-    if changed != expected {
+    let mut reader = BufReader::new(file);
+    let mut first_line = Vec::new();
+    reader
+        .read_until(b'\n', &mut first_line)
+        .map_err(io_error)?;
+    if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
+        return Err("Codex rollout session metadata is too large".to_string());
+    }
+    let separator: &[u8] = if first_line.ends_with(b"\r\n") {
+        b"\r\n"
+    } else if first_line.ends_with(b"\n") {
+        b"\n"
+    } else {
+        b""
+    };
+    let line = first_line.strip_suffix(b"\n").unwrap_or(&first_line);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let mut value: Value = serde_json::from_slice(line)
+        .map_err(|_| "Codex rollout session metadata is malformed".to_string())?;
+    let provider = value
+        .get("payload")
+        .and_then(|payload| payload.get("model_provider"))
+        .and_then(Value::as_str);
+    let changed = usize::from(
+        value.get("type").and_then(Value::as_str) == Some("session_meta")
+            && provider != Some(target),
+    );
+    if changed != expected || changed != 1 {
         return Err("Codex rollout changed during repair".to_string());
     }
-    replace_file(path, output.as_bytes(), false)
+    let payload = value
+        .get_mut("payload")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Codex session metadata is invalid".to_string())?;
+    payload.insert(
+        "model_provider".to_string(),
+        Value::String(target.to_string()),
+    );
+    let updated =
+        serde_json::to_vec(&value).map_err(|_| "Codex session serialization failed".to_string())?;
+    replace_file_with(path, false, move |output| {
+        output.write_all(&updated).map_err(io_error)?;
+        output.write_all(separator).map_err(io_error)?;
+        std::io::copy(&mut reader, output).map_err(io_error)?;
+        Ok(())
+    })
 }
 
 fn restore_manifest(manifest: &RepairManifest, directory: &Path) -> Result<usize, String> {
@@ -620,6 +649,14 @@ fn validate_manifest_paths(manifest: &RepairManifest, directory: &Path) -> Resul
 }
 
 fn replace_file(path: &Path, bytes: &[u8], sqlite: bool) -> Result<(), String> {
+    replace_file_with(path, sqlite, |file| file.write_all(bytes).map_err(io_error))
+}
+
+fn replace_file_with(
+    path: &Path,
+    sqlite: bool,
+    write: impl FnOnce(&mut File) -> Result<(), String>,
+) -> Result<(), String> {
     let temporary = sibling_path(
         path,
         &format!(".repair-{}.tmp", uuid::Uuid::new_v4().simple()),
@@ -633,8 +670,12 @@ fn replace_file(path: &Path, bytes: &[u8], sqlite: bool) -> Result<(), String> {
         .write(true)
         .open(&temporary)
         .map_err(io_error)?;
-    file.write_all(bytes).map_err(io_error)?;
-    file.sync_all().map_err(io_error)?;
+    if let Err(error) = write(&mut file).and_then(|_| file.sync_all().map_err(io_error)) {
+        drop(file);
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    drop(file);
     fs::rename(path, &previous).map_err(io_error)?;
     if sqlite {
         for suffix in ["-wal", "-shm"] {
@@ -746,7 +787,7 @@ mod tests {
         let applied = apply(&state, &backups, &preview.session_id).unwrap();
         assert_eq!(applied.rollout_records_changed, 1);
         assert_eq!(applied.sqlite_rows_changed, 1);
-        assert_eq!(rollout_provider(&rollout), "zenith_relay_local");
+        assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
         assert_eq!(database_provider(&database), "zenith_relay_local");
         assert!(fs::read_to_string(&rollout)
             .unwrap()
@@ -754,7 +795,7 @@ mod tests {
 
         let rolled_back = rollback(&backups, &applied.backup_id).unwrap();
         assert_eq!(rolled_back.files_restored, 2);
-        assert_eq!(rollout_provider(&rollout), "openai");
+        assert_eq!(rollout_provider_from_file(&rollout), "openai");
         assert_eq!(database_provider(&database), "openai");
         fs::remove_dir_all(root).unwrap();
     }
@@ -768,10 +809,47 @@ mod tests {
 
         let error = apply(&state, &backups, &preview.session_id).unwrap_err();
         assert!(error.contains("changed after repair preview"));
-        assert_eq!(rollout_provider(&rollout), "openai");
+        assert_eq!(rollout_provider_from_file(&rollout), "openai");
         assert_eq!(database_provider(&database), "openai");
         assert!(!backups.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_rollout_provider_repair_streams_the_payload() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-large-rollout-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let rollout = root.join("rollout-large.jsonl");
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&rollout)
+            .unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-large\",\"model_provider\":\"openai\"}}}}"
+        )
+        .unwrap();
+        file.set_len(64 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+
+        let snapshot = scan_rollout(&rollout, "zenith_relay_local").unwrap();
+        assert_eq!(snapshot.records, 1);
+        rewrite_rollout(&rollout, "zenith_relay_local", 1).unwrap();
+        assert_eq!(rollout_provider_from_file(&rollout), "zenith_relay_local");
+        assert!(fs::metadata(&rollout).unwrap().len() > 64 * 1024 * 1024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_rollout_provider_still_requires_repair() {
+        assert_eq!(
+            rollout_provider(b"{\"type\":\"session_meta\",\"payload\":{}}\n"),
+            Some(None)
+        );
     }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
@@ -811,13 +889,11 @@ mod tests {
         (root, state, backups, profile, rollout, database)
     }
 
-    fn rollout_provider(path: &Path) -> String {
-        let line = fs::read_to_string(path)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap()
-            .to_string();
+    fn rollout_provider_from_file(path: &Path) -> String {
+        let mut line = String::new();
+        BufReader::new(File::open(path).unwrap())
+            .read_line(&mut line)
+            .unwrap();
         let value: Value = serde_json::from_str(&line).unwrap();
         value["payload"]["model_provider"]
             .as_str()

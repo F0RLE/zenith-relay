@@ -887,6 +887,18 @@ test("repair and launch applies the reviewed session changes before starting Cod
   expect(commands).toEqual(["launch_codex_account", "preview_codex_history_repair", "apply_codex_history_repair", "launch_managed_codex_profile"]);
 });
 
+test("row launch still starts Codex when optional history preview fails", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, historyRepairError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Launch in Codex" }).click();
+
+  await expect(page.getByText("Client launched.")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Keep Codex sessions visible" })).toHaveCount(0);
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((item) => item.command).filter((command) => ["launch_codex_account", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(command)));
+  expect(commands).toEqual(["launch_codex_account", "preview_codex_history_repair", "launch_managed_codex_profile"]);
+});
+
 test("remote account export uses the capability-gated server command", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");

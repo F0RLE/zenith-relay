@@ -178,7 +178,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       result.current = await relayCommands.previewHistoryRepair([binding.profileDir], target);
     });
     const preview = result.current;
-    if (!previewed || !preview) return false;
+    if (!previewed || !preview) return launchAfter ? launchAttachedCodex() : false;
     if (preview.rolloutRecordCount + preview.sqliteRowCount > 0) {
       setPendingProfileRepair({ preview, launchAfter });
       return true;

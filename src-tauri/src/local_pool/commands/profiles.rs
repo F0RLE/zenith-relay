@@ -107,7 +107,6 @@ pub async fn launch_managed_codex_profile(
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
-    stop_codex_and_sync_account(&state).await?;
     launch_codex_with_profile().map_err(|error| {
         LocalPoolError::new(ErrorCode::Io, format!("failed to launch Codex: {error}")).into()
     })
