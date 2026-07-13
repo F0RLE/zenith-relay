@@ -40,6 +40,8 @@ type RelayContextValue = {
   setTheme: (theme: "system" | "light" | "dark") => void;
   compact: boolean;
   setCompact: (compact: boolean) => void;
+  snapshotBeforeSwitch: boolean;
+  setSnapshotBeforeSwitch: (enabled: boolean) => void;
 };
 
 const RelayContext = createContext<RelayContextValue | null>(null);
@@ -62,6 +64,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
+  const [snapshotBeforeSwitch, setSnapshotBeforeSwitchState] = useState(() => stored("relay.snapshotBeforeSwitch", "1") === "1");
   const remoteUsageRequest = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -197,11 +200,22 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return launchAfter ? launchAttachedCodex() : true;
   }, [launchAttachedCodex, perform]);
 
+  const offerProfileSnapshot = useCallback(async () => {
+    if (!snapshotBeforeSwitch || !window.confirm(t("profiles.switchSnapshotConfirm"))) return true;
+    const date = new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date());
+    return perform(
+      "profile-snapshot-switch",
+      () => relayCommands.createProfileSnapshot(t("profiles.switchSnapshotName", { date })),
+      "feedback.snapshotCreated",
+    );
+  }, [i18n.language, perform, snapshotBeforeSwitch, t]);
+
   const activateCodexProfile = useCallback(async (
     id: string,
     work: () => Promise<ProfileActivation>,
     launchAfter = false,
   ) => {
+    if (!await offerProfileSnapshot()) return false;
     const result: { current: ProfileActivation | null } = { current: null };
     const activated = await perform(id, async () => {
       result.current = await work();
@@ -212,7 +226,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       return inspectProfileHistory(activation.binding, launchAfter);
     }
     return true;
-  }, [inspectProfileHistory, perform]);
+  }, [inspectProfileHistory, offerProfileSnapshot, perform]);
 
   const launchCodexProfile = useCallback(async (binding: ProfileBinding) => {
     const stopped = await perform("profile-stop", relayCommands.stopManagedCodex);
@@ -261,6 +275,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCompactState(next);
   }, []);
 
+  const setSnapshotBeforeSwitch = useCallback((enabled: boolean) => {
+    localStorage.setItem("relay.snapshotBeforeSwitch", enabled ? "1" : "0");
+    setSnapshotBeforeSwitchState(enabled);
+  }, []);
+
   const value = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
@@ -289,7 +308,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     compact,
     setCompact,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
+    snapshotBeforeSwitch,
+    setSnapshotBeforeSwitch,
+  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

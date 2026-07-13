@@ -345,6 +345,15 @@ export type ProfileActivation = {
   stoppedRunningClient: boolean;
 };
 
+export type ProfileSnapshot = {
+  id: string;
+  name: string;
+  profileDir: string;
+  createdAtMs: number;
+  configAvailable: boolean;
+  authAvailable: boolean;
+};
+
 export type OpenCodeProfileState = {
   attached: boolean;
   backupAvailable: boolean;

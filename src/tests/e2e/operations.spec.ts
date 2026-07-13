@@ -855,6 +855,27 @@ test("managed Codex profiles use the local profile launcher", async ({ page }) =
   expect(call).toBeTruthy();
 });
 
+test("named Codex snapshots can be created, restored with a safety copy, and deleted", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Profiles", exact: true }).click();
+  await page.getByRole("tab", { name: "Backups" }).click();
+
+  await expect(page.getByRole("row").filter({ hasText: "Original profile" })).toBeVisible();
+  await page.getByLabel("Snapshot name").fill("Before migration");
+  await page.getByRole("button", { name: "Create snapshot" }).click();
+  const created = page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) });
+  await expect(created).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await created.getByRole("button", { name: "Restore Before migration" }).click();
+  await expect(page.getByRole("row").filter({ hasText: "Before restoring Before migration" })).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) }).getByRole("button", { name: "Delete Before migration", exact: true }).click();
+  await expect(page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) })).toHaveCount(0);
+});
+
 test("account identity reveal is explicit and reversible", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
@@ -933,6 +954,41 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
+test("a Codex account or pool switch offers a protected profile snapshot", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, historyRepairChanges: false, profileSnapshotsEmpty: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("protected snapshot");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await expect(page.getByText("Client launched.")).toBeVisible();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
+  const workflow = calls.filter((call) => ["create_codex_profile_snapshot", "attach_codex_to_local_gateway"].includes(call.command));
+  expect(workflow.map((call) => call.command)).toEqual(["create_codex_profile_snapshot", "attach_codex_to_local_gateway"]);
+});
+
+test("profile snapshot prompts can be disabled without blocking Codex switching", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, historyRepairChanges: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  const setting = page.getByRole("checkbox", { name: "Offer a profile snapshot before switching an account or pool" });
+  await expect(setting).toBeChecked();
+  await setting.uncheck();
+
+  let dialogs = 0;
+  page.on("dialog", async (dialog) => { dialogs += 1; await dialog.dismiss(); });
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await expect(page.getByText("Client launched.")).toBeVisible();
+  expect(dialogs).toBe(0);
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.some((call) => call.command === "create_codex_profile_snapshot")).toBe(false);
+});
+
 test("profile switch errors remain readable and then dismiss automatically", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
   await page.goto("/");
@@ -940,7 +996,7 @@ test("profile switch errors remain readable and then dismiss automatically", asy
   await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  await expect(feedback).toContainText("The profile changed after backup.");
+  await expect(feedback).toContainText("The profile changed during the operation.");
   await expect(feedback).toBeHidden({ timeout: 9_000 });
 });
 

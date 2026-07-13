@@ -7,7 +7,7 @@ use crate::{
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalGatewayKeyRecord,
-        profiles::{codex, opencode, repair},
+        profiles::{codex, opencode, repair, snapshots},
         state::DesktopState,
         store::secret_store,
     },
@@ -371,6 +371,50 @@ pub async fn restore_codex_account_profile(
     let result = codex::restore_account_profile(&profile_dir, &state.profile_backup_root())
         .map_err(Into::into);
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+}
+
+#[tauri::command]
+pub fn list_codex_profile_snapshots(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<snapshots::ProfileSnapshotSummary>, CommandError> {
+    snapshots::list(&state.profile_backup_root()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn create_codex_profile_snapshot(
+    name: String,
+    state: State<'_, DesktopState>,
+) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
+    let _mutation = state.setup_guard().await;
+    snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn restore_codex_profile_snapshot(
+    snapshot_id: String,
+    safety_name: String,
+    state: State<'_, DesktopState>,
+) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let stopped = stop_codex_and_sync_account(&state).await?;
+    let result = snapshots::restore(
+        &default_codex_home(),
+        &state.profile_backup_root(),
+        &snapshot_id,
+        &safety_name,
+    )
+    .map_err(Into::into);
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+}
+
+#[tauri::command]
+pub async fn delete_codex_profile_snapshot(
+    snapshot_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    snapshots::delete(&state.profile_backup_root(), &snapshot_id).map_err(Into::into)
 }
 
 async fn activate_account_profile(

@@ -12,6 +12,7 @@ export type MockOptions = {
   codexBoundOauthAccountId?: string | null;
   profileRepairRecommended?: boolean;
   profileSwitchError?: boolean;
+  profileSnapshotsEmpty?: boolean;
   historyRepairChanges?: boolean;
   historyRepairError?: boolean;
   supplementalQuota?: boolean;
@@ -136,6 +137,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       createdAtMs: Date.now() - 86_400_000,
       lastUsedAtMs: Date.now() - 60_000,
     };
+    let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
+      id: "11111111-1111-4111-8111-111111111111",
+      name: locale === "ru" ? "Исходный профиль" : "Original profile",
+      profileDir: "C:\\Users\\Test\\.codex",
+      createdAtMs: Date.now() - 3_600_000,
+      configAvailable: true,
+      authAvailable: true,
+    }];
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -355,6 +364,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "restore_codex_profile":
           case "restore_opencode_profile":
           case "restore_codex_account_profile": return null;
+          case "list_codex_profile_snapshots": return structuredClone(profileSnapshots);
+          case "create_codex_profile_snapshot": {
+            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir: "C:\\Users\\Test\\.codex", createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+            profileSnapshots = [snapshot, ...profileSnapshots];
+            return structuredClone(snapshot);
+          }
+          case "restore_codex_profile_snapshot": {
+            const safety = { id: `33333333-3333-4333-8333-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.safetyName), profileDir: "C:\\Users\\Test\\.codex", createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+            profileSnapshots = [safety, ...profileSnapshots];
+            return structuredClone(safety);
+          }
+          case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
           case "stop_managed_codex_profile": return true;
           case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
           case "attach_codex_to_account":

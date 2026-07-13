@@ -71,6 +71,11 @@ pub struct ProfileBinding {
     pub bound_oauth_account_id: Option<String>,
 }
 
+pub(super) struct UserProfileSnapshot {
+    pub config: Option<String>,
+    pub auth: Option<String>,
+}
+
 pub(crate) struct BoundOAuthProfile<'a> {
     pub account_id: &'a str,
     pub tokens: &'a TokenSet,
@@ -164,6 +169,128 @@ pub fn restore_account_profile(
 ) -> Result<Option<ProfileBinding>> {
     let _profile_guard = lock_codex_profile();
     restore_account_locked(codex_home, backup_root, &OsSecretBackend)
+}
+
+pub(super) fn snapshot_user_profile(
+    codex_home: &Path,
+    backup_root: &Path,
+) -> Result<UserProfileSnapshot> {
+    snapshot_user_profile_with(codex_home, backup_root, &OsSecretBackend)
+}
+
+fn snapshot_user_profile_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<UserProfileSnapshot> {
+    let _profile_guard = lock_codex_profile();
+    fs::create_dir_all(codex_home).map_err(io_error)?;
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let auth = read_optional_bytes(&auth_path)?;
+    let mut document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+
+    if let Some(path) = account_backup_for_profile(&profile_dir, backup_root)? {
+        let backup_bytes = read_optional_bytes(&path)?;
+        let backup = parse_account_backup_snapshot(&backup_bytes, &path)?.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "Codex account profile backup disappeared while creating a snapshot",
+            )
+        })?;
+        if account_managed_config_matches(&document) {
+            restore_config(&mut document, backup.previous_model_provider.as_deref());
+            let auth =
+                if account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)? {
+                    previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
+                } else {
+                    snapshot_text(&auth, &auth_path)?.map(str::to_string)
+                };
+            return Ok(UserProfileSnapshot {
+                config: Some(document.to_string()),
+                auth,
+            });
+        }
+    } else if let Some(backup) = local_backup(backup_root)? {
+        if managed_config_matches(&document, &backup) {
+            restore_config(&mut document, backup.previous_model_provider.as_deref());
+            let auth = if managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
+                previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
+            } else {
+                snapshot_text(&auth, &auth_path)?.map(str::to_string)
+            };
+            return Ok(UserProfileSnapshot {
+                config: Some(document.to_string()),
+                auth,
+            });
+        }
+        if external_provider_took_over(&document, &backup) {
+            remove_managed_provider(&mut document);
+            return Ok(UserProfileSnapshot {
+                config: Some(document.to_string()),
+                auth: snapshot_text(&auth, &auth_path)?.map(str::to_string),
+            });
+        }
+    }
+
+    Ok(UserProfileSnapshot {
+        config: snapshot_text(&config, &config_path)?.map(str::to_string),
+        auth: snapshot_text(&auth, &auth_path)?.map(str::to_string),
+    })
+}
+
+pub(super) fn restore_user_profile_snapshot(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot: &UserProfileSnapshot,
+) -> Result<()> {
+    restore_user_profile_snapshot_with(codex_home, backup_root, snapshot, &OsSecretBackend)
+}
+
+fn restore_user_profile_snapshot_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot: &UserProfileSnapshot,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let _profile_guard = lock_codex_profile();
+    fs::create_dir_all(codex_home).map_err(io_error)?;
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let original_config = read_optional_bytes(&config_path)?;
+    let original_auth = read_optional_bytes(&auth_path)?;
+
+    replace_with_snapshot(&config_path, &original_config, snapshot.config.as_deref())?;
+    let target_config = snapshot
+        .config
+        .as_ref()
+        .map(|value| value.as_bytes().to_vec());
+    if let Err(error) = replace_with_snapshot(&auth_path, &original_auth, snapshot.auth.as_deref())
+    {
+        return Err(with_rollback(
+            error,
+            restore_snapshot_if_unchanged(&config_path, &target_config, &original_config),
+        ));
+    }
+    let target_auth = snapshot
+        .auth
+        .as_ref()
+        .map(|value| value.as_bytes().to_vec());
+    if let Err(error) = discard_managed_binding_locked(&profile_dir, backup_root, secrets) {
+        let auth_rollback = restore_snapshot_if_unchanged(&auth_path, &target_auth, &original_auth);
+        let config_rollback =
+            restore_snapshot_if_unchanged(&config_path, &target_config, &original_config);
+        return Err(with_rollback(
+            error,
+            merge_rollbacks(auth_rollback, config_rollback),
+        ));
+    }
+    Ok(())
 }
 
 pub fn credential_kind(
@@ -1427,16 +1554,20 @@ fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
 }
 
 fn restore_config(document: &mut DocumentMut, previous_model_provider: Option<&str>) {
+    remove_managed_provider(document);
+    if let Some(previous_model_provider) = previous_model_provider {
+        document["model_provider"] = value(previous_model_provider);
+    } else {
+        document.remove("model_provider");
+    }
+}
+
+fn remove_managed_provider(document: &mut DocumentMut) {
     if let Some(model_providers) = document["model_providers"].as_table_mut() {
         model_providers.remove(PROVIDER_ID);
         if model_providers.is_empty() {
             document.remove("model_providers");
         }
-    }
-    if let Some(previous_model_provider) = previous_model_provider {
-        document["model_provider"] = value(previous_model_provider);
-    } else {
-        document.remove("model_provider");
     }
 }
 
@@ -1704,6 +1835,85 @@ fn restore_snapshot_if_unchanged(
     }
 }
 
+fn replace_with_snapshot(
+    path: &Path,
+    expected_current: &Option<Vec<u8>>,
+    content: Option<&str>,
+) -> Result<()> {
+    match content {
+        Some(content) => replace_if_unchanged(path, expected_current, content),
+        None => remove_if_unchanged(path, expected_current),
+    }
+}
+
+fn previous_auth_snapshot(
+    secret_ref: Option<&str>,
+    secrets: &impl SecretBackend,
+) -> Result<Option<String>> {
+    secret_ref
+        .map(|secret_ref| {
+            secrets.load(secret_ref)?.ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "Codex profile backup secret is missing",
+                )
+            })
+        })
+        .transpose()
+}
+
+fn discard_managed_binding_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    if let Some(path) = account_backup_for_profile(codex_home, backup_root)? {
+        let bytes = read_optional_bytes(&path)?;
+        let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "Codex account profile backup disappeared during snapshot restore",
+            )
+        })?;
+        return discard_backup(
+            &path,
+            &bytes,
+            backup.previous_auth_secret_ref.as_deref(),
+            secrets,
+        );
+    }
+    let path = backup_path(backup_root);
+    let bytes = read_optional_bytes(&path)?;
+    let Some(backup) = parse_backup_snapshot(&bytes, &path)? else {
+        return Ok(());
+    };
+    discard_backup(
+        &path,
+        &bytes,
+        backup.previous_auth_secret_ref.as_deref(),
+        secrets,
+    )
+}
+
+fn discard_backup(
+    path: &Path,
+    bytes: &Option<Vec<u8>>,
+    secret_ref: Option<&str>,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    remove_if_unchanged(path, bytes)?;
+    let Some(secret_ref) = secret_ref else {
+        return Ok(());
+    };
+    if let Err(error) = secrets.delete(secret_ref) {
+        return Err(with_rollback(
+            error,
+            restore_snapshot_if_unchanged(path, &None, bytes),
+        ));
+    }
+    Ok(())
+}
+
 fn merge_rollbacks(first: Result<()>, second: Result<()>) -> Result<()> {
     match (first, second) {
         (Ok(()), Ok(())) => Ok(()),
@@ -1930,6 +2140,42 @@ mod tests {
         assert!(fs::read_to_string(home.join(AUTH_FILE))
             .unwrap()
             .contains("chatgpt"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_snapshot_excludes_managed_projection_and_restore_detaches_it() {
+        let (root, home, backups) = profile_dirs("user-snapshot");
+        let original_config = "model_provider = \"custom\"\n";
+        let original_auth = "{\"tokens\":{\"access_token\":\"original\"}}";
+        fs::write(home.join(CONFIG_FILE), original_config).unwrap();
+        fs::write(home.join(AUTH_FILE), original_auth).unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+
+        let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(snapshot.config.as_deref(), Some(original_config));
+        assert_eq!(snapshot.auth.as_deref(), Some(original_auth));
+        assert!(!snapshot.config.as_deref().unwrap().contains(PROVIDER_ID));
+
+        restore_user_profile_snapshot_with(&home, &backups, &snapshot, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            original_config
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            original_auth
+        );
+        assert_eq!(profile_backup_count(&backups), 0);
+        assert!(secrets.load(BACKUP_SECRET_REF).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
