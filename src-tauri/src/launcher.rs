@@ -29,6 +29,7 @@ const CODEX_PROCESS_NAMES: &[&str] = &[
     "OpenAI.Codex.exe",
 ];
 const CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "windows")]
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn launch_codex() -> String {
