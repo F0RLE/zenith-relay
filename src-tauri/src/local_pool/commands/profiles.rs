@@ -51,47 +51,53 @@ pub async fn attach_codex_to_local_gateway(
     let profile_dir = default_codex_home();
     let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let bound_oauth = match bound_oauth_account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(account_id) => Some((
-            account_id.to_string(),
-            prepare_account_credentials(&state, account_id).await?,
-        )),
-        None => None,
-    };
-    let base_url = format!("http://127.0.0.1:{port}/v1");
-    let binding = match bound_oauth.as_ref() {
-        Some((account_id, prepared)) => codex::attach_with_oauth(
-            &profile_dir,
-            &state.profile_backup_root(),
-            &key_id,
-            &base_url,
-            &secret,
-            codex::BoundOAuthProfile {
-                account_id,
-                tokens: prepared.tokens(),
-                provider_account_id: prepared.provider_account_id(),
-            },
-        )?,
-        None => codex::attach(
-            &profile_dir,
-            &state.profile_backup_root(),
-            &key_id,
-            &base_url,
-            &secret,
-        )?,
-    };
-    Ok(profile_activation(binding, previous, stopped))
+    let result: Result<ProfileActivation, CommandError> = async {
+        let bound_oauth = match bound_oauth_account_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(account_id) => Some((
+                account_id.to_string(),
+                prepare_account_credentials(&state, account_id).await?,
+            )),
+            None => None,
+        };
+        let base_url = format!("http://127.0.0.1:{port}/v1");
+        let binding = match bound_oauth.as_ref() {
+            Some((account_id, prepared)) => codex::attach_with_oauth(
+                &profile_dir,
+                &state.profile_backup_root(),
+                &key_id,
+                &base_url,
+                &secret,
+                codex::BoundOAuthProfile {
+                    account_id,
+                    tokens: prepared.tokens(),
+                    provider_account_id: prepared.provider_account_id(),
+                },
+            )?,
+            None => codex::attach(
+                &profile_dir,
+                &state.profile_backup_root(),
+                &key_id,
+                &base_url,
+                &secret,
+            )?,
+        };
+        Ok(profile_activation(binding, previous, stopped))
+    }
+    .await;
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
 #[tauri::command]
 pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
-    stop_codex_and_sync_account(&state).await?;
-    codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
+    let stopped = stop_codex_and_sync_account(&state).await?;
+    let result =
+        codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into);
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -260,8 +266,10 @@ pub async fn restore_codex_account_profile(
 ) -> Result<Option<codex::ProfileBinding>, CommandError> {
     let _mutation = state.setup_guard().await;
     let profile_dir = resolve_profile_dir(profile_dir)?;
-    stop_codex_and_sync_account_at(&state, &profile_dir).await?;
-    codex::restore_account_profile(&profile_dir, &state.profile_backup_root()).map_err(Into::into)
+    let stopped = stop_codex_and_sync_account_at(&state, &profile_dir).await?;
+    let result = codex::restore_account_profile(&profile_dir, &state.profile_backup_root())
+        .map_err(Into::into);
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
 async fn activate_account_profile(
@@ -272,15 +280,19 @@ async fn activate_account_profile(
     let profile_dir = resolve_profile_dir(profile_dir)?;
     let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
     let stopped = stop_codex_and_sync_account_at(state, &profile_dir).await?;
-    let prepared = prepare_account_credentials(state, account_id).await?;
-    let binding = codex::attach_account(
-        &profile_dir,
-        &state.profile_backup_root(),
-        account_id,
-        prepared.tokens(),
-        prepared.provider_account_id(),
-    )?;
-    Ok(profile_activation(binding, previous, stopped))
+    let result: Result<ProfileActivation, CommandError> = async {
+        let prepared = prepare_account_credentials(state, account_id).await?;
+        let binding = codex::attach_account(
+            &profile_dir,
+            &state.profile_backup_root(),
+            account_id,
+            prepared.tokens(),
+            prepared.provider_account_id(),
+        )?;
+        Ok(profile_activation(binding, previous, stopped))
+    }
+    .await;
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
 fn profile_activation(
@@ -315,12 +327,34 @@ async fn stop_codex_and_sync_account_at(
     profile_dir: &std::path::Path,
 ) -> Result<bool, CommandError> {
     let stopped = stop_codex_for_profile_change()?;
-    if let Some(account_id) =
-        codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
-    {
-        sync_managed_account_profile(state, &account_id).await?;
+    let result: Result<(), CommandError> = async {
+        if let Some(account_id) =
+            codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
+        {
+            sync_managed_account_profile(state, &account_id).await?;
+        }
+        Ok(())
     }
+    .await;
+    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)?;
     Ok(stopped)
+}
+
+fn restart_codex_after_failed_change<T>(
+    stopped: bool,
+    result: Result<T, CommandError>,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<T, CommandError> {
+    match result {
+        Err(mut error) if stopped => {
+            if let Err(launch_error) = launch() {
+                error.message =
+                    format!("{}; failed to restart Codex: {launch_error}", error.message);
+            }
+            Err(error)
+        }
+        result => result,
+    }
 }
 
 fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandError> {
@@ -375,4 +409,27 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn failed_profile_change_restarts_a_previously_running_codex() {
+        let launched = Cell::new(false);
+        let error = restart_codex_after_failed_change::<()>(
+            true,
+            Err(LocalPoolError::new(ErrorCode::Conflict, "profile conflict").into()),
+            || {
+                launched.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(launched.get());
+        assert!(matches!(error.code, ErrorCode::Conflict));
+    }
 }

@@ -10,6 +10,7 @@ type PendingProfileRepair = { preview: HistoryRepairPreview; launchAfter: boolea
 
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 const SUCCESS_FEEDBACK_TIMEOUT_MS = 4_000;
+const ERROR_FEEDBACK_TIMEOUT_MS = 8_000;
 
 type RelayContextValue = {
   mode: RelayMode;
@@ -143,8 +144,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [theme, compact]);
 
   useEffect(() => {
-    if (feedback?.kind !== "success") return;
-    const timeout = window.setTimeout(() => setFeedback(null), SUCCESS_FEEDBACK_TIMEOUT_MS);
+    if (!feedback) return;
+    const timeout = window.setTimeout(
+      () => setFeedback(null),
+      feedback.kind === "success" ? SUCCESS_FEEDBACK_TIMEOUT_MS : ERROR_FEEDBACK_TIMEOUT_MS,
+    );
     return () => window.clearTimeout(timeout);
   }, [feedback]);
 

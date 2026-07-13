@@ -458,10 +458,25 @@ fn switch_to_local_with(
 ) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
-    if account_backup_for_profile(codex_home, backup_root)?.is_some() {
-        restore_account_locked(codex_home, backup_root, secrets)?;
-    }
-    attach_local_locked(
+    let detached_account_backup = match account_backup_for_profile(codex_home, backup_root)? {
+        Some(path) if external_account_provider_took_over(codex_home)? => {
+            let bytes = read_optional_bytes(&path)?;
+            let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "Codex account profile backup disappeared during the switch",
+                )
+            })?;
+            remove_if_unchanged(&path, &bytes)?;
+            Some((path, bytes, backup.previous_auth_secret_ref))
+        }
+        Some(_) => {
+            restore_account_locked(codex_home, backup_root, secrets)?;
+            None
+        }
+        None => None,
+    };
+    if let Err(error) = attach_local_locked(
         codex_home,
         backup_root,
         key_id,
@@ -469,7 +484,23 @@ fn switch_to_local_with(
         local_key,
         bound_oauth,
         secrets,
-    )?;
+    ) {
+        let rollback = detached_account_backup
+            .as_ref()
+            .map(|(path, bytes, _)| restore_snapshot_if_unchanged(path, &None, bytes))
+            .unwrap_or(Ok(()));
+        return Err(with_rollback(error, rollback));
+    }
+    if let Some((path, bytes, Some(secret_ref))) = detached_account_backup {
+        if let Err(error) = secrets.delete(&secret_ref) {
+            let profile_rollback = restore_local_locked(codex_home, backup_root, secrets);
+            let backup_rollback = restore_snapshot_if_unchanged(&path, &None, &bytes);
+            return Err(with_rollback(
+                error,
+                merge_rollbacks(profile_rollback, backup_rollback),
+            ));
+        }
+    }
     let backup = local_backup(backup_root)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -1400,6 +1431,14 @@ fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> boo
 fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document).is_some_and(|provider| provider != PROVIDER_ID)
         && managed_provider_matches(document, backup)
+}
+
+fn external_account_provider_took_over(codex_home: &Path) -> Result<bool> {
+    let config_path = canonical_profile_dir(codex_home)?.join(CONFIG_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    Ok(root_model_provider(&document)
+        .is_some_and(|provider| provider != "openai" && provider != PROVIDER_ID))
 }
 
 fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
@@ -2543,6 +2582,66 @@ mod tests {
         assert!(fs::read_to_string(home.join(AUTH_FILE))
             .unwrap()
             .contains("original"));
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn switching_external_account_takeover_to_local_rebases_the_latest_profile() {
+        let (root, home, backups) = profile_dirs("external-account-takeover");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+        fs::write(home.join(AUTH_FILE), "{\"auth_mode\":\"chatgpt\"}").unwrap();
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new(
+            "managed-access",
+            Some("managed-refresh".into()),
+            Some("managed-id".into()),
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+        attach_account_with(
+            &home,
+            &backups,
+            "account-local",
+            &tokens,
+            "provider-account",
+            &secrets,
+        )
+        .unwrap();
+
+        let external_config = "model_provider = \"codex_local_access\"\n\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+        let external_auth = "{\"tokens\":{\"access_token\":\"external\"}}";
+        fs::write(home.join(CONFIG_FILE), external_config).unwrap();
+        fs::write(home.join(AUTH_FILE), external_auth).unwrap();
+
+        switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            Some(BoundOAuthProfile {
+                account_id: "account-local",
+                tokens: &tokens,
+                provider_account_id: "provider-account",
+            }),
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(profile_backup_count(&backups), 1);
+        assert!(backup_path(&backups).exists());
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            external_config
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(AUTH_FILE)).unwrap(),
+            external_auth
+        );
         assert_eq!(profile_backup_count(&backups), 0);
         fs::remove_dir_all(root).unwrap();
     }

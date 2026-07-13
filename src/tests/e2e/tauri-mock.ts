@@ -11,6 +11,7 @@ export type MockOptions = {
   codexBindings?: boolean;
   codexBoundOauthAccountId?: string | null;
   profileRepairRecommended?: boolean;
+  profileSwitchError?: boolean;
   historyRepairChanges?: boolean;
   historyRepairError?: boolean;
   supplementalQuota?: boolean;
@@ -355,7 +356,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "restore_opencode_profile":
           case "restore_codex_account_profile": return null;
           case "stop_managed_codex_profile": return true;
-          case "attach_codex_to_local_gateway": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
+          case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
           case "attach_codex_to_account":
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
           case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };

@@ -915,6 +915,17 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
+test("profile switch errors remain readable and then dismiss automatically", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+
+  const feedback = page.locator(".global-feedback.error");
+  await expect(feedback).toContainText("The profile changed after backup.");
+  await expect(feedback).toBeHidden({ timeout: 9_000 });
+});
+
 test("runtime state refreshes when the app regains focus", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
