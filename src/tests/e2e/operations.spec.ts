@@ -82,21 +82,9 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
   await page.getByRole("button", { name: "Apply and restart" }).click();
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
-  await page.getByRole("tab", { name: "Client Setup" }).click();
-  await expect(page.getByLabel("OAuth account for Codex")).toHaveValue("account_synthetic");
-  await page.getByRole("button", { name: "Attach current endpoint" }).click();
-  await expect(page.getByText(/backup was preserved/i)).toBeVisible();
-  await page.getByRole("button", { name: "OpenCode" }).click();
-  const openCodeProvider = page.locator(".opencode-provider-summary");
-  await expect(openCodeProvider.getByRole("heading", { name: "OpenCode provider" })).toBeVisible();
-  await expect(openCodeProvider).toContainText("zenith_relay_local");
-  await expect(openCodeProvider).toContainText("http://127.0.0.1:15001/v1");
-  await expect(openCodeProvider).toContainText("Codex");
-  await expect(openCodeProvider).toContainText("gpt-5.4");
-  await expect(openCodeProvider).toContainText("gpt-5.4-mini");
-  await expect(openCodeProvider).toContainText("Models: 2");
-  await expect(page.getByRole("button", { name: "Remove provider" })).toBeVisible();
-  await page.getByRole("button", { name: "Add provider to OpenCode" }).click();
+  await page.getByRole("tab", { name: "Codex Setup" }).click();
+  await expect(page.getByLabel("Codex interface account")).toHaveValue("account_synthetic");
+  await expect(page.getByRole("heading", { name: "Codex in pool mode" })).toBeVisible();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
   await expect(page.getByText(/gpt-5.4-mini completed in 321 ms/)).toBeVisible();
@@ -105,11 +93,6 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(diagnosticCalls).toEqual([false, true]);
   const gatewayCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { port?: number } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "restart_local_gateway" || call.command === "update_local_gateway_port"));
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
-  const profileCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "attach_codex_to_local_gateway" || call.command === "attach_opencode_to_local_gateway"));
-  expect(profileCalls).toEqual([
-    { command: "attach_codex_to_local_gateway", args: { keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" } },
-    { command: "attach_opencode_to_local_gateway", args: { keyId: "key_synthetic" } },
-  ]);
   const policyCalls = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__;
     return Object.fromEntries(calls
@@ -710,15 +693,34 @@ test("empty connection views keep the page header as the single action area", as
   await expect(page.getByPlaceholder("Search")).toHaveCount(0);
 });
 
-test("manual client setup hides unavailable profile actions", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+test("Codex client setup persists the selected pool identity for switching", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, gatewayRunning: true, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
-  await page.getByRole("tab", { name: "Client Setup" }).click();
-  await page.getByRole("button", { name: "Other" }).click();
-  await expect(page.getByRole("button", { name: "Attach current endpoint" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Restore previous" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Copy" })).toBeVisible();
+  await page.getByRole("tab", { name: "Codex Setup" }).click();
+  const setup = page.locator(".client-setup");
+  const account = page.getByLabel("Codex interface account");
+  await expect(account).toHaveValue("account_synthetic_2");
+  await account.selectOption("account_synthetic");
+  await expect(setup).toContainText("Personal Plus");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthAccountId"))).toBe("account_synthetic");
+  await expect(setup.getByRole("button")).toHaveCount(0);
+  await expect(setup).not.toContainText("Generated configuration");
+  const selectionMatchesTheme = await setup.evaluate((element) => {
+    const probe = document.createElement("span");
+    probe.style.backgroundColor = "var(--relay-accent-soft)";
+    element.appendChild(probe);
+    const expected = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return getComputedStyle(element, "::selection").backgroundColor === expected;
+  });
+  expect(selectionMatchesTheme).toBe(true);
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await expect(page.getByText("Client launched.")).toBeVisible();
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
+  expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
 });
 
 test("usage filters name independent choices", async ({ page }) => {

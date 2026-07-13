@@ -2,7 +2,12 @@ import { ReactNode, useEffect, useRef, useState } from "react";
 import { CheckCircle2, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { QuotaSnapshot, QuotaWindow } from "../api/types";
+import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
+
+export function isCodexOauthAccountEligible(account: AccountSummary) {
+  const authState = typeof account.authState === "string" ? account.authState : account.authState.state;
+  return account.enabled && account.inPool && !account.draining && account.secretAvailable && !account.routingExclusion && authState === "active";
+}
 
 export function formatAccountPlan(planType: string | null, unknown: string) {
   const value = planType?.trim();

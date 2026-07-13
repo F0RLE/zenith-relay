@@ -42,6 +42,8 @@ type RelayContextValue = {
   setCompact: (compact: boolean) => void;
   snapshotBeforeSwitch: boolean;
   setSnapshotBeforeSwitch: (enabled: boolean) => void;
+  codexPoolOauthAccountId: string;
+  setCodexPoolOauthAccountId: (accountId: string) => void;
 };
 
 const RelayContext = createContext<RelayContextValue | null>(null);
@@ -65,6 +67,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
   const [snapshotBeforeSwitch, setSnapshotBeforeSwitchState] = useState(() => stored("relay.snapshotBeforeSwitch", "1") === "1");
+  const [codexPoolOauthAccountId, setCodexPoolOauthAccountIdState] = useState(() => stored("relay.codexPoolOauthAccountId", ""));
   const remoteUsageRequest = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -280,6 +283,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setSnapshotBeforeSwitchState(enabled);
   }, []);
 
+  const setCodexPoolOauthAccountId = useCallback((accountId: string) => {
+    if (accountId) localStorage.setItem("relay.codexPoolOauthAccountId", accountId);
+    else localStorage.removeItem("relay.codexPoolOauthAccountId");
+    setCodexPoolOauthAccountIdState(accountId);
+  }, []);
+
   const value = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
@@ -310,7 +319,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setCompact,
     snapshotBeforeSwitch,
     setSnapshotBeforeSwitch,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch]);
+    codexPoolOauthAccountId,
+    setCodexPoolOauthAccountId,
+  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, codexPoolOauthAccountId, setCodexPoolOauthAccountId]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

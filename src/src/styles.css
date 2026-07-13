@@ -1748,6 +1748,11 @@ body,
   line-height: 1.45;
 }
 
+::selection {
+  background: var(--relay-accent-soft);
+  color: var(--relay-text);
+}
+
 button,
 input,
 select,
@@ -3508,13 +3513,15 @@ textarea {
 
 .client-oauth-binding {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
-  align-items: end;
-  gap: 14px 24px;
-  margin-top: 16px;
-  padding: 14px 0;
-  border-top: 1px solid var(--relay-border);
-  border-bottom: 1px solid var(--relay-border);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 390px);
+  align-items: start;
+  gap: 18px 32px;
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
 }
 
 .client-oauth-binding > header {
@@ -3535,20 +3542,74 @@ textarea {
 }
 
 .client-oauth-binding h2 {
-  font-size: 14px;
+  font-size: 16px;
+  line-height: 22px;
 }
 
 .client-oauth-binding header p {
   max-width: 680px;
   margin-top: 3px;
   color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 13px;
+  line-height: 19px;
 }
 
 .client-oauth-binding > .form-note {
   grid-column: 1 / -1;
-  margin: -4px 0 0;
+  margin: -6px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.codex-oauth-account-control {
+  min-width: 0;
+}
+
+.codex-oauth-account-control .relay-field {
+  margin: 0;
+}
+
+.codex-oauth-account-summary {
+  min-width: 0;
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.codex-oauth-account-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.codex-oauth-account-summary span {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.codex-oauth-account-summary strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-oauth-account-summary em {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 4px;
+  color: var(--relay-secondary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 650;
 }
 
 .config-preview {
@@ -3563,97 +3624,6 @@ textarea {
   border-radius: 6px;
   background: var(--relay-subtle);
   color: var(--relay-text);
-}
-
-.opencode-provider-summary {
-  margin: 16px 0;
-  padding: 14px 0;
-  border-top: 1px solid var(--relay-border);
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.opencode-provider-summary > header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.opencode-provider-summary > header > div {
-  min-width: 0;
-}
-
-.opencode-provider-summary h2,
-.opencode-provider-summary header p,
-.opencode-provider-summary > .form-note,
-.opencode-models p {
-  margin: 0;
-}
-
-.opencode-provider-summary h2 {
-  font-size: 15px;
-  line-height: 20px;
-}
-
-.opencode-provider-summary header p {
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.opencode-provider-summary dl {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin: 14px 0;
-}
-
-.opencode-provider-summary dl > div {
-  min-width: 0;
-}
-
-.opencode-provider-summary dt {
-  margin-bottom: 3px;
-  color: var(--relay-muted);
-  font-size: 11px;
-}
-
-.opencode-provider-summary dd {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.opencode-models {
-  display: grid;
-  gap: 7px;
-  margin-bottom: 10px;
-}
-
-.opencode-models > strong {
-  font-size: 12px;
-}
-
-.opencode-models > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.opencode-models code {
-  max-width: 100%;
-  overflow: hidden;
-  padding: 3px 6px;
-  border: 1px solid var(--relay-border);
-  border-radius: 4px;
-  background: var(--relay-subtle);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .diagnostics-list {
@@ -5642,15 +5612,6 @@ input[type="password"] {
   .client-oauth-binding {
     grid-template-columns: 1fr;
     align-items: stretch;
-  }
-
-  .opencode-provider-summary > header {
-    flex-direction: column;
-  }
-
-  .opencode-provider-summary dl {
-    grid-template-columns: 1fr;
-    gap: 10px;
   }
 
   .model-sort-select {

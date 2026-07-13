@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { getSavedKeyStats } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
 import type { GatewayDiagnostic, SupportBundlePreview } from "../../api/types";
-import { Button, Dialog, EmptyState, PageHeader, SecretField, StatusBadge, Tabs, copyText } from "../../components/Ui";
+import { Button, Dialog, EmptyState, PageHeader, SecretField, StatusBadge, Tabs, copyText, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "endpoint" | "clients" | "diagnostics";
@@ -14,7 +14,7 @@ export function GatewayPage() {
   const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("local_gateway"));
   const restart = () => perform("gateway-restart", async () => { if (mode === "local") await relayCommands.restartGateway(); else { await relayCommands.remoteAction({type:"stop_gateway"}); await relayCommands.remoteAction({type:"start_gateway"}); } }, "feedback.restarted");
   const action = mode === "zenith" ? null : <>{running ? <Button variant="secondary" busy={busy === "gateway-restart"} disabled={!canManage} title={!canManage ? t("common.unsupported") : undefined} icon={<RotateCw aria-hidden />} onClick={restart}>{t("gateway.restart")}</Button> : null}<Button variant="primary" busy={busy === "gateway-toggle"} disabled={!canManage} title={!canManage ? t("common.unsupported") : undefined} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway-toggle", () => mode === "local" ? (running ? relayCommands.stopGateway() : relayCommands.startGateway()) : relayCommands.remoteAction({type:running?"stop_gateway":"start_gateway"}), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button></>;
-  return <section className="relay-page"><PageHeader title={t("nav.gateway")} subtitle={t(`gateway.subtitles.${mode}`)} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("gateway.views")} items={[{id:"endpoint",label:t("gateway.endpoint")},{id:"clients",label:t("gateway.clientSetup")},{id:"diagnostics",label:t("gateway.diagnostics")}]}/>{view === "endpoint" ? <EndpointView running={running} endpoint={endpoint} /> : null}{view === "clients" ? <ClientSetup endpoint={endpoint} /> : null}{view === "diagnostics" ? <Diagnostics running={running} /> : null}</section>;
+  return <section className="relay-page"><PageHeader title={t("nav.gateway")} subtitle={t(`gateway.subtitles.${mode}`)} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("gateway.views")} items={[{id:"endpoint",label:t("gateway.endpoint")},{id:"clients",label:t("gateway.clientSetup")},{id:"diagnostics",label:t("gateway.diagnostics")}]}/>{view === "endpoint" ? <EndpointView running={running} endpoint={endpoint} /> : null}{view === "clients" ? <ClientSetup /> : null}{view === "diagnostics" ? <Diagnostics running={running} /> : null}</section>;
 }
 
 function EndpointView({ running, endpoint }: { running: boolean; endpoint: string }) {
@@ -48,20 +48,17 @@ function EndpointView({ running, endpoint }: { running: boolean; endpoint: strin
   </div>;
 }
 
-function ClientSetup({ endpoint }: { endpoint: string }) {
-  const { t } = useTranslation(); const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState(); const [client, setClient] = useState("codex"); const [boundOauthAccountId, setBoundOauthAccountId] = useState(""); const key = runtime?.keys.find((item) => item.enabled);
-  const visibleModels = runtime?.gateway.visibleModelIds ?? [];
-  const eligibleAccounts = (runtime?.accounts ?? []).filter((account) => account.enabled
-    && account.inPool
-    && !account.draining
-    && account.secretAvailable
-    && !account.routingExclusion
-    && (!key?.accountIds || key.accountIds.includes(account.id))
-    && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active")
-    .sort((left, right) => left.id.localeCompare(right.id));
+function ClientSetup() {
+  const { t } = useTranslation();
+  const { mode, runtime, codexPoolOauthAccountId, setCodexPoolOauthAccountId } = useRelayState();
+  const eligibleAccounts = (runtime?.accounts ?? [])
+    .filter(isCodexOauthAccountEligible)
+    .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   const eligibleAccountIds = eligibleAccounts.map((account) => account.id).join("\0");
   useEffect(() => {
+    if (mode !== "local") return;
     const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
+    if (codexPoolOauthAccountId && ids.includes(codexPoolOauthAccountId)) return;
     let cancelled = false;
     void relayCommands.profileBindings()
       .then((bindings) => bindings.find((binding) => binding.credentialKind === "local_gateway")?.boundOauthAccountId
@@ -70,26 +67,19 @@ function ClientSetup({ endpoint }: { endpoint: string }) {
       .catch(() => "")
       .then((activeAccountId) => {
         if (cancelled) return;
-        setBoundOauthAccountId((current) => current && ids.includes(current)
-          ? current
-          : ids.includes(activeAccountId) ? activeAccountId : ids[0] ?? "");
+        setCodexPoolOauthAccountId(ids.includes(activeAccountId) ? activeAccountId : ids[0] ?? "");
       });
     return () => { cancelled = true; };
-  }, [eligibleAccountIds]);
-  const config = client === "codex" ? `base_url = "${endpoint}"\nwire_api = "responses"\nrequires_openai_auth = true` : `OPENAI_BASE_URL=${endpoint}`;
-  const attach = () => key && (client === "opencode" ? perform("profile-attach", () => relayCommands.attachOpenCodeGateway(key.id), "feedback.openCodeProviderAdded") : activateCodexProfile("profile-attach", () => relayCommands.attachCodexGateway(key.id, boundOauthAccountId || null)));
-  const restore = () => perform("profile-restore", client === "opencode" ? relayCommands.restoreOpenCode : relayCommands.restoreCodex, client === "opencode" ? "feedback.openCodeProviderRemoved" : "feedback.restored");
-  return <div className="client-setup">
-    <div className="segmented">{["codex","opencode","other"].map((value) => <button type="button" key={value} className={client === value ? "active" : ""} onClick={() => setClient(value)}>{t(`clients.${value}`)}</button>)}</div>
-    {client === "codex" && mode === "local" ? <section className="client-oauth-binding">
-      <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={eligibleAccounts.length ? "ready" : "warning"} label={boundOauthAccountId ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingAutomatic")} /></header>
-      <label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={boundOauthAccountId} onChange={(event) => setBoundOauthAccountId(event.target.value)}><option value="">{t("gateway.oauthBindingAutomatic")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.subscription.planType ? ` - ${account.subscription.planType.toUpperCase()}` : ""}</option>)}</select></label>
-      {!eligibleAccounts.length ? <p className="form-note warning-text">{t("gateway.oauthBindingUnavailable")}</p> : null}
-    </section> : null}
-    {client === "opencode" ? <section className="opencode-provider-summary"><header><div><h2>{t("gateway.openCodeProvider")}</h2><p>{t("gateway.openCodeProviderHint")}</p></div><StatusBadge status={key && visibleModels.length ? "ready" : "warning"} label={t("gateway.modelCount", { count: visibleModels.length })} /></header><dl><div><dt>{t("gateway.provider")}</dt><dd><code>zenith_relay_local</code></dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code title={endpoint}>{endpoint}</code></dd></div><div><dt>{t("gateway.poolKey")}</dt><dd>{key?.label ?? t("common.notConfigured")}</dd></div></dl><div className="opencode-models"><strong>{t("gateway.availableModels")}</strong>{visibleModels.length ? <div>{visibleModels.map((model) => <code key={model}>{model}</code>)}</div> : <p>{t("gateway.noAvailableModels")}</p>}</div><p className="form-note">{t("gateway.openCodeCredentialsHint")}</p></section> : <section className="config-preview"><header><h2>{t("gateway.generatedConfig")}</h2><Button variant="ghost" icon={<Copy aria-hidden />} onClick={() => copyText(config)}>{t("common.copy")}</Button></header><pre>{config}</pre></section>}
-    {client !== "other" ? <div className="inline-actions"><Button variant="primary" busy={busy === "profile-attach"} disabled={mode !== "local" || !key || (client === "opencode" && !visibleModels.length)} icon={<ClipboardCheck aria-hidden />} onClick={attach}>{client === "opencode" ? t("profiles.addOpenCodeProvider") : t("profiles.attachCurrent")}</Button><Button variant="secondary" busy={busy === "profile-restore"} disabled={mode !== "local"} onClick={restore}>{client === "opencode" ? t("profiles.removeOpenCodeProvider") : t("profiles.restore")}</Button></div> : null}
-    {client !== "opencode" ? <p className="form-note">{mode !== "local" || client === "other" ? t("gateway.manualOnly") : t("profiles.backupHint")}</p> : null}
-  </div>;
+  }, [codexPoolOauthAccountId, eligibleAccountIds, mode, setCodexPoolOauthAccountId]);
+  if (mode !== "local") return <EmptyState title={t("gateway.oauthBindingLocalOnly")} description={t("gateway.oauthBindingLocalOnlyHint")} />;
+  const selectedAccount = eligibleAccounts.find((account) => account.id === codexPoolOauthAccountId) ?? null;
+  return <div className="client-setup codex-client-setup"><section className="client-oauth-binding">
+    <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={selectedAccount ? "ready" : "warning"} label={selectedAccount ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingUnavailableShort")} /></header>
+    <div className="codex-oauth-account-control"><label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} disabled={!eligibleAccounts.length} value={selectedAccount?.id ?? ""} onChange={(event) => setCodexPoolOauthAccountId(event.target.value)}>{!eligibleAccounts.length ? <option value="">{t("gateway.oauthBindingUnavailableShort")}</option> : null}{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {formatAccountPlan(account.subscription.planType, t("common.unknown"))}</option>)}</select></label>
+      {selectedAccount ? <div className="codex-oauth-account-summary"><div><span>{t("gateway.oauthBindingSelectedAccount")}</span><strong title={selectedAccount.label}>{selectedAccount.label}</strong></div><em>{formatAccountPlan(selectedAccount.subscription.planType, t("common.unknown"))}</em></div> : null}
+    </div>
+    <p className={`form-note${selectedAccount ? "" : " warning-text"}`}>{selectedAccount ? t("gateway.oauthBindingNextSwitch") : t("gateway.oauthBindingUnavailable")}</p>
+  </section></div>;
 }
 
 function Diagnostics({ running }: { running: boolean }) {

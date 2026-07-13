@@ -618,27 +618,24 @@ for (const viewport of viewports) {
 
 for (const theme of themes) {
   for (const viewport of viewports) {
-    test(`OpenCode native provider ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
-      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+    test(`Codex pool account setup ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Адрес API", exact: true }).click();
-      await page.getByRole("tab", { name: "Настройка клиента" }).click();
-      await page.getByRole("button", { name: "OpenCode" }).click();
+      await page.getByRole("tab", { name: "Настройка Codex" }).click();
 
-      const summary = page.locator(".opencode-provider-summary");
-      await expect(summary.getByRole("heading", { name: "Провайдер OpenCode" })).toBeVisible();
-      await expect(summary).toContainText("zenith_relay_local");
-      await expect(summary).toContainText("gpt-5.4-mini");
-      await expect(page.getByRole("button", { name: "Добавить провайдера в OpenCode" })).toBeVisible();
-      await expect(page.getByRole("button", { name: "Удалить провайдера" })).toBeVisible();
-      expect(await summary.evaluate((element) => {
+      const setup = page.locator(".client-oauth-binding");
+      await expect(setup.getByRole("heading", { name: "Codex в режиме пула" })).toBeVisible();
+      await expect(page.getByLabel("Аккаунт интерфейса Codex")).toBeVisible();
+      await expect(setup).toContainText("Выбранный аккаунт");
+      await expect(page.locator(".client-setup button")).toHaveCount(0);
+      expect(await setup.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
       })).toBe(true);
-      expect(await page.locator(".client-setup > .inline-actions button span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-      await page.screenshot({ path: `output/playwright/opencode-provider-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.screenshot({ path: `output/playwright/codex-pool-account-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
 }

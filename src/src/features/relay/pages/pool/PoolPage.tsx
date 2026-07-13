@@ -3,7 +3,7 @@ import { ArrowRightLeft, ArrowUpDown, CheckCheck, KeyRound, LayoutGrid, List, Lo
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, KeySummary, ModelSummary, SourceSummary } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, compareAccountPlans, formatAccountPlan } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "members" | "keys" | "models";
@@ -14,7 +14,7 @@ type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: 
 
 export function PoolPage() {
   const { t } = useTranslation();
-  const { mode, runtime, activateCodexProfile, busy, perform } = useRelayState();
+  const { mode, runtime, activateCodexProfile, busy, perform, codexPoolOauthAccountId } = useRelayState();
   const [view, setView] = useState<View>("members");
   const [createKey, setCreateKey] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
@@ -36,6 +36,9 @@ export function PoolPage() {
       ? <ActionMenuItem icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</ActionMenuItem>
       : null;
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
+  const selectedOauthAccountId = runtime?.accounts.some((account) => account.id === codexPoolOauthAccountId && isCodexOauthAccountEligible(account))
+    ? codexPoolOauthAccountId
+    : null;
   const switchCodexToPool = () => activateCodexProfile("pool-switch", async () => {
     const snapshot = await relayCommands.localState();
     const key = snapshot.keys.find((candidate) => candidate.enabled
@@ -45,7 +48,7 @@ export function PoolPage() {
       && !candidate.excludedModels.length
       && !candidate.modelPrefix)
       ?? (await relayCommands.createKey(t("pool.codexKeyLabel"))).key;
-    return relayCommands.attachCodexGateway(key.id, null);
+    return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId);
   }, true);
   const running = Boolean(runtime?.gateway.running);
   const action = mode === "local" ? <>
