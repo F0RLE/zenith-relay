@@ -325,6 +325,35 @@ impl TokenAuthority {
         Ok(())
     }
 
+    pub fn register_if_absent(
+        &self,
+        account_id: &str,
+        tokens: TokenSet,
+        auth_state: AccountAuthState,
+    ) -> Result<bool, TokenAuthorityError> {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return Err(TokenAuthorityError::InvalidAccountId);
+        }
+        let mut slots = lock(&self.slots);
+        if slots.contains_key(account_id) {
+            return Ok(false);
+        }
+        if slots.len() >= self.max_accounts {
+            return Err(TokenAuthorityError::CapacityReached);
+        }
+        slots.insert(
+            account_id.to_string(),
+            Arc::new(AsyncMutex::new(TokenSlot {
+                tokens,
+                auth_state,
+                persistence_pending: false,
+                auth_state_persistence_pending: false,
+            })),
+        );
+        Ok(true)
+    }
+
     pub fn remove(&self, account_id: &str) -> bool {
         lock(&self.slots).remove(account_id).is_some()
     }
@@ -584,6 +613,26 @@ mod tests {
         assert!(!debug.contains("new-access-secret"));
         assert!(!debug.contains("refresh-secret"));
         assert!(!debug.contains("id-secret"));
+    }
+
+    #[tokio::test]
+    async fn register_if_absent_never_overwrites_newer_tokens() {
+        let authority = TokenAuthority::new(1).unwrap();
+        let first =
+            TokenSet::new("new-access", Some("new-refresh".into()), None, None, 2, 2).unwrap();
+        let stale =
+            TokenSet::new("old-access", Some("old-refresh".into()), None, None, 1, 1).unwrap();
+
+        assert!(authority
+            .register_if_absent("account", first, AccountAuthState::Active)
+            .unwrap());
+        assert!(!authority
+            .register_if_absent("account", stale, AccountAuthState::Active)
+            .unwrap());
+
+        let stored = authority.tokens("account").await.unwrap();
+        assert_eq!(stored.generation(), 2);
+        assert_eq!(stored.access_token(), "new-access");
     }
 
     struct InvalidGrant;

@@ -1,8 +1,8 @@
 use super::runtime_from_store;
 use crate::{
-    launcher::launch_codex_with_profile,
+    launcher::{launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
-        commands::accounts::prepare_account_credentials,
+        commands::accounts::{prepare_account_credentials, sync_managed_account_profile},
         error::{CommandError, ErrorCode, LocalPoolError},
         profiles::{codex, opencode, repair},
         state::DesktopState,
@@ -10,16 +10,26 @@ use crate::{
     },
     platform::{default_codex_home, default_opencode_auth, default_opencode_config},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileActivation {
+    binding: codex::ProfileBinding,
+    previous_credential_kind: Option<codex::ProfileCredentialKind>,
+    repair_recommended: bool,
+    stopped_running_client: bool,
+}
+
 #[tauri::command]
 pub async fn attach_codex_to_local_gateway(
     key_id: String,
+    bound_oauth_account_id: Option<String>,
     state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
+) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
     let (key, port) = {
         let store = state.store()?;
@@ -38,19 +48,69 @@ pub async fn attach_codex_to_local_gateway(
     }
     let secret = secret_store::load(&key.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key secret is missing"))?;
-    codex::attach(
-        &default_codex_home(),
-        &state.profile_backup_root(),
-        &format!("http://127.0.0.1:{port}/v1"),
-        &secret,
-    )
-    .map_err(Into::into)
+    let profile_dir = default_codex_home();
+    let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
+    let stopped = stop_codex_and_sync_account(&state).await?;
+    let bound_oauth = match bound_oauth_account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(account_id) => Some((
+            account_id.to_string(),
+            prepare_account_credentials(&state, account_id).await?,
+        )),
+        None => None,
+    };
+    let base_url = format!("http://127.0.0.1:{port}/v1");
+    let binding = match bound_oauth.as_ref() {
+        Some((account_id, prepared)) => codex::attach_with_oauth(
+            &profile_dir,
+            &state.profile_backup_root(),
+            &key_id,
+            &base_url,
+            &secret,
+            codex::BoundOAuthProfile {
+                account_id,
+                tokens: prepared.tokens(),
+                provider_account_id: prepared.provider_account_id(),
+            },
+        )?,
+        None => codex::attach(
+            &profile_dir,
+            &state.profile_backup_root(),
+            &key_id,
+            &base_url,
+            &secret,
+        )?,
+    };
+    Ok(profile_activation(binding, previous, stopped))
 }
 
 #[tauri::command]
 pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
+    stop_codex_and_sync_account(&state).await?;
     codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn stop_managed_codex_profile(
+    state: State<'_, DesktopState>,
+) -> Result<bool, CommandError> {
+    let _mutation = state.setup_guard().await;
+    stop_codex_and_sync_account(&state).await
+}
+
+#[tauri::command]
+pub async fn launch_managed_codex_profile(
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    stop_codex_and_sync_account(&state).await?;
+    launch_codex_with_profile().map_err(|error| {
+        LocalPoolError::new(ErrorCode::Io, format!("failed to launch Codex: {error}")).into()
+    })
 }
 
 #[tauri::command]
@@ -123,46 +183,25 @@ pub async fn attach_codex_to_account(
     account_id: String,
     profile_dir: Option<String>,
     state: State<'_, DesktopState>,
-) -> Result<codex::ProfileBinding, CommandError> {
+) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    let profile_dir = resolve_profile_dir(profile_dir)?;
-    let prepared = prepare_account_credentials(&state, &account_id).await?;
-    codex::attach_account(
-        &profile_dir,
-        &state.profile_backup_root(),
-        &account_id,
-        prepared.tokens(),
-        prepared.provider_account_id(),
-    )
-    .map_err(Into::into)
+    activate_account_profile(&account_id, profile_dir, &state).await
 }
 
 #[tauri::command]
 pub async fn launch_codex_account(
     account_id: String,
     state: State<'_, DesktopState>,
-) -> Result<codex::ProfileBinding, CommandError> {
+) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
-    let profile_dir = default_codex_home();
-    let prepared = prepare_account_credentials(&state, &account_id).await?;
-    let binding = codex::attach_account(
-        &profile_dir,
-        &state.profile_backup_root(),
-        &account_id,
-        prepared.tokens(),
-        prepared.provider_account_id(),
-    )?;
-    launch_codex_with_profile().map_err(|error| {
-        LocalPoolError::new(ErrorCode::Io, format!("failed to launch Codex: {error}"))
-    })?;
-    Ok(binding)
+    activate_account_profile(&account_id, None, &state).await
 }
 
 #[tauri::command]
 pub fn list_codex_account_bindings(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<codex::ProfileBinding>, CommandError> {
-    codex::account_bindings(&state.profile_backup_root()).map_err(Into::into)
+    codex::profile_bindings(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into)
 }
 
 #[derive(Deserialize)]
@@ -222,7 +261,67 @@ pub async fn restore_codex_account_profile(
 ) -> Result<Option<codex::ProfileBinding>, CommandError> {
     let _mutation = state.setup_guard().await;
     let profile_dir = resolve_profile_dir(profile_dir)?;
+    stop_codex_and_sync_account_at(&state, &profile_dir).await?;
     codex::restore_account_profile(&profile_dir, &state.profile_backup_root()).map_err(Into::into)
+}
+
+async fn activate_account_profile(
+    account_id: &str,
+    profile_dir: Option<String>,
+    state: &DesktopState,
+) -> Result<ProfileActivation, CommandError> {
+    let profile_dir = resolve_profile_dir(profile_dir)?;
+    let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
+    let stopped = stop_codex_and_sync_account_at(state, &profile_dir).await?;
+    let prepared = prepare_account_credentials(state, account_id).await?;
+    let binding = codex::attach_account(
+        &profile_dir,
+        &state.profile_backup_root(),
+        account_id,
+        prepared.tokens(),
+        prepared.provider_account_id(),
+    )?;
+    Ok(profile_activation(binding, previous, stopped))
+}
+
+fn profile_activation(
+    binding: codex::ProfileBinding,
+    previous: Option<codex::ProfileCredentialKind>,
+    stopped_running_client: bool,
+) -> ProfileActivation {
+    ProfileActivation {
+        repair_recommended: previous.is_some_and(|kind| kind != binding.credential_kind),
+        binding,
+        previous_credential_kind: previous,
+        stopped_running_client,
+    }
+}
+
+fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
+    stop_codex_and_wait().map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("failed to stop Codex before changing its profile: {error}"),
+        )
+        .into()
+    })
+}
+
+async fn stop_codex_and_sync_account(state: &DesktopState) -> Result<bool, CommandError> {
+    stop_codex_and_sync_account_at(state, &default_codex_home()).await
+}
+
+async fn stop_codex_and_sync_account_at(
+    state: &DesktopState,
+    profile_dir: &std::path::Path,
+) -> Result<bool, CommandError> {
+    let stopped = stop_codex_for_profile_change()?;
+    if let Some(account_id) =
+        codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
+    {
+        sync_managed_account_profile(state, &account_id).await?;
+    }
+    Ok(stopped)
 }
 
 fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandError> {

@@ -11,14 +11,7 @@ mod tray;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{
-    collections::BTreeSet,
-    env,
-    io::Write,
-    net::{TcpListener, TcpStream},
-    thread,
-    time::Duration,
-};
+use std::{collections::BTreeSet, env, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
@@ -34,7 +27,6 @@ use crate::{
     tray::{build_tray, close_main_window, AppState},
 };
 
-const SINGLE_INSTANCE_ADDR: &str = "127.0.0.1:47831";
 const DEFAULT_API_BASE_URL: &str = "https://api.zenithmarket.dev/v1";
 const TOP_UP_BOT_URL: &str = "https://t.me/zenith_service_bot";
 const TOP_UP_BOT_DOMAIN: &str = "zenith_service_bot";
@@ -1208,17 +1200,10 @@ mod tests {
 }
 
 fn main() {
-    let _single_instance = match TcpListener::bind(SINGLE_INSTANCE_ADDR) {
-        Ok(listener) => listener,
-        Err(_) => {
-            if let Ok(mut stream) = TcpStream::connect(SINGLE_INSTANCE_ADDR) {
-                let _ = stream.write_all(b"show");
-            }
-            return;
-        }
-    };
-
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            crate::tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1240,15 +1225,6 @@ fn main() {
             build_tray(&handle, &state)?;
             start_key_stats_watcher(handle.clone());
 
-            let instance_handle = handle.clone();
-            thread::spawn(move || {
-                for stream in _single_instance.incoming() {
-                    if stream.is_ok() {
-                        crate::tray::show_main_window(&instance_handle);
-                    }
-                }
-            });
-
             if env::args().any(|arg| arg == "--tray") {
                 close_main_window(&handle);
             }
@@ -1258,7 +1234,7 @@ fn main() {
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.destroy();
+                let _ = window.hide();
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -1302,6 +1278,7 @@ fn main() {
             local_pool::commands::accounts::delete_local_account,
             local_pool::commands::accounts::refresh_local_account_quota,
             local_pool::commands::accounts::refresh_all_local_account_quotas,
+            local_pool::commands::accounts::refresh_local_pool_account_quotas,
             local_pool::commands::oauth::start_codex_oauth,
             local_pool::commands::oauth::resume_codex_oauth,
             local_pool::commands::oauth::get_codex_oauth_status,
@@ -1319,17 +1296,23 @@ fn main() {
             local_pool::commands::pool::set_local_gateway_key_enabled,
             local_pool::commands::pool::delete_local_gateway_key,
             local_pool::commands::pool::rotate_local_gateway_key,
+            local_pool::commands::pool::set_local_pool_membership,
+            local_pool::commands::pool::set_local_model_enabled,
+            local_pool::commands::pool::update_local_quota_policy,
             local_pool::commands::pool::update_local_routing,
             local_pool::commands::gateway::start_local_gateway,
             local_pool::commands::gateway::stop_local_gateway,
             local_pool::commands::gateway::restart_local_gateway,
             local_pool::commands::gateway::update_local_gateway_port,
             local_pool::commands::gateway::set_local_common_proxy,
+            local_pool::commands::gateway::set_local_account_proxy_required,
             local_pool::commands::gateway::diagnose_local_gateway,
             local_pool::commands::usage::get_local_usage,
             local_pool::commands::usage::clear_local_usage,
             local_pool::commands::profiles::attach_codex_to_local_gateway,
             local_pool::commands::profiles::restore_codex_profile,
+            local_pool::commands::profiles::stop_managed_codex_profile,
+            local_pool::commands::profiles::launch_managed_codex_profile,
             local_pool::commands::profiles::attach_opencode_to_local_gateway,
             local_pool::commands::profiles::restore_opencode_profile,
             local_pool::commands::profiles::get_opencode_profile_state,

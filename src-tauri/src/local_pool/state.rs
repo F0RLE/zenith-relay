@@ -33,7 +33,7 @@ use zenith_relay_core::{
     UsageCallback, UsageEvent,
 };
 
-const MAX_QUOTA_REFRESH_ENTRIES: usize = 512;
+const MAX_QUOTA_REFRESH_ENTRIES: usize = crate::local_pool::models::MAX_LOCAL_ACCOUNTS;
 
 trait SecretLookup {
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
@@ -84,10 +84,10 @@ impl DesktopState {
             &root.join("telemetry").join("usage.sqlite"),
         )?);
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
-        let token_authority =
-            Arc::new(TokenAuthority::new(512).map_err(|error| {
-                LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
-            })?);
+        let token_authority = Arc::new(
+            TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
+                .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
+        );
         let oauth_events = DesktopOAuthEvents::default();
         let oauth_flow =
             OAuthFlowManager::new(root.clone(), NativeSecretBackend, oauth_events.clone());
@@ -498,6 +498,7 @@ impl DesktopState {
             }
             let usable_source = sources.iter().any(|source| {
                 source.enabled
+                    && source.in_pool
                     && !source.draining
                     && sources_with_secrets.contains(source.id.as_str())
                     && key
@@ -507,6 +508,7 @@ impl DesktopState {
             });
             let usable_account = accounts.iter().any(|account| {
                 account.account.enabled
+                    && account.account.in_pool
                     && !account.account.draining
                     && accounts_with_secrets.contains(account.account.id.as_str())
                     && key
@@ -773,6 +775,7 @@ mod tests {
                 id: "source_1".into(),
                 name: "Synthetic".into(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
@@ -1276,6 +1279,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             enabled: true,
+            in_pool: true,
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: format!("source:{id}"),
@@ -1348,6 +1352,7 @@ mod tests {
                 token_updated_at_ms: Some(1),
                 tags: BTreeSet::new(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 created_at_ms: 1,
                 last_used_at_ms: None,

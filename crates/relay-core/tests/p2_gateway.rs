@@ -744,6 +744,7 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
             max_retry_candidates: 3,
             session_affinity_ttl: Some(Duration::from_millis(500)),
             max_affinity_entries: 16,
+            hidden_models: Vec::new(),
         },
     )
     .await;
@@ -832,6 +833,7 @@ async fn spawn_gateway(
             max_retry_candidates,
             session_affinity_ttl: None,
             max_affinity_entries: 0,
+            hidden_models: Vec::new(),
         },
     )
     .await

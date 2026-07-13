@@ -12,9 +12,11 @@ pub struct AppliedQuota {
 
 pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
-    data: CodexQuotaRefreshData,
+    mut data: CodexQuotaRefreshData,
 ) -> Result<AppliedQuota, &'static str> {
     let previous = account.account.quota.clone();
+    data.quota
+        .preserve_subscription_metadata(&account.account.subscription);
     let (quota, subscription) = data
         .quota
         .normalize(&previous)
@@ -128,6 +130,7 @@ mod tests {
     #[test]
     fn full_transition_is_emitted_once_and_subscription_is_kept() {
         let mut account = account();
+        account.account.subscription.active_until_ms = Some(2_000);
         apply_quota_success(&mut account, refresh(20.0, 10)).unwrap();
         let applied = apply_quota_success(&mut account, refresh(100.0, 20)).unwrap();
         assert_eq!(applied.transitions.len(), 1);
@@ -135,6 +138,7 @@ mod tests {
             account.account.subscription.status,
             SubscriptionStatus::Active
         );
+        assert_eq!(account.account.subscription.active_until_ms, Some(2_000));
         assert!(apply_quota_success(&mut account, refresh(100.0, 30))
             .unwrap()
             .transitions

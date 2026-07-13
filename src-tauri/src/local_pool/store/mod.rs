@@ -3,6 +3,7 @@ mod quarantine;
 pub mod secret_store;
 pub(crate) mod settings_store;
 pub mod telemetry_db;
+pub(crate) mod vault;
 
 use self::{
     migrations::migrate,
@@ -180,6 +181,15 @@ impl LocalPoolStore {
         )
     }
 
+    pub fn replace_pool_records(
+        &mut self,
+        sources: Vec<ProviderSourceRecord>,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+    ) -> Result<()> {
+        self.replace_all_records(sources, accounts, keys, self.automations.clone())
+    }
+
     pub fn replace_automations(&mut self, automations: AutomationRecords) -> Result<()> {
         self.replace_all_records(
             self.sources.clone(),
@@ -276,7 +286,8 @@ impl LocalPoolStore {
         Ok(())
     }
 
-    pub fn replace_gateway(&mut self, gateway: GatewaySettings) -> Result<()> {
+    pub fn replace_gateway(&mut self, mut gateway: GatewaySettings) -> Result<()> {
+        gateway.hidden_models = crate::local_pool::models::normalized_values(gateway.hidden_models);
         if gateway == self.gateway {
             return Ok(());
         }
@@ -452,6 +463,22 @@ mod tests {
     }
 
     #[test]
+    fn quota_policy_survives_restart() {
+        let root = temp_root();
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        let mut gateway = store.gateway().clone();
+        gateway.quota_refresh_interval_seconds = 120;
+        gateway.quota_request_timeout_seconds = 10;
+        store.replace_gateway(gateway).unwrap();
+        drop(store);
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(reopened.gateway().quota_refresh_interval_seconds, 120);
+        assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn corrupt_settings_are_quarantined() {
         let root = temp_root();
         fs::create_dir_all(root.join("settings")).unwrap();
@@ -471,6 +498,7 @@ mod tests {
                 id: "source_1".into(),
                 name: "Synthetic".into(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
@@ -519,6 +547,7 @@ mod tests {
             id: "source_1".into(),
             name: "Synthetic".into(),
             enabled: true,
+            in_pool: true,
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
@@ -570,6 +599,7 @@ mod tests {
             id: "source_1".into(),
             name: "Before".into(),
             enabled: true,
+            in_pool: true,
             draining: false,
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
@@ -619,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn store_rejects_the_513th_account_without_changing_persisted_state() {
+    fn store_rejects_account_overflow_without_changing_persisted_state() {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let accounts = (0..MAX_LOCAL_ACCOUNTS)
@@ -693,6 +723,7 @@ mod tests {
                 token_updated_at_ms: Some(1),
                 tags: BTreeSet::new(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 created_at_ms: 1,
                 last_used_at_ms: None,

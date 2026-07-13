@@ -108,6 +108,30 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
+pub fn source_points_to_gateway(source_base_url: &str, gateway_base_url: &str) -> bool {
+    let Ok(source) = normalized_base_url(source_base_url) else {
+        return false;
+    };
+    let Ok(mut gateway) = Url::parse(gateway_base_url.trim()) else {
+        return false;
+    };
+    if !gateway.path().ends_with('/') {
+        gateway.set_path(&format!("{}/", gateway.path()));
+    }
+    let hosts_match =
+        source
+            .host_str()
+            .zip(gateway.host_str())
+            .is_some_and(|(source_host, gateway_host)| {
+                source_host.eq_ignore_ascii_case(gateway_host)
+                    || (is_loopback(&source) && is_loopback(&gateway))
+            });
+    hosts_match
+        && source.scheme() == gateway.scheme()
+        && source.port_or_known_default() == gateway.port_or_known_default()
+        && source.path() == gateway.path()
+}
+
 fn is_loopback(url: &Url) -> bool {
     match url.host() {
         Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
@@ -160,5 +184,25 @@ mod tests {
         source.base_url = "http://127.0.0.1:14998/v1".to_string();
         assert!(source.validate().is_ok());
         assert!(!format!("{source:?}").contains("upstream-secret"));
+    }
+
+    #[test]
+    fn source_self_route_matches_only_the_same_gateway_endpoint() {
+        assert!(source_points_to_gateway(
+            "http://localhost:14998/v1",
+            "http://127.0.0.1:14998/v1"
+        ));
+        assert!(source_points_to_gateway(
+            "https://relay.example.test/v1/",
+            "https://relay.example.test/v1"
+        ));
+        assert!(!source_points_to_gateway(
+            "http://127.0.0.1:14999/v1",
+            "http://127.0.0.1:14998/v1"
+        ));
+        assert!(!source_points_to_gateway(
+            "https://provider.example.test/v1",
+            "https://relay.example.test/v1"
+        ));
     }
 }

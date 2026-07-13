@@ -1,5 +1,7 @@
 use super::import_session::SecretBackend;
-use super::oauth::{CodexOAuthClient, OAuthCallback, OAuthPendingSession};
+use super::oauth::{
+    CodexOAuthClient, OAuthCallback, OAuthPendingSession, CODEX_OAUTH_CALLBACK_PORTS,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -193,13 +195,17 @@ where
                 self.inner.cleanup(&snapshot.login_id)?;
                 continue;
             }
+            let port = callback_port(&snapshot.pending)?;
+            if !CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
+                self.inner.cleanup(&snapshot.login_id)?;
+                continue;
+            }
             if snapshot.status == OAuthFlowStatus::CallbackReceived {
                 return Ok(snapshot.start());
             }
             if lock(&self.inner.listeners).contains_key(&snapshot.login_id) {
                 return Ok(snapshot.start());
             }
-            let port = callback_port(&snapshot.pending)?;
             if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
                 self.spawn_listener(listener, snapshot.clone(), now_ms);
                 self.inner
@@ -208,12 +214,7 @@ where
             }
         }
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|_| {
-            OAuthFlowError::new(
-                OAuthFlowErrorCode::ListenerUnavailable,
-                "OAuth callback listener is unavailable",
-            )
-        })?;
+        let listener = bind_callback_listener().await?;
         let port = listener
             .local_addr()
             .map_err(|_| {
@@ -254,10 +255,18 @@ where
                     .for_login(&login_id),
             );
         }
+        let port = callback_port(&snapshot.pending)?;
+        if !CODEX_OAUTH_CALLBACK_PORTS.contains(&port) {
+            self.inner.cleanup(&login_id)?;
+            return Err(OAuthFlowError::new(
+                OAuthFlowErrorCode::Expired,
+                "OAuth login must be restarted",
+            )
+            .for_login(&login_id));
+        }
         if snapshot.status == OAuthFlowStatus::Pending
             && !lock(&self.inner.listeners).contains_key(&login_id)
         {
-            let port = callback_port(&snapshot.pending)?;
             let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|_| {
                 OAuthFlowError::new(
                     OAuthFlowErrorCode::CallbackPortUnavailable,
@@ -920,6 +929,25 @@ fn callback_port(pending: &OAuthPendingSession) -> Result<u16, OAuthFlowError> {
     redirect.port().ok_or_else(recovery_required)
 }
 
+async fn bind_callback_listener() -> Result<TcpListener, OAuthFlowError> {
+    let mut listener_error = false;
+    for port in CODEX_OAUTH_CALLBACK_PORTS {
+        match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(_) => listener_error = true,
+        }
+    }
+    Err(OAuthFlowError::new(
+        if listener_error {
+            OAuthFlowErrorCode::ListenerUnavailable
+        } else {
+            OAuthFlowErrorCode::CallbackPortUnavailable
+        },
+        "OAuth callback ports 1455 and 1457 are unavailable",
+    ))
+}
+
 fn snapshot_io() -> OAuthFlowError {
     OAuthFlowError::new(
         OAuthFlowErrorCode::SnapshotIo,
@@ -952,6 +980,8 @@ mod tests {
     use super::super::import_session::SecretBackendError;
     use super::*;
     use std::collections::BTreeMap;
+
+    static TEST_OAUTH_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[derive(Clone, Default)]
     struct MemorySecrets(Arc<Mutex<BTreeMap<String, String>>>);
@@ -997,6 +1027,7 @@ mod tests {
 
     #[tokio::test]
     async fn loopback_callback_validates_state_and_stores_only_secret_material() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("callback-success");
         let secrets = MemorySecrets::default();
         let events = Events::default();
@@ -1005,6 +1036,8 @@ mod tests {
             .start(&CodexOAuthClient::new().unwrap())
             .await
             .unwrap();
+        assert!(CODEX_OAUTH_CALLBACK_PORTS
+            .contains(&Url::parse(&start.redirect_uri).unwrap().port().unwrap()));
         let callback = callback_url_for(&start, "authorization-code", None);
 
         let response = send_callback(&start.redirect_uri, &request_target(&callback)).await;
@@ -1026,6 +1059,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_mismatch_is_rejected_and_listener_remains_cancelable() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("state-mismatch");
         let secrets = MemorySecrets::default();
         let events = Events::default();
@@ -1050,6 +1084,7 @@ mod tests {
 
     #[tokio::test]
     async fn manual_callback_and_restart_resume_use_the_known_pending_session() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("manual-restart");
         let secrets = MemorySecrets::default();
         let first_events = Events::default();
@@ -1080,6 +1115,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_removes_snapshot_and_releases_callback_port() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("cancel");
         let manager =
             OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
@@ -1098,6 +1134,7 @@ mod tests {
 
     #[tokio::test]
     async fn traversal_oversized_requests_and_corrupt_snapshots_fail_safely() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("unsafe");
         let manager =
             OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());
@@ -1203,6 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_material_requires_received_callback_and_redacts_all_secrets() {
+        let _port_guard = TEST_OAUTH_PORT_LOCK.lock().await;
         let root = test_root("exchange-material");
         let manager =
             OAuthFlowManager::new(root.clone(), MemorySecrets::default(), Events::default());

@@ -38,6 +38,12 @@ pub struct SetCommonProxyInput {
     proxy_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetAccountProxyPolicyInput {
+    required: bool,
+}
+
 #[tauri::command]
 pub async fn start_local_gateway(
     state: State<'_, DesktopState>,
@@ -124,6 +130,23 @@ pub async fn set_local_common_proxy(
         state.store()?.replace_gateway(old_gateway)
     })
     .await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_account_proxy_required(
+    input: SetAccountProxyPolicyInput,
+    state: State<'_, DesktopState>,
+) -> Result<LocalPoolSnapshot, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let old_gateway = state.store()?.gateway().clone();
+    if old_gateway.account_proxy_required == input.required {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    let mut next_gateway = old_gateway.clone();
+    next_gateway.account_proxy_required = input.required;
+    state.store()?.replace_gateway(next_gateway)?;
+    restart_or_rollback(&state, || state.store()?.replace_gateway(old_gateway)).await?;
     state.snapshot().await.map_err(Into::into)
 }
 

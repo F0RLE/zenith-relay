@@ -382,6 +382,27 @@ async fn exhausted_and_reauth_accounts_are_filtered_before_account_source_fallba
 }
 
 #[tokio::test]
+async fn exhausted_only_account_does_not_block_gateway_startup() {
+    let (upstream, state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
+    let authority = ready_authority("oauth-exhausted", "exhausted-access").await;
+    let mut exhausted = account("oauth-exhausted", "provider-exhausted", &upstream, 100);
+    exhausted.quota = CandidateQuota::Exhausted;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![exhausted],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn persisted_account_cooldown_and_failure_count_seed_the_rebuilt_runtime() {
     let (cooled_upstream, cooled_state) =
         spawn_upstream(vec![success_reply("cooled-must-not-run")]).await;
@@ -709,6 +730,7 @@ async fn spawn_mixed_gateway(
             max_retry_candidates: 3,
             session_affinity_ttl: None,
             max_affinity_entries: 0,
+            hidden_models: Vec::new(),
         },
         Arc::new(move |event| captured.lock().unwrap().push(event)),
     )

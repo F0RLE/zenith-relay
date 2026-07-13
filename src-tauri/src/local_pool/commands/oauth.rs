@@ -8,7 +8,7 @@ use crate::local_pool::{
             CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
         },
         import_session::SecretBackend,
-        models::{CodexModelsClient, ModelDiscoveryFailure},
+        models::{CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode},
         oauth::{
             CodexOAuthClient, OAuthError, OAuthTokenSet, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_SCOPE,
         },
@@ -16,9 +16,9 @@ use crate::local_pool::{
             OAuthFlowError, OAuthFlowErrorCode, OAuthFlowEventSink, OAuthFlowManager,
             OAuthFlowStart, OAuthFlowStatus,
         },
-        proxy::{common_proxy_config, effective_proxy_config},
+        proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
         quota::CodexQuotaClient,
-        quota_service::apply_quota_success,
+        quota_service::{apply_quota_failure, apply_quota_success},
         records::{self, new_account_record, CODEX_SOURCE_ID},
         NativeSecretBackend,
     },
@@ -32,7 +32,11 @@ use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 use uuid::Uuid;
-use zenith_relay_core::{accounts::AccountAuthMode, quota::QuotaRefreshFailure, ProxyConfig};
+use zenith_relay_core::{
+    accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
+    quota::QuotaRefreshFailure,
+    ProxyConfig,
+};
 
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_PATH: &str = "/auth/callback";
@@ -40,6 +44,14 @@ const COMPLETION_CHECKPOINT_VERSION: u32 = 1;
 const MAX_COMPLETION_CHECKPOINT_BYTES: usize = 256 * 1024;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
+
+#[derive(Clone, Copy)]
+struct InitialModelIssue {
+    code: &'static str,
+    retryable: bool,
+    auth_error: bool,
+    blocked: bool,
+}
 
 #[tauri::command]
 pub async fn start_codex_oauth(
@@ -49,6 +61,7 @@ pub async fn start_codex_oauth(
     let _mutation = state.setup_guard().await;
     let settings = state.store()?.gateway().clone();
     let proxy = common_proxy_config(&settings)?;
+    ensure_account_proxy(&settings, proxy.as_ref())?;
     let oauth = CodexOAuthClient::new_with_proxy(proxy.as_ref()).map_err(oauth_error)?;
     let flow = state.oauth_flow();
     let start = flow.start(&oauth).await.map_err(flow_error)?;
@@ -128,6 +141,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     let now_ms = super::current_time_ms();
     let settings = state.store()?.gateway().clone();
     let common_proxy = common_proxy_config(&settings)?;
+    ensure_account_proxy(&settings, common_proxy.as_ref())?;
     let (checkpoint, encoded_checkpoint) =
         completion_checkpoint(&flow, login_id, now_ms, common_proxy.as_ref()).await?;
     let (old_accounts, old_keys) = current_accounts(state)?;
@@ -166,30 +180,32 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             .map_err(credential_error)?;
     }
     let proxy = effective_proxy_config(&settings, &credentials)?;
-    let models = CodexModelsClient::new_with_proxy(proxy.as_ref())
-        .map_err(model_error)?
-        .discover(
-            &checkpoint.access_token,
-            &checkpoint.provider_account_id,
-            env!("CARGO_PKG_VERSION"),
-        )
-        .await
-        .map_err(model_error)?;
-    if models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "Codex account did not expose any supported models",
-        ));
-    }
-    let quota = CodexQuotaClient::new_with_proxy(proxy.as_ref()).map_err(quota_error)?;
-    let quota_data = quota
-        .refresh_data(
-            &checkpoint.access_token,
-            &checkpoint.provider_account_id,
-            now_ms,
-        )
-        .await
-        .map_err(quota_error)?;
+    let previous_models = existing
+        .map(|account| account.models.clone())
+        .unwrap_or_default();
+    let (models, model_issue) = match CodexModelsClient::new_with_proxy(proxy.as_ref()) {
+        Ok(client) => match client
+            .discover(
+                &checkpoint.access_token,
+                &checkpoint.provider_account_id,
+                zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+            )
+            .await
+        {
+            Ok(models) if !models.is_empty() => (models, None),
+            Ok(_) => (
+                previous_models,
+                Some(InitialModelIssue {
+                    code: "models_empty",
+                    retryable: false,
+                    auth_error: false,
+                    blocked: false,
+                }),
+            ),
+            Err(error) => (previous_models, Some(initial_model_issue(&error))),
+        },
+        Err(error) => (previous_models, Some(initial_model_issue(&error))),
+    };
     let authority_tokens = credentials.to_token_set().map_err(credential_error)?;
     let mut record = new_account_record(
         &credentials,
@@ -198,30 +214,69 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         existing.map_or(0, |account| account.priority),
         now_ms,
     )?;
+    if let Some(active_until_ms) = checkpoint.subscription_active_until_ms {
+        record.account.subscription = zenith_relay_core::quota::Subscription::normalize(
+            zenith_relay_core::quota::SubscriptionInput {
+                plan_type: record.account.subscription.plan_type.clone(),
+                active_until_ms: Some(active_until_ms),
+                forbidden: false,
+                observed_at_ms: now_ms,
+            },
+        );
+    }
     if let Some(existing) = existing {
         preserve_existing_settings(&mut record, existing);
     }
-    let applied_quota = apply_quota_success(&mut record, quota_data).map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "initial Codex quota response could not be normalized",
-        )
-    })?;
+    let quota_result = match CodexQuotaClient::new_with_proxy_and_timeout(
+        proxy.as_ref(),
+        std::time::Duration::from_secs(settings.quota_request_timeout_seconds),
+    ) {
+        Ok(quota) => {
+            quota
+                .refresh_data_with_subscription(
+                    &checkpoint.access_token,
+                    &checkpoint.provider_account_id,
+                    now_ms,
+                    &record.account.subscription,
+                    true,
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    let quota_outcome = match quota_result {
+        Ok(data) => match apply_quota_success(&mut record, data) {
+            Ok(applied) => AccountQuotaOutcome::Updated {
+                transitions: applied.transitions,
+            },
+            Err(_) => {
+                let failure = QuotaRefreshFailure::new("quota_invalid_response", false);
+                apply_quota_failure(&mut record, &failure, now_ms);
+                AccountQuotaOutcome::Failed {
+                    code: failure.code,
+                    retryable: failure.retryable,
+                }
+            }
+        },
+        Err(failure) => {
+            apply_quota_failure(&mut record, &failure, now_ms);
+            AccountQuotaOutcome::Failed {
+                code: failure.code,
+                retryable: failure.retryable,
+            }
+        }
+    };
+    if let Some(issue) = model_issue {
+        apply_initial_model_issue(&mut record, issue);
+    }
     let quota_refresh_at = next_quota_refresh_at(
         &AccountQuotaRefreshResponse {
             account: record.clone(),
-            quota: AccountQuotaOutcome::Updated {
-                transitions: applied_quota.transitions,
-            },
+            quota: quota_outcome,
         },
         now_ms,
-    )
-    .ok_or_else(|| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "initial Codex quota refresh did not produce a follow-up schedule",
-        )
-    })?;
+        settings.quota_refresh_interval_seconds,
+    );
 
     let runtime_port = state.gateway.address().await.map(|address| address.port());
     credential_store
@@ -281,23 +336,41 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
         )
         .await);
     }
-    let previous_quota_refresh =
-        match state.replace_quota_refresh(&local_account_id, quota_refresh_at) {
-            Ok(previous) => previous,
-            Err(error) => {
-                return Err(rollback_completion(
-                    state,
-                    &credential_store,
-                    &local_account_id,
-                    previous_credentials.as_ref(),
-                    &old_accounts,
-                    &old_keys,
-                    runtime_port,
-                    error,
-                )
-                .await)
-            }
-        };
+    let previous_quota_refresh = match state.quota_refresh_snapshot() {
+        Ok(previous) => previous,
+        Err(error) => {
+            return Err(rollback_completion(
+                state,
+                &credential_store,
+                &local_account_id,
+                previous_credentials.as_ref(),
+                &old_accounts,
+                &old_keys,
+                runtime_port,
+                error,
+            )
+            .await)
+        }
+    };
+    let schedule_result = match quota_refresh_at {
+        Some(due_at_ms) => state
+            .replace_quota_refresh(&local_account_id, due_at_ms)
+            .map(|_| ()),
+        None => state.remove_quota_refresh(&local_account_id).map(|_| ()),
+    };
+    if let Err(error) = schedule_result {
+        return Err(rollback_completion(
+            state,
+            &credential_store,
+            &local_account_id,
+            previous_credentials.as_ref(),
+            &old_accounts,
+            &old_keys,
+            runtime_port,
+            error,
+        )
+        .await);
+    }
     if let Err(error) = flow.complete(login_id).await.map_err(flow_error) {
         let queue_restored = state.restore_quota_refresh(previous_quota_refresh).is_ok();
         let checkpoint_restored =
@@ -417,6 +490,8 @@ struct OAuthCompletionCheckpoint {
     provider_account_id: String,
     provider_user_id: Option<String>,
     plan_type: Option<String>,
+    #[serde(default)]
+    subscription_active_until_ms: Option<u64>,
     account_is_fedramp: bool,
 }
 
@@ -454,6 +529,7 @@ impl OAuthCompletionCheckpoint {
             provider_account_id,
             provider_user_id: claims.user_id().map(str::to_string),
             plan_type: claims.plan_type().map(str::to_string),
+            subscription_active_until_ms: claims.subscription_active_until_ms(),
             account_is_fedramp: claims.account_is_fedramp(),
         };
         checkpoint.validate(login_id)?;
@@ -524,6 +600,10 @@ impl fmt::Debug for OAuthCompletionCheckpoint {
                 &self.provider_user_id.as_ref().map(|_| "[redacted]"),
             )
             .field("plan_type", &self.plan_type)
+            .field(
+                "subscription_active_until_ms",
+                &self.subscription_active_until_ms,
+            )
             .field("account_is_fedramp", &self.account_is_fedramp)
             .finish()
     }
@@ -799,15 +879,50 @@ fn credential_error(error: CredentialError) -> LocalPoolError {
     LocalPoolError::new(code, error.to_string())
 }
 
-fn model_error(error: ModelDiscoveryFailure) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
+fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModelIssue {
+    let (code, auth_error, blocked) = match error.code {
+        ModelDiscoveryFailureCode::Forbidden => ("models_forbidden", false, true),
+        ModelDiscoveryFailureCode::HttpStatus => ("models_http_status", false, false),
+        ModelDiscoveryFailureCode::InvalidAccessToken => {
+            ("models_invalid_access_token", true, false)
+        }
+        ModelDiscoveryFailureCode::InvalidAccountId => ("models_invalid_account_id", true, false),
+        ModelDiscoveryFailureCode::InvalidClientVersion => {
+            ("models_invalid_client_version", false, false)
+        }
+        ModelDiscoveryFailureCode::InvalidEndpoint => ("models_invalid_endpoint", false, false),
+        ModelDiscoveryFailureCode::InvalidResponse => ("models_invalid_response", false, false),
+        ModelDiscoveryFailureCode::RateLimited => ("models_rate_limited", false, false),
+        ModelDiscoveryFailureCode::ResponseTooLarge => ("models_response_too_large", false, false),
+        ModelDiscoveryFailureCode::Transport => ("models_transport", false, false),
+        ModelDiscoveryFailureCode::Unauthorized => ("models_unauthorized", true, false),
+        ModelDiscoveryFailureCode::Upstream => ("models_upstream", false, false),
+    };
+    InitialModelIssue {
+        code,
+        retryable: error.retryable,
+        auth_error,
+        blocked,
+    }
 }
 
-fn quota_error(error: QuotaRefreshFailure) -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::InvalidState,
-        format!("initial Codex quota refresh failed ({})", error.code),
-    )
+fn apply_initial_model_issue(record: &mut LocalAccountRecord, issue: InitialModelIssue) {
+    record.account.last_error_code = Some(issue.code.to_string());
+    if issue.auth_error {
+        record.account.auth_state = AccountAuthState::Error;
+        record.account.health = AccountHealthState::Unhealthy;
+    } else if issue.blocked {
+        record.account.health = AccountHealthState::Blocked;
+    } else if !matches!(
+        record.account.health,
+        AccountHealthState::Blocked | AccountHealthState::Unhealthy
+    ) {
+        record.account.health = if issue.retryable {
+            AccountHealthState::Degraded
+        } else {
+            AccountHealthState::Unhealthy
+        };
+    }
 }
 
 #[cfg(test)]
@@ -876,6 +991,7 @@ mod tests {
             provider_account_id: "provider-private-id".into(),
             provider_user_id: Some("provider-user-private-id".into()),
             plan_type: Some("plus".into()),
+            subscription_active_until_ms: Some(1_788_998_400_000),
             account_is_fedramp: false,
         };
         let encoded = encode_completion_checkpoint(&checkpoint).unwrap();
@@ -920,6 +1036,29 @@ mod tests {
         assert_eq!(state.next_quota_refresh_due().unwrap(), Some(60_000));
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_initial_probe_keeps_account_with_typed_error() {
+        let mut record = account("account_saved", "provider-account", "refresh-token");
+        record.models.clear();
+        apply_initial_model_issue(
+            &mut record,
+            initial_model_issue(&ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Unauthorized,
+                retryable: false,
+                http_status: Some(401),
+            }),
+        );
+
+        assert_eq!(record.account.id, "account_saved");
+        assert!(record.models.is_empty());
+        assert_eq!(record.account.auth_state, AccountAuthState::Error);
+        assert_eq!(record.account.health, AccountHealthState::Unhealthy);
+        assert_eq!(
+            record.account.last_error_code.as_deref(),
+            Some("models_unauthorized")
+        );
     }
 
     #[test]

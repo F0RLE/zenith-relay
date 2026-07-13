@@ -1,5 +1,5 @@
-import { Activity, Cable, ChevronDown, CircleHelp, Gauge, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, UserRoundCog } from "lucide-react";
-import { useState } from "react";
+import { Activity, Cable, Check, ChevronDown, CircleHelp, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, UserRoundCog, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
@@ -24,18 +24,48 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
 
 export function RelayShell() {
   const { t } = useTranslation();
-  const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
-  const [collapsed, setCollapsed] = useState(false);
+  const { mode, setMode, page, setPage, feedback, clearFeedback, loading, resetOnboarding } = useRelayState();
+  const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
   const [modeOpen, setModeOpen] = useState(false);
+  const modePickerRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const visiblePages = pages.filter((item) => !(item.id === "pool" && mode === "zenith"));
+
+  useEffect(() => {
+    if (contentRef.current) {
+      contentRef.current.scrollTop = 0;
+      contentRef.current.scrollLeft = 0;
+    }
+  }, [mode, page]);
+
+  useEffect(() => {
+    const closePopovers = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!modePickerRef.current?.contains(target)) setModeOpen(false);
+      document.querySelectorAll<HTMLDetailsElement>(".relay-action-menu[open]").forEach((menu) => {
+        if (!menu.contains(target)) menu.open = false;
+      });
+    };
+    const closeWithEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setModeOpen(false);
+      document.querySelectorAll<HTMLDetailsElement>(".relay-action-menu[open]").forEach((menu) => { menu.open = false; });
+    };
+    document.addEventListener("pointerdown", closePopovers);
+    document.addEventListener("keydown", closeWithEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closePopovers);
+      document.removeEventListener("keydown", closeWithEscape);
+    };
+  }, []);
 
   return (
     <div className={`relay-shell ${collapsed ? "sidebar-collapsed" : ""}`} data-mode={mode} data-page={page}>
       <aside className="relay-sidebar">
-        <div className="mode-picker">
+        <div className="mode-picker" ref={modePickerRef}>
           <button
             type="button"
-            aria-label={t(`modes.${mode}`)}
+            aria-label={`${t("common.mode")}: ${t(`modes.${mode}`)}`}
             title={t(`modes.${mode}`)}
             aria-haspopup="menu"
             aria-expanded={modeOpen}
@@ -49,7 +79,8 @@ export function RelayShell() {
             <div className="mode-menu" role="menu">
               {(["local", "remote", "zenith"] as RelayMode[]).map((value) => (
                 <button
-                  role="menuitem"
+                  role="menuitemradio"
+                  aria-checked={mode === value}
                   key={value}
                   type="button"
                   onClick={() => {
@@ -59,6 +90,7 @@ export function RelayShell() {
                 >
                   <ModeIcon mode={value} />
                   <span>{t(`modes.${value}`)}</span>
+                  {mode === value ? <Check className="mode-check" aria-hidden /> : null}
                 </button>
               ))}
             </div>
@@ -81,11 +113,10 @@ export function RelayShell() {
           ))}
         </nav>
         <div className="sidebar-footer">
-          <button type="button" aria-label={t("common.help")} title={t("common.help")}>
+          <button className="sidebar-help" type="button" aria-label={t("common.help")} title={t("common.help")} onClick={resetOnboarding}>
             <CircleHelp aria-hidden />
-            <span>{t("common.help")}</span>
+            <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v1.0.5</small></span>
           </button>
-          <small>v1.0.5</small>
           <IconButton
             label={collapsed ? t("shell.expand") : t("shell.collapse")}
             icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
@@ -93,11 +124,11 @@ export function RelayShell() {
           />
         </div>
       </aside>
-      <div className="relay-content">
+      <div className="relay-content" ref={contentRef}>
         {feedback ? (
           <div className={`global-feedback ${feedback.kind}`} role="status">
             <span>{t(feedback.key)}</span>
-            <button type="button" onClick={clearFeedback}>×</button>
+            <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
           </div>
         ) : null}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Page page={page} />}
@@ -107,7 +138,7 @@ export function RelayShell() {
 }
 
 function ModeIcon({ mode }: { mode: RelayMode }) {
-  return mode === "local" ? <LayoutDashboard aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
+  return mode === "local" ? <Laptop aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
 }
 
 function Page({ page }: { page: PageId }) {

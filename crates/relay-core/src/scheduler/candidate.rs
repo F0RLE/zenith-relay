@@ -96,6 +96,17 @@ impl RuntimeCandidate {
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
     ) -> bool {
+        self.is_configured(model, allowed_protocols, scope)
+            && self.health.is_eligible()
+            && self.quota.is_eligible()
+    }
+
+    pub(crate) fn is_configured(
+        &self,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+    ) -> bool {
         self.enabled
             && !self.draining
             && self.secret_available
@@ -104,8 +115,6 @@ impl RuntimeCandidate {
             && self.model_rules.allows(model)
             && scope.includes(self)
             && scope.model_rules.allows(model)
-            && self.health.is_eligible()
-            && self.quota.is_eligible()
     }
 
     pub fn retry_at_if_visible(

@@ -150,11 +150,12 @@ impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
     pub session_affinity_ttl: Option<Duration>,
     pub max_affinity_entries: usize,
+    pub hidden_models: Vec<String>,
 }
 
 impl Default for GatewayRuntimeOptions {
@@ -163,6 +164,7 @@ impl Default for GatewayRuntimeOptions {
             max_retry_candidates: 3,
             session_affinity_ttl: Some(Duration::from_secs(3_600)),
             max_affinity_entries: 4_096,
+            hidden_models: Vec::new(),
         }
     }
 }
@@ -443,7 +445,9 @@ impl GatewayRuntime {
             );
         }
 
+        let hidden_models = normalized_set(options.hidden_models.iter());
         let mut runtime_keys = Vec::new();
+        let mut configured_key_rules = Vec::new();
         let mut key_ids = HashSet::new();
         for key in keys {
             key.key.validate()?;
@@ -452,16 +456,24 @@ impl GatewayRuntime {
                     "local gateway key ids must be unique".to_string(),
                 ));
             }
+            let scope = CandidateScope {
+                source_ids: key.source_ids.map(|ids| normalized_set(ids.iter())),
+                account_ids: key.account_ids.map(|ids| normalized_set(ids.iter())),
+                model_rules: ModelRules::default(),
+            };
+            let base_model_rules = ModelRules {
+                allowed: normalized_set(key.allowed_models.iter()),
+                excluded: normalized_set(key.excluded_models.iter()),
+            };
+            configured_key_rules.push((key.enabled, scope.clone(), base_model_rules.clone()));
+            let mut model_rules = base_model_rules;
+            model_rules.excluded.extend(hidden_models.iter().cloned());
             runtime_keys.push(RuntimeKey {
                 id: key.key.id,
                 enabled: key.enabled,
                 secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
-                scope: CandidateScope {
-                    source_ids: key.source_ids.map(|ids| normalized_set(ids.iter())),
-                    account_ids: key.account_ids.map(|ids| normalized_set(ids.iter())),
-                    model_rules: ModelRules::default(),
-                },
-                model_rules: model_rules(key.allowed_models, key.excluded_models),
+                scope,
+                model_rules,
                 model_prefix: normalize_prefix(key.model_prefix),
             });
         }
@@ -476,20 +488,21 @@ impl GatewayRuntime {
                 "at least one enabled local gateway key is required".to_string(),
             ));
         }
-        let has_usable_key = runtime_keys.iter().filter(|key| key.enabled).any(|key| {
-            registry
-                .visible_models(
-                    &scheduler,
-                    &key.scope,
-                    &[WireApi::Responses, WireApi::ChatCompletions],
-                    current_time_ms(),
-                )
-                .into_iter()
-                .any(|model| key.model_rules.allows(&model))
-        });
+        let protocols = [WireApi::Responses, WireApi::ChatCompletions];
+        let has_usable_key = configured_key_rules
+            .iter()
+            .filter(|(enabled, _, _)| *enabled)
+            .any(|(_, scope, model_rules)| {
+                scheduler.candidates().any(|candidate| {
+                    candidate.models.iter().any(|model| {
+                        model_rules.allows(model)
+                            && candidate.is_configured(model, &protocols, scope)
+                    })
+                })
+            });
         if !has_usable_key {
             return Err(Error::Validation(
-                "no enabled local key can reach an eligible Responses candidate".to_string(),
+                "no enabled local key can reach a configured Responses candidate".to_string(),
             ));
         }
 
@@ -1037,6 +1050,7 @@ fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'
         .then(|| &value[prefix.len()..])
 }
 
+#[cfg(test)]
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1157,5 +1171,32 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no enabled local key"));
+    }
+
+    #[test]
+    fn global_hidden_models_apply_to_listing_and_requests() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-a",
+                "a",
+                &["gpt-new", "gpt-old"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+            GatewayRuntimeOptions {
+                hidden_models: vec!["GPT-OLD".into()],
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+
+        assert_eq!(
+            runtime.visible_models(&authenticated, &[WireApi::Responses], current_time_ms()),
+            vec!["gpt-new"]
+        );
+        assert!(runtime.resolve_model(&authenticated, "gpt-old").is_none());
     }
 }

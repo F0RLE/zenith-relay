@@ -1,8 +1,8 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
-use std::{path::Path, sync::Mutex};
-use zenith_relay_core::UsageEvent;
+use std::{collections::HashMap, path::Path, sync::Mutex};
+use zenith_relay_core::{estimate_api_equivalent, ApiEquivalentSummary, UsageEvent};
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -75,6 +75,12 @@ pub struct UsageLog {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+}
+
+#[derive(Default)]
+pub struct UsageEquivalents {
+    pub accounts: HashMap<String, ApiEquivalentSummary>,
+    pub sources: HashMap<String, ApiEquivalentSummary>,
 }
 
 impl TelemetryDb {
@@ -195,6 +201,50 @@ impl TelemetryDb {
         Ok(logs)
     }
 
+    pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+                    COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model),
+                    SUM(input_tokens), SUM(output_tokens), SUM(total_tokens)
+                 FROM request_logs
+                 GROUP BY 1, 2, 3",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                let input_tokens: Option<i64> = row.get(3)?;
+                let output_tokens: Option<i64> = row.get(4)?;
+                let total_tokens: Option<i64> = row.get(5)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    estimate_api_equivalent(
+                        row.get::<_, Option<String>>(2)?.as_deref(),
+                        input_tokens.map(rust_u64),
+                        output_tokens.map(rust_u64),
+                        total_tokens.map(rust_u64),
+                    ),
+                ))
+            })
+            .map_err(db_error)?;
+        let mut equivalents = UsageEquivalents::default();
+        for row in rows {
+            let (kind, id, estimate) = row.map_err(db_error)?;
+            let values = if kind == "account" {
+                &mut equivalents.accounts
+            } else {
+                &mut equivalents.sources
+            };
+            values.entry(id).or_default().merge(estimate);
+        }
+        Ok(equivalents)
+    }
+
     pub fn clear(&self) -> Result<()> {
         self.connection
             .lock()
@@ -311,6 +361,50 @@ mod tests {
         assert_eq!(logs.len(), 2);
         assert_eq!(logs[0].attempt, 2);
         assert_eq!(logs[1].attempt, 1);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn api_equivalents_group_priced_and_unknown_usage_by_candidate() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-equivalent-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let event = UsageEvent {
+            request_id: "req_equivalent".into(),
+            attempt: 1,
+            local_key_id: "key_1".into(),
+            source_id: "source_1".into(),
+            candidate_id: Some("account_1".into()),
+            account_id: Some("account_1".into()),
+            requested_model: Some("gpt-5.4".into()),
+            resolved_model: Some("gpt-5.4".into()),
+            wire_api: WireApi::Responses,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 12,
+            ttft_ms: None,
+            input_tokens: Some(20),
+            output_tokens: Some(8),
+            total_tokens: Some(28),
+        };
+        database.record(&event).unwrap();
+        let equivalents = database.api_equivalents().unwrap();
+        assert_eq!(
+            equivalents.accounts.get("account_1"),
+            Some(&ApiEquivalentSummary {
+                micro_usd: 170,
+                priced_tokens: 28,
+                unpriced_tokens: 0,
+            })
+        );
+        assert!(equivalents.sources.is_empty());
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

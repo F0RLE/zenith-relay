@@ -47,6 +47,8 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 2 => migrate_v2_to_v3(root, &gateway_path)?,
                 3 => migrate_v3_to_v4(root)?,
                 4 => migrate_v4_to_v5(root, &gateway_path)?,
+                5 => migrate_v5_to_v6(root, &gateway_path)?,
+                6 => migrate_v6_to_v7(root, &gateway_path)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -66,6 +68,66 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v6_to_v7(root: &Path, gateway_path: &Path) -> Result<()> {
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway
+        .entry("hiddenModels")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    save_json(gateway_path, gateway)
+}
+
+fn migrate_v5_to_v6(root: &Path, gateway_path: &Path) -> Result<()> {
+    migrate_record_defaults(root, "sources.json", &[("inPool", Value::Bool(false))])?;
+    let path = root.join("records").join("accounts.json");
+    let mut records =
+        load_json_or_quarantine::<Value>(root, &path)?.unwrap_or_else(|| Value::Array(Vec::new()));
+    let records = records.as_array_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "accounts.json must contain an array",
+        )
+    })?;
+    for record in records.iter_mut() {
+        let account = record
+            .get_mut("account")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "accounts.json records must contain an account object",
+                )
+            })?;
+        account
+            .entry("inPool")
+            .or_insert_with(|| Value::Bool(false));
+    }
+    save_json(&path, &records)?;
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway
+        .entry("quotaRefreshIntervalSeconds")
+        .or_insert_with(|| Value::from(300));
+    gateway
+        .entry("quotaRequestTimeoutSeconds")
+        .or_insert_with(|| Value::from(20));
+    save_json(gateway_path, gateway)
 }
 
 fn migrate_v4_to_v5(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -468,6 +530,42 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(gateway["commonProxyConfigured"], false);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v5_connections_outside_the_pool() {
+        let root = temp_root();
+        write_v3_store(&root);
+        migrate_v3_to_v4(&root).unwrap();
+        let gateway_path = root.join("settings").join("gateway.json");
+        migrate_v4_to_v5(&root, &gateway_path).unwrap();
+        save_json(
+            &root.join("records").join("accounts.json"),
+            &vec![serde_json::json!({"account": {"id": "account_1", "label": "Preserved"}})],
+        )
+        .unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 5 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let sources: Value = load_json(&root.join("records").join("sources.json"))
+            .unwrap()
+            .unwrap();
+        let accounts: Value = load_json(&root.join("records").join("accounts.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(sources[0]["inPool"], false);
+        assert_eq!(accounts[0]["account"]["inPool"], false);
+        assert_eq!(accounts[0]["account"]["label"], "Preserved");
+        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        assert_eq!(gateway["hiddenModels"], Value::Array(Vec::new()));
         fs::remove_dir_all(root).unwrap();
     }
 

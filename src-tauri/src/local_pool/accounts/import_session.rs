@@ -13,9 +13,9 @@ use std::{
 use uuid::Uuid;
 
 const SNAPSHOT_VERSION: u32 = 1;
-const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_DEPTH: usize = 16;
-const MAX_SNAPSHOT_NODES: usize = 16_384;
+const MAX_SNAPSHOT_NODES: usize = 65_536;
 const MAX_SNAPSHOT_STRING_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -919,6 +919,61 @@ mod tests {
             state.values.remove(secret_ref);
             Ok(())
         }
+    }
+
+    #[derive(Clone)]
+    struct VaultSecrets(Arc<crate::local_pool::store::vault::Vault>);
+
+    impl SecretBackend for VaultSecrets {
+        fn save(&self, secret_ref: &str, value: &str) -> Result<(), SecretBackendError> {
+            self.0
+                .save(secret_ref, value)
+                .map_err(|_| SecretBackendError)
+        }
+
+        fn load(&self, secret_ref: &str) -> Result<Option<String>, SecretBackendError> {
+            self.0.load(secret_ref).map_err(|_| SecretBackendError)
+        }
+
+        fn delete(&self, secret_ref: &str) -> Result<(), SecretBackendError> {
+            self.0
+                .delete(secret_ref)
+                .map(|_| ())
+                .map_err(|_| SecretBackendError)
+        }
+    }
+
+    #[test]
+    fn encrypted_vault_resumes_the_maximum_import_batch() {
+        let root = temp_root("vault-batch");
+        let vault_root = root.join("vault");
+        let secrets = VaultSecrets(Arc::new(
+            crate::local_pool::store::vault::Vault::open(&vault_root, [7; 32]).unwrap(),
+        ));
+        let content = serde_json::Value::Array(
+            (0..MAX_IMPORT_ITEMS)
+                .map(|index| {
+                    serde_json::json!({
+                        "auth_mode": "apikey",
+                        "OPENAI_API_KEY": format!("synthetic-secret-{index}"),
+                        "base_url": format!("https://provider-{index}.example.test/v1")
+                    })
+                })
+                .collect(),
+        )
+        .to_string();
+        let store = ImportSessionStore::new(root.clone(), secrets);
+        let started = store.start(&content, None, &[]).unwrap();
+        let resumed = store.resume(&started.session_id, &[]).unwrap();
+
+        assert_eq!(resumed.preview.rows.len(), MAX_IMPORT_ITEMS);
+        assert_eq!(resumed.items.len(), MAX_IMPORT_ITEMS);
+        assert!(
+            !String::from_utf8_lossy(&fs::read(vault_root.join("secrets.enc")).unwrap())
+                .contains("synthetic-secret")
+        );
+        store.cancel(&started.session_id).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

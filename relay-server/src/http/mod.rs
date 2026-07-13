@@ -4,11 +4,14 @@ mod public_api;
 
 use crate::state::AppState;
 use axum::{
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{get, patch, post},
     Router,
 };
 use std::sync::Arc;
+
+const MAX_MANAGEMENT_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn router(state: Arc<AppState>) -> Router {
     let auth = middleware::ManagementAuth::new(&state.config.management_token);
@@ -25,12 +28,21 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/sources/{id}/test", post(management_api::test_source))
         .route("/accounts", get(management_api::list_accounts))
+        .route("/pool/members", post(management_api::set_pool_membership))
+        .route(
+            "/pool/quota/refresh",
+            post(management_api::refresh_pool_accounts),
+        )
         .route("/accounts/export", post(management_api::export_accounts))
         .route(
             "/accounts/{id}/identity/reveal",
             post(management_api::reveal_account_identity),
         )
         .route("/proxies/common", post(management_api::set_common_proxy))
+        .route(
+            "/proxies/policy",
+            post(management_api::set_account_proxy_required),
+        )
         .route(
             "/accounts/proxies/assign",
             post(management_api::assign_account_proxies),
@@ -60,6 +72,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(management_api::set_account_proxy),
         )
         .route(
+            "/accounts/{id}/refresh",
+            post(management_api::refresh_account),
+        )
+        .route(
             "/keys",
             get(management_api::list_keys).post(management_api::create_key),
         )
@@ -69,7 +85,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/keys/{id}/rotate", post(management_api::rotate_key))
         .route("/quota", get(management_api::quota))
+        .route("/quota/settings", post(management_api::set_quota_policy))
         .route("/models", get(management_api::models))
+        .route("/models/rules", post(management_api::set_model_enabled))
         .route(
             "/usage",
             get(management_api::usage).delete(management_api::clear_usage),
@@ -90,7 +108,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             post(management_api::test_wake_task),
         )
         .route("/wake-history", get(management_api::wake_history))
-        .route_layer(from_fn_with_state(auth, middleware::require_management));
+        .route_layer(from_fn_with_state(auth, middleware::require_management))
+        .layer(DefaultBodyLimit::max(MAX_MANAGEMENT_BODY_BYTES));
 
     Router::new()
         .route("/health", get(management_api::health))

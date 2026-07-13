@@ -22,5 +22,8 @@ pub use scheduler::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, PoolScheduler,
     RuntimeCandidate, Selection, SelectionRequest,
 };
-pub use sources::{LocalGatewayKey, ProviderSource, WireApi};
-pub use usage::{UsageCallback, UsageEvent};
+pub use sources::{source_points_to_gateway, LocalGatewayKey, ProviderSource, WireApi};
+pub use usage::{
+    api_model_price, estimate_api_equivalent, ApiEquivalentSummary, ApiModelPrice, UsageCallback,
+    UsageEvent,
+};

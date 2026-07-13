@@ -25,10 +25,17 @@ export type QuotaSnapshot = {
   error: { code: string; observedAtMs: number } | null;
 };
 
+export type ApiEquivalentSummary = {
+  microUsd: number;
+  pricedTokens: number;
+  unpricedTokens: number;
+};
+
 export type SourceSummary = {
   id: string;
   name: string;
   enabled: boolean;
+  inPool: boolean;
   draining: boolean;
   baseUrl: string;
   wireApi: "responses" | "chat_completions" | "messages";
@@ -37,6 +44,7 @@ export type SourceSummary = {
   excludedModels: string[];
   priority: number;
   weight: number;
+  apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
 };
@@ -46,6 +54,7 @@ export type AccountSummary = {
   label: string;
   identityHint: string;
   enabled: boolean;
+  inPool: boolean;
   draining: boolean;
   authState: string | { state: string; reason?: string };
   health: string;
@@ -54,6 +63,7 @@ export type AccountSummary = {
   excludedModels: string[];
   priority: number;
   weight: number;
+  apiEquivalent: ApiEquivalentSummary;
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   secretAvailable: boolean;
@@ -78,6 +88,15 @@ export type KeySummary = {
   modelPrefix: string | null;
   createdAtMs: number;
   lastUsedAtMs: number | null;
+};
+
+export type ModelSummary = {
+  id: string;
+  enabled: boolean;
+  memberCount: number;
+  catalogRank: number | null;
+  inputMicroUsdPerMillion: number | null;
+  outputMicroUsdPerMillion: number | null;
 };
 
 export type WakeTask = {
@@ -114,8 +133,12 @@ export type RuntimeSnapshot = {
     baseUrl: string;
     candidateCount: number;
     visibleModelIds: string[];
+    models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
+    accountProxyRequired?: boolean;
+    quotaRefreshIntervalSeconds?: number;
+    quotaRequestTimeoutSeconds?: number;
   };
   platform: string;
   capabilities: { features: string[]; [key: string]: unknown };
@@ -174,6 +197,8 @@ export type UsageExportRow = {
   model: string | null;
   connection: string;
   latencyMs: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
   tokens: number | null;
   requestId: string | null;
   httpStatus: number | null;
@@ -205,6 +230,7 @@ export type RemoteUsage = {
   localKeyId: string;
   candidateKind: string;
   candidateHint: string;
+  candidateLabel?: string | null;
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: "responses" | "chat_completions" | "messages";
@@ -255,6 +281,8 @@ export type ImportSession = {
       quotaStatus: string;
       status: string;
       plan?: string;
+      expiresAt?: string;
+      subscriptionExpiresAt?: string;
       defaultSelected: boolean;
       selectable: boolean;
       existing: boolean;
@@ -294,8 +322,16 @@ export type RemoteTarget = {
 
 export type ProfileBinding = {
   profileDir: string;
-  credentialKind: string;
+  credentialKind: "oauth_account" | "api_key" | "local_gateway";
   credentialId: string;
+  boundOauthAccountId: string | null;
+};
+
+export type ProfileActivation = {
+  binding: ProfileBinding;
+  previousCredentialKind: ProfileBinding["credentialKind"] | null;
+  repairRecommended: boolean;
+  stoppedRunningClient: boolean;
 };
 
 export type OpenCodeProfileState = {

@@ -14,6 +14,7 @@ pub use state::DesktopState;
 pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let root = crate::platform::local_pool_dir(app)
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;
+    store::secret_store::initialize(&root)?;
     let state = DesktopState::open(root)?;
     state.set_app_handle(app.clone());
     Ok(state)

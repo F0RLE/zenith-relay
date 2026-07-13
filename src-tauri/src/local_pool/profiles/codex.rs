@@ -9,7 +9,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    fs,
+    fmt, fs,
     path::{Path, PathBuf},
 };
 use toml_edit::{value, DocumentMut, Item, Table};
@@ -20,6 +20,7 @@ const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
 const ACCOUNT_BACKUP_PREFIX: &str = "codex-account-";
+const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,8 +28,14 @@ struct ProfileBackup {
     version: u32,
     previous_model_provider: Option<String>,
     previous_auth_secret_ref: Option<String>,
+    #[serde(default)]
+    managed_key_id: String,
     managed_key_hash: String,
     managed_base_url: String,
+    #[serde(default)]
+    bound_oauth_account_id: Option<String>,
+    #[serde(default)]
+    managed_oauth_access_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -46,6 +53,8 @@ struct AccountProfileBackup {
 #[serde(rename_all = "snake_case")]
 pub enum ProfileCredentialKind {
     OAuthAccount,
+    ApiKey,
+    LocalGateway,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -54,29 +63,77 @@ pub struct ProfileBinding {
     pub profile_dir: String,
     pub credential_kind: ProfileCredentialKind,
     pub credential_id: String,
+    pub bound_oauth_account_id: Option<String>,
+}
+
+pub(crate) struct BoundOAuthProfile<'a> {
+    pub account_id: &'a str,
+    pub tokens: &'a TokenSet,
+    pub provider_account_id: &'a str,
+}
+
+pub(crate) struct ManagedAccountTokenUpdate {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub id_token: Option<String>,
+}
+
+impl fmt::Debug for ManagedAccountTokenUpdate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ManagedAccountTokenUpdate")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("id_token", &self.id_token.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
 }
 
 pub fn attach(
     codex_home: &Path,
     backup_root: &Path,
+    key_id: &str,
     base_url: &str,
     local_key: &str,
-) -> Result<()> {
-    attach_with(
+) -> Result<ProfileBinding> {
+    switch_to_local_with(
         codex_home,
         backup_root,
+        key_id,
         base_url,
         local_key,
+        None,
+        &OsSecretBackend,
+    )
+}
+
+pub(crate) fn attach_with_oauth(
+    codex_home: &Path,
+    backup_root: &Path,
+    key_id: &str,
+    base_url: &str,
+    local_key: &str,
+    bound_oauth: BoundOAuthProfile<'_>,
+) -> Result<ProfileBinding> {
+    switch_to_local_with(
+        codex_home,
+        backup_root,
+        key_id,
+        base_url,
+        local_key,
+        Some(bound_oauth),
         &OsSecretBackend,
     )
 }
 
 pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
+    let _profile_guard = lock_codex_profile();
+    ensure_single_profile_backup(codex_home, backup_root)?;
     if account_backup_for_profile(codex_home, backup_root)?.is_some() {
-        restore_account_profile(codex_home, backup_root)?;
+        restore_account_locked(codex_home, backup_root, &OsSecretBackend)?;
         return Ok(());
     }
-    restore_with(codex_home, backup_root, &OsSecretBackend)
+    restore_local_locked(codex_home, backup_root, &OsSecretBackend)
 }
 
 pub fn attach_account(
@@ -86,7 +143,7 @@ pub fn attach_account(
     tokens: &TokenSet,
     provider_account_id: &str,
 ) -> Result<ProfileBinding> {
-    attach_account_with(
+    switch_to_account_with(
         codex_home,
         backup_root,
         account_id,
@@ -100,7 +157,52 @@ pub fn restore_account_profile(
     codex_home: &Path,
     backup_root: &Path,
 ) -> Result<Option<ProfileBinding>> {
-    restore_account_with(codex_home, backup_root, &OsSecretBackend)
+    let _profile_guard = lock_codex_profile();
+    restore_account_locked(codex_home, backup_root, &OsSecretBackend)
+}
+
+pub fn credential_kind(
+    codex_home: &Path,
+    backup_root: &Path,
+) -> Result<Option<ProfileCredentialKind>> {
+    let _profile_guard = lock_codex_profile();
+    credential_kind_locked(codex_home, backup_root)
+}
+
+pub(crate) fn active_managed_account_id(
+    codex_home: &Path,
+    backup_root: &Path,
+) -> Result<Option<String>> {
+    let _profile_guard = lock_codex_profile();
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    if let Some(path) = account_backup_for_profile(codex_home, backup_root)? {
+        let snapshot = read_optional_bytes(&path)?;
+        return Ok(parse_account_backup_snapshot(&snapshot, &path)?
+            .map(|backup| backup.managed_account_id));
+    }
+    Ok(local_backup(backup_root)?.and_then(|backup| backup.bound_oauth_account_id))
+}
+
+pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<ProfileBinding>> {
+    let _profile_guard = lock_codex_profile();
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    let mut bindings = account_bindings(backup_root)?;
+    if let Some(backup) = local_backup(backup_root)? {
+        bindings.push(ProfileBinding {
+            profile_dir: canonical_profile_dir(codex_home)?
+                .to_string_lossy()
+                .into_owned(),
+            credential_kind: ProfileCredentialKind::LocalGateway,
+            credential_id: if backup.managed_key_id.is_empty() {
+                "local_gateway".to_string()
+            } else {
+                backup.managed_key_id
+            },
+            bound_oauth_account_id: backup.bound_oauth_account_id,
+        });
+    }
+    bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
+    Ok(bindings)
 }
 
 pub fn account_bindings(backup_root: &Path) -> Result<Vec<ProfileBinding>> {
@@ -122,6 +224,146 @@ pub fn account_bindings(backup_root: &Path) -> Result<Vec<ProfileBinding>> {
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
     Ok(bindings)
+}
+
+pub(crate) fn managed_account_token_update(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    current_access_token: &str,
+    provider_account_id: &str,
+) -> Result<Option<ManagedAccountTokenUpdate>> {
+    let _profile_guard = lock_codex_profile();
+    let current_hash = key_hash(current_access_token);
+    let mut update = None;
+
+    if backup_root.exists() {
+        for entry in fs::read_dir(backup_root).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with(ACCOUNT_BACKUP_PREFIX) || !name.ends_with(".json") {
+                continue;
+            }
+            let backup_path = entry.path();
+            let content = fs::read_to_string(&backup_path)
+                .map_err(|error| io_error_at(&backup_path, error))?;
+            let backup = parse_account_backup(&content, &backup_path)?;
+            if backup.managed_account_id != account_id || backup.managed_access_hash != current_hash
+            {
+                continue;
+            }
+            merge_managed_token_update(
+                &mut update,
+                read_managed_account_token_update(
+                    Path::new(&backup.profile_dir),
+                    current_access_token,
+                    provider_account_id,
+                )?,
+            )?;
+        }
+    }
+
+    if let Some(backup) = local_backup(backup_root)? {
+        if backup.bound_oauth_account_id.as_deref() == Some(account_id)
+            && backup.managed_oauth_access_hash.as_deref() == Some(current_hash.as_str())
+        {
+            merge_managed_token_update(
+                &mut update,
+                read_managed_account_token_update(
+                    codex_home,
+                    current_access_token,
+                    provider_account_id,
+                )?,
+            )?;
+        }
+    }
+
+    Ok(update)
+}
+
+fn read_managed_account_token_update(
+    profile_dir: &Path,
+    current_access_token: &str,
+    provider_account_id: &str,
+) -> Result<Option<ManagedAccountTokenUpdate>> {
+    if !profile_dir.exists() {
+        return Ok(None);
+    }
+    let profile_dir = canonical_profile_dir(profile_dir)?;
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let snapshot = read_optional_bytes(&auth_path)?;
+    let Some(content) = snapshot_text(&snapshot, &auth_path)? else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Ok(None);
+    };
+    if value.get("auth_mode").and_then(serde_json::Value::as_str) != Some("chatgpt") {
+        return Ok(None);
+    }
+    let Some(tokens) = value.get("tokens").and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    if tokens
+        .get("account_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        != Some(provider_account_id)
+    {
+        return Ok(None);
+    }
+    let Some(access_token) = managed_token(tokens, "access_token") else {
+        return Ok(None);
+    };
+    if access_token == current_access_token {
+        return Ok(None);
+    }
+    let Some(refresh_token) = managed_token(tokens, "refresh_token") else {
+        return Ok(None);
+    };
+    let id_token = managed_token(tokens, "id_token").map(str::to_string);
+    Ok(Some(ManagedAccountTokenUpdate {
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+        id_token,
+    }))
+}
+
+fn managed_token<'a>(
+    tokens: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<&'a str> {
+    tokens
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= MAX_MANAGED_TOKEN_BYTES
+                && !value.bytes().any(|byte| byte.is_ascii_control())
+        })
+}
+
+fn merge_managed_token_update(
+    current: &mut Option<ManagedAccountTokenUpdate>,
+    next: Option<ManagedAccountTokenUpdate>,
+) -> Result<()> {
+    let Some(next) = next else {
+        return Ok(());
+    };
+    if current.as_ref().is_some_and(|current| {
+        current.access_token != next.access_token
+            || current.refresh_token != next.refresh_token
+            || current.id_token != next.id_token
+    }) {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "managed Codex profiles contain conflicting token generations",
+        ));
+    }
+    *current = Some(next);
+    Ok(())
 }
 
 pub fn sync_account_bindings(
@@ -150,6 +392,122 @@ pub fn sync_account_bindings(
     Ok(updated)
 }
 
+pub fn sync_local_gateway_binding(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    tokens: &TokenSet,
+    provider_account_id: &str,
+) -> Result<bool> {
+    let _profile_guard = lock_codex_profile();
+    let backup_path = backup_path(backup_root);
+    let backup_bytes = read_optional_bytes(&backup_path)?;
+    let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
+        return Ok(false);
+    };
+    if backup.bound_oauth_account_id.as_deref() != Some(account_id) {
+        return Ok(false);
+    }
+    if tokens.id_token().is_none() {
+        return Ok(false);
+    }
+    let next_hash = key_hash(tokens.access_token());
+    if backup.managed_oauth_access_hash.as_deref() == Some(next_hash.as_str()) {
+        return Ok(false);
+    }
+
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let auth = read_optional_bytes(&auth_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    let auth_matches_previous = managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
+    let auth_matches_next = account_auth_matches_snapshot(&auth, &auth_path, &next_hash)?;
+    if !managed_config_matches(&document, &backup) || (!auth_matches_previous && !auth_matches_next)
+    {
+        return Ok(false);
+    }
+
+    backup.managed_oauth_access_hash = Some(next_hash);
+    let updated_backup = serialize_backup(&backup)?;
+    replace_if_unchanged(&backup_path, &backup_bytes, &updated_backup)?;
+    if auth_matches_next {
+        return Ok(true);
+    }
+    let updated_auth = account_auth_content(tokens, provider_account_id)?;
+    if let Err(error) = replace_if_unchanged(&auth_path, &auth, &updated_auth) {
+        return Err(with_rollback(
+            error,
+            rollback_file(&backup_path, &updated_backup, &backup_bytes),
+        ));
+    }
+    Ok(true)
+}
+
+fn switch_to_local_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    key_id: &str,
+    base_url: &str,
+    local_key: &str,
+    bound_oauth: Option<BoundOAuthProfile<'_>>,
+    secrets: &impl SecretBackend,
+) -> Result<ProfileBinding> {
+    let _profile_guard = lock_codex_profile();
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    if account_backup_for_profile(codex_home, backup_root)?.is_some() {
+        restore_account_locked(codex_home, backup_root, secrets)?;
+    }
+    attach_local_locked(
+        codex_home,
+        backup_root,
+        key_id,
+        base_url,
+        local_key,
+        bound_oauth,
+        secrets,
+    )?;
+    let backup = local_backup(backup_root)?.ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "Codex local gateway profile backup is missing after attach",
+        )
+    })?;
+    Ok(ProfileBinding {
+        profile_dir: canonical_profile_dir(codex_home)?
+            .to_string_lossy()
+            .into_owned(),
+        credential_kind: ProfileCredentialKind::LocalGateway,
+        credential_id: key_id.to_string(),
+        bound_oauth_account_id: backup.bound_oauth_account_id,
+    })
+}
+
+fn switch_to_account_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    tokens: &TokenSet,
+    provider_account_id: &str,
+    secrets: &impl SecretBackend,
+) -> Result<ProfileBinding> {
+    let _profile_guard = lock_codex_profile();
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    if backup_path(backup_root).exists() {
+        restore_local_locked(codex_home, backup_root, secrets)?;
+    }
+    attach_account_locked(
+        codex_home,
+        backup_root,
+        account_id,
+        tokens,
+        provider_account_id,
+        secrets,
+    )
+}
+
+#[cfg(test)]
 fn attach_with(
     codex_home: &Path,
     backup_root: &Path,
@@ -158,12 +516,34 @@ fn attach_with(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let _profile_guard = lock_codex_profile();
+    attach_local_locked(
+        codex_home,
+        backup_root,
+        "local_gateway",
+        base_url,
+        local_key,
+        None,
+        secrets,
+    )
+}
+
+fn attach_local_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    key_id: &str,
+    base_url: &str,
+    local_key: &str,
+    bound_oauth: Option<BoundOAuthProfile<'_>>,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let key_id = key_id.trim();
     let local_key = local_key.trim();
     let base_url = base_url.trim_end_matches('/');
-    if local_key.is_empty() || base_url.is_empty() {
+    let bound_oauth = normalize_bound_oauth(bound_oauth)?;
+    if key_id.is_empty() || local_key.is_empty() || base_url.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "profile base URL and local key are required",
+            "profile key ID, base URL, and local key are required",
         ));
     }
     fs::create_dir_all(codex_home).map_err(io_error)?;
@@ -198,7 +578,7 @@ fn attach_with(
         return Err(profile_restore_blocked());
     }
     if let Some(backup) = existing_backup.as_ref() {
-        if !auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup.managed_key_hash)? {
+        if !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)? {
             return Err(profile_restore_blocked());
         }
     }
@@ -208,8 +588,11 @@ fn attach_with(
         version: 1,
         previous_model_provider: root_model_provider(&document),
         previous_auth_secret_ref: None,
+        managed_key_id: String::new(),
         managed_key_hash: String::new(),
         managed_base_url: String::new(),
+        bound_oauth_account_id: None,
+        managed_oauth_access_hash: None,
     });
     if created_backup {
         if let Some(previous_auth) = original_auth.filter(|value| !value.trim().is_empty()) {
@@ -217,8 +600,18 @@ fn attach_with(
             backup.previous_auth_secret_ref = Some(BACKUP_SECRET_REF.to_string());
         }
     }
+    backup.managed_key_id = key_id.to_string();
     backup.managed_key_hash = key_hash(local_key);
     backup.managed_base_url = base_url.to_string();
+    let managed_oauth_access_hash = bound_oauth
+        .as_ref()
+        .filter(|oauth| oauth.tokens.id_token().is_some())
+        .map(|oauth| key_hash(oauth.tokens.access_token()));
+    let project_bound_oauth = managed_oauth_access_hash.is_some();
+    backup.bound_oauth_account_id = bound_oauth
+        .as_ref()
+        .map(|oauth| oauth.account_id.to_string());
+    backup.managed_oauth_access_hash = managed_oauth_access_hash;
     let backup_content = serialize_backup(&backup)?;
     if let Err(error) = replace_if_unchanged(&backup_path, &original_backup_bytes, &backup_content)
     {
@@ -244,7 +637,12 @@ fn attach_with(
             ),
         ));
     }
-    let managed_auth = auth_content(local_key);
+    let managed_auth = match bound_oauth {
+        Some(oauth) if project_bound_oauth => {
+            account_auth_content(oauth.tokens, oauth.provider_account_id)?
+        }
+        Some(_) | None => auth_content(local_key),
+    };
     if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
         let backup_rollback = rollback_backup(
@@ -263,8 +661,42 @@ fn attach_with(
     Ok(())
 }
 
+fn normalize_bound_oauth(
+    bound_oauth: Option<BoundOAuthProfile<'_>>,
+) -> Result<Option<BoundOAuthProfile<'_>>> {
+    let Some(bound_oauth) = bound_oauth else {
+        return Ok(None);
+    };
+    let account_id = bound_oauth.account_id.trim();
+    let provider_account_id = bound_oauth.provider_account_id.trim();
+    if account_id.is_empty()
+        || account_id.chars().any(char::is_control)
+        || provider_account_id.is_empty()
+        || bound_oauth.tokens.refresh_token().is_none()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "OAuth binding requires active refresh and account tokens",
+        ));
+    }
+    Ok(Some(BoundOAuthProfile {
+        account_id,
+        tokens: bound_oauth.tokens,
+        provider_account_id,
+    }))
+}
+
+#[cfg(test)]
 fn restore_with(codex_home: &Path, backup_root: &Path, secrets: &impl SecretBackend) -> Result<()> {
     let _profile_guard = lock_codex_profile();
+    restore_local_locked(codex_home, backup_root, secrets)
+}
+
+fn restore_local_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
     let backup_path = backup_path(backup_root);
     let backup_bytes = read_optional_bytes(&backup_path)?;
     let Some(backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
@@ -277,7 +709,7 @@ fn restore_with(codex_home: &Path, backup_root: &Path, secrets: &impl SecretBack
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
     if !managed_config_matches(&document, &backup)
-        || !auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup.managed_key_hash)?
+        || !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup)?
     {
         return Err(profile_restore_blocked());
     }
@@ -341,6 +773,7 @@ fn restore_with(codex_home: &Path, backup_root: &Path, secrets: &impl SecretBack
     Ok(())
 }
 
+#[cfg(test)]
 fn attach_account_with(
     codex_home: &Path,
     backup_root: &Path,
@@ -350,6 +783,24 @@ fn attach_account_with(
     secrets: &impl SecretBackend,
 ) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
+    attach_account_locked(
+        codex_home,
+        backup_root,
+        account_id,
+        tokens,
+        provider_account_id,
+        secrets,
+    )
+}
+
+fn attach_account_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    account_id: &str,
+    tokens: &TokenSet,
+    provider_account_id: &str,
+    secrets: &impl SecretBackend,
+) -> Result<ProfileBinding> {
     let account_id = account_id.trim();
     let provider_account_id = provider_account_id.trim();
     if account_id.is_empty()
@@ -458,12 +909,21 @@ fn attach_account_with(
     Ok(binding_from_backup(&backup))
 }
 
+#[cfg(test)]
 fn restore_account_with(
     codex_home: &Path,
     backup_root: &Path,
     secrets: &impl SecretBackend,
 ) -> Result<Option<ProfileBinding>> {
     let _profile_guard = lock_codex_profile();
+    restore_account_locked(codex_home, backup_root, secrets)
+}
+
+fn restore_account_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<Option<ProfileBinding>> {
     let profile_dir = canonical_profile_dir(codex_home)?;
     let backup_path = account_backup_path(backup_root, &profile_dir);
     let backup_bytes = read_optional_bytes(&backup_path)?;
@@ -571,14 +1031,19 @@ fn sync_account_profile_with(
     let config = read_optional_bytes(&config_path)?;
     let auth = read_optional_bytes(&auth_path)?;
     let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-    if !account_managed_config_matches(&document)
-        || !account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?
+    let auth_matches_previous =
+        account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
+    let auth_matches_next = account_auth_matches_snapshot(&auth, &auth_path, &next_hash)?;
+    if !account_managed_config_matches(&document) || (!auth_matches_previous && !auth_matches_next)
     {
         return Ok(false);
     }
     backup.managed_access_hash = next_hash;
     let updated_backup = serialize_account_backup(&backup)?;
     replace_if_unchanged(&backup_path, &backup_bytes, &updated_backup)?;
+    if auth_matches_next {
+        return Ok(true);
+    }
     let updated_auth = account_auth_content(tokens, provider_account_id)?;
     if let Err(error) = replace_if_unchanged(&auth_path, &auth, &updated_auth) {
         return Err(with_rollback(
@@ -657,6 +1122,47 @@ fn account_backup_for_profile(codex_home: &Path, backup_root: &Path) -> Result<O
     Ok(path.exists().then_some(path))
 }
 
+fn ensure_single_profile_backup(codex_home: &Path, backup_root: &Path) -> Result<()> {
+    if backup_path(backup_root).exists()
+        && account_backup_for_profile(codex_home, backup_root)?.is_some()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "Codex profile has conflicting local gateway and account backups",
+        ));
+    }
+    Ok(())
+}
+
+fn credential_kind_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+) -> Result<Option<ProfileCredentialKind>> {
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    if account_backup_for_profile(codex_home, backup_root)?.is_some() {
+        return Ok(Some(ProfileCredentialKind::OAuthAccount));
+    }
+    if backup_path(backup_root).exists() {
+        local_backup(backup_root)?;
+        return Ok(Some(ProfileCredentialKind::LocalGateway));
+    }
+    let auth_path = codex_home.join(AUTH_FILE);
+    let auth = read_optional_bytes(&auth_path)?;
+    let Some(content) = snapshot_text(&auth, &auth_path)? else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Ok(None);
+    };
+    Ok(
+        match value.get("auth_mode").and_then(serde_json::Value::as_str) {
+            Some("chatgpt") => Some(ProfileCredentialKind::OAuthAccount),
+            Some("apikey") => Some(ProfileCredentialKind::ApiKey),
+            _ => None,
+        },
+    )
+}
+
 fn account_backup_path(backup_root: &Path, profile_dir: &Path) -> PathBuf {
     backup_root.join(format!(
         "{ACCOUNT_BACKUP_PREFIX}{}.json",
@@ -726,6 +1232,7 @@ fn binding_from_backup(backup: &AccountProfileBackup) -> ProfileBinding {
         profile_dir: backup.profile_dir.clone(),
         credential_kind: ProfileCredentialKind::OAuthAccount,
         credential_id: backup.managed_account_id.clone(),
+        bound_oauth_account_id: None,
     }
 }
 
@@ -894,12 +1401,63 @@ fn auth_matches_snapshot(
             .is_some_and(|mode| mode == "apikey"))
 }
 
+fn managed_auth_matches_snapshot(
+    snapshot: &Option<Vec<u8>>,
+    path: &Path,
+    backup: &ProfileBackup,
+) -> Result<bool> {
+    match (
+        backup.bound_oauth_account_id.as_deref(),
+        backup.managed_oauth_access_hash.as_deref(),
+    ) {
+        (Some(account_id), Some(access_hash))
+            if !account_id.trim().is_empty() && access_hash.len() == 64 =>
+        {
+            account_auth_matches_snapshot(snapshot, path, access_hash)
+        }
+        (Some(account_id), None) if !account_id.trim().is_empty() => {
+            auth_matches_snapshot(snapshot, path, &backup.managed_key_hash)
+        }
+        (None, None) => auth_matches_snapshot(snapshot, path, &backup.managed_key_hash),
+        _ => Ok(false),
+    }
+}
+
 fn key_hash(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 fn backup_path(root: &Path) -> std::path::PathBuf {
     root.join("codex-default.json")
+}
+
+fn local_backup(root: &Path) -> Result<Option<ProfileBackup>> {
+    let path = backup_path(root);
+    let snapshot = read_optional_bytes(&path)?;
+    let backup = parse_backup_snapshot(&snapshot, &path)?;
+    if backup.as_ref().is_some_and(|value| {
+        let oauth_metadata_valid = match (
+            value.bound_oauth_account_id.as_deref(),
+            value.managed_oauth_access_hash.as_deref(),
+        ) {
+            (Some(account_id), Some(access_hash)) => {
+                !account_id.trim().is_empty() && access_hash.len() == 64
+            }
+            (Some(account_id), None) => !account_id.trim().is_empty(),
+            (None, None) => true,
+            _ => false,
+        };
+        value.version != 1
+            || value.managed_key_hash.len() != 64
+            || value.managed_base_url.trim().is_empty()
+            || !oauth_metadata_valid
+    }) {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "Codex local gateway profile backup has invalid metadata",
+        ));
+    }
+    Ok(backup)
 }
 
 fn parse_backup_snapshot(snapshot: &Option<Vec<u8>>, path: &Path) -> Result<Option<ProfileBackup>> {
@@ -1631,6 +2189,293 @@ mod tests {
     }
 
     #[test]
+    fn managed_profile_rotation_is_adopted_only_for_the_same_account() {
+        let (root, home, backups) = profile_dirs("managed-token-adoption");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        let secrets = MemorySecrets::default();
+        let original = TokenSet::new(
+            "access-original",
+            Some("refresh-original".into()),
+            Some("id-original".into()),
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+        attach_account_with(
+            &home,
+            &backups,
+            "account-local",
+            &original,
+            "provider-account",
+            &secrets,
+        )
+        .unwrap();
+
+        let rotated = TokenSet::new(
+            "access-rotated",
+            Some("refresh-rotated".into()),
+            Some("id-rotated".into()),
+            Some(120_000),
+            2,
+            2,
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            account_auth_content(&rotated, "provider-account").unwrap(),
+        )
+        .unwrap();
+        let update = managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            original.access_token(),
+            "provider-account",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.access_token, "access-rotated");
+        assert_eq!(update.refresh_token, "refresh-rotated");
+        assert_eq!(update.id_token.as_deref(), Some("id-rotated"));
+        let debug = format!("{update:?}");
+        assert!(!debug.contains("rotated"));
+
+        assert_eq!(
+            sync_account_bindings(&backups, "account-local", &rotated, "provider-account").unwrap(),
+            1
+        );
+        assert!(managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            rotated.access_token(),
+            "provider-account",
+        )
+        .unwrap()
+        .is_none());
+
+        let other = TokenSet::new(
+            "other-access",
+            Some("other-refresh".into()),
+            Some("other-id".into()),
+            Some(180_000),
+            3,
+            3,
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            account_auth_content(&other, "provider-other").unwrap(),
+        )
+        .unwrap();
+        assert!(managed_account_token_update(
+            &home,
+            &backups,
+            "account-local",
+            rotated.access_token(),
+            "provider-account",
+        )
+        .unwrap()
+        .is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn switching_account_and_local_gateway_preserves_the_original_profile() {
+        let (root, home, backups) = profile_dirs("credential-kind-switch");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new(
+            "managed-account",
+            Some("refresh".into()),
+            Some("id-token".into()),
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+
+        let local = switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(local.credential_kind, ProfileCredentialKind::LocalGateway);
+        assert_eq!(profile_bindings(&home, &backups).unwrap(), vec![local]);
+        assert_eq!(profile_backup_count(&backups), 1);
+
+        let account = switch_to_account_with(
+            &home,
+            &backups,
+            "account-local",
+            &tokens,
+            "provider-account",
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(account.credential_kind, ProfileCredentialKind::OAuthAccount);
+        assert_eq!(profile_bindings(&home, &backups).unwrap(), vec![account]);
+        assert!(!backup_path(&backups).exists());
+        assert_eq!(profile_backup_count(&backups), 1);
+
+        switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(profile_backup_count(&backups), 1);
+        restore_with(&home, &backups, &secrets).unwrap();
+
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"custom\""));
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original"));
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_gateway_projects_and_syncs_a_bound_oauth_profile() {
+        let (root, home, backups) = profile_dirs("local-gateway-bound-oauth");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new(
+            "bound-access",
+            Some("bound-refresh".into()),
+            Some("bound-id".into()),
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+
+        let binding = switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            Some(BoundOAuthProfile {
+                account_id: "account-local",
+                tokens: &tokens,
+                provider_account_id: "provider-account",
+            }),
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(
+            binding.bound_oauth_account_id.as_deref(),
+            Some("account-local")
+        );
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"zenith_relay_local\""));
+        let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
+        assert!(projected.contains("bound-access"));
+        assert!(!projected.contains("zlr_key"));
+
+        let refreshed = TokenSet::new(
+            "bound-access-refreshed",
+            Some("bound-refresh-next".into()),
+            Some("bound-id-next".into()),
+            Some(120_000),
+            2,
+            2,
+        )
+        .unwrap();
+        assert!(sync_local_gateway_binding(
+            &home,
+            &backups,
+            "account-local",
+            &refreshed,
+            "provider-account",
+        )
+        .unwrap());
+        assert!(!sync_local_gateway_binding(
+            &home,
+            &backups,
+            "account-local",
+            &refreshed,
+            "provider-account",
+        )
+        .unwrap());
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("bound-access-refreshed"));
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider = \"custom\""));
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("original"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn local_gateway_keeps_api_key_projection_when_bound_oauth_has_no_id_token() {
+        let (root, home, backups) = profile_dirs("local-gateway-bound-access-only");
+        let secrets = MemorySecrets::default();
+        let tokens = TokenSet::new(
+            "bound-access",
+            Some("bound-refresh".into()),
+            None,
+            Some(60_000),
+            1,
+            1,
+        )
+        .unwrap();
+
+        let binding = switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            Some(BoundOAuthProfile {
+                account_id: "account-local",
+                tokens: &tokens,
+                provider_account_id: "provider-account",
+            }),
+            &secrets,
+        )
+        .unwrap();
+        assert_eq!(
+            binding.bound_oauth_account_id.as_deref(),
+            Some("account-local")
+        );
+        let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
+        assert!(projected.contains("zlr_key"));
+        assert!(!projected.contains("bound-access"));
+        restore_with(&home, &backups, &secrets).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn oauth_account_restore_refuses_a_fresh_manual_login() {
         let (root, home, backups) = profile_dirs("oauth-fresh-login");
         fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
@@ -1709,5 +2554,15 @@ mod tests {
         let backups = root.join("backups");
         fs::create_dir_all(&home).unwrap();
         (root, home, backups)
+    }
+
+    fn profile_backup_count(backups: &Path) -> usize {
+        fs::read_dir(backups)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| {
+                entry.path().extension().and_then(|value| value.to_str()) == Some("json")
+            })
+            .count()
     }
 }

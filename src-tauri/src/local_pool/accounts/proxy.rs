@@ -25,11 +25,13 @@ pub fn effective_proxy_url(
     settings: &GatewaySettings,
     credentials: &StoredCodexCredentials,
 ) -> Result<Option<String>> {
-    choose_proxy_url(
+    let proxy = choose_proxy_url(
         credentials.proxy_url(),
         settings.common_proxy_configured,
         || secret_store::load(COMMON_PROXY_SECRET_REF),
-    )
+    )?;
+    ensure_account_proxy(settings, proxy.as_ref().map(|_| ()))?;
+    Ok(proxy)
 }
 
 pub fn effective_proxy_config(
@@ -82,7 +84,17 @@ pub fn proxy_status(
     if settings.common_proxy_configured {
         return (ProxyMode::Common, common_available);
     }
-    (ProxyMode::Direct, true)
+    (ProxyMode::Direct, !settings.account_proxy_required)
+}
+
+pub fn ensure_account_proxy<T>(settings: &GatewaySettings, proxy: Option<T>) -> Result<()> {
+    if settings.account_proxy_required && proxy.is_none() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "an account proxy is required; direct account traffic is blocked",
+        ));
+    }
+    Ok(())
 }
 
 pub fn common_proxy_available(settings: &GatewaySettings) -> bool {
@@ -203,5 +215,38 @@ mod tests {
         let error = choose_proxy_url(None, true, || Ok(None)).unwrap_err();
         assert!(matches!(error.code, ErrorCode::SecretStoreUnavailable));
         assert_eq!(choose_proxy_url(None, false, || Ok(None)).unwrap(), None);
+    }
+
+    #[test]
+    fn required_proxy_blocks_direct_account_egress() {
+        let settings = GatewaySettings {
+            account_proxy_required: true,
+            ..Default::default()
+        };
+        assert!(ensure_account_proxy(&settings, None::<()>).is_err());
+        assert!(ensure_account_proxy(&settings, Some(())).is_ok());
+        assert_eq!(
+            proxy_status(&settings, &credentials_without_proxy(), false),
+            (ProxyMode::Direct, false)
+        );
+    }
+
+    fn credentials_without_proxy() -> StoredCodexCredentials {
+        StoredCodexCredentials::new(
+            "account",
+            "access".into(),
+            Some("refresh".into()),
+            None,
+            None,
+            0,
+            0,
+            None,
+            Some("provider-account".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap()
     }
 }

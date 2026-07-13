@@ -46,6 +46,18 @@ pub struct QuotaRefreshData {
 }
 
 impl QuotaRefreshData {
+    pub fn preserve_subscription_metadata(&mut self, previous: &Subscription) {
+        let Some(subscription) = self.subscription.as_mut() else {
+            return;
+        };
+        if subscription.plan_type.is_none() {
+            subscription.plan_type = previous.plan_type.clone();
+        }
+        if subscription.active_until_ms.is_none() {
+            subscription.active_until_ms = previous.active_until_ms;
+        }
+    }
+
     pub fn normalize(
         self,
         previous: &QuotaSnapshot,
@@ -240,5 +252,28 @@ mod tests {
             unsafe_id.normalize(&QuotaSnapshot::default()).unwrap_err(),
             QuotaNormalizationError::InvalidSupplementalWindow
         );
+    }
+
+    #[test]
+    fn quota_refresh_preserves_subscription_expiry_when_usage_only_reports_plan() {
+        let previous = Subscription::normalize(SubscriptionInput {
+            plan_type: Some("plus".into()),
+            active_until_ms: Some(2_000),
+            forbidden: false,
+            observed_at_ms: 1,
+        });
+        let mut data = QuotaRefreshData {
+            subscription: Some(SubscriptionInput {
+                plan_type: Some("plus".into()),
+                active_until_ms: None,
+                forbidden: false,
+                observed_at_ms: 10,
+            }),
+            ..Default::default()
+        };
+
+        data.preserve_subscription_metadata(&previous);
+
+        assert_eq!(data.subscription.unwrap().active_until_ms, Some(2_000));
     }
 }

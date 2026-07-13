@@ -7,6 +7,7 @@ use rusqlite::{
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::{HashMap, HashSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
@@ -16,9 +17,17 @@ use std::{
 };
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
+    estimate_api_equivalent,
     protocol::{UsagePage, UsageQuery, UsageSummary},
-    UsageEvent, WireApi,
+    ApiEquivalentSummary, UsageEvent, WireApi,
 };
+
+pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
+pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
+pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
+pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -40,6 +49,16 @@ const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "004_account_proxies",
         sql: include_str!("../../migrations/004_account_proxies.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "005_pool_membership",
+        sql: include_str!("../../migrations/005_pool_membership.sql"),
+    },
+    Migration {
+        version: 6,
+        name: "006_model_rules",
+        sql: include_str!("../../migrations/006_model_rules.sql"),
     },
 ];
 
@@ -146,6 +165,82 @@ impl Store {
         )
     }
 
+    pub fn account_proxy_required(&self) -> Result<bool, String> {
+        Ok(self
+            .metadata("account_proxy_required")?
+            .is_some_and(|value| value == "true"))
+    }
+
+    pub fn set_account_proxy_required(&self, required: bool) -> Result<(), String> {
+        self.set_metadata(
+            "account_proxy_required",
+            if required { "true" } else { "false" },
+        )
+    }
+
+    pub fn quota_policy(&self) -> Result<(u64, u64), String> {
+        let refresh = self.metadata("quota_refresh_interval_seconds")?.map_or(
+            Ok(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS),
+            |value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "quota refresh interval is invalid".to_string())
+            },
+        )?;
+        let timeout = self.metadata("quota_request_timeout_seconds")?.map_or(
+            Ok(DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS),
+            |value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "quota request timeout is invalid".to_string())
+            },
+        )?;
+        validate_quota_policy(refresh, timeout)?;
+        Ok((refresh, timeout))
+    }
+
+    pub fn set_quota_policy(
+        &self,
+        refresh_interval_seconds: u64,
+        request_timeout_seconds: u64,
+    ) -> Result<(), String> {
+        validate_quota_policy(refresh_interval_seconds, request_timeout_seconds)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for (key, value) in [
+            ("quota_refresh_interval_seconds", refresh_interval_seconds),
+            ("quota_request_timeout_seconds", request_timeout_seconds),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![key, value.to_string()],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
+    }
+
+    pub fn hidden_models(&self) -> Result<Vec<String>, String> {
+        let value = self
+            .metadata("hidden_model_ids")?
+            .unwrap_or_else(|| "[]".to_string());
+        normalize_model_ids(
+            serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())?,
+        )
+    }
+
+    pub fn set_hidden_models(&self, models: Vec<String>) -> Result<(), String> {
+        let models = normalize_model_ids(models)?;
+        self.set_metadata(
+            "hidden_model_ids",
+            &serde_json::to_string(&models)
+                .map_err(|_| "hidden model list serialization failed".to_string())?,
+        )
+    }
+
     pub fn sources(&self) -> Result<Vec<SourceRecord>, String> {
         self.list_records("sources")
     }
@@ -168,6 +263,40 @@ impl Store {
 
     pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
         self.delete_record("accounts", id)
+    }
+
+    pub fn replace_pool_membership(
+        &self,
+        sources: &[(String, bool)],
+        accounts: &[(String, bool)],
+    ) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for (id, in_pool) in sources {
+            let changed = transaction
+                .execute(
+                    "UPDATE sources SET data_json = json_set(data_json, '$.inPool', json(?1)) WHERE id = ?2",
+                    params![if *in_pool { "true" } else { "false" }, id],
+                )
+                .map_err(db_error)?;
+            if changed != 1 {
+                return Err("pool source not found".to_string());
+            }
+        }
+        for (id, in_pool) in accounts {
+            let changed = transaction
+                .execute(
+                    "UPDATE accounts SET data_json = json_set(data_json, '$.inPool', json(?1)) WHERE id = ?2",
+                    params![if *in_pool { "true" } else { "false" }, id],
+                )
+                .map_err(db_error)?;
+            if changed != 1 {
+                return Err("pool account not found".to_string());
+            }
+        }
+        transaction.commit().map_err(db_error)
     }
 
     pub fn keys(&self) -> Result<Vec<GatewayKeyRecord>, String> {
@@ -378,6 +507,7 @@ impl Store {
                     local_key_id: row.get(2)?,
                     candidate_kind: row.get(3)?,
                     candidate_hint: row.get(4)?,
+                    candidate_label: None,
                     requested_model: row.get(5)?,
                     resolved_model: row.get(6)?,
                     wire_api: parse_wire_api(&wire_api),
@@ -405,6 +535,43 @@ impl Store {
             page_size,
             total_pages,
         })
+    }
+
+    pub fn api_equivalents(&self) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
+        let connection = self.lock()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT candidate_hint, COALESCE(resolved_model, requested_model),
+                    SUM(input_tokens), SUM(output_tokens), SUM(total_tokens)
+                 FROM usage_events
+                 GROUP BY candidate_hint, COALESCE(resolved_model, requested_model)",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                let input_tokens: Option<i64> = row.get(2)?;
+                let output_tokens: Option<i64> = row.get(3)?;
+                let total_tokens: Option<i64> = row.get(4)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    estimate_api_equivalent(
+                        row.get::<_, Option<String>>(1)?.as_deref(),
+                        optional_u64(input_tokens),
+                        optional_u64(output_tokens),
+                        optional_u64(total_tokens),
+                    ),
+                ))
+            })
+            .map_err(db_error)?;
+        let mut equivalents = HashMap::<String, ApiEquivalentSummary>::new();
+        for row in rows {
+            let (candidate_hint, estimate) = row.map_err(db_error)?;
+            equivalents
+                .entry(candidate_hint)
+                .or_default()
+                .merge(estimate);
+        }
+        Ok(equivalents)
     }
 
     pub fn clear_usage(&self) -> Result<usize, String> {
@@ -808,6 +975,44 @@ fn parse_wire_api(value: &str) -> WireApi {
     }
 }
 
+fn validate_quota_policy(
+    refresh_interval_seconds: u64,
+    request_timeout_seconds: u64,
+) -> Result<(), String> {
+    if !(MIN_QUOTA_REFRESH_INTERVAL_SECONDS..=MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
+        .contains(&refresh_interval_seconds)
+    {
+        return Err("quota refresh interval is invalid".to_string());
+    }
+    if !(MIN_QUOTA_REQUEST_TIMEOUT_SECONDS..=MAX_QUOTA_REQUEST_TIMEOUT_SECONDS)
+        .contains(&request_timeout_seconds)
+    {
+        return Err("quota request timeout is invalid".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
+    if models.len() > 4_096 {
+        return Err("model list exceeds the supported limit".to_string());
+    }
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        if model.len() > 256 || model.chars().any(char::is_control) {
+            return Err("model id is invalid".to_string());
+        }
+        if seen.insert(model.to_ascii_lowercase()) {
+            normalized.push(model.to_string());
+        }
+    }
+    Ok(normalized)
+}
+
 fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
@@ -821,6 +1026,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pool_membership_migration_defaults_existing_records_outside_pool() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(MIGRATIONS[0].sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO sources(id, data_json, secret_ref) VALUES ('source_1', '{\"id\":\"source_1\",\"name\":\"Preserved\"}', 'source:1')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO accounts(id, data_json, secret_ref) VALUES ('account_1', '{\"id\":\"account_1\",\"label\":\"Preserved\"}', 'account:1')",
+                [],
+            )
+            .unwrap();
+        connection.execute_batch(MIGRATIONS[4].sql).unwrap();
+        let source: bool = connection
+            .query_row(
+                "SELECT json_extract(data_json, '$.inPool') FROM sources WHERE id = 'source_1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let account: bool = connection
+            .query_row(
+                "SELECT json_extract(data_json, '$.inPool') FROM accounts WHERE id = 'account_1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!source);
+        assert!(!account);
+    }
+
+    #[test]
+    fn pool_membership_batch_rolls_back_when_one_record_is_missing() {
+        let root = test_root("pool-membership-rollback");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        {
+            let connection = store.lock().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO sources(id, data_json, secret_ref) VALUES ('source_1', '{\"id\":\"source_1\",\"inPool\":false}', 'source:1')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        assert!(store
+            .replace_pool_membership(
+                &[
+                    ("source_1".to_string(), true),
+                    ("missing".to_string(), true)
+                ],
+                &[],
+            )
+            .is_err());
+        let in_pool: bool = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT json_extract(data_json, '$.inPool') FROM sources WHERE id = 'source_1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!in_pool);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn quota_policy_is_validated_and_persists() {
+        let root = test_root("quota-policy");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        assert_eq!(store.quota_policy().unwrap(), (300, 20));
+        assert!(store.set_quota_policy(119, 20).is_err());
+        assert!(store.set_quota_policy(120, 9).is_err());
+        store.set_quota_policy(120, 10).unwrap();
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(reopened.quota_policy().unwrap(), (120, 10));
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hidden_models_are_validated_deduplicated_and_persisted() {
+        let root = test_root("hidden-models");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        assert!(store.hidden_models().unwrap().is_empty());
+        store
+            .set_hidden_models(vec![" gpt-5.4 ".into(), "GPT-5.4".into()])
+            .unwrap();
+        assert!(store.set_hidden_models(vec!["x\nunsafe".into()]).is_err());
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(reopened.hidden_models().unwrap(), ["gpt-5.4"]);
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn store_migrates_and_preserves_server_identity() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-store-{}", uuid::Uuid::new_v4()));
@@ -829,15 +1141,18 @@ mod tests {
         let server_id = first.server_id().unwrap();
         assert!(first.gateway_enabled().unwrap());
         assert!(!first.common_proxy_configured().unwrap());
+        assert!(!first.account_proxy_required().unwrap());
         first.set_common_proxy_configured(true).unwrap();
+        first.set_account_proxy_required(true).unwrap();
         assert_eq!(
             first.metadata("schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("6")
         );
         drop(first);
         let second = Store::open(path).unwrap();
         assert_eq!(second.server_id().unwrap(), server_id);
         assert!(second.common_proxy_configured().unwrap());
+        assert!(second.account_proxy_required().unwrap());
         drop(second);
         fs::remove_dir_all(root).unwrap();
     }
@@ -852,7 +1167,7 @@ mod tests {
         assert_eq!(store.server_id().unwrap(), "stable-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("6")
         );
         let ledger = {
             let connection = store.lock().unwrap();
@@ -873,7 +1188,9 @@ mod tests {
                 (1, "001_init".to_string()),
                 (2, "002_migration_ledger".to_string()),
                 (3, "003_usage_query_indexes".to_string()),
-                (4, "004_account_proxies".to_string())
+                (4, "004_account_proxies".to_string()),
+                (5, "005_pool_membership".to_string()),
+                (6, "006_model_rules".to_string())
             ]
         );
         drop(store);
@@ -927,13 +1244,17 @@ mod tests {
             )
             .unwrap();
         drop(connection);
-        fs::write(sibling_path(&path, ".migration-in-progress"), b"1:4\n").unwrap();
+        fs::write(
+            sibling_path(&path, ".migration-in-progress"),
+            format!("1:{SERVER_SCHEMA_VERSION}\n"),
+        )
+        .unwrap();
 
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(store.server_id().unwrap(), "original-server-id");
         assert_eq!(
             store.metadata("schema_version").unwrap().as_deref(),
-            Some("4")
+            Some("6")
         );
         assert!(!sibling_path(&path, ".migration-in-progress").exists());
         drop(store);
@@ -961,7 +1282,7 @@ mod tests {
         let root = test_root("usage-query");
         let store = Store::open(root.join("relay.sqlite")).unwrap();
         for (index, success, model, error) in [
-            (1, true, "gpt-test", None),
+            (1, true, "gpt-5.4", None),
             (2, false, "gpt%literal", Some("quota_exhausted")),
             (3, true, "gpt-test", None),
         ] {
@@ -1011,6 +1332,15 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.total_pages, 1);
         assert_eq!(page.events[0].request_id, "req_2");
+        let hint = format!("{:x}", Sha256::digest(b"source_alpha"))[..12].to_string();
+        assert_eq!(
+            store.api_equivalents().unwrap().get(&hint),
+            Some(&ApiEquivalentSummary {
+                micro_usd: 18,
+                priced_tokens: 2,
+                unpriced_tokens: 4,
+            })
+        );
         assert_eq!(store.clear_usage().unwrap(), 3);
         assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 0);
         drop(store);

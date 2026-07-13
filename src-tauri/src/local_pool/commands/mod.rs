@@ -53,7 +53,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
                 wire_api: source.wire_api,
                 models: source.models,
             },
-            enabled: source.enabled,
+            enabled: source.enabled && source.in_pool,
             draining: source.draining,
             priority: source.priority,
             weight: source.weight,
@@ -77,7 +77,9 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         let Some(chatgpt_account_id) = secret.provider_account_id() else {
             continue;
         };
-        let proxy = effective_proxy_config(&settings, &secret)?;
+        let Ok(proxy) = effective_proxy_config(&settings, &secret) else {
+            continue;
+        };
         authority
             .register(
                 &account_id,
@@ -94,7 +96,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
             models: account.models,
-            enabled: account.account.enabled,
+            enabled: account.account.enabled && account.account.in_pool,
             draining: account.account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -155,6 +157,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
                 .session_affinity
                 .then(|| Duration::from_secs(settings.session_affinity_ttl_seconds)),
             max_affinity_entries: 4_096,
+            hidden_models: settings.hidden_models,
         },
         state.usage_callback(),
     )
@@ -367,6 +370,7 @@ mod tests {
                 id: "source_1".into(),
                 name: "Synthetic".into(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 base_url: "http://127.0.0.1:9/v1".into(),
                 secret_ref: source_secret_ref.clone(),

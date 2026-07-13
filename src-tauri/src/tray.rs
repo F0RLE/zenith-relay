@@ -95,6 +95,6 @@ pub fn show_main_window(app: &AppHandle) {
 
 pub fn close_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.destroy();
+        let _ = window.hide();
     }
 }

@@ -60,10 +60,16 @@ pub enum RemoteServerAction {
     PreviewAccountBatchImport,
     ConfirmAccountBatchImport,
     UpdateAccount { id: String },
+    RefreshAccount { id: String },
     DeleteAccount { id: String },
     SetCommonProxy,
+    SetAccountProxyRequired,
     SetAccountProxy { id: String },
     AssignAccountProxies,
+    SetPoolMembership,
+    SetQuotaPolicy,
+    RefreshPoolQuotas,
+    SetModelEnabled,
     CreateKey,
     UpdateKey { id: String },
     DeleteKey { id: String },
@@ -388,10 +394,18 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::UpdateAccount { id } => {
             (Method::PATCH, object_path("accounts", id)?, true)
         }
+        RemoteServerAction::RefreshAccount { id } => (
+            Method::POST,
+            format!("{}/refresh", object_path("accounts", id)?),
+            false,
+        ),
         RemoteServerAction::DeleteAccount { id } => {
             (Method::DELETE, object_path("accounts", id)?, false)
         }
         RemoteServerAction::SetCommonProxy => (Method::POST, "/proxies/common".to_string(), true),
+        RemoteServerAction::SetAccountProxyRequired => {
+            (Method::POST, "/proxies/policy".to_string(), true)
+        }
         RemoteServerAction::SetAccountProxy { id } => (
             Method::POST,
             format!("{}/proxy", object_path("accounts", id)?),
@@ -400,6 +414,12 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         RemoteServerAction::AssignAccountProxies => {
             (Method::POST, "/accounts/proxies/assign".to_string(), true)
         }
+        RemoteServerAction::SetPoolMembership => (Method::POST, "/pool/members".to_string(), true),
+        RemoteServerAction::SetQuotaPolicy => (Method::POST, "/quota/settings".to_string(), true),
+        RemoteServerAction::RefreshPoolQuotas => {
+            (Method::POST, "/pool/quota/refresh".to_string(), false)
+        }
+        RemoteServerAction::SetModelEnabled => (Method::POST, "/models/rules".to_string(), true),
         RemoteServerAction::CreateKey => (Method::POST, "/keys".to_string(), true),
         RemoteServerAction::UpdateKey { id } => (Method::PATCH, object_path("keys", id)?, true),
         RemoteServerAction::DeleteKey { id } => (Method::DELETE, object_path("keys", id)?, false),

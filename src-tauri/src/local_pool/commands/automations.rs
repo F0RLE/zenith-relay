@@ -430,6 +430,7 @@ mod tests {
                 token_updated_at_ms: Some(1),
                 tags: BTreeSet::new(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 created_at_ms: 1,
                 last_used_at_ms: None,

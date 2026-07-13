@@ -20,6 +20,7 @@ pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_OAUTH_ORIGINATOR: &str = "codex_cli_rs";
+pub(super) const CODEX_OAUTH_CALLBACK_PORTS: [u16; 2] = [1455, 1457];
 
 const CALLBACK_PATH: &str = "/auth/callback";
 const MAX_CALLBACK_URL_BYTES: usize = 8 * 1024;
@@ -82,7 +83,7 @@ impl CodexOAuthClient {
     }
 
     pub fn begin(&self, callback_port: u16, now_ms: u64) -> Result<OAuthStart, OAuthError> {
-        if callback_port == 0 {
+        if !CODEX_OAUTH_CALLBACK_PORTS.contains(&callback_port) {
             return Err(OAuthError::new(OAuthErrorCode::InvalidCallbackPort, false));
         }
 
@@ -421,6 +422,7 @@ impl fmt::Debug for OAuthTokenSet {
 pub struct OAuthIdentityClaims {
     email: Option<String>,
     plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
     user_id: Option<String>,
     account_id: Option<String>,
     account_is_fedramp: bool,
@@ -434,6 +436,10 @@ impl OAuthIdentityClaims {
 
     pub fn plan_type(&self) -> Option<&str> {
         self.plan_type.as_deref()
+    }
+
+    pub fn subscription_active_until_ms(&self) -> Option<u64> {
+        self.subscription_active_until_ms
     }
 
     pub fn user_id(&self) -> Option<&str> {
@@ -455,6 +461,10 @@ impl fmt::Debug for OAuthIdentityClaims {
             .debug_struct("OAuthIdentityClaims")
             .field("email", &self.email.as_ref().map(|_| "[redacted]"))
             .field("plan_type", &self.plan_type)
+            .field(
+                "subscription_active_until_ms",
+                &self.subscription_active_until_ms,
+            )
             .field("user_id", &self.user_id.as_ref().map(|_| "[redacted]"))
             .field(
                 "account_id",
@@ -572,6 +582,8 @@ struct AuthClaims {
     #[serde(default)]
     chatgpt_plan_type: Option<String>,
     #[serde(default)]
+    chatgpt_subscription_active_until: Option<Value>,
+    #[serde(default)]
     chatgpt_user_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
@@ -611,6 +623,10 @@ fn parse_identity_claims(jwt: &str) -> Result<OAuthIdentityClaims, OAuthError> {
         plan_type: auth
             .as_ref()
             .and_then(|auth| nonempty(auth.chatgpt_plan_type.clone())),
+        subscription_active_until_ms: auth
+            .as_ref()
+            .and_then(|auth| auth.chatgpt_subscription_active_until.as_ref())
+            .and_then(zenith_relay_core::quota::parse_subscription_timestamp_ms),
         user_id: auth.as_ref().and_then(|auth| {
             nonempty(auth.chatgpt_user_id.clone()).or_else(|| nonempty(auth.user_id.clone()))
         }),
@@ -675,18 +691,16 @@ fn nonempty(value: Option<String>) -> Option<String> {
 
 fn provider_error_code(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
-    let code = value
-        .get("error")
-        .and_then(|error| {
-            error.as_str().or_else(|| {
-                error
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .or_else(|| error.get("type").and_then(Value::as_str))
-            })
-        })
-        .or_else(|| value.get("code").and_then(Value::as_str))?;
-    safe_provider_code(code)
+    let code = [
+        value.pointer("/error/code").and_then(Value::as_str),
+        value.get("code").and_then(Value::as_str),
+        value.get("error").and_then(Value::as_str),
+        value.pointer("/error/type").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(safe_provider_code);
+    code
 }
 
 fn safe_provider_code(value: &str) -> Option<String> {
@@ -704,7 +718,9 @@ fn refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
         "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
         "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
         "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
-        "refresh_token_invalidated" => TokenRefreshFailureKind::InvalidatedRefreshToken,
+        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
+            TokenRefreshFailureKind::InvalidatedRefreshToken
+        }
         _ => TokenRefreshFailureKind::Transient,
     }
 }
@@ -803,6 +819,11 @@ mod tests {
             query.get("originator").map(String::as_str),
             Some(CODEX_OAUTH_ORIGINATOR)
         );
+        assert!(client.begin(1457, 10_000).is_ok());
+        assert_eq!(
+            client.begin(1456, 10_000).err().unwrap().code,
+            OAuthErrorCode::InvalidCallbackPort
+        );
         let expected_challenge =
             URL_SAFE_NO_PAD.encode(Sha256::digest(start.pending.code_verifier.as_bytes()));
         assert_eq!(
@@ -862,6 +883,10 @@ mod tests {
         let claims = tokens.identity_claims().unwrap().unwrap();
         assert_eq!(claims.email(), Some("user@example.test"));
         assert_eq!(claims.plan_type(), Some("pro"));
+        assert_eq!(
+            claims.subscription_active_until_ms(),
+            Some(1_788_998_400_000)
+        );
         assert_eq!(claims.account_id(), Some("account-123"));
         assert_eq!(claims.user_id(), Some("user-123"));
         let rendered = format!("{tokens:?} {claims:?}");
@@ -935,6 +960,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_refresh_error_prefers_specific_rotation_code() {
+        assert_eq!(
+            provider_error_code(br#"{"error":"invalid_grant","code":"refresh_token_reused"}"#)
+                .as_deref(),
+            Some("refresh_token_reused")
+        );
+        assert_eq!(
+            provider_error_code(
+                br#"{"error":{"type":"invalid_request_error","code":"refresh_token_expired"}}"#
+            )
+            .as_deref(),
+            Some("refresh_token_expired")
+        );
+    }
+
     async fn exchange(headers: HeaderMap, body: Bytes) -> impl IntoResponse {
         assert!(headers
             .get("content-type")
@@ -968,6 +1009,7 @@ mod tests {
                 "exp": 4_000,
                 "https://api.openai.com/auth": {
                     "chatgpt_plan_type": "pro",
+                    "chatgpt_subscription_active_until": "2026-09-10T00:00:00Z",
                     "chatgpt_user_id": "user-123",
                     "chatgpt_account_id": "account-123"
                 }

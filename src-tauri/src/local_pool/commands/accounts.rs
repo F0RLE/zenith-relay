@@ -18,9 +18,9 @@ use crate::local_pool::{
             ImportPreviewStatus, ImportQuotaStatus, ParsedImportItem, MAX_IMPORT_BYTES,
             MAX_IMPORT_ITEMS,
         },
-        models::{CodexModelsClient, ModelDiscoveryFailureCode},
+        models::{CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode},
         oauth::CodexOAuthClient,
-        proxy::{common_proxy_config, effective_proxy_config},
+        proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
         quota::{CodexQuotaClient, QuotaRefreshOutcome},
         quota_service::{apply_quota_failure, apply_quota_success},
         records, NativeSecretBackend,
@@ -50,8 +50,8 @@ use tauri_plugin_dialog::DialogExt;
 use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
-    accounts::{build_account_export, AccountExportCredential},
-    accounts::{AccountAuthMode, AccountAuthState, TokenSet},
+    accounts::{build_account_export, AccountExportCredential, TokenPersistenceAdapter},
+    accounts::{AccountAuthMode, AccountAuthState, AccountHealthState, TokenSet},
     automations::AccountSelector,
     discover_source_models,
     protocol::RevealedAccountIdentity,
@@ -66,10 +66,9 @@ const MAX_JWT_BYTES: usize = 64 * 1024;
 const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 const DEFAULT_OPENAI_SOURCE_URL: &str = "https://api.openai.com/v1";
 const TOKEN_REFRESH_SKEW_MS: u64 = 60_000;
-const QUOTA_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
+const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration = Duration::from_secs(5);
 const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
 const QUOTA_REFRESH_RETRY_MS: u64 = 60_000;
-const QUOTA_REFRESH_FALLBACK_MS: u64 = 10 * 60_000;
 const QUOTA_REFRESH_LEAD_MS: u64 = 60_000;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -121,6 +120,8 @@ pub struct UpdateAccountInput {
     allowed_models: Option<Vec<String>>,
     #[serde(default)]
     excluded_models: Option<Vec<String>>,
+    #[serde(default)]
+    in_pool: Option<bool>,
     #[serde(default)]
     draining: Option<bool>,
 }
@@ -410,6 +411,7 @@ struct ImportRowContext {
     auth_mode: ImportAuthMode,
     selectable: bool,
     plan: Option<String>,
+    subscription_active_until_ms: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -435,6 +437,8 @@ struct ImportedAuthClaims {
     #[serde(default)]
     chatgpt_plan_type: Option<String>,
     #[serde(default)]
+    chatgpt_subscription_active_until: Option<serde_json::Value>,
+    #[serde(default)]
     chatgpt_user_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
@@ -448,6 +452,7 @@ struct ImportedAuthClaims {
 struct ImportedIdentity {
     email: Option<String>,
     plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
     provider_user_id: Option<String>,
     provider_account_id: Option<String>,
     account_is_fedramp: bool,
@@ -464,6 +469,7 @@ struct ImportedCredentialMaterial {
     provider_user_id: Option<String>,
     organization_id: Option<String>,
     plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
     account_is_fedramp: bool,
 }
 
@@ -537,9 +543,10 @@ pub async fn preview_local_account_import_files(
         )
         .map_err(import_session_error)?;
     let session_id = session.session_id.clone();
+    let probe_quota = should_probe_import_quota(true, session.preview.rows.len());
     let prepared = async {
         let (content, preview) =
-            prepare_import_preview(&state, &credentials, session, true).await?;
+            prepare_import_preview(&state, &credentials, session, probe_quota).await?;
         sessions
             .prepare(
                 &session_id,
@@ -583,7 +590,7 @@ fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
     if paths.is_empty() || paths.len() > MAX_IMPORT_ITEMS {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "select between 1 and 256 import files",
+            format!("select between 1 and {MAX_IMPORT_ITEMS} import files"),
         ));
     }
     let mut total_bytes = 0usize;
@@ -668,8 +675,9 @@ pub async fn prepare_local_account_import(
             &existing.keys().cloned().collect::<Vec<_>>(),
         )
         .map_err(import_session_error)?;
+    let probe_quota = should_probe_import_quota(input.probe_quota, session.preview.rows.len());
     let (content, preview) =
-        prepare_import_preview(&state, &credentials, session, input.probe_quota).await?;
+        prepare_import_preview(&state, &credentials, session, probe_quota).await?;
     let session = sessions
         .prepare(
             &input.session_id,
@@ -727,15 +735,16 @@ async fn confirm_local_account_import_inner(
                 && item.secrets().access_token().is_none()
                 && item.secrets().refresh_token().is_some()
         });
-    let quota_preview_required = input.probe_quota
-        && session.preview.rows.iter().any(|row| {
+    let probe_quota = input.probe_quota
+        && !session.preview.rows.iter().any(|row| {
             selected.contains(row.item_id.as_str())
+                && row.auth_mode != ImportAuthMode::ApiKey
                 && row.quota_status == ImportQuotaStatus::Skipped
         });
-    if refresh_exchange_required || quota_preview_required {
+    if refresh_exchange_required {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "prepare the import preview before confirming selected accounts",
+            "prepare refresh-only credentials before confirming selected accounts",
         )
         .into());
     }
@@ -750,6 +759,10 @@ async fn confirm_local_account_import_inner(
                     auth_mode: row.auth_mode,
                     selectable: row.selectable,
                     plan: row.plan.clone(),
+                    subscription_active_until_ms: row
+                        .subscription_expires_at
+                        .as_deref()
+                        .and_then(parse_subscription_timestamp_ms),
                 },
             )
         })
@@ -798,7 +811,7 @@ async fn confirm_local_account_import_inner(
                 item,
                 context,
                 input.discover_models,
-                input.probe_quota,
+                probe_quota,
                 &configured_models,
             )
             .await
@@ -1140,18 +1153,39 @@ pub async fn refresh_all_local_account_quotas(
         .iter()
         .map(|account| account.account.id.clone())
         .collect::<Vec<_>>();
+    Ok(refresh_account_quotas(&state, account_ids).await)
+}
+
+#[tauri::command]
+pub async fn refresh_local_pool_account_quotas(
+    state: State<'_, DesktopState>,
+) -> CommandResult<Vec<AccountQuotaRefreshItemResult>> {
+    let account_ids = state
+        .store()?
+        .accounts()
+        .iter()
+        .filter(|account| account.account.in_pool && account.account.enabled)
+        .map(|account| account.account.id.clone())
+        .collect::<Vec<_>>();
+    Ok(refresh_account_quotas(&state, account_ids).await)
+}
+
+async fn refresh_account_quotas(
+    state: &DesktopState,
+    account_ids: Vec<String>,
+) -> Vec<AccountQuotaRefreshItemResult> {
     let mut results = Vec::with_capacity(account_ids.len());
     for chunk in account_ids.chunks(QUOTA_REFRESH_BATCH_SIZE) {
         let (first, second, third, fourth, fifth) = tokio::join!(
-            refresh_batch_slot(&state, chunk.first()),
-            refresh_batch_slot(&state, chunk.get(1)),
-            refresh_batch_slot(&state, chunk.get(2)),
-            refresh_batch_slot(&state, chunk.get(3)),
-            refresh_batch_slot(&state, chunk.get(4)),
+            refresh_batch_slot(state, chunk.first()),
+            refresh_batch_slot(state, chunk.get(1)),
+            refresh_batch_slot(state, chunk.get(2)),
+            refresh_batch_slot(state, chunk.get(3)),
+            refresh_batch_slot(state, chunk.get(4)),
         );
         results.extend([first, second, third, fourth, fifth].into_iter().flatten());
     }
-    Ok(results)
+    results
 }
 
 async fn refresh_batch_slot(
@@ -1180,7 +1214,7 @@ async fn refresh_manual_account_quota(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    match refresh_account_quota_once(state, account_id).await {
+    match refresh_account_quota_once(state, account_id, false).await {
         Ok(response) => {
             settle_manual_quota_refresh(state, account_id, &response)?;
             Ok(response)
@@ -1192,10 +1226,110 @@ async fn refresh_manual_account_quota(
     }
 }
 
+pub(crate) async fn sync_managed_account_profile(
+    state: &DesktopState,
+    account_id: &str,
+) -> LocalResult<bool> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let stored = credentials
+        .require(account_id)
+        .map_err(credential_local_error)?;
+    let provider_account_id = stored
+        .provider_account_id()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "account credentials do not contain a provider account id",
+            )
+        })?;
+    let persistence =
+        CredentialPersistence::new(credentials.clone(), state.account_metadata_sink());
+    let now_ms = current_time_ms();
+    let Some(update) = codex::managed_account_token_update(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        account_id,
+        stored.access_token(),
+        &provider_account_id,
+    )?
+    else {
+        return Ok(false);
+    };
+    let identity = imported_identity(update.id_token.as_deref(), Some(&update.access_token));
+    if identity
+        .provider_account_id
+        .as_deref()
+        .is_some_and(|value| value != provider_account_id)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "managed Codex profile token belongs to another account",
+        ));
+    }
+    let tokens = TokenSet::new(
+        update.access_token,
+        Some(update.refresh_token),
+        update.id_token,
+        identity.access_expires_at_ms,
+        now_ms,
+        stored.generation().saturating_add(1),
+    )
+    .map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "managed Codex profile tokens are invalid",
+        )
+    })?;
+    persistence
+        .persist(account_id, &tokens)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::Io,
+                format!("failed to persist managed Codex tokens: {}", error.code),
+            )
+        })?;
+    persistence
+        .persist_auth_state(account_id, AccountAuthState::Active)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::Io,
+                format!("failed to restore managed Codex auth state: {}", error.code),
+            )
+        })?;
+    state
+        .token_authority()
+        .register(account_id, tokens.clone(), AccountAuthState::Active)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("failed to register managed Codex tokens: {error}"),
+            )
+        })?;
+    codex::sync_account_bindings(
+        &state.profile_backup_root(),
+        account_id,
+        &tokens,
+        &provider_account_id,
+    )?;
+    codex::sync_local_gateway_binding(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        account_id,
+        &tokens,
+        &provider_account_id,
+    )?;
+    Ok(true)
+}
+
 pub(crate) async fn prepare_account_credentials(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<PreparedAccountCredentials> {
+    sync_managed_account_profile(state, account_id).await?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let initial_account = state
         .store()?
@@ -1268,14 +1402,19 @@ pub(crate) async fn prepare_account_credentials(
             )
         })?;
     let proxy = effective_proxy_config(&gateway, &current_credentials)?;
-    if prepared.tokens.generation() > stored.generation() {
-        codex::sync_account_bindings(
-            &state.profile_backup_root(),
-            account_id,
-            &prepared.tokens,
-            &provider_account_id,
-        )?;
-    }
+    codex::sync_account_bindings(
+        &state.profile_backup_root(),
+        account_id,
+        &prepared.tokens,
+        &provider_account_id,
+    )?;
+    codex::sync_local_gateway_binding(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+        account_id,
+        &prepared.tokens,
+        &provider_account_id,
+    )?;
     Ok(PreparedAccountCredentials {
         tokens: prepared.tokens,
         provider_account_id,
@@ -1286,30 +1425,74 @@ pub(crate) async fn prepare_account_credentials(
 pub(crate) async fn refresh_account_quota_once(
     state: &DesktopState,
     account_id: &str,
+    force_subscription_refresh: bool,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
     let prepared = prepare_account_credentials(state, account_id).await?;
     let now_ms = current_time_ms();
-    let subscription = state
+    let request_timeout =
+        Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
+    let mut subscription = state
         .store()?
         .account(account_id)
         .map(|account| account.account.subscription.clone())
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    let quota = CodexQuotaClient::new_with_proxy(prepared.proxy()).map_err(|failure| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            format!("failed to initialize quota client: {}", failure.code),
+    if subscription.active_until_ms.is_none() {
+        if let Some(active_until_ms) = imported_identity(
+            prepared.tokens().id_token(),
+            Some(prepared.tokens().access_token()),
         )
-    })?;
-    let refreshed = tokio::time::timeout(
-        QUOTA_COMMAND_TIMEOUT,
-        quota.refresh_quota(
-            prepared.tokens().access_token(),
-            prepared.provider_account_id(),
+        .subscription_active_until_ms
+        {
+            subscription = zenith_relay_core::quota::Subscription::normalize(
+                zenith_relay_core::quota::SubscriptionInput {
+                    plan_type: subscription.plan_type.clone(),
+                    active_until_ms: Some(active_until_ms),
+                    forbidden: false,
+                    observed_at_ms: now_ms,
+                },
+            );
+        }
+    }
+    let quota = CodexQuotaClient::new_with_proxy_and_timeout(prepared.proxy(), request_timeout)
+        .map_err(|failure| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("failed to initialize quota client: {}", failure.code),
+            )
+        })?;
+    let refresh_subscription = force_subscription_refresh
+        || zenith_relay_core::quota::subscription_refresh_due(
+            subscription.active_until_ms,
+            subscription.updated_at_ms,
             now_ms,
-            &subscription,
+        );
+    let model_discovery = async {
+        match CodexModelsClient::new_with_proxy(prepared.proxy()) {
+            Ok(client) => {
+                client
+                    .discover(
+                        prepared.tokens().access_token(),
+                        prepared.provider_account_id(),
+                        zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let (refreshed, discovered_models) = tokio::join!(
+        tokio::time::timeout(
+            request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
+            quota.refresh_quota(
+                prepared.tokens().access_token(),
+                prepared.provider_account_id(),
+                now_ms,
+                &subscription,
+                refresh_subscription,
+            ),
         ),
-    )
-    .await;
+        model_discovery,
+    );
 
     let _mutation = state.setup_guard().await;
     let (old_accounts, old_keys) = current_account_records(state)?;
@@ -1318,6 +1501,11 @@ pub(crate) async fn refresh_account_quota_once(
         .account(account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    if account.account.subscription.active_until_ms.is_none()
+        && subscription.active_until_ms.is_some()
+    {
+        account.account.subscription = subscription;
+    }
     let outcome = match refreshed {
         Ok(outcome) => apply_quota_outcome(&mut account, outcome, now_ms),
         Err(_) => {
@@ -1329,6 +1517,7 @@ pub(crate) async fn refresh_account_quota_once(
             }
         }
     };
+    apply_model_discovery(&mut account, discovered_models);
     state.store()?.upsert_account(account.clone())?;
     sync_accounts_or_rollback(state, old_accounts, old_keys).await?;
     Ok(AccountQuotaRefreshResponse {
@@ -1343,7 +1532,10 @@ fn settle_manual_quota_refresh(
     response: &AccountQuotaRefreshResponse,
 ) -> LocalResult<()> {
     state.remove_quota_refresh(account_id)?;
-    if let Some(due_at_ms) = next_quota_refresh_at(response, current_time_ms()) {
+    let refresh_interval_seconds = state.store()?.gateway().quota_refresh_interval_seconds;
+    if let Some(due_at_ms) =
+        next_quota_refresh_at(response, current_time_ms(), refresh_interval_seconds)
+    {
         state.mark_quota_refresh(account_id, due_at_ms)?;
     }
     Ok(())
@@ -1367,10 +1559,12 @@ fn settle_manual_quota_error(
 pub(crate) fn next_quota_refresh_at(
     response: &AccountQuotaRefreshResponse,
     now_ms: u64,
+    refresh_interval_seconds: u64,
 ) -> Option<u64> {
+    let refresh_interval_ms = refresh_interval_seconds.saturating_mul(1_000);
     match &response.quota {
         AccountQuotaOutcome::Updated { .. } => {
-            let fallback = now_ms.saturating_add(QUOTA_REFRESH_FALLBACK_MS);
+            let fallback = now_ms.saturating_add(refresh_interval_ms);
             let reset_due = response
                 .account
                 .account
@@ -1394,7 +1588,7 @@ pub(crate) fn next_quota_refresh_at(
         AccountQuotaOutcome::Failed {
             retryable: false, ..
         } => None,
-        AccountQuotaOutcome::Skipped => Some(now_ms.saturating_add(QUOTA_REFRESH_FALLBACK_MS)),
+        AccountQuotaOutcome::Skipped => Some(now_ms.saturating_add(refresh_interval_ms)),
     }
 }
 
@@ -1449,13 +1643,27 @@ async fn prepare_import_preview(
         let plan_hint = row.plan.clone();
         let hinted_proxy = hinted_import_proxy(state, credentials, &settings, &item)
             .map_err(import_item_command_error)?;
+        let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
+        if let Err(error) = ensure_account_proxy(&settings, import_proxy) {
+            row.status = ImportPreviewStatus::Invalid;
+            row.selectable = false;
+            row.default_selected = false;
+            row.error = Some(ImportIssue {
+                code: ImportIssueCode::RefreshExchangeFailed,
+                message: error.message,
+            });
+            continue;
+        }
         credentials_changed |=
             item.secrets().access_token().is_none() && item.secrets().refresh_token().is_some();
         let material = match build_import_credential_material(
             item,
             now_ms,
             plan_hint.as_deref(),
-            hinted_proxy.as_ref().or(common_proxy.as_ref()),
+            row.subscription_expires_at
+                .as_deref()
+                .and_then(parse_subscription_timestamp_ms),
+            import_proxy,
         )
         .await
         {
@@ -1484,6 +1692,10 @@ async fn prepare_import_preview(
         row.identity = masked_account_identity(provider_account_id);
         row.plan = material.plan_type.clone().or_else(|| row.plan.clone());
         row.expires_at = material.expires_at_ms.and_then(timestamp_from_ms);
+        row.subscription_expires_at = material
+            .subscription_active_until_ms
+            .and_then(timestamp_from_ms)
+            .or_else(|| row.subscription_expires_at.clone());
         let existing_account = find_existing_account(
             state,
             credentials,
@@ -1507,12 +1719,28 @@ async fn prepare_import_preview(
                     .or_else(|| common_proxy.clone()),
                 None => common_proxy.clone(),
             };
-            let quota = CodexQuotaClient::new_with_proxy(proxy.as_ref()).map_err(|_| {
-                LocalPoolError::new(ErrorCode::InvalidState, "quota client is unavailable")
-            })?;
+            let request_timeout = Duration::from_secs(settings.quota_request_timeout_seconds);
+            let quota =
+                CodexQuotaClient::new_with_proxy_and_timeout(proxy.as_ref(), request_timeout)
+                    .map_err(|_| {
+                        LocalPoolError::new(ErrorCode::InvalidState, "quota client is unavailable")
+                    })?;
             match tokio::time::timeout(
-                QUOTA_COMMAND_TIMEOUT,
-                quota.refresh_data(&material.access_token, provider_account_id, now_ms),
+                request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
+                quota.refresh_data_with_subscription(
+                    &material.access_token,
+                    provider_account_id,
+                    now_ms,
+                    &zenith_relay_core::quota::Subscription::normalize(
+                        zenith_relay_core::quota::SubscriptionInput {
+                            plan_type: material.plan_type.clone(),
+                            active_until_ms: material.subscription_active_until_ms,
+                            forbidden: false,
+                            observed_at_ms: now_ms,
+                        },
+                    ),
+                    true,
+                ),
             )
             .await
             {
@@ -1522,8 +1750,10 @@ async fn prepare_import_preview(
                         row.error = None;
                         if let Some(subscription) = subscription {
                             row.plan = subscription.plan_type.or_else(|| row.plan.clone());
-                            row.subscription_expires_at =
-                                subscription.active_until_ms.and_then(timestamp_from_ms);
+                            row.subscription_expires_at = subscription
+                                .active_until_ms
+                                .and_then(timestamp_from_ms)
+                                .or_else(|| row.subscription_expires_at.clone());
                         }
                     }
                     Err(_) => mark_preview_quota_failed(row, "quota response is invalid"),
@@ -1786,6 +2016,7 @@ fn imported_source_record(
         id: runtime_source.id,
         name: runtime_source.name,
         enabled: existing.as_ref().is_none_or(|source| source.enabled),
+        in_pool: existing.as_ref().is_some_and(|source| source.in_pool),
         draining: existing.as_ref().is_some_and(|source| source.draining),
         base_url: runtime_source.base_url,
         secret_ref,
@@ -2019,11 +2250,14 @@ async fn import_account_item(
         .clone();
     let common_proxy = common_proxy_config(&settings).map_err(proxy_item_error)?;
     let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &item)?;
+    let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
+    ensure_account_proxy(&settings, import_proxy).map_err(proxy_item_error)?;
     let material = build_import_credential_material(
         item,
         issued_at_ms,
         context.plan.as_deref(),
-        hinted_proxy.as_ref().or(common_proxy.as_ref()),
+        context.subscription_active_until_ms,
+        import_proxy,
     )
     .await?;
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
@@ -2058,6 +2292,7 @@ async fn import_account_item(
         .max()
         .unwrap_or(0)
         .saturating_add(1);
+    let subscription_active_until_ms = material.subscription_active_until_ms;
     let mut credentials = material.into_stored(&local_account_id, issued_at_ms, generation)?;
     if let Some(proxy_url) = old_credential
         .as_ref()
@@ -2080,7 +2315,7 @@ async fn import_account_item(
             .discover(
                 credentials.access_token(),
                 provider_account_id,
-                env!("CARGO_PKG_VERSION"),
+                zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
             )
             .await
             .map_err(model_item_error)?;
@@ -2115,6 +2350,16 @@ async fn import_account_item(
     )
     .map_err(|_| ImportItemError::new("invalid_account", "imported account record is invalid"))?;
     merge_existing_account(&mut account, existing_account.as_ref());
+    if let Some(active_until_ms) = subscription_active_until_ms {
+        account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
+            zenith_relay_core::quota::SubscriptionInput {
+                plan_type: account.account.subscription.plan_type.clone(),
+                active_until_ms: Some(active_until_ms),
+                forbidden: false,
+                observed_at_ms: issued_at_ms,
+            },
+        );
+    }
     if existing_account.is_none() && !item_label.trim().is_empty() {
         account.account.label = item_label;
     }
@@ -2122,7 +2367,13 @@ async fn import_account_item(
         .map_err(|_| ImportItemError::new("invalid_label", "imported account label is invalid"))?;
     account.normalize();
     let quota = if probe_quota {
-        probe_import_quota(&mut account, &credentials, proxy.as_ref()).await
+        probe_import_quota(
+            &mut account,
+            &credentials,
+            proxy.as_ref(),
+            settings.quota_request_timeout_seconds,
+        )
+        .await
     } else {
         AccountQuotaOutcome::Skipped
     };
@@ -2141,6 +2392,7 @@ async fn build_import_credential_material(
     item: ParsedImportItem,
     issued_at_ms: u64,
     plan_hint: Option<&str>,
+    subscription_active_until_hint: Option<u64>,
     proxy: Option<&ProxyConfig>,
 ) -> ItemResult<ImportedCredentialMaterial> {
     let email = item.email().map(str::to_string);
@@ -2164,6 +2416,9 @@ async fn build_import_credential_material(
             plan_type: imported_identity
                 .plan_type
                 .or_else(|| plan_hint.map(str::to_string)),
+            subscription_active_until_ms: imported_identity
+                .subscription_active_until_ms
+                .or(subscription_active_until_hint),
             account_is_fedramp: imported_identity.account_is_fedramp,
         });
     }
@@ -2202,6 +2457,9 @@ async fn build_import_credential_material(
     let oauth_plan = oauth_claims
         .as_ref()
         .and_then(|claims| claims.plan_type().map(str::to_string));
+    let oauth_subscription_active_until_ms = oauth_claims
+        .as_ref()
+        .and_then(|claims| claims.subscription_active_until_ms());
     let account_is_fedramp = oauth_claims
         .as_ref()
         .is_some_and(|claims| claims.account_is_fedramp());
@@ -2222,6 +2480,10 @@ async fn build_import_credential_material(
         plan_type: oauth_plan
             .or(imported_identity.plan_type)
             .or_else(|| plan_hint.map(str::to_string)),
+        subscription_active_until_ms: imported_identity
+            .subscription_active_until_ms
+            .or(oauth_subscription_active_until_ms)
+            .or(subscription_active_until_hint),
         account_is_fedramp: account_is_fedramp || imported_identity.account_is_fedramp,
     })
 }
@@ -2258,6 +2520,7 @@ async fn probe_import_quota(
     account: &mut LocalAccountRecord,
     credentials: &StoredCodexCredentials,
     proxy: Option<&ProxyConfig>,
+    request_timeout_seconds: u64,
 ) -> AccountQuotaOutcome {
     let now_ms = current_time_ms();
     let Some(provider_account_id) = credentials.provider_account_id() else {
@@ -2268,7 +2531,8 @@ async fn probe_import_quota(
             retryable: failure.retryable,
         };
     };
-    let client = match CodexQuotaClient::new_with_proxy(proxy) {
+    let request_timeout = Duration::from_secs(request_timeout_seconds);
+    let client = match CodexQuotaClient::new_with_proxy_and_timeout(proxy, request_timeout) {
         Ok(client) => client,
         Err(failure) => {
             apply_quota_failure(account, &failure, now_ms);
@@ -2279,12 +2543,13 @@ async fn probe_import_quota(
         }
     };
     let outcome = match tokio::time::timeout(
-        QUOTA_COMMAND_TIMEOUT,
+        request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
         client.refresh_quota(
             credentials.access_token(),
             provider_account_id,
             now_ms,
             &account.account.subscription,
+            true,
         ),
     )
     .await
@@ -2324,6 +2589,46 @@ fn apply_quota_outcome(
                 retryable: failure.retryable,
             }
         }
+    }
+}
+
+fn apply_model_discovery(
+    account: &mut LocalAccountRecord,
+    result: std::result::Result<Vec<String>, ModelDiscoveryFailure>,
+) {
+    match result {
+        Ok(models) if !models.is_empty() => {
+            account.models = models;
+            account.normalize();
+            if account
+                .account
+                .last_error_code
+                .as_deref()
+                .is_some_and(|code| code.starts_with("models_"))
+            {
+                account.account.last_error_code = None;
+            }
+        }
+        Ok(_) if account.models.is_empty() => {
+            apply_model_discovery_failure(account, "models_empty", false)
+        }
+        Err(error) if account.models.is_empty() => {
+            apply_model_discovery_failure(account, model_failure_code(&error), error.retryable)
+        }
+        Ok(_) | Err(_) => {}
+    }
+}
+
+fn apply_model_discovery_failure(account: &mut LocalAccountRecord, code: &str, retryable: bool) {
+    account.account.last_error_code = Some(code.to_string());
+    match code {
+        "models_unauthorized" | "models_invalid_access_token" | "models_invalid_account_id" => {
+            account.account.auth_state = AccountAuthState::Error;
+            account.account.health = AccountHealthState::Unhealthy;
+        }
+        "models_forbidden" => account.account.health = AccountHealthState::Blocked,
+        _ if retryable => account.account.health = AccountHealthState::Degraded,
+        _ => account.account.health = AccountHealthState::Unhealthy,
     }
 }
 
@@ -2503,6 +2808,7 @@ fn merge_existing_account(account: &mut LocalAccountRecord, existing: Option<&Lo
     account.account.label = existing.account.label.clone();
     account.account.tags = existing.account.tags.clone();
     account.account.enabled = existing.account.enabled;
+    account.account.in_pool = existing.account.in_pool;
     account.account.draining = existing.account.draining;
     account.account.created_at_ms = existing.account.created_at_ms;
     account.account.last_used_at_ms = existing.account.last_used_at_ms;
@@ -2542,6 +2848,9 @@ fn apply_account_patch(
     if let Some(models) = input.excluded_models {
         account.excluded_models = normalize_models(models)?;
     }
+    if let Some(in_pool) = input.in_pool {
+        account.account.in_pool = in_pool;
+    }
     if let Some(draining) = input.draining {
         account.account.draining = draining;
     }
@@ -2551,10 +2860,10 @@ fn apply_account_patch(
 
 fn validate_account_record(account: &LocalAccountRecord) -> LocalResult<()> {
     validate_label(&account.account.label)?;
-    if account.models.is_empty() {
+    if !account_model_state_is_valid(account) {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "account must expose at least one model",
+            "a healthy account must expose at least one model",
         ));
     }
     normalize_models(account.models.clone())?;
@@ -2571,6 +2880,12 @@ fn validate_account_record(account: &LocalAccountRecord) -> LocalResult<()> {
     }
     credentials.to_token_set().map_err(credential_local_error)?;
     Ok(())
+}
+
+fn account_model_state_is_valid(account: &LocalAccountRecord) -> bool {
+    !account.models.is_empty()
+        || (account.account.last_error_code.is_some()
+            && account.account.health != zenith_relay_core::accounts::AccountHealthState::Healthy)
 }
 
 fn validate_label(label: &str) -> LocalResult<()> {
@@ -2646,6 +2961,10 @@ fn normalize_selected_item_ids(item_ids: Vec<String>) -> CommandResult<Vec<Strin
         }
     }
     Ok(normalized)
+}
+
+fn should_probe_import_quota(requested: bool, row_count: usize) -> bool {
+    requested && row_count <= QUOTA_REFRESH_BATCH_SIZE
 }
 
 fn existing_identity_index(
@@ -2788,6 +3107,14 @@ fn imported_identity(id_token: Option<&str>, access_token: Option<&str>) -> Impo
         email: claim_email(id_claims.as_ref()).or_else(|| claim_email(access_claims.as_ref())),
         plan_type: auth_string(id_auth, |auth| &auth.chatgpt_plan_type)
             .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_plan_type)),
+        subscription_active_until_ms: id_auth
+            .and_then(|auth| auth.chatgpt_subscription_active_until.as_ref())
+            .and_then(parse_subscription_timestamp_value_ms)
+            .or_else(|| {
+                access_auth
+                    .and_then(|auth| auth.chatgpt_subscription_active_until.as_ref())
+                    .and_then(parse_subscription_timestamp_value_ms)
+            }),
         provider_user_id: auth_string(id_auth, |auth| &auth.chatgpt_user_id)
             .or_else(|| auth_string(id_auth, |auth| &auth.user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_user_id))
@@ -2801,6 +3128,42 @@ fn imported_identity(id_token: Option<&str>, access_token: Option<&str>) -> Impo
             .and_then(|claims| claims.exp)
             .map(|seconds| seconds.saturating_mul(1_000)),
     }
+}
+
+fn parse_subscription_timestamp_value_ms(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Number(value) => value.as_u64().and_then(normalize_epoch_timestamp_ms),
+        serde_json::Value::String(value) => parse_subscription_timestamp_ms(value),
+        _ => None,
+    }
+}
+
+fn parse_subscription_timestamp_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return value
+            .parse::<u64>()
+            .ok()
+            .and_then(normalize_epoch_timestamp_ms);
+    }
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
+}
+
+fn normalize_epoch_timestamp_ms(value: u64) -> Option<u64> {
+    let value = if value < 100_000_000_000 {
+        value.checked_mul(1_000)?
+    } else {
+        value
+    };
+    i64::try_from(value)
+        .ok()
+        .and_then(|value| Utc.timestamp_millis_opt(value).single())
+        .map(|_| value)
 }
 
 fn decode_imported_jwt(token: &str) -> Option<ImportedJwtClaims> {
@@ -3107,7 +3470,11 @@ fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
 fn model_item_error(
     error: crate::local_pool::accounts::models::ModelDiscoveryFailure,
 ) -> ImportItemError {
-    let code = match error.code {
+    ImportItemError::new(model_failure_code(&error), &error.to_string())
+}
+
+fn model_failure_code(error: &ModelDiscoveryFailure) -> &'static str {
+    match error.code {
         ModelDiscoveryFailureCode::Forbidden => "models_forbidden",
         ModelDiscoveryFailureCode::HttpStatus => "models_http_status",
         ModelDiscoveryFailureCode::InvalidAccessToken => "models_invalid_access_token",
@@ -3120,8 +3487,7 @@ fn model_item_error(
         ModelDiscoveryFailureCode::Transport => "models_transport",
         ModelDiscoveryFailureCode::Unauthorized => "models_unauthorized",
         ModelDiscoveryFailureCode::Upstream => "models_upstream",
-    };
-    ImportItemError::new(code, &error.to_string())
+    }
 }
 
 fn import_session_error(error: ImportSessionError) -> CommandError {
@@ -3280,6 +3646,49 @@ mod tests {
     }
 
     #[test]
+    fn large_import_preview_defers_quota_network_calls() {
+        assert!(should_probe_import_quota(true, QUOTA_REFRESH_BATCH_SIZE));
+        assert!(!should_probe_import_quota(
+            true,
+            QUOTA_REFRESH_BATCH_SIZE + 1
+        ));
+        assert!(!should_probe_import_quota(false, 1));
+    }
+
+    #[test]
+    fn model_refresh_accepts_unknown_slugs_and_preserves_last_good_list() {
+        let mut account = account_record("account_models");
+        apply_model_discovery(&mut account, Ok(vec!["gpt-future-codex".into()]));
+        assert_eq!(account.models, ["gpt-future-codex"]);
+
+        apply_model_discovery(
+            &mut account,
+            Err(ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Transport,
+                retryable: true,
+                http_status: None,
+            }),
+        );
+        assert_eq!(account.models, ["gpt-future-codex"]);
+        assert!(account.account.last_error_code.is_none());
+
+        account.models.clear();
+        apply_model_discovery(
+            &mut account,
+            Err(ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::Transport,
+                retryable: true,
+                http_status: None,
+            }),
+        );
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("models_transport")
+        );
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+    }
+
+    #[test]
     fn selected_import_files_are_read_and_combined_only_in_rust() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-import-files-{}",
@@ -3325,7 +3734,8 @@ mod tests {
                         "access_token": format!("synthetic-access-{index}"),
                         "refresh_token": format!("synthetic-refresh-{index}"),
                         "chatgpt_account_id": format!("synthetic-provider-{index}"),
-                        "email": format!("member-{index}@example.test")
+                        "email": format!("member-{index}@example.test"),
+                        "subscription_expires_at": format!("2026-08-0{index}T00:00:00Z")
                     }
                 })
                 .to_string()
@@ -3382,6 +3792,66 @@ mod tests {
             credential_store.delete(&account.account.id).unwrap();
         }
         assert_eq!(provider_ids.len(), 3);
+        assert!(accounts.iter().all(|account| account
+            .account
+            .subscription
+            .active_until_ms
+            .is_some()));
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cockpit_api_keys_do_not_require_oauth_quota_preview() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-cockpit-source-import-{}",
+            Uuid::new_v4().simple()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let content = r#"[
+            {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-one","api_base_url":"https://one.example.test/v1","api_provider_name":"One API"},
+            {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-two","api_base_url":"https://two.example.test/v1","api_provider_name":"Two API"}
+        ]"#;
+        let sessions = ImportSessionStore::new(root.clone(), NativeSecretBackend);
+        let session = sessions.start(content, None, &[]).unwrap();
+        let selected_item_ids = session
+            .preview
+            .rows
+            .iter()
+            .map(|row| row.item_id.clone())
+            .collect();
+
+        let response = confirm_local_account_import_inner(
+            ConfirmAccountImportInput {
+                session_id: session.session_id,
+                selected_item_ids,
+                discover_models: false,
+                probe_quota: true,
+                models: vec!["gpt-test".into()],
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.results.len(), 2);
+        assert!(response
+            .results
+            .iter()
+            .all(|result| result.status == ImportItemStatus::Succeeded));
+        let sources = state.store().unwrap().sources().to_vec();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(
+            sources
+                .iter()
+                .map(|source| source.name.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["One API", "Two API"])
+        );
+        for source in sources {
+            secret_store::delete(&source.secret_ref).unwrap();
+        }
 
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -3435,6 +3905,7 @@ mod tests {
             id: "source_existing".into(),
             name: "Custom name".into(),
             enabled: false,
+            in_pool: true,
             draining: true,
             base_url: "https://api.example.test/v1".into(),
             secret_ref: "source:source_existing".into(),
@@ -3489,6 +3960,7 @@ mod tests {
         let mut existing = account_record("account_existing");
         existing.account.label = "My account".into();
         existing.account.token_generation = 7;
+        existing.account.in_pool = true;
         existing.priority = 9;
         let resolved = existing.clone();
         let credentials = ImportedCredentialMaterial {
@@ -3501,6 +3973,7 @@ mod tests {
             provider_user_id: None,
             organization_id: None,
             plan_type: None,
+            subscription_active_until_ms: None,
             account_is_fedramp: false,
         }
         .into_stored(&resolved.account.id, 2, 8)
@@ -3520,6 +3993,7 @@ mod tests {
         assert_eq!(updated.account.id, "account_existing");
         assert_eq!(updated.account.label, "My account");
         assert_eq!(updated.account.token_generation, 8);
+        assert!(updated.account.in_pool);
         assert_eq!(updated.priority, 9);
         assert_ne!(
             updated.account.identity.stable_index,
@@ -3579,6 +4053,7 @@ mod tests {
                 weight: Some(2),
                 allowed_models: Some(vec![" gpt-test ".into(), "gpt-test".into()]),
                 excluded_models: Some(vec![" gpt-old ".into()]),
+                in_pool: Some(true),
                 draining: Some(true),
             },
         )
@@ -3598,10 +4073,23 @@ mod tests {
                 weight: Some(0),
                 allowed_models: None,
                 excluded_models: None,
+                in_pool: None,
                 draining: None,
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn failed_account_without_models_remains_manageable() {
+        let mut account = account_record("account_failed");
+        account.models.clear();
+        account.account.health = zenith_relay_core::accounts::AccountHealthState::Unhealthy;
+        account.account.last_error_code = Some("models_unauthorized".into());
+        assert!(account_model_state_is_valid(&account));
+
+        account.account.health = zenith_relay_core::accounts::AccountHealthState::Healthy;
+        assert!(!account_model_state_is_valid(&account));
     }
 
     #[test]
@@ -3746,7 +4234,7 @@ mod tests {
             },
         };
         assert_eq!(
-            next_quota_refresh_at(&updated, now_ms),
+            next_quota_refresh_at(&updated, now_ms, 300),
             Some(now_ms + 300_000 - QUOTA_REFRESH_LEAD_MS)
         );
         account.account.quota.primary.as_mut().unwrap().reset_at_ms =
@@ -3758,8 +4246,8 @@ mod tests {
             },
         };
         assert_eq!(
-            next_quota_refresh_at(&long_window, now_ms),
-            Some(now_ms + QUOTA_REFRESH_FALLBACK_MS)
+            next_quota_refresh_at(&long_window, now_ms, 120),
+            Some(now_ms + 120_000)
         );
 
         let retryable = AccountQuotaRefreshResponse {
@@ -3770,7 +4258,7 @@ mod tests {
             },
         };
         assert_eq!(
-            next_quota_refresh_at(&retryable, now_ms),
+            next_quota_refresh_at(&retryable, now_ms, 300),
             Some(now_ms + QUOTA_REFRESH_RETRY_MS)
         );
         let terminal = AccountQuotaRefreshResponse {
@@ -3780,7 +4268,7 @@ mod tests {
                 retryable: false,
             },
         };
-        assert_eq!(next_quota_refresh_at(&terminal, now_ms), None);
+        assert_eq!(next_quota_refresh_at(&terminal, now_ms, 300), None);
         assert_eq!(QUOTA_REFRESH_BATCH_SIZE, 5);
     }
 
@@ -3842,6 +4330,7 @@ mod tests {
                 "exp": 123,
                 "https://api.openai.com/auth": {
                     "chatgpt_plan_type": "pro",
+                    "chatgpt_subscription_active_until": 1_767_225_600,
                     "chatgpt_user_id": "user-private",
                     "chatgpt_account_id": "account-private"
                 }
@@ -3856,6 +4345,10 @@ mod tests {
         );
         assert_eq!(identity.provider_user_id.as_deref(), Some("user-private"));
         assert_eq!(identity.plan_type.as_deref(), Some("pro"));
+        assert_eq!(
+            identity.subscription_active_until_ms,
+            Some(1_767_225_600_000)
+        );
         assert_eq!(identity.access_expires_at_ms, Some(123_000));
         assert!(!format!("{:x}", Sha256::digest(token.as_bytes())).contains("private"));
     }
@@ -3883,9 +4376,10 @@ mod tests {
             &[],
         )
         .unwrap();
-        let material = build_import_credential_material(parsed.items.remove(0), 1, None, None)
-            .await
-            .unwrap();
+        let material =
+            build_import_credential_material(parsed.items.remove(0), 1, None, None, None)
+                .await
+                .unwrap();
         assert_eq!(material.email.as_deref(), Some("member@example.test"));
     }
 

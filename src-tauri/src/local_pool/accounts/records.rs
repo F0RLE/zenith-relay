@@ -84,6 +84,7 @@ pub fn new_account_record(
             token_updated_at_ms: Some(credentials.issued_at_ms()),
             tags: BTreeSet::new(),
             enabled: true,
+            in_pool: false,
             draining: false,
             created_at_ms: now_ms,
             last_used_at_ms: None,
@@ -99,12 +100,6 @@ pub fn new_account_record(
         consecutive_failures: 0,
     };
     record.normalize();
-    if record.models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "Codex account did not expose any supported models",
-        ));
-    }
     Ok(record)
 }
 
@@ -228,6 +223,20 @@ mod tests {
         assert!(!serialized.contains("access-secret"));
         assert!(!serialized.contains("refresh-secret"));
         assert!(serialized.contains("p***@e***.test"));
+    }
+
+    #[test]
+    fn unavailable_account_can_be_saved_without_discovered_models() {
+        let mut record =
+            new_account_record(&credentials(), AccountAuthMode::OAuth, Vec::new(), 0, 1).unwrap();
+        record.account.health = AccountHealthState::Unhealthy;
+        record.account.last_error_code = Some("models_unauthorized".into());
+
+        assert!(record.models.is_empty());
+        assert_eq!(
+            candidate_health(&record.account),
+            CandidateHealth::Unhealthy
+        );
     }
 
     #[test]

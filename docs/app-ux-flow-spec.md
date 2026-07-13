@@ -604,11 +604,16 @@ Columns:
 Health
 Label
 Plan
+Subscription end date
 Quota and reset
 Models
 Last used
 Menu
 ```
+
+Every account row shows the normalized subscription end date when the provider
+reports one. Missing metadata is displayed as unavailable and is never replaced
+with access-token expiry.
 
 Inline action:
 
@@ -740,12 +745,13 @@ Layout:
 
 ```text
 + Header --------------------------------------------------- [Add member]   +
++ Toolbar -------- [Display order v] [Refresh quotas] [Refresh settings]  +
 + Summary -----------------------------------------------------------------+
 | Healthy | Cooling | Limited | Disabled | Visible models                  |
 + Table -------------------------------------------------------------------+
 | enabled | type | name | health | quota | priority | last used | menu     |
 + Selected editor ----------------------------------------------------------+
-| priority | weight | drain | allowed models | exclusion reason            |
+| routing priority | traffic share | drain | allowed models | exclusions   |
 +---------------------------------------------------------------------------+
 ```
 
@@ -770,10 +776,33 @@ least recently used
 weight tie-break
 ```
 
+The editor names these controls by effect: higher routing priority is considered
+first, while traffic share distributes requests only among otherwise equal
+eligible members. Sorting the visible members table never changes runtime order.
+
+Creating or importing a connection does not add it to the pool. The empty
+Members view asks the user to choose existing connections, and only confirmed
+selections become eligible runtime candidates. The table defaults to runtime
+order and may be sorted by priority, effective quota, or name for inspection.
+
+Member rows may show an `API equivalent` derived from recorded input and
+output tokens for model ids present in Relay's versioned official OpenAI price
+catalog. This value is informational only: it is not subscription spend,
+provider billing, or a routing input. Tokens without a catalog price or without
+an input/output split remain explicitly unpriced instead of being silently
+estimated.
+
+`Refresh quotas` updates only enabled OAuth accounts currently in the pool and
+uses a bounded batch. Refresh settings use fixed safe presets: background
+interval `120..=3600` seconds and request timeout `10..=20` seconds. Manual
+refresh remains available regardless of the background interval.
+
 Buttons:
 
 ```text
 Add member         page primary action
+Refresh quotas      secondary, enabled when the pool has an OAuth account
+Refresh settings    icon action beside refresh
 Preview selection  secondary
 Save changes       appears only when dirty
 Reset              ghost, appears only when dirty
@@ -847,10 +876,13 @@ Layout:
 ```
 
 The common proxy control accepts a new HTTP(S) proxy value or clears the saved
-value; it never reveals a stored address. `Connections -> Accounts` shows only
-`Direct`, `Common`, or `Account proxy` plus availability. Each account can
-replace or clear its override, and the bulk dialog assigns one proxy line per
-selected account while reporting unused lines.
+value; it never reveals a stored address. A separate `Require a proxy for OAuth
+accounts` toggle disables direct account egress without deleting affected
+accounts. `Connections -> Accounts` shows only `Direct`, `Common`, or `Account
+proxy` plus availability; direct accounts blocked by the policy are visibly
+unavailable. Each account can replace or clear its override, and the bulk
+dialog assigns one proxy line per selected account while reporting unused
+lines.
 
 Mode behavior:
 
@@ -909,23 +941,30 @@ Layout:
 ```text
 + Header ----------------------------------------------- [Refresh] [Export] +
 + Metrics -----------------------------------------------------------------+
-| Requests | Success | Tokens | Cache | Latency | Estimated local cost      |
+| Requests | Success | Total tokens | Latency                              |
 + Filters ------------------------------------------------------------------+
 | Range | Model | Connection | Key | Status | Request ID                   |
 + Table --------------------------------------------------------------------+
-| time | status | model | connection | latency | tokens/cache | request id  |
-+ Request drawer ------------------------------------------------------------+
-| attempts | timing | usage | selected member | redacted error              |
+| time | status | model | connection | latency | total tokens | request id   |
++ Models / Connections aggregate ------------------------------------------+
+| requests | success | input tokens | output tokens | total tokens | latency |
++ Request dialog -----------------------------------------------------------+
+| timing | input/output/total usage | selected member | redacted error       |
 +---------------------------------------------------------------------------+
 ```
 
-Request drawer is allowed because the table remains useful while inspecting
-adjacent requests.
+Request details open in a focused dialog and keep the underlying filters and
+table state intact after closing.
 
 Rules:
 
 - no prompt or response body by default;
-- estimated local cost is labeled `Estimate`, never `Charged`;
+- no monetary estimate is shown without authoritative provider/model pricing;
+- an OpenAI `API equivalent` is allowed only from the versioned official price
+  catalog and recorded split token counts, with unpriced tokens disclosed; it
+  is never labeled as actual cost, subscription spend, or Zenith billing;
+- account/source aggregates use the current safe label and keep a stable
+  redacted hint when that object no longer exists;
 - raw upstream errors are redacted and collapsed;
 - selected account/source identity is masked where needed;
 - Clear Logs lives in the page overflow menu and requires confirmation.

@@ -108,6 +108,8 @@ pub struct AccountRecord {
     pub token_updated_at_ms: Option<u64>,
     pub tags: BTreeSet<String>,
     pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
     pub draining: bool,
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
@@ -117,6 +119,7 @@ pub struct AccountRecord {
 impl AccountRecord {
     pub fn is_wake_eligible(&self) -> bool {
         self.enabled
+            && self.in_pool
             && !self.draining
             && self.auth_state == AccountAuthState::Active
             && self.health == AccountHealthState::Healthy

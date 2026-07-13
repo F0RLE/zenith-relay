@@ -1,4 +1,5 @@
 use crate::{
+    jobs,
     state::{
         identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
         SourceRecord, COMMON_PROXY_SECRET_REF, MAX_SERVER_ACCOUNTS,
@@ -13,12 +14,11 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use chrono::DateTime;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
     time::Instant,
 };
@@ -36,14 +36,17 @@ use zenith_relay_core::{
         RevealedAccountIdentity, RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery,
         UsageRange,
     },
-    quota::{QuotaSnapshot, Subscription, SubscriptionInput},
-    ProviderSource, WireApi,
+    quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
+    source_points_to_gateway, ProviderSource, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
-const MAX_IMPORT_BYTES: usize = 1024 * 1024;
-const MAX_IMPORT_ITEMS: usize = 256;
+const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_IMPORT_ITEMS: usize = 1_024;
 const MAX_IMPORT_DEPTH: usize = 32;
+const MAX_JWT_BYTES: usize = 64 * 1024;
+const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
+const MAX_SYNCHRONOUS_IMPORT_PROBES: usize = 5;
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
@@ -101,6 +104,7 @@ pub async fn create_source(
     let id = format!("source_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("source:{id}");
     let mut record = source_record(id, secret_ref.clone(), input)?;
+    ensure_not_server_self_source(&state, &record.base_url)?;
     record.models = discover_models(&record, &api_key).await?;
     state
         .vault
@@ -129,6 +133,7 @@ pub struct SourcePatch {
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
     enabled: Option<bool>,
+    in_pool: Option<bool>,
     draining: Option<bool>,
     priority: Option<i32>,
     weight: Option<u32>,
@@ -169,6 +174,9 @@ pub async fn update_source(
     if let Some(value) = input.enabled {
         record.enabled = value;
     }
+    if let Some(value) = input.in_pool {
+        record.in_pool = value;
+    }
     if let Some(value) = input.draining {
         record.draining = value;
     }
@@ -179,6 +187,7 @@ pub async fn update_source(
         record.weight = valid_weight(value)?;
     }
     validate_source_record(&record, input.api_key.as_deref().unwrap_or(&old_secret))?;
+    ensure_not_server_self_source(&state, &record.base_url)?;
     if let Some(secret) = input.api_key.as_deref() {
         validate_secret(secret, "source API key")?;
         state
@@ -249,6 +258,7 @@ pub async fn test_source(
         .ok_or_else(|| {
             ManagementError::not_found("source_secret_missing", "source secret missing")
         })?;
+    ensure_not_server_self_source(&state, &record.base_url)?;
     record.models = match discover_models(&record, &api_key).await {
         Ok(models) => models,
         Err(error) => {
@@ -374,6 +384,12 @@ pub struct SetProxyInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProxyPolicyInput {
+    required: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignProxiesInput {
     account_ids: Vec<String>,
     proxy_urls: Vec<String>,
@@ -406,6 +422,29 @@ pub async fn set_common_proxy(
     }
     if let Err(error) = state.rebuild_runtime().await {
         restore_common_proxy(&state, previous_configured, previous.as_deref())?;
+        let _ = state.rebuild_runtime().await;
+        return Err(runtime_error(error));
+    }
+    Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+pub async fn set_account_proxy_required(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<ProxyPolicyInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous = state.store.account_proxy_required().map_err(store_error)?;
+    if previous == input.required {
+        return Ok(Json(state.snapshot().map_err(store_error)?));
+    }
+    state
+        .store
+        .set_account_proxy_required(input.required)
+        .map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        state
+            .store
+            .set_account_proxy_required(previous)
+            .map_err(store_error)?;
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
@@ -866,7 +905,7 @@ fn parse_batch_import_input(
     if input.documents.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
             "import_item_count",
-            "import must contain between 1 and 256 items",
+            format!("import must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
 
@@ -889,7 +928,7 @@ fn parse_batch_import_input(
         if values.len() > MAX_IMPORT_ITEMS {
             return Err(ManagementError::validation(
                 "import_item_count",
-                "import must contain between 1 and 256 items",
+                format!("import must contain between 1 and {MAX_IMPORT_ITEMS} items"),
             ));
         }
     }
@@ -901,6 +940,8 @@ fn parse_batch_import_input(
 pub struct BatchImportConfirmInput {
     session_id: String,
     selected_item_ids: Vec<String>,
+    #[serde(default)]
+    probe_metadata: bool,
 }
 
 #[derive(Serialize)]
@@ -932,31 +973,39 @@ pub async fn confirm_account_batch_import(
     if input.selected_item_ids.is_empty() || input.selected_item_ids.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
             "import_selection_invalid",
-            "import selection must contain between 1 and 256 items",
+            format!("import selection must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
+    let probe_metadata =
+        input.probe_metadata && input.selected_item_ids.len() <= MAX_SYNCHRONOUS_IMPORT_PROBES;
     let mut seen = HashSet::new();
     let mut results = Vec::with_capacity(input.selected_item_ids.len());
     for item_id in input.selected_item_ids {
         if !seen.insert(item_id.clone()) {
             continue;
         }
-        let result =
-            match confirm_one_account_import(&state, &item_id, Some(&input.session_id)).await {
-                Ok(_) => BatchImportResult {
-                    item_id,
-                    status: "succeeded".to_string(),
-                    error: None,
-                },
-                Err(error) => BatchImportResult {
-                    item_id,
-                    status: "failed".to_string(),
-                    error: Some(BatchImportIssue {
-                        code: error.code,
-                        message: error.message,
-                    }),
-                },
-            };
+        let result = match confirm_one_account_import(
+            &state,
+            &item_id,
+            Some(&input.session_id),
+            probe_metadata,
+        )
+        .await
+        {
+            Ok(_) => BatchImportResult {
+                item_id,
+                status: "succeeded".to_string(),
+                error: None,
+            },
+            Err(error) => BatchImportResult {
+                item_id,
+                status: "failed".to_string(),
+                error: Some(BatchImportIssue {
+                    code: error.code,
+                    message: error.message,
+                }),
+            },
+        };
         results.push(result);
     }
     Ok(Json(BatchImportConfirmResponse {
@@ -1045,7 +1094,7 @@ fn parse_batch_import(
     if values.is_empty() || values.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
             "import_item_count",
-            "import must contain between 1 and 256 items",
+            format!("import must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
     warnings.shrink_to_fit();
@@ -1053,7 +1102,13 @@ fn parse_batch_import(
 }
 
 fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, String)> {
-    if let Ok(input) = serde_json::from_value::<AccountImportInput>(value.clone()) {
+    if let Ok(mut input) = serde_json::from_value::<AccountImportInput>(value.clone()) {
+        let jwt = imported_jwt_metadata(input.id_token.as_deref(), Some(&input.access_token));
+        input.expires_at_ms = input.expires_at_ms.or(jwt.expires_at_ms);
+        input.plan_type = input.plan_type.and_then(safe_plan_type).or(jwt.plan_type);
+        input.subscription_active_until_ms = input
+            .subscription_active_until_ms
+            .or(jwt.subscription_active_until_ms);
         return Ok(input);
     }
     let object = value
@@ -1079,23 +1134,6 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
             "account import requires an access token",
         )
     })?;
-    let chatgpt_account_id = import_string(
-        object,
-        credentials,
-        tokens,
-        &[
-            "chatgpt_account_id",
-            "chatgptAccountId",
-            "account_id",
-            "accountId",
-        ],
-    )
-    .ok_or_else(|| {
-        invalid_import(
-            "missing_account_id",
-            "account import requires an account id",
-        )
-    })?;
     let label = import_string(object, credentials, tokens, &["label", "name"])
         .unwrap_or_else(|| "Imported account".to_string());
     let refresh_token = import_string(
@@ -1105,11 +1143,14 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
         &["refresh_token", "refreshToken"],
     );
     let id_token = import_string(object, credentials, tokens, &["id_token", "idToken"]);
+    let jwt = imported_jwt_metadata(id_token.as_deref(), Some(&access_token));
     let expires_at_ms = import_timestamp_ms(
         object,
         credentials,
+        tokens,
         &["expires_at_ms", "expiresAtMs", "expires_at", "expiresAt"],
-    );
+    )
+    .or(jwt.expires_at_ms);
     let plan_type = import_string(
         object,
         credentials,
@@ -1132,7 +1173,26 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
         .flatten()
         .any(|secret| secret == value)
     })
-    .and_then(safe_plan_type);
+    .and_then(safe_plan_type)
+    .or(jwt.plan_type);
+    let chatgpt_account_id = import_string(
+        object,
+        credentials,
+        tokens,
+        &[
+            "chatgpt_account_id",
+            "chatgptAccountId",
+            "account_id",
+            "accountId",
+        ],
+    )
+    .or(jwt.account_id)
+    .ok_or_else(|| {
+        invalid_import(
+            "missing_account_id",
+            "account import requires an account id",
+        )
+    })?;
     Ok(AccountImportInput {
         label,
         access_token,
@@ -1143,8 +1203,17 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
         subscription_active_until_ms: import_timestamp_ms(
             object,
             credentials,
-            &["subscription_expires_at", "subscriptionExpiresAt"],
-        ),
+            tokens,
+            &[
+                "subscription_expires_at",
+                "subscriptionExpiresAt",
+                "subscription_active_until",
+                "subscriptionActiveUntil",
+                "chatgpt_subscription_active_until",
+                "chatgptSubscriptionActiveUntil",
+            ],
+        )
+        .or(jwt.subscription_active_until_ms),
         chatgpt_account_id,
         responses_url: import_string(
             object,
@@ -1198,29 +1267,87 @@ fn import_string(
 fn import_timestamp_ms(
     root: &Map<String, Value>,
     credentials: &Map<String, Value>,
+    tokens: Option<&Map<String, Value>>,
     names: &[&str],
 ) -> Option<u64> {
-    [root, credentials].into_iter().find_map(|object| {
-        names.iter().find_map(|name| {
-            let value = object.get(*name)?;
-            let timestamp = value
-                .as_u64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .map(|value| {
-                    if value < 10_000_000_000 {
-                        value.saturating_mul(1_000)
-                    } else {
-                        value
-                    }
-                });
-            timestamp.or_else(|| {
-                let millis = DateTime::parse_from_rfc3339(value.as_str()?.trim())
-                    .ok()?
-                    .timestamp_millis();
-                u64::try_from(millis).ok()
+    [Some(root), Some(credentials), tokens]
+        .into_iter()
+        .flatten()
+        .find_map(|object| {
+            names.iter().find_map(|name| {
+                let value = object.get(*name)?;
+                parse_subscription_timestamp_ms(value)
             })
         })
-    })
+}
+
+#[derive(Default)]
+struct ImportedJwtMetadata {
+    account_id: Option<String>,
+    plan_type: Option<String>,
+    subscription_active_until_ms: Option<u64>,
+    expires_at_ms: Option<u64>,
+}
+
+fn imported_jwt_metadata(
+    id_token: Option<&str>,
+    access_token: Option<&str>,
+) -> ImportedJwtMetadata {
+    let mut metadata = ImportedJwtMetadata::default();
+    for token in [id_token, access_token].into_iter().flatten() {
+        let Some(claims) = decode_import_jwt(token) else {
+            continue;
+        };
+        let auth = claims
+            .get("https://api.openai.com/auth")
+            .and_then(Value::as_object);
+        metadata.account_id = metadata.account_id.or_else(|| {
+            auth.and_then(|value| import_claim_string(value, &["chatgpt_account_id", "account_id"]))
+        });
+        metadata.plan_type = metadata.plan_type.or_else(|| {
+            auth.and_then(|value| import_claim_string(value, &["chatgpt_plan_type"]))
+                .and_then(safe_plan_type)
+        });
+        metadata.subscription_active_until_ms =
+            metadata.subscription_active_until_ms.or_else(|| {
+                auth.and_then(|value| value.get("chatgpt_subscription_active_until"))
+                    .and_then(parse_subscription_timestamp_ms)
+            });
+        metadata.expires_at_ms = metadata
+            .expires_at_ms
+            .or_else(|| claims.get("exp").and_then(parse_subscription_timestamp_ms));
+    }
+    metadata
+}
+
+fn decode_import_jwt(token: &str) -> Option<Value> {
+    if token.is_empty() || token.len() > MAX_JWT_BYTES {
+        return None;
+    }
+    let mut parts = token.split('.');
+    let (Some(header), Some(payload), Some(signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    if header.is_empty() || payload.is_empty() || signature.is_empty() {
+        return None;
+    }
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    if decoded.len() > MAX_JWT_PAYLOAD_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&decoded).ok()?;
+    value.is_object().then_some(value)
+}
+
+fn import_claim_string(object: &Map<String, Value>, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 512)
+        .map(str::to_string)
 }
 
 fn import_strings(root: &Map<String, Value>, name: &str) -> Vec<String> {
@@ -1289,13 +1416,15 @@ fn invalid_batch_row(ordinal: usize, code: String, message: String) -> BatchImpo
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmImportInput {
     session_id: String,
+    #[serde(default)]
+    probe_metadata: bool,
 }
 
 pub async fn confirm_account_import(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ConfirmImportInput>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
-    confirm_one_account_import(&state, &input.session_id, None)
+    confirm_one_account_import(&state, &input.session_id, None, input.probe_metadata)
         .await
         .map(Json)
 }
@@ -1304,6 +1433,7 @@ async fn confirm_one_account_import(
     state: &Arc<AppState>,
     session_id: &str,
     batch_session_id: Option<&str>,
+    probe_metadata: bool,
 ) -> Result<AccountSummary, ManagementError> {
     if !valid_generated_id(session_id, "import_") {
         return Err(ManagementError::validation(
@@ -1356,11 +1486,12 @@ async fn confirm_one_account_import(
                 .map(|value| value.subscription.clone())
                 .unwrap_or_default()
         };
-    let record = ServerAccountRecord {
+    let mut record = ServerAccountRecord {
         id: preview.account_id.clone(),
         label: preview.label,
         identity_hint: preview.identity_hint,
         enabled: true,
+        in_pool: existing.as_ref().is_some_and(|value| value.in_pool),
         draining: false,
         source_id: "openai_codex".to_string(),
         secret_ref: pending.secret_ref.clone(),
@@ -1382,17 +1513,19 @@ async fn confirm_one_account_import(
         last_error_code: None,
     };
     state.store.save_account(&record).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        match existing.as_ref() {
-            Some(previous) => {
-                let _ = state.store.save_account(previous);
-            }
-            None => {
-                let _ = state.store.delete_account(&record.id);
+    if probe_metadata {
+        match jobs::refresh_account_now(state, record.clone()).await {
+            Ok(updated) => record = updated,
+            Err(_) => {
+                record.health = AccountHealthState::Degraded;
+                record.last_error_code = Some("metadata_refresh_failed".to_string());
+                let _ = state.store.save_account(&record);
             }
         }
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
+    } else if state.rebuild_runtime().await.is_err() {
+        record.health = AccountHealthState::Degraded;
+        record.last_error_code = Some("runtime_rebuild_failed".to_string());
+        let _ = state.store.save_account(&record);
     }
     state
         .store
@@ -1454,6 +1587,7 @@ fn contains_sensitive(value: &str, sensitive: &[Option<&str>]) -> bool {
 pub struct AccountPatch {
     label: Option<String>,
     enabled: Option<bool>,
+    in_pool: Option<bool>,
     draining: Option<bool>,
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
@@ -1473,6 +1607,9 @@ pub async fn update_account(
     }
     if let Some(value) = input.enabled {
         record.enabled = value;
+    }
+    if let Some(value) = input.in_pool {
+        record.in_pool = value;
     }
     if let Some(value) = input.draining {
         record.draining = value;
@@ -1496,6 +1633,125 @@ pub async fn update_account(
         return Err(runtime_error(error));
     }
     Ok(Json(account_summary(&state, &record)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PoolMembershipInput {
+    #[serde(default)]
+    account_ids: Vec<String>,
+    #[serde(default)]
+    source_ids: Vec<String>,
+    in_pool: bool,
+}
+
+pub async fn set_pool_membership(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<PoolMembershipInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
+    let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
+    if account_ids.is_empty() && source_ids.is_empty() {
+        return Err(ManagementError::validation(
+            "pool_members_empty",
+            "at least one pool member is required",
+        ));
+    }
+    if account_ids.len().saturating_add(source_ids.len()) > 2_048 {
+        return Err(ManagementError::validation(
+            "pool_members_too_many",
+            "too many pool members were requested",
+        ));
+    }
+
+    let accounts = state.store.accounts().map_err(store_error)?;
+    let sources = state.store.sources().map_err(store_error)?;
+    let old_accounts = account_ids
+        .iter()
+        .map(|id| {
+            accounts
+                .iter()
+                .find(|record| &record.id == id)
+                .map(|record| (id.clone(), record.in_pool))
+                .ok_or_else(|| ManagementError::not_found("account_not_found", "account not found"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let old_sources = source_ids
+        .iter()
+        .map(|id| {
+            sources
+                .iter()
+                .find(|record| &record.id == id)
+                .map(|record| (id.clone(), record.in_pool))
+                .ok_or_else(|| ManagementError::not_found("source_not_found", "source not found"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let next_accounts = account_ids
+        .iter()
+        .map(|id| (id.clone(), input.in_pool))
+        .collect::<Vec<_>>();
+    let next_sources = source_ids
+        .iter()
+        .map(|id| (id.clone(), input.in_pool))
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_pool_membership(&next_sources, &next_accounts)
+        .map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        state
+            .store
+            .replace_pool_membership(&old_sources, &old_accounts)
+            .map_err(|rollback| {
+                ManagementError::internal(
+                    "pool_membership_recovery_failed",
+                    format!("{error}; failed to restore pool membership: {rollback}"),
+                )
+            })?;
+        return Err(runtime_error(error));
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+pub async fn refresh_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<AccountSummary>, ManagementError> {
+    let record = find_account(&state, &id)?;
+    let updated = jobs::refresh_account_now(&state, record)
+        .await
+        .map_err(|_| {
+            ManagementError::new(
+                StatusCode::BAD_GATEWAY,
+                "account_refresh_failed",
+                "account metadata could not be refreshed",
+                "quota",
+                true,
+            )
+        })?;
+    account_summary(&state, &updated).map(Json)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolQuotaRefreshResult {
+    refreshed: usize,
+    failed: usize,
+    snapshot: RuntimeStateSnapshot,
+}
+
+pub async fn refresh_pool_accounts(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PoolQuotaRefreshResult>, ManagementError> {
+    let (refreshed, failed) = jobs::refresh_pool_accounts_now(&state)
+        .await
+        .map_err(runtime_error)?;
+    let snapshot = state.snapshot().map_err(store_error)?;
+    Ok(Json(PoolQuotaRefreshResult {
+        refreshed,
+        failed,
+        snapshot,
+    }))
 }
 
 pub async fn delete_account(
@@ -1726,6 +1982,45 @@ pub async fn quota(
     ))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaPolicyInput {
+    refresh_interval_seconds: u64,
+    request_timeout_seconds: u64,
+}
+
+pub async fn set_quota_policy(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<QuotaPolicyInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    if !(crate::store::MIN_QUOTA_REFRESH_INTERVAL_SECONDS
+        ..=crate::store::MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
+        .contains(&input.refresh_interval_seconds)
+    {
+        return Err(ManagementError::validation(
+            "quota_refresh_interval_invalid",
+            "quota refresh interval must be between 120 and 3600 seconds",
+        ));
+    }
+    if !(crate::store::MIN_QUOTA_REQUEST_TIMEOUT_SECONDS
+        ..=crate::store::MAX_QUOTA_REQUEST_TIMEOUT_SECONDS)
+        .contains(&input.request_timeout_seconds)
+    {
+        return Err(ManagementError::validation(
+            "quota_request_timeout_invalid",
+            "quota request timeout must be between 10 and 20 seconds",
+        ));
+    }
+    state
+        .store
+        .set_quota_policy(
+            input.refresh_interval_seconds,
+            input.request_timeout_seconds,
+        )
+        .map_err(store_error)?;
+    state.snapshot().map(Json).map_err(store_error)
+}
+
 #[derive(Serialize)]
 pub struct ModelList {
     data: Vec<ModelItem>,
@@ -1755,12 +2050,79 @@ pub async fn models(
     Ok(Json(ModelList { data: models }))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelEnabledInput {
+    model_id: String,
+    enabled: bool,
+}
+
+pub async fn set_model_enabled(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelEnabledInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let requested = input.model_id.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(ManagementError::validation(
+            "model_id_invalid",
+            "model id is invalid",
+        ));
+    }
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case(requested))
+        .map(|model| model.id.clone())
+        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let old_hidden = state.store.hidden_models().map_err(store_error)?;
+    let mut hidden = old_hidden.clone();
+    hidden.retain(|model| !model.eq_ignore_ascii_case(&canonical));
+    if !input.enabled {
+        hidden.push(canonical);
+    }
+    if hidden == old_hidden {
+        return Ok(Json(snapshot));
+    }
+    state.store.set_hidden_models(hidden).map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        state
+            .store
+            .set_hidden_models(old_hidden)
+            .map_err(|rollback| {
+                ManagementError::internal(
+                    "model_rule_recovery_failed",
+                    format!("{error}; failed to restore model rules: {rollback}"),
+                )
+            })?;
+        return Err(runtime_error(error));
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
 pub async fn usage(
     State(state): State<Arc<AppState>>,
     Query(mut query): Query<UsageQuery>,
 ) -> Result<Json<UsagePage>, ManagementError> {
     normalize_usage_query(&mut query)?;
-    Ok(Json(state.store.usage_page(&query).map_err(store_error)?))
+    let mut page = state.store.usage_page(&query).map_err(store_error)?;
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let labels = snapshot
+        .accounts
+        .into_iter()
+        .map(|account| (identity_hint(&account.id), account.label))
+        .chain(
+            snapshot
+                .sources
+                .into_iter()
+                .map(|source| (identity_hint(&source.id), source.name)),
+        )
+        .collect::<HashMap<_, _>>();
+    for event in &mut page.events {
+        event.candidate_label = labels.get(&event.candidate_hint).cloned();
+    }
+    Ok(Json(page))
 }
 
 pub async fn clear_usage(
@@ -1855,7 +2217,7 @@ pub async fn diagnose_gateway(
             ));
         }
     } else if !serde_json::from_slice::<Value>(&response)
-        .is_ok_and(|value| value.is_object() && value.get("error").is_none())
+        .is_ok_and(|value| value.is_object() && value.get("error").is_none_or(Value::is_null))
     {
         return Err(ManagementError::internal(
             "diagnostic_invalid",
@@ -2160,6 +2522,7 @@ fn source_record(
         id,
         name: clean_label(&input.name, "source name")?,
         enabled: true,
+        in_pool: false,
         draining: false,
         base_url: input.base_url.trim().to_string(),
         secret_ref,
@@ -2380,6 +2743,23 @@ fn generate_pool_key() -> String {
     let mut bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut bytes);
     format!("zrs_{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn ensure_not_server_self_source(
+    state: &AppState,
+    source_base_url: &str,
+) -> Result<(), ManagementError> {
+    let gateway_base_url = format!(
+        "{}/v1",
+        state.config.public_base_url.as_str().trim_end_matches('/')
+    );
+    if source_points_to_gateway(source_base_url, &gateway_base_url) {
+        return Err(ManagementError::validation(
+            "source_self_route",
+            "source base URL must not point back to this Relay gateway",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

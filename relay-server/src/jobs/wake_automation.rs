@@ -16,8 +16,8 @@ use std::{
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountIdentity, AccountRecord},
     automations::{
-        verify_wake_countdown, WakeAdapterPolicy, WakeCompletion, WakeCompletionOutcome,
-        WakeCoordinator, WakeModel, WakePermit,
+        model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
+        WakeCompletionOutcome, WakeCoordinator, WakeModel, WakePermit,
     },
     quota::{QuotaTransition, QuotaWindowKind},
 };
@@ -190,7 +190,7 @@ async fn execute_inner(
         .and_then(|value| value.get("usage").cloned());
     drop(bytes);
     tokio::time::sleep(Duration::from_millis(permit.verification_delay_ms)).await;
-    let (updated, _) = quota_refresh::refresh_one(state, account).await?;
+    let (updated, _) = quota_refresh::refresh_one(state, account, false).await?;
     let after = updated.quota.window(permit.window_kind);
     let outcome = match verify_wake_countdown(permit.verification.baseline_window.as_ref(), after) {
         zenith_relay_core::automations::WakeVerificationOutcome::ConfirmedQuotaConsumed
@@ -237,6 +237,7 @@ fn core_account(account: &ServerAccountRecord) -> Result<AccountRecord, String> 
         token_updated_at_ms: None,
         tags: BTreeSet::new(),
         enabled: account.enabled,
+        in_pool: account.in_pool,
         draining: account.draining,
         created_at_ms: 0,
         last_used_at_ms: account.last_used_at_ms,
@@ -256,7 +257,7 @@ fn policy(account: &ServerAccountRecord) -> WakeAdapterPolicy {
             .enumerate()
             .map(|(index, id)| WakeModel {
                 id: id.clone(),
-                lightness_rank: index.min(u32::MAX as usize) as u32,
+                lightness_rank: model_lightness_rank(id, index),
                 wake_capable: true,
             })
             .collect(),
@@ -280,6 +281,7 @@ mod tests {
             label: "Test".into(),
             identity_hint: "abcdef123456".into(),
             enabled: true,
+            in_pool: true,
             draining: false,
             source_id: "openai_codex".into(),
             secret_ref: "account:synthetic".into(),

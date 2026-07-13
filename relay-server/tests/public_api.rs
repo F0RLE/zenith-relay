@@ -9,6 +9,7 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
@@ -75,6 +76,14 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert!(!tested_source
         .to_string()
         .contains("synthetic-upstream-api-key"));
+    let membership = client
+        .post(format!("{}/pool/members", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sourceIds": [source_id], "inPool": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(membership.status(), StatusCode::OK);
 
     let generated: Value = client
         .post(format!("{}/keys", first.origin))
@@ -134,6 +143,19 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap()
         .contains("response.completed"));
+
+    let non_stream_diagnostic: Value = client
+        .post(format!("{}/diagnostics", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"stream": false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(non_stream_diagnostic["stream"], false);
+    assert_eq!(non_stream_diagnostic["model"], "gpt-test");
 
     let diagnostic: Value = client
         .post(format!("{}/diagnostics", first.origin))
@@ -220,6 +242,14 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap();
     assert_eq!(reenabling.status(), StatusCode::OK);
+    let membership = client
+        .post(format!("{}/pool/members", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"accountIds": [account_id], "inPool": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(membership.status(), StatusCode::OK);
 
     assert_eq!(
         client
@@ -363,6 +393,49 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap()
         .contains("account-response-test"));
 
+    let account_usage: Value = client
+        .get(format!("{}/usage?page=1&pageSize=50", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_event = account_usage["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["candidateKind"] == "account")
+        .unwrap();
+    assert_eq!(account_event["candidateLabel"], "Synthetic OAuth account");
+    assert_eq!(account_event["inputTokens"], 1);
+    assert_eq!(account_event["outputTokens"], 1);
+    assert_eq!(account_event["totalTokens"], 2);
+
+    let disabled_response = client
+        .post(format!("{}/models/rules", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"modelId": "gpt-test", "enabled": false}))
+        .send()
+        .await
+        .unwrap();
+    let disabled_status = disabled_response.status();
+    let disabled_text = disabled_response.text().await.unwrap();
+    assert_eq!(disabled_status, StatusCode::OK, "{disabled_text}");
+    let disabled: Value = serde_json::from_str(&disabled_text).unwrap();
+    assert_eq!(disabled["gateway"]["models"][0]["enabled"], false);
+    let hidden_models: Value = client
+        .get(format!("{}/v1/models", first.origin))
+        .bearer_auth(&pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hidden_models["data"], json!([]));
+
     let state_text = client
         .get(format!("{}/state", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -400,16 +473,38 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         second_state["runtimeTarget"]["serverId"].as_str(),
         Some(first_server_id.as_str())
     );
-    assert_eq!(
-        client
-            .get(format!("{}/v1/models", second.origin))
-            .bearer_auth(&pool_key)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::OK
-    );
+    let persisted_models: Value = client
+        .get(format!("{}/v1/models", second.origin))
+        .bearer_auth(&pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(persisted_models["data"], json!([]));
+    let enabled_response = client
+        .post(format!("{}/models/rules", second.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"modelId": "gpt-test", "enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    let enabled_status = enabled_response.status();
+    let enabled_text = enabled_response.text().await.unwrap();
+    assert_eq!(enabled_status, StatusCode::OK, "{enabled_text}");
+    let enabled: Value = serde_json::from_str(&enabled_text).unwrap();
+    assert_eq!(enabled["gateway"]["models"][0]["enabled"], true);
+    let restored_models: Value = client
+        .get(format!("{}/v1/models", second.origin))
+        .bearer_auth(&pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restored_models["data"][0]["id"], "gpt-test");
     let reopened_stream = client
         .post(format!("{}/v1/responses", second.origin))
         .bearer_auth(&pool_key)
@@ -472,10 +567,75 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
 }
 
 #[tokio::test]
+async fn quota_policy_and_pool_refresh_have_remote_parity() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let invalid = client
+        .post(format!("{}/quota/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"refreshIntervalSeconds": 119, "requestTimeoutSeconds": 20}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let updated: Value = client
+        .post(format!("{}/quota/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"refreshIntervalSeconds": 120, "requestTimeoutSeconds": 10}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["gateway"]["quotaRefreshIntervalSeconds"], 120);
+    assert_eq!(updated["gateway"]["quotaRequestTimeoutSeconds"], 10);
+
+    let refreshed: Value = client
+        .post(format!("{}/pool/quota/refresh", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(refreshed["refreshed"], 0);
+    assert_eq!(refreshed["failed"], 0);
+    assert_eq!(
+        refreshed["snapshot"]["gateway"]["quotaRefreshIntervalSeconds"],
+        120
+    );
+
+    server.task.abort();
+}
+
+#[tokio::test]
 async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
+    let missing_refresh = client
+        .post(format!(
+            "{}/accounts/account_missing/refresh",
+            server.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_refresh.status(), StatusCode::NOT_FOUND);
+    let second_id_token = jwt(json!({
+        "exp": 1_789_084_800,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "synthetic-batch-account-two",
+            "chatgpt_plan_type": "business",
+            "chatgpt_subscription_active_until": "2026-10-10T00:00:00Z"
+        }
+    }));
     let content = json!({
         "version": 1,
         "proxies": [{"password": "synthetic-proxy-secret-never-import"}],
@@ -500,7 +660,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
                 "tokens": {
                     "accessToken": "synthetic-batch-access-two",
                     "refreshToken": "synthetic-batch-refresh-two",
-                    "chatgptAccountId": "synthetic-batch-account-two"
+                    "idToken": second_id_token
                 },
                 "models": ["gpt-test"]
             }
@@ -524,6 +684,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         "synthetic-batch-refresh-two",
         "synthetic-proxy-secret-never-import",
         "synthetic-source-secret-never-import",
+        &second_id_token,
     ] {
         assert!(!preview_text.contains(secret));
     }
@@ -582,12 +743,34 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         .unwrap();
     assert_eq!(second_confirm["results"][0]["status"], "succeeded");
     assert_eq!(server.state.store.accounts().unwrap().len(), 2);
+    let second_account = server
+        .state
+        .store
+        .accounts()
+        .unwrap()
+        .into_iter()
+        .find(|account| account.label == "Portable second")
+        .unwrap();
+    assert_eq!(
+        second_account.subscription.plan_type.as_deref(),
+        Some("business")
+    );
+    assert_eq!(
+        second_account.subscription.active_until_ms,
+        Some(1_791_590_400_000)
+    );
 
     let database = std::fs::read(root.path().join("relay.sqlite")).unwrap();
     let database = String::from_utf8_lossy(&database);
     assert!(!database.contains("synthetic-proxy-secret-never-import"));
     assert!(!database.contains("synthetic-source-secret-never-import"));
     server.task.abort();
+}
+
+fn jwt(payload: Value) -> String {
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+    format!("{header}.{payload}.synthetic-signature")
 }
 
 #[tokio::test]
@@ -755,9 +938,9 @@ async fn batch_import_enforces_size_count_depth_and_batch_ownership() {
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
 
-    let oversized = "x".repeat(1024 * 1024 + 1);
+    let oversized = "x".repeat(4 * 1024 * 1024 + 1);
     assert_batch_error(&client, &server.origin, oversized, "import_too_large").await;
-    let too_many = Value::Array((0..257).map(|_| json!({})).collect()).to_string();
+    let too_many = Value::Array((0..1_025).map(|_| json!({})).collect()).to_string();
     assert_batch_error(&client, &server.origin, too_many, "import_item_count").await;
     let mut deep = json!({});
     for _ in 0..34 {
@@ -891,6 +1074,14 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
         .unwrap();
     assert_eq!(confirmed["proxyMode"], "common");
     assert_eq!(confirmed["proxyAvailable"], true);
+    let membership = client
+        .post(format!("{}/pool/members", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"accountIds": [account_id], "inPool": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(membership.status(), StatusCode::OK);
 
     let generated: Value = client
         .post(format!("{}/keys", server.origin))
@@ -1069,6 +1260,40 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
     assert_eq!(repaired_state["gateway"]["commonProxyAvailable"], true);
     assert_eq!(repaired_state["gateway"]["running"], true);
 
+    let strict_state: Value = client
+        .post(format!("{}/proxies/policy", recovered.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"required": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(strict_state["gateway"]["accountProxyRequired"], true);
+    let blocked_state: Value = client
+        .post(format!("{}/proxies/common", recovered.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": null}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(blocked_state["gateway"]["commonProxyConfigured"], false);
+    assert_eq!(blocked_state["gateway"]["accountProxyRequired"], true);
+    assert_eq!(blocked_state["accounts"][0]["proxyMode"], "direct");
+    assert_eq!(blocked_state["accounts"][0]["proxyAvailable"], false);
+    let blocked_request = client
+        .post(format!("{}/v1/responses", recovered.origin))
+        .bearer_auth(pool_key)
+        .json(&json!({"model":"gpt-proxy-test","input":"must not use direct egress"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_request.status(), StatusCode::SERVICE_UNAVAILABLE);
+
     recovered.task.abort();
     common_task.abort();
     account_task.abort();
@@ -1220,6 +1445,7 @@ async fn upstream_response(request: Request) -> Response {
             "id":"response-test",
             "object":"response",
             "model":"gpt-test",
+            "error": null,
             "output":[],
             "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
         })),

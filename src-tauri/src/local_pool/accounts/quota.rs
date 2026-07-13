@@ -6,8 +6,9 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 use url::Url;
 use zenith_relay_core::quota::{
-    QuotaAdapterCapabilities, QuotaRefreshData, QuotaRefreshFailure, QuotaWindowInput,
-    QuotaWindowKind, ResetTime, Subscription, SubscriptionInput, SupplementalQuotaWindowInput,
+    merge_subscription_metadata, CodexSubscriptionClient, QuotaAdapterCapabilities,
+    QuotaRefreshData, QuotaRefreshFailure, QuotaWindowInput, QuotaWindowKind, ResetTime,
+    Subscription, SubscriptionInput, SupplementalQuotaWindowInput,
 };
 use zenith_relay_core::ProxyConfig;
 
@@ -22,6 +23,7 @@ const MAX_QUOTA_RESPONSE_BYTES: usize = 256 * 1024;
 pub struct CodexQuotaClient {
     http: reqwest::Client,
     usage_endpoint: Url,
+    subscription: CodexSubscriptionClient,
 }
 
 impl CodexQuotaClient {
@@ -30,23 +32,31 @@ impl CodexQuotaClient {
     }
 
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, QuotaRefreshFailure> {
+        Self::new_with_proxy_and_timeout(proxy, Duration::from_secs(20))
+    }
+
+    pub fn new_with_proxy_and_timeout(
+        proxy: Option<&ProxyConfig>,
+        request_timeout: Duration,
+    ) -> Result<Self, QuotaRefreshFailure> {
         let usage_endpoint = Url::parse(CODEX_QUOTA_ENDPOINT)
             .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
-        Self::with_endpoint_and_proxy(usage_endpoint, proxy)
+        Self::with_endpoint_proxy_and_timeout(usage_endpoint, proxy, request_timeout)
     }
 
     #[cfg(test)]
     fn with_endpoint(usage_endpoint: Url) -> Result<Self, QuotaRefreshFailure> {
-        Self::with_endpoint_and_proxy(usage_endpoint, None)
+        Self::with_endpoint_proxy_and_timeout(usage_endpoint, None, Duration::from_secs(20))
     }
 
-    fn with_endpoint_and_proxy(
+    fn with_endpoint_proxy_and_timeout(
         usage_endpoint: Url,
         proxy: Option<&ProxyConfig>,
+        request_timeout: Duration,
     ) -> Result<Self, QuotaRefreshFailure> {
         let builder = reqwest::Client::builder()
             .redirect(Policy::none())
-            .timeout(Duration::from_secs(20))
+            .timeout(request_timeout)
             .user_agent("Zenith Relay");
         let http = match proxy {
             Some(proxy) => proxy.apply(builder),
@@ -54,9 +64,11 @@ impl CodexQuotaClient {
         }
         .build()
         .map_err(|_| QuotaRefreshFailure::new("invalid_configuration", false))?;
+        let subscription = CodexSubscriptionClient::new(http.clone())?;
         Ok(Self {
             http,
             usage_endpoint,
+            subscription,
         })
     }
 
@@ -76,9 +88,16 @@ impl CodexQuotaClient {
         chatgpt_account_id: &str,
         now_ms: u64,
         previous_subscription: &Subscription,
+        refresh_subscription: bool,
     ) -> QuotaRefreshOutcome {
         match self
-            .refresh_data(access_token, chatgpt_account_id, now_ms)
+            .refresh_data_with_subscription(
+                access_token,
+                chatgpt_account_id,
+                now_ms,
+                previous_subscription,
+                refresh_subscription,
+            )
             .await
         {
             Ok(data) => QuotaRefreshOutcome::Updated(data),
@@ -135,6 +154,48 @@ impl CodexQuotaClient {
         }
 
         parse_usage_payload(&body, now_ms)
+    }
+
+    pub async fn refresh_data_with_subscription(
+        &self,
+        access_token: &str,
+        chatgpt_account_id: &str,
+        now_ms: u64,
+        previous_subscription: &Subscription,
+        refresh_subscription: bool,
+    ) -> Result<CodexQuotaRefreshData, QuotaRefreshFailure> {
+        let mut data = self
+            .refresh_data(access_token, chatgpt_account_id, now_ms)
+            .await?;
+        if refresh_subscription {
+            let metadata = self
+                .subscription
+                .fetch(access_token, chatgpt_account_id, now_ms)
+                .await;
+            let input = data
+                .quota
+                .subscription
+                .get_or_insert_with(|| SubscriptionInput {
+                    plan_type: previous_subscription.plan_type.clone(),
+                    active_until_ms: previous_subscription.active_until_ms,
+                    forbidden: false,
+                    observed_at_ms: now_ms,
+                });
+            if let Ok(metadata) = metadata {
+                merge_subscription_metadata(
+                    &mut input.plan_type,
+                    &mut input.active_until_ms,
+                    metadata,
+                );
+            }
+            input.observed_at_ms = now_ms;
+        } else if let Some(input) = data.quota.subscription.as_mut() {
+            if input.plan_type == previous_subscription.plan_type && input.active_until_ms.is_none()
+            {
+                input.observed_at_ms = previous_subscription.updated_at_ms.unwrap_or(now_ms);
+            }
+        }
+        Ok(data)
     }
 }
 
@@ -294,6 +355,9 @@ fn collect_supplemental_windows(
         .take(15)
         .enumerate()
     {
+        if is_spark_limit(entry) {
+            continue;
+        }
         let Some(rate_limit) = entry.rate_limit.as_ref() else {
             continue;
         };
@@ -317,6 +381,15 @@ fn collect_supplemental_windows(
         );
     }
     windows
+}
+
+fn is_spark_limit(entry: &AdditionalRateLimitStatus) -> bool {
+    entry
+        .limit_name
+        .as_deref()
+        .into_iter()
+        .chain(entry.metered_feature.as_deref())
+        .any(|value| value.to_ascii_lowercase().contains("spark"))
 }
 
 fn append_supplemental_windows(
@@ -433,6 +506,7 @@ mod tests {
                 "account-123",
                 1_700_000_000_000,
                 &Subscription::default(),
+                false,
             )
             .await;
         let QuotaRefreshOutcome::Updated(data) = result else {
@@ -465,6 +539,57 @@ mod tests {
         let subscription = subscription.unwrap();
         assert_eq!(subscription.plan_type.as_deref(), Some("pro"));
         assert_eq!(subscription.status, SubscriptionStatus::Active);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn quota_refresh_queries_subscription_fallback_on_the_same_http_client() {
+        let router = Router::new()
+            .route("/backend-api/wham/usage", get(successful_usage))
+            .route(
+                "/backend-api/accounts/check/v4-2023-04-27",
+                get(subscription_account_check),
+            )
+            .route("/backend-api/subscriptions", get(subscription_status));
+        let (usage_endpoint, server) = spawn(router).await;
+        let http = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .build()
+            .unwrap();
+        let subscription = CodexSubscriptionClient::with_endpoints(
+            http.clone(),
+            usage_endpoint
+                .join("/backend-api/accounts/check/v4-2023-04-27")
+                .unwrap(),
+            usage_endpoint.join("/backend-api/subscriptions").unwrap(),
+        )
+        .unwrap();
+        let client = CodexQuotaClient {
+            http,
+            usage_endpoint,
+            subscription,
+        };
+
+        let QuotaRefreshOutcome::Updated(data) = client
+            .refresh_quota(
+                "access-secret",
+                "account-123",
+                1_700_000_000_000,
+                &Subscription::default(),
+                true,
+            )
+            .await
+        else {
+            panic!("expected quota refresh");
+        };
+        let subscription = data
+            .quota
+            .normalize(&QuotaSnapshot::default())
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(subscription.plan_type.as_deref(), Some("business"));
+        assert_eq!(subscription.active_until_ms, Some(1_791_590_400_000));
         server.abort();
     }
 
@@ -546,7 +671,7 @@ mod tests {
             let (endpoint, server) = spawn(router).await;
             let result = CodexQuotaClient::with_endpoint(endpoint)
                 .unwrap()
-                .refresh_quota("access-secret", "account-123", 100, &previous)
+                .refresh_quota("access-secret", "account-123", 100, &previous, false)
                 .await;
             let QuotaRefreshOutcome::Failed {
                 failure,
@@ -611,6 +736,14 @@ mod tests {
                         "reset_after_seconds": 604_800
                     }
                 }
+            }, {
+                "limit_name": "GPT-5.3 Codex Spark",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 50,
+                        "limit_window_seconds": 18_000
+                    }
+                }
             }],
             "rate_limit_reached_type": { "type": "rate_limit_reached" },
             "rate_limit_reset_credits": { "available_count": 2 }
@@ -623,6 +756,22 @@ mod tests {
 
     async fn invalid_usage() -> impl IntoResponse {
         (StatusCode::OK, "provider-body-secret")
+    }
+
+    async fn subscription_account_check() -> impl IntoResponse {
+        Json(json!({
+            "accounts": [{
+                "account": {"id": "account-123"},
+                "entitlement": {"subscription_plan": "business"}
+            }]
+        }))
+    }
+
+    async fn subscription_status() -> impl IntoResponse {
+        Json(json!({
+            "subscription_plan": "business",
+            "active_until": "2026-10-10T00:00:00Z"
+        }))
     }
 
     async fn spawn(router: Router) -> (Url, tokio::task::JoinHandle<()>) {

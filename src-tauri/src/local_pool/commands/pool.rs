@@ -1,4 +1,7 @@
-use super::{restart_after_secret_change, sync_gateway_or_rollback, sync_records_or_rollback};
+use super::{
+    restart_after_secret_change, restart_or_rollback, sync_gateway_or_rollback,
+    sync_records_or_rollback,
+};
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
@@ -7,6 +10,7 @@ use crate::local_pool::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
 
@@ -39,6 +43,152 @@ pub struct UpdateRoutingInput {
     max_retry_candidates: u8,
     session_affinity: bool,
     session_affinity_ttl_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PoolMembershipInput {
+    #[serde(default)]
+    account_ids: Vec<String>,
+    #[serde(default)]
+    source_ids: Vec<String>,
+    in_pool: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QuotaPolicyInput {
+    refresh_interval_seconds: u64,
+    request_timeout_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelEnabledInput {
+    model_id: String,
+    enabled: bool,
+}
+
+#[tauri::command]
+pub async fn set_local_model_enabled(
+    input: SetModelEnabledInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let requested = input.model_id.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(LocalPoolError::new(ErrorCode::InvalidState, "model id is invalid").into());
+    }
+    let _mutation = state.setup_guard().await;
+    let canonical = {
+        let store = state.store()?;
+        store
+            .sources()
+            .iter()
+            .filter(|source| source.in_pool)
+            .flat_map(|source| source.models.iter())
+            .chain(
+                store
+                    .accounts()
+                    .iter()
+                    .filter(|account| account.account.in_pool)
+                    .flat_map(|account| account.models.iter()),
+            )
+            .find(|model| model.eq_ignore_ascii_case(requested))
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))?
+    };
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    gateway
+        .hidden_models
+        .retain(|model| !model.eq_ignore_ascii_case(&canonical));
+    if !input.enabled {
+        gateway.hidden_models.push(canonical);
+    }
+    if gateway == old_gateway {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    state.store()?.replace_gateway(gateway)?;
+    sync_gateway_or_rollback(&state, old_gateway).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_local_quota_policy(
+    input: QuotaPolicyInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let mut gateway = state.store()?.gateway().clone();
+    gateway.quota_refresh_interval_seconds = input.refresh_interval_seconds;
+    gateway.quota_request_timeout_seconds = input.request_timeout_seconds;
+    gateway
+        .validate()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
+    state.store()?.replace_gateway(gateway)?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_pool_membership(
+    input: PoolMembershipInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
+    let source_ids = input.source_ids.into_iter().collect::<BTreeSet<_>>();
+    if account_ids.is_empty() && source_ids.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "at least one pool member is required",
+        )
+        .into());
+    }
+
+    let _mutation = state.setup_guard().await;
+    let (old_sources, old_accounts, old_keys) = {
+        let store = state.store()?;
+        (
+            store.sources().to_vec(),
+            store.accounts().to_vec(),
+            store.keys().to_vec(),
+        )
+    };
+    if source_ids
+        .iter()
+        .any(|id| !old_sources.iter().any(|record| &record.id == id))
+        || account_ids
+            .iter()
+            .any(|id| !old_accounts.iter().any(|record| &record.account.id == id))
+    {
+        return Err(LocalPoolError::new(ErrorCode::NotFound, "pool member not found").into());
+    }
+
+    let mut sources = old_sources.clone();
+    let mut accounts = old_accounts.clone();
+    for source in &mut sources {
+        if source_ids.contains(&source.id) {
+            source.in_pool = input.in_pool;
+        }
+    }
+    for account in &mut accounts {
+        if account_ids.contains(&account.account.id) {
+            account.account.in_pool = input.in_pool;
+        }
+    }
+    if sources == old_sources && accounts == old_accounts {
+        return state.snapshot().await.map_err(Into::into);
+    }
+
+    state
+        .store()?
+        .replace_pool_records(sources, accounts, old_keys.clone())?;
+    restart_or_rollback(&state, || {
+        state
+            .store()?
+            .replace_pool_records(old_sources, old_accounts, old_keys)
+    })
+    .await?;
+    state.snapshot().await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -297,6 +447,7 @@ pub(super) fn has_usable_source(
             .is_none_or(|ids| ids.iter().any(|id| id == &source.id));
         if scoped
             && source.enabled
+            && source.in_pool
             && !source.draining
             && secret_store::load(&source.secret_ref)?.is_some()
         {
@@ -308,7 +459,11 @@ pub(super) fn has_usable_source(
             .account_ids
             .as_ref()
             .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id));
-        if !scoped || !account.account.enabled || account.account.draining {
+        if !scoped
+            || !account.account.enabled
+            || !account.account.in_pool
+            || account.account.draining
+        {
             continue;
         }
         let mut secrets_available = !account.account.secret_refs.is_empty();

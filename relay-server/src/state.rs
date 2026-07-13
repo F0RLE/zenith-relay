@@ -15,8 +15,8 @@ use zenith_relay_core::{
     GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 4;
-pub const MAX_SERVER_ACCOUNTS: usize = 512;
+pub const SERVER_SCHEMA_VERSION: u32 = 6;
+pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -25,6 +25,8 @@ pub struct SourceRecord {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
     pub draining: bool,
     pub base_url: String,
     pub secret_ref: String,
@@ -44,6 +46,8 @@ pub struct ServerAccountRecord {
     pub label: String,
     pub identity_hint: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
     pub draining: bool,
     pub source_id: String,
     pub secret_ref: String,

@@ -83,7 +83,9 @@ secret-store/encrypted-vault credential payload. The common account proxy is a
 separate protected secret. Neither URL is part of account records, snapshots,
 diagnostics, exports, logs, or portable imports. Re-import and token rotation
 preserve an existing account override. SOCKS and silent direct fallback are not
-supported.
+supported. When `accountProxyRequired` is enabled, an account without either a
+valid override or a valid common proxy stays persisted but cannot perform OAuth
+exchange, refresh, model discovery, quota refresh, wake, or provider requests.
 
 Useful index shape:
 

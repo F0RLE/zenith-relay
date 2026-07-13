@@ -2,9 +2,13 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats, getSavedKeyUsageHistory, getState, KeyStats, UiState, UsageLogEntry } from "../../../tauri";
 import { relayCommands } from "../api/commands";
-import type { LocalUsage, PageId, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import type { HistoryRepairPreview, LocalUsage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import { Button, Dialog, StatusBadge } from "../components/Ui";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
+type PendingProfileRepair = { preview: HistoryRepairPreview; launchAfter: boolean };
+
+const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 
 type RelayContextValue = {
   mode: RelayMode;
@@ -24,6 +28,8 @@ type RelayContextValue = {
   feedback: Feedback;
   refresh: () => Promise<void>;
   perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
+  activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
+  launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
   clearFeedback: () => void;
   onboardingComplete: boolean;
   finishOnboarding: (mode: RelayMode) => void;
@@ -37,7 +43,7 @@ type RelayContextValue = {
 const RelayContext = createContext<RelayContextValue | null>(null);
 
 export function RelayStateProvider({ children }: { children: ReactNode }) {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
   const [mode, setModeState] = useState<RelayMode>(() => stored("relay.mode", "local") as RelayMode);
   const [page, setPage] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
@@ -50,6 +56,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
+  const [pendingProfileRepair, setPendingProfileRepair] = useState<PendingProfileRepair | null>(null);
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
@@ -116,6 +123,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
+    const refreshVisibleRuntime = () => {
+      if (document.visibilityState === "visible") void refresh().catch(() => undefined);
+    };
+    const interval = window.setInterval(refreshVisibleRuntime, RUNTIME_REFRESH_INTERVAL_MS);
+    window.addEventListener("focus", refreshVisibleRuntime);
+    document.addEventListener("visibilitychange", refreshVisibleRuntime);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshVisibleRuntime);
+      document.removeEventListener("visibilitychange", refreshVisibleRuntime);
+    };
+  }, [refresh]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.compact = compact ? "true" : "false";
   }, [theme, compact]);
@@ -143,6 +164,69 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       setBusy(null);
     }
   }, [refresh]);
+
+  const launchAttachedCodex = useCallback(() => perform(
+    "profile-launch",
+    relayCommands.launchManagedCodex,
+    "feedback.launched",
+  ), [perform]);
+
+  const inspectProfileHistory = useCallback(async (binding: ProfileBinding, launchAfter: boolean) => {
+    const result: { current: HistoryRepairPreview | null } = { current: null };
+    const target = binding.credentialKind === "local_gateway" ? "zenith_relay_local" : "openai";
+    const previewed = await perform("history-repair-preview", async () => {
+      result.current = await relayCommands.previewHistoryRepair([binding.profileDir], target);
+    });
+    const preview = result.current;
+    if (!previewed || !preview) return false;
+    if (preview.rolloutRecordCount + preview.sqliteRowCount > 0) {
+      setPendingProfileRepair({ preview, launchAfter });
+      return true;
+    }
+    return launchAfter ? launchAttachedCodex() : true;
+  }, [launchAttachedCodex, perform]);
+
+  const activateCodexProfile = useCallback(async (
+    id: string,
+    work: () => Promise<ProfileActivation>,
+    launchAfter = false,
+  ) => {
+    const result: { current: ProfileActivation | null } = { current: null };
+    const activated = await perform(id, async () => {
+      result.current = await work();
+    }, launchAfter ? undefined : "feedback.profileAttached");
+    const activation = result.current;
+    if (!activated || !activation) return false;
+    if (activation.repairRecommended || launchAfter) {
+      return inspectProfileHistory(activation.binding, launchAfter);
+    }
+    return true;
+  }, [inspectProfileHistory, perform]);
+
+  const launchCodexProfile = useCallback(async (binding: ProfileBinding) => {
+    const stopped = await perform("profile-stop", relayCommands.stopManagedCodex);
+    return stopped && inspectProfileHistory(binding, true);
+  }, [inspectProfileHistory, perform]);
+
+  const applyPendingProfileRepair = useCallback(async () => {
+    if (!pendingProfileRepair) return;
+    const pending = pendingProfileRepair;
+    const applied = await perform(
+      "history-repair-apply",
+      () => relayCommands.applyHistoryRepair(pending.preview.sessionId),
+      pending.launchAfter ? undefined : "feedback.saved",
+    );
+    if (!applied) return;
+    setPendingProfileRepair(null);
+    if (pending.launchAfter) await launchAttachedCodex();
+  }, [launchAttachedCodex, pendingProfileRepair, perform]);
+
+  const skipPendingProfileRepair = useCallback(async () => {
+    if (!pendingProfileRepair) return;
+    const launchAfter = pendingProfileRepair.launchAfter;
+    setPendingProfileRepair(null);
+    if (launchAfter) await launchAttachedCodex();
+  }, [launchAttachedCodex, pendingProfileRepair]);
 
   const finishOnboarding = useCallback((nextMode: RelayMode) => {
     localStorage.setItem("relay.onboarding", "1");
@@ -184,6 +268,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     feedback,
     refresh,
     perform,
+    activateCodexProfile,
+    launchCodexProfile,
     clearFeedback: () => setFeedback(null),
     onboardingComplete,
     finishOnboarding,
@@ -192,13 +278,21 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setTheme,
     compact,
     setCompact,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
+  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
   }, [i18n.language]);
 
-  return <RelayContext.Provider value={value}>{children}</RelayContext.Provider>;
+  return <RelayContext.Provider value={value}>{children}{pendingProfileRepair ? <Dialog
+    title={t("profiles.switchRepairTitle")}
+    onClose={() => setPendingProfileRepair(null)}
+    footer={<>
+      <Button variant="secondary" onClick={() => setPendingProfileRepair(null)}>{t("profiles.continueLater")}</Button>
+      {pendingProfileRepair.launchAfter ? <Button variant="secondary" busy={busy === "profile-launch"} onClick={skipPendingProfileRepair}>{t("profiles.launchWithoutRepair")}</Button> : null}
+      <Button variant="primary" busy={busy === "history-repair-apply"} disabled={pendingProfileRepair.preview.codexRunning} onClick={applyPendingProfileRepair}>{pendingProfileRepair.launchAfter ? t("profiles.applyAndLaunch") : t("profiles.applyRepair")}</Button>
+    </>}
+  ><p>{t("profiles.switchRepairHint")}</p><StatusBadge status="warning" label={t("profiles.previewReady")} /><dl className="detail-list"><div><dt>{t("profiles.rolloutFiles")}</dt><dd>{pendingProfileRepair.preview.rolloutFileCount}</dd></div><div><dt>{t("profiles.rolloutRecords")}</dt><dd>{pendingProfileRepair.preview.rolloutRecordCount}</dd></div><div><dt>{t("profiles.databaseRows")}</dt><dd>{pendingProfileRepair.preview.sqliteRowCount}</dd></div></dl>{pendingProfileRepair.preview.codexRunning ? <p className="warning-box">{t("profiles.runningWarning")}</p> : null}</Dialog> : null}</RelayContext.Provider>;
 }
 
 export function useRelayState() {

@@ -4,8 +4,8 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fmt};
 use url::Url;
 
-pub const MAX_IMPORT_BYTES: usize = 1024 * 1024;
-pub const MAX_IMPORT_ITEMS: usize = 256;
+pub const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_IMPORT_ITEMS: usize = 1_024;
 pub const MAX_JSON_DEPTH: usize = 32;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -766,7 +766,17 @@ fn parse_item(
             provider_data.and_then(|data| value_field(data, SUBSCRIPTION_EXPIRES_AT_FIELDS))
         });
     let mut subscription_expires_at = safe_expiry(subscription_expires_at_value);
-    let base_url_value = value_field(object, &["base_url", "baseUrl", "api_base", "apiBase"]);
+    let base_url_value = value_field(
+        object,
+        &[
+            "base_url",
+            "baseUrl",
+            "api_base",
+            "apiBase",
+            "api_base_url",
+            "apiBaseUrl",
+        ],
+    );
     let base_url_supplied = base_url_value.is_some();
     let base_url = safe_base_url(base_url_value.and_then(Value::as_str));
     let protocol_value = value_field(object, &["protocol", "wire_api", "wireApi"]);
@@ -861,8 +871,11 @@ fn parse_item(
         ImportAuthMode::ApiKey => format!("API source {}", ordinal + 1),
         _ => format!("Account {}", ordinal + 1),
     };
-    let label_value = string_field(object, &["name", "label"])
-        .or_else(|| meta.and_then(|data| string_field(data, &["name", "label"])));
+    let label_value = string_field(
+        object,
+        &["name", "label", "api_provider_name", "apiProviderName"],
+    )
+    .or_else(|| meta.and_then(|data| string_field(data, &["name", "label"])));
     let mut label = safe_label(label_value).unwrap_or_else(|| identity.clone());
     if label == "unknown" || label.is_empty() {
         label = fallback_label;
@@ -1387,8 +1400,14 @@ const PLAN_FIELDS: &[&str] = &[
     "plan",
 ];
 const EXPIRES_AT_FIELDS: &[&str] = &["expires_at", "expiresAt", "expired"];
-const SUBSCRIPTION_EXPIRES_AT_FIELDS: &[&str] =
-    &["subscription_expires_at", "subscriptionExpiresAt"];
+const SUBSCRIPTION_EXPIRES_AT_FIELDS: &[&str] = &[
+    "subscription_expires_at",
+    "subscriptionExpiresAt",
+    "subscription_active_until",
+    "subscriptionActiveUntil",
+    "chatgpt_subscription_active_until",
+    "chatgptSubscriptionActiveUntil",
+];
 
 #[cfg(test)]
 mod tests {
@@ -1654,6 +1673,46 @@ mod tests {
                 .iter()
                 .any(|warning| warning.code == ImportWarningCode::AccessTokenOnly));
         }
+    }
+
+    #[test]
+    fn parses_mixed_cockpit_array_and_sub2api_failure_rows() {
+        let cockpit = format!(
+            r#"[
+                {{"type":"codex","access_token":"{ACCESS}-one","refresh_token":"{REFRESH}-one","account_id":"acct_cockpit_one","email":"one@example.test"}},
+                {{"type":"codex","access_token":"{ACCESS}-two","account_id":"acct_cockpit_two","email":"two@example.test"}},
+                {{"auth_mode":"apikey","OPENAI_API_KEY":"{API_KEY}","api_base_url":"https://api.example.test/v1","api_provider_name":"Example API"}}
+            ]"#
+        );
+        let parsed = parse_import(&cockpit, None, &[]).unwrap();
+        assert_eq!(parsed.preview.format, ImportFormat::JsonArray);
+        assert_eq!(parsed.items.len(), 3);
+        assert!(parsed.preview.rows.iter().all(|row| row.selectable));
+        assert_eq!(parsed.items[2].label, "Example API");
+        assert_eq!(
+            parsed.items[2].base_url.as_deref(),
+            Some("https://api.example.test/v1")
+        );
+
+        let sub2api = format!(
+            r#"{{"type":"sub2api-data","version":1,"accounts":[
+                {{"name":"First","platform":"openai","type":"oauth","credentials":{{"access_token":"{ACCESS}-one","chatgpt_account_id":"acct_sub2api_one","email":"one@example.test"}}}},
+                {{"name":"Second","platform":"openai","type":"oauth","credentials":{{"access_token":"{ACCESS}-two","chatgpt_account_id":"acct_sub2api_two","email":"two@example.test"}}}},
+                {{"name":"Missing credential","platform":"openai","type":"oauth","credentials":{{"access_token":"","email":"missing@example.test"}}}}
+            ],"proxies":[]}}"#
+        );
+        let parsed = parse_import(&sub2api, None, &[]).unwrap();
+        assert_eq!(parsed.preview.format, ImportFormat::PortableAccountBundleV1);
+        assert_eq!(parsed.preview.rows.len(), 3);
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.preview.rows[2].status, ImportPreviewStatus::Invalid);
+        assert_eq!(
+            parsed.preview.rows[2]
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ImportIssueCode::MissingCredentials)
+        );
     }
 
     #[test]

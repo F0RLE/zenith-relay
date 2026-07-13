@@ -7,11 +7,17 @@ use zenith_relay_core::{
     WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
-pub const MAX_LOCAL_ACCOUNTS: usize = 512;
+pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
+pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
+pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
+pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
+pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const MAX_LOCAL_ACCOUNTS: usize = 1_024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +54,14 @@ pub struct GatewaySettings {
     pub session_affinity_ttl_seconds: u64,
     #[serde(default)]
     pub common_proxy_configured: bool,
+    #[serde(default)]
+    pub account_proxy_required: bool,
+    #[serde(default = "default_quota_refresh_interval_seconds")]
+    pub quota_refresh_interval_seconds: u64,
+    #[serde(default = "default_quota_request_timeout_seconds")]
+    pub quota_request_timeout_seconds: u64,
+    #[serde(default)]
+    pub hidden_models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -56,6 +70,8 @@ pub struct ProviderSourceRecord {
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub in_pool: bool,
     #[serde(default)]
     pub draining: bool,
     pub base_url: String,
@@ -156,6 +172,10 @@ impl Default for GatewaySettings {
             session_affinity: true,
             session_affinity_ttl_seconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
             common_proxy_configured: false,
+            account_proxy_required: false,
+            quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
+            quota_request_timeout_seconds: DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS,
+            hidden_models: Vec::new(),
         }
     }
 }
@@ -174,8 +194,26 @@ impl GatewaySettings {
         if !(60..=86_400).contains(&self.session_affinity_ttl_seconds) {
             return Err("session affinity TTL must be between 60 and 86400 seconds");
         }
+        if !(MIN_QUOTA_REFRESH_INTERVAL_SECONDS..=MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
+            .contains(&self.quota_refresh_interval_seconds)
+        {
+            return Err("quota refresh interval must be between 120 and 3600 seconds");
+        }
+        if !(MIN_QUOTA_REQUEST_TIMEOUT_SECONDS..=MAX_QUOTA_REQUEST_TIMEOUT_SECONDS)
+            .contains(&self.quota_request_timeout_seconds)
+        {
+            return Err("quota request timeout must be between 10 and 20 seconds");
+        }
         Ok(())
     }
+}
+
+fn default_quota_refresh_interval_seconds() -> u64 {
+    DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS
+}
+
+fn default_quota_request_timeout_seconds() -> u64 {
+    DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
 }
 
 impl ProviderSourceRecord {
@@ -204,7 +242,7 @@ impl LocalGatewayKeyRecord {
     }
 }
 
-fn normalized_values(values: Vec<String>) -> Vec<String> {
+pub(crate) fn normalized_values(values: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     values
         .into_iter()
@@ -275,6 +313,19 @@ mod tests {
         settings.max_retry_candidates = DEFAULT_MAX_RETRY_CANDIDATES;
         settings.session_affinity_ttl_seconds = 59;
         assert!(settings.validate().is_err());
+    }
+
+    #[test]
+    fn gateway_validation_bounds_quota_policy() {
+        let mut settings = GatewaySettings::default();
+        assert!(settings.validate().is_ok());
+        settings.quota_refresh_interval_seconds = MIN_QUOTA_REFRESH_INTERVAL_SECONDS - 1;
+        assert!(settings.validate().is_err());
+        settings.quota_refresh_interval_seconds = MAX_QUOTA_REFRESH_INTERVAL_SECONDS;
+        settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS - 1;
+        assert!(settings.validate().is_err());
+        settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;
+        assert!(settings.validate().is_ok());
     }
 
     #[test]

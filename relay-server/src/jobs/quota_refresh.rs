@@ -3,31 +3,39 @@ use crate::{
     jobs::wake_automation,
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
+use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderValue, AUTHORIZATION},
     redirect::Policy,
 };
 use serde::Deserialize;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState},
     quota::{
+        merge_subscription_metadata, subscription_refresh_due, CodexSubscriptionClient,
         QuotaErrorState, QuotaRefreshData, QuotaTransition, QuotaWindowInput, QuotaWindowKind,
         ResetTime, SubscriptionInput, SupplementalQuotaWindowInput,
     },
 };
 
-const INTERVAL: Duration = Duration::from_secs(300);
 const CODEX_QUOTA_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_MODELS: usize = 4_096;
+const MAX_MODEL_SLUG_BYTES: usize = 256;
 
 pub fn start(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
             let _ = run(&state).await;
+            let refresh_interval_seconds = state
+                .store
+                .quota_policy()
+                .map(|policy| policy.0)
+                .unwrap_or(crate::store::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS);
+            tokio::time::sleep(Duration::from_secs(refresh_interval_seconds)).await;
         }
     });
 }
@@ -37,7 +45,7 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
         if !account.enabled || account.draining {
             continue;
         }
-        let (updated, transitions) = refresh_one(state, account).await?;
+        let (updated, transitions) = refresh_account_metadata(state, account, false).await?;
         if !transitions.is_empty() {
             wake_automation::schedule_transitions(state, &updated, &transitions).await?;
         }
@@ -45,14 +53,32 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
     state.rebuild_runtime().await
 }
 
+pub async fn refresh_account_metadata(
+    state: &Arc<AppState>,
+    account: ServerAccountRecord,
+    force_subscription_refresh: bool,
+) -> Result<(ServerAccountRecord, Vec<QuotaTransition>), String> {
+    let model_account = account.clone();
+    let (quota_result, model_result) = tokio::join!(
+        refresh_one(state, account, force_subscription_refresh),
+        discover_account_models(state, &model_account),
+    );
+    let (mut account, transitions) = quota_result?;
+    apply_discovered_models(&mut account, model_result);
+    state.store.save_account(&account)?;
+    Ok((account, transitions))
+}
+
 pub async fn refresh_one(
     state: &Arc<AppState>,
     mut account: ServerAccountRecord,
+    force_subscription_refresh: bool,
 ) -> Result<(ServerAccountRecord, Vec<QuotaTransition>), String> {
-    let result = refresh_data(state, &account).await;
+    let result = refresh_data(state, &account, force_subscription_refresh).await;
     let previous = account.quota.clone();
     let transitions = match result {
-        Ok(data) => {
+        Ok((mut data, subscription_error)) => {
+            data.preserve_subscription_metadata(&account.subscription);
             let (quota, subscription) = data
                 .normalize(&previous)
                 .map_err(|error| error.to_string())?;
@@ -69,7 +95,7 @@ pub async fn refresh_one(
                 account.subscription = subscription;
             }
             account.health = AccountHealthState::Healthy;
-            account.last_error_code = None;
+            account.last_error_code = subscription_error;
             transitions
         }
         Err((code, retryable)) => {
@@ -94,7 +120,8 @@ pub async fn refresh_one(
 async fn refresh_data(
     state: &Arc<AppState>,
     account: &ServerAccountRecord,
-) -> Result<QuotaRefreshData, (String, bool)> {
+    force_subscription_refresh: bool,
+) -> Result<(QuotaRefreshData, Option<String>), (String, bool)> {
     let tokens = state
         .prepare_account_tokens(&account.id)
         .await
@@ -112,9 +139,14 @@ async fn refresh_data(
         .map_err(|_| ("quota_access_token_invalid".to_string(), false))?;
     let proxy = account_proxy_config(state, &credential)
         .map_err(|_| ("quota_proxy_unavailable".to_string(), false))?;
+    let request_timeout_seconds = state
+        .store
+        .quota_policy()
+        .map_err(|_| ("quota_policy_invalid".to_string(), false))?
+        .1;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(request_timeout_seconds))
         .user_agent("Zenith Relay Server");
     let client = match proxy.as_ref() {
         Some(proxy) => proxy.apply(builder),
@@ -146,7 +178,202 @@ async fn refresh_data(
             _ => ("quota_http_status".to_string(), false),
         });
     }
-    parse_payload(&bytes, now_ms()).map_err(|code| (code, false))
+    let observed_at_ms = now_ms();
+    let mut data = parse_payload(&bytes, observed_at_ms).map_err(|code| (code, false))?;
+    let refresh_subscription = force_subscription_refresh
+        || subscription_refresh_due(
+            account.subscription.active_until_ms,
+            account.subscription.updated_at_ms,
+            observed_at_ms,
+        );
+    let subscription_error = if refresh_subscription {
+        let subscription = CodexSubscriptionClient::new(client.clone())
+            .map_err(|failure| (failure.code, failure.retryable))?;
+        let input = data.subscription.get_or_insert_with(|| SubscriptionInput {
+            plan_type: account.subscription.plan_type.clone(),
+            active_until_ms: account.subscription.active_until_ms,
+            forbidden: false,
+            observed_at_ms,
+        });
+        match subscription
+            .fetch(
+                tokens.access_token(),
+                &credential.chatgpt_account_id,
+                observed_at_ms,
+            )
+            .await
+        {
+            Ok(metadata) => {
+                merge_subscription_metadata(
+                    &mut input.plan_type,
+                    &mut input.active_until_ms,
+                    metadata,
+                );
+                None
+            }
+            Err(failure) => Some(failure.code),
+        }
+    } else {
+        if let Some(input) = data.subscription.as_mut() {
+            if input.plan_type == account.subscription.plan_type && input.active_until_ms.is_none()
+            {
+                input.observed_at_ms = account.subscription.updated_at_ms.unwrap_or(observed_at_ms);
+            }
+        }
+        None
+    };
+    Ok((data, subscription_error))
+}
+
+fn apply_discovered_models(
+    account: &mut ServerAccountRecord,
+    result: Result<Vec<String>, (String, bool)>,
+) {
+    match result {
+        Ok(models) if !models.is_empty() => {
+            account.models = models;
+            if account
+                .last_error_code
+                .as_deref()
+                .is_some_and(|code| code.starts_with("models_"))
+            {
+                account.last_error_code = None;
+            }
+        }
+        Ok(_) if account.models.is_empty() => apply_model_failure(account, "models_empty", false),
+        Err((code, retryable)) if account.models.is_empty() => {
+            apply_model_failure(account, &code, retryable)
+        }
+        Ok(_) | Err(_) => {}
+    }
+}
+
+async fn discover_account_models(
+    state: &Arc<AppState>,
+    account: &ServerAccountRecord,
+) -> Result<Vec<String>, (String, bool)> {
+    let tokens = state
+        .prepare_account_tokens(&account.id)
+        .await
+        .map_err(|_| ("models_token_prepare".to_string(), true))?;
+    let secret = state
+        .vault
+        .load(&account.secret_ref)
+        .map_err(|_| ("models_secret_load".to_string(), true))?
+        .ok_or_else(|| ("models_secret_missing".to_string(), false))?;
+    let credential: AccountCredential =
+        serde_json::from_str(&secret).map_err(|_| ("models_secret_invalid".to_string(), false))?;
+    let account_id = HeaderValue::from_str(&credential.chatgpt_account_id)
+        .map_err(|_| ("models_account_id_invalid".to_string(), false))?;
+    let authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
+        .map_err(|_| ("models_access_token_invalid".to_string(), false))?;
+    let proxy = account_proxy_config(state, &credential)
+        .map_err(|_| ("models_proxy_unavailable".to_string(), false))?;
+    let builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(20))
+        .user_agent("Zenith Relay Server");
+    let client = match proxy.as_ref() {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| ("models_client_init".to_string(), false))?;
+    let response = client
+        .get(CODEX_MODELS_ENDPOINT)
+        .query(&[(
+            "client_version",
+            zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+        )])
+        .header(AUTHORIZATION, authorization)
+        .header("chatgpt-account-id", account_id)
+        .header("originator", "codex_cli_rs")
+        .send()
+        .await
+        .map_err(|_| ("models_transport".to_string(), true))?;
+    let status = response.status();
+    let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES).await?;
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            401 => ("models_unauthorized".to_string(), false),
+            403 => ("models_forbidden".to_string(), false),
+            429 => ("models_rate_limited".to_string(), true),
+            _ if status.is_server_error() => ("models_upstream".to_string(), true),
+            _ => ("models_http_status".to_string(), false),
+        });
+    }
+    parse_models(&body).map_err(|code| (code, false))
+}
+
+async fn collect_limited(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<Vec<u8>, (String, bool)> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ("models_transport".to_string(), true))?;
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(("models_response_too_large".to_string(), false));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[derive(Deserialize)]
+struct ModelsPayload {
+    models: Vec<ModelPayload>,
+}
+
+#[derive(Deserialize)]
+struct ModelPayload {
+    slug: String,
+    #[serde(default)]
+    supported_in_api: Option<bool>,
+    #[serde(default)]
+    visibility: Option<String>,
+}
+
+fn parse_models(body: &[u8]) -> Result<Vec<String>, String> {
+    let response: ModelsPayload =
+        serde_json::from_slice(body).map_err(|_| "models_invalid_response".to_string())?;
+    if response.models.len() > MAX_MODELS {
+        return Err("models_invalid_response".to_string());
+    }
+    let mut seen = HashSet::new();
+    Ok(response
+        .models
+        .into_iter()
+        .filter(|model| model.supported_in_api != Some(false))
+        .filter(|model| {
+            !model
+                .visibility
+                .as_deref()
+                .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
+        })
+        .filter_map(|model| {
+            let slug = model.slug.trim();
+            (!slug.is_empty()
+                && slug.len() <= MAX_MODEL_SLUG_BYTES
+                && !slug.chars().any(char::is_control)
+                && seen.insert(slug.to_string()))
+            .then(|| slug.to_string())
+        })
+        .collect())
+}
+
+fn apply_model_failure(account: &mut ServerAccountRecord, code: &str, retryable: bool) {
+    account.last_error_code = Some(code.to_string());
+    match code {
+        "models_unauthorized" | "models_access_token_invalid" => {
+            account.auth_state = AccountAuthState::Error;
+            account.health = AccountHealthState::Unhealthy;
+        }
+        "models_forbidden" => account.health = AccountHealthState::Blocked,
+        _ if retryable => account.health = AccountHealthState::Degraded,
+        _ => account.health = AccountHealthState::Unhealthy,
+    }
 }
 
 #[derive(Deserialize)]
@@ -251,6 +478,9 @@ fn collect_supplemental_windows(
         .take(15)
         .enumerate()
     {
+        if is_spark_limit(entry) {
+            continue;
+        }
         let Some(rate_limit) = entry.rate_limit.as_ref() else {
             continue;
         };
@@ -274,6 +504,15 @@ fn collect_supplemental_windows(
         );
     }
     windows
+}
+
+fn is_spark_limit(entry: &AdditionalRateLimit) -> bool {
+    entry
+        .limit_name
+        .as_deref()
+        .into_iter()
+        .chain(entry.metered_feature.as_deref())
+        .any(|value| value.to_ascii_lowercase().contains("spark"))
 }
 
 fn append_supplemental_windows(
@@ -360,6 +599,34 @@ fn safe_display_label(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use zenith_relay_core::quota::QuotaSnapshot;
+
+    fn account(models: &[&str]) -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: "account-test".into(),
+            label: "Account".into(),
+            identity_hint: "a***@example.test".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "codex".into(),
+            secret_ref: "account:account-test".into(),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: models.iter().map(|model| (*model).to_string()).collect(),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Default::default(),
+            quota: QuotaSnapshot::default(),
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+            last_used_at_ms: None,
+            last_error_code: None,
+        }
+    }
 
     #[test]
     fn quota_payload_maps_primary_and_secondary_windows() {
@@ -376,6 +643,9 @@ mod tests {
                 "additional_rate_limits":[{
                     "metered_feature":" GPT-5   Priority ",
                     "rate_limit":{"secondary_window":{"used_percent":10,"limit_window_seconds":604800}}
+                },{
+                    "limit_name":"GPT-5.3 Codex Spark",
+                    "rate_limit":{"primary_window":{"used_percent":50,"limit_window_seconds":18000}}
                 }],
                 "rate_limit_reset_credits":{"available_count":2}
             }"#,
@@ -443,5 +713,37 @@ mod tests {
                 "quota_invalid_percentage"
             );
         }
+    }
+
+    #[test]
+    fn model_payload_keeps_only_safe_supported_unique_slugs() {
+        let models = parse_models(
+            br#"{"models":[
+                {"slug":"gpt-test","supported_in_api":true},
+                {"slug":" gpt-test "},
+                {"slug":"hidden","supported_in_api":false},
+                {"slug":"internal","visibility":"hide"},
+                {"slug":"bad\nslug"},
+                {"slug":"gpt-mini"}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(models, vec!["gpt-test", "gpt-mini"]);
+    }
+
+    #[test]
+    fn model_refresh_replaces_live_slugs_but_keeps_last_good_list_on_failure() {
+        let mut record = account(&["gpt-old"]);
+        apply_discovered_models(&mut record, Ok(vec!["gpt-future-codex".into()]));
+        assert_eq!(record.models, ["gpt-future-codex"]);
+
+        apply_discovered_models(&mut record, Err(("models_transport".into(), true)));
+        assert_eq!(record.models, ["gpt-future-codex"]);
+        assert!(record.last_error_code.is_none());
+
+        let mut empty = account(&[]);
+        apply_discovered_models(&mut empty, Err(("models_transport".into(), true)));
+        assert_eq!(empty.health, AccountHealthState::Degraded);
+        assert_eq!(empty.last_error_code.as_deref(), Some("models_transport"));
     }
 }

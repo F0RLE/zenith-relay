@@ -1,12 +1,12 @@
 use crate::state::{
-    now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord, SourceRecord,
-    COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
+    identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
+    SourceRecord, COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
 };
 use futures_util::future::BoxFuture;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -19,14 +19,15 @@ use zenith_relay_core::{
         AccountSummary, GatewaySummary, KeySummary, ProxyMode, RuntimeStateSnapshot,
         RuntimeTargetSummary, SourceSummary,
     },
-    CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey,
-    ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey,
-    RuntimeSource,
+    ApiEquivalentSummary, CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth,
+    RuntimeMixedLocalKey, RuntimeSource,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
 
 impl AppState {
     pub async fn prepare_account_tokens(
@@ -40,6 +41,9 @@ impl AppState {
             .ok_or_else(|| "stored account credential is missing".to_string())?;
         let credential: AccountCredential = serde_json::from_str(&secret)
             .map_err(|_| "stored account credential is invalid".to_string())?;
+        self.token_authority
+            .register_if_absent(account_id, credential.tokens()?, record.auth_state)
+            .map_err(|error| error.to_string())?;
         let proxy = account_proxy_config(self, &credential)?;
         let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
         let persistence = ServerTokenPersistence {
@@ -56,6 +60,7 @@ impl AppState {
         let source_records = self.store.sources()?;
         let account_records = self.store.accounts()?;
         let key_records = self.store.keys()?;
+        let hidden_models = self.store.hidden_models()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -69,8 +74,10 @@ impl AppState {
         }
 
         let mut accounts = Vec::new();
+        let mut direct_refresh_accounts = HashSet::new();
         let mut refresh_clients = HashMap::new();
         let common_proxy_configured = self.store.common_proxy_configured()?;
+        let account_proxy_required = self.store.account_proxy_required()?;
         let common_proxy = if common_proxy_configured {
             self.vault
                 .load(COMMON_PROXY_SECRET_REF)?
@@ -93,6 +100,7 @@ impl AppState {
                     Some(proxy) => Some(proxy),
                     None => continue,
                 },
+                None if account_proxy_required => continue,
                 None => None,
             };
             self.token_authority
@@ -104,6 +112,8 @@ impl AppState {
                     record.id.clone(),
                     CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
                 );
+            } else {
+                direct_refresh_accounts.insert(record.id.clone());
             }
             accounts.push(runtime_account(record, &credential, proxy));
         }
@@ -121,6 +131,7 @@ impl AppState {
 
         let refresh = Arc::new(ServerRefreshClients {
             direct: CodexRefreshClient::new_with_proxy(None)?,
+            direct_accounts: direct_refresh_accounts,
             clients: refresh_clients,
         });
         let persistence = Arc::new(ServerTokenPersistence {
@@ -180,7 +191,10 @@ impl AppState {
                 persistence_adapter: persistence,
                 refresh_skew_ms: 60_000,
             },
-            GatewayRuntimeOptions::default(),
+            GatewayRuntimeOptions {
+                hidden_models,
+                ..GatewayRuntimeOptions::default()
+            },
             usage,
         )
         .map_err(|error| error.to_string())?;
@@ -193,6 +207,11 @@ impl AppState {
         let keys = self.store.keys()?;
         let common_proxy_configured = self.store.common_proxy_configured()?;
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
+        let account_proxy_required = self.store.account_proxy_required()?;
+        let (quota_refresh_interval_seconds, quota_request_timeout_seconds) =
+            self.store.quota_policy()?;
+        let hidden_models = self.store.hidden_models()?;
+        let equivalents = self.store.api_equivalents()?;
         let mut warnings = Vec::new();
         let source_summaries = sources
             .iter()
@@ -201,7 +220,14 @@ impl AppState {
                 if !secret_available {
                     warnings.push(format!("source_secret_missing:{}", record.id));
                 }
-                Ok(source_summary(record, secret_available))
+                Ok(source_summary(
+                    record,
+                    secret_available,
+                    equivalents
+                        .get(&identity_hint(&record.id))
+                        .copied()
+                        .unwrap_or_default(),
+                ))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let account_summaries = accounts
@@ -220,6 +246,7 @@ impl AppState {
                             &credential,
                             common_proxy_configured,
                             common_proxy_available,
+                            account_proxy_required,
                         )
                     })
                     .unwrap_or((ProxyMode::Direct, false));
@@ -228,22 +255,23 @@ impl AppState {
                     secret_available,
                     proxy_mode,
                     proxy_available,
+                    equivalents
+                        .get(&identity_hint(&record.id))
+                        .copied()
+                        .unwrap_or_default(),
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
         let key_summaries = keys.iter().map(key_summary).collect::<Vec<_>>();
-        let visible_model_ids = sources
+        let models = zenith_relay_core::protocol::pool_model_summaries(
+            &source_summaries,
+            &account_summaries,
+            &hidden_models,
+        );
+        let visible_model_ids = models
             .iter()
-            .filter(|record| record.enabled && !record.draining)
-            .flat_map(|record| record.models.iter().cloned())
-            .chain(
-                accounts
-                    .iter()
-                    .filter(|record| record.enabled && !record.draining)
-                    .flat_map(|record| record.models.iter().cloned()),
-            )
-            .collect::<BTreeSet<_>>()
-            .into_iter()
+            .filter(|model| model.enabled)
+            .map(|model| model.id.clone())
             .collect::<Vec<_>>();
         let running = self.store.gateway_enabled()? && self.runtime()?.is_some();
         Ok(RuntimeStateSnapshot {
@@ -261,10 +289,32 @@ impl AppState {
                     "{}/v1",
                     self.config.public_base_url.as_str().trim_end_matches('/')
                 ),
-                candidate_count: sources.len() + accounts.len(),
+                candidate_count: source_summaries
+                    .iter()
+                    .filter(|record| {
+                        record.enabled
+                            && record.in_pool
+                            && !record.draining
+                            && record.secret_available
+                    })
+                    .count()
+                    + account_summaries
+                        .iter()
+                        .filter(|record| {
+                            record.enabled
+                                && record.in_pool
+                                && !record.draining
+                                && record.secret_available
+                                && record.proxy_available
+                        })
+                        .count(),
                 visible_model_ids,
+                models,
                 common_proxy_configured,
                 common_proxy_available,
+                account_proxy_required,
+                quota_refresh_interval_seconds,
+                quota_request_timeout_seconds,
             },
             platform: std::env::consts::OS.to_string(),
             capabilities: self.capabilities.clone(),
@@ -288,6 +338,9 @@ pub(crate) fn account_proxy_config(
             .map_err(|_| "stored account proxy URL is invalid".to_string());
     }
     if !state.store.common_proxy_configured()? {
+        if state.store.account_proxy_required()? {
+            return Err("an account proxy is required; direct account traffic is blocked".into());
+        }
         return Ok(None);
     }
     let value = state
@@ -313,6 +366,7 @@ fn account_proxy_status(
     credential: &AccountCredential,
     common_configured: bool,
     common_available: bool,
+    account_proxy_required: bool,
 ) -> (ProxyMode, bool) {
     if let Some(value) = credential.proxy_url.as_deref() {
         return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
@@ -320,7 +374,7 @@ fn account_proxy_status(
     if common_configured {
         return (ProxyMode::Common, common_available);
     }
-    (ProxyMode::Direct, true)
+    (ProxyMode::Direct, !account_proxy_required)
 }
 
 fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
@@ -333,7 +387,7 @@ fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
             wire_api: record.wire_api,
             models: record.models,
         },
-        enabled: record.enabled,
+        enabled: record.enabled && record.in_pool,
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
@@ -348,14 +402,14 @@ fn runtime_account(
     credential: &AccountCredential,
     proxy: Option<ProxyConfig>,
 ) -> RuntimeAccount {
-    let quota = candidate_quota(&record);
+    let quota = candidate_quota(&record.quota, now_ms());
     RuntimeAccount {
         id: record.id,
         source_id: record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
         models: record.models,
-        enabled: record.enabled,
+        enabled: record.enabled && record.in_pool,
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
@@ -400,12 +454,19 @@ fn candidate_health(auth: AccountAuthState, health: AccountHealthState) -> Candi
     }
 }
 
-fn candidate_quota(record: &ServerAccountRecord) -> CandidateQuota {
-    let available = record
-        .quota
+fn candidate_quota(quota: &zenith_relay_core::quota::QuotaSnapshot, now_ms: u64) -> CandidateQuota {
+    if quota
+        .updated_at_ms
+        .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > QUOTA_STALE_AFTER_MS)
+    {
+        return CandidateQuota::Stale;
+    }
+    let available = quota
         .primary
-        .as_ref()
-        .and_then(|window| window.available_basis_points);
+        .iter()
+        .chain(quota.secondary.iter())
+        .filter_map(|window| window.available_basis_points)
+        .min();
     match available {
         Some(0) => CandidateQuota::Exhausted,
         Some(value) => CandidateQuota::Available(u64::from(value)),
@@ -413,11 +474,16 @@ fn candidate_quota(record: &ServerAccountRecord) -> CandidateQuota {
     }
 }
 
-fn source_summary(record: &SourceRecord, secret_available: bool) -> SourceSummary {
+fn source_summary(
+    record: &SourceRecord,
+    secret_available: bool,
+    api_equivalent: ApiEquivalentSummary,
+) -> SourceSummary {
     SourceSummary {
         id: record.id.clone(),
         name: record.name.clone(),
         enabled: record.enabled,
+        in_pool: record.in_pool,
         draining: record.draining,
         base_url: record.base_url.clone(),
         wire_api: record.wire_api,
@@ -426,6 +492,7 @@ fn source_summary(record: &SourceRecord, secret_available: bool) -> SourceSummar
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        api_equivalent,
         secret_available,
         last_error_code: record.last_error_code.clone(),
     }
@@ -436,12 +503,14 @@ fn account_summary(
     secret_available: bool,
     proxy_mode: ProxyMode,
     proxy_available: bool,
+    api_equivalent: ApiEquivalentSummary,
 ) -> AccountSummary {
     AccountSummary {
         id: record.id.clone(),
         label: record.label.clone(),
         identity_hint: record.identity_hint.clone(),
         enabled: record.enabled,
+        in_pool: record.in_pool,
         draining: record.draining,
         auth_state: record.auth_state,
         health: format!("{:?}", record.health).to_ascii_lowercase(),
@@ -450,6 +519,7 @@ fn account_summary(
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        api_equivalent,
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),
         secret_available,
@@ -561,6 +631,7 @@ impl CodexRefreshClient {
 
 struct ServerRefreshClients {
     direct: CodexRefreshClient,
+    direct_accounts: HashSet<String>,
     clients: HashMap<String, CodexRefreshClient>,
 }
 
@@ -572,7 +643,16 @@ impl TokenRefreshAdapter for ServerRefreshClients {
         now_ms: u64,
     ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
         Box::pin(async move {
-            let client = self.clients.get(account_id).unwrap_or(&self.direct);
+            let client = match self.clients.get(account_id) {
+                Some(client) => client,
+                None if self.direct_accounts.contains(account_id) => &self.direct,
+                None => {
+                    return Err(TokenRefreshFailure::new(
+                        TokenRefreshFailureKind::Transient,
+                        "proxy_client_missing",
+                    ))
+                }
+            };
             client.refresh(account_id, refresh_token, now_ms).await
         })
     }
@@ -619,14 +699,9 @@ impl TokenRefreshAdapter for CodexRefreshClient {
                 ));
             }
             if !status.is_success() {
-                let code = serde_json::from_slice::<TokenError>(&body)
-                    .ok()
-                    .and_then(|value| value.error)
+                let code = provider_error_code(&body)
                     .unwrap_or_else(|| "token_refresh_failed".to_string());
-                let kind = match code.as_str() {
-                    "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
-                    _ => TokenRefreshFailureKind::Transient,
-                };
+                let kind = token_refresh_failure_kind(&code);
                 return Err(TokenRefreshFailure::new(kind, &code));
             }
             let payload: TokenResponse = serde_json::from_slice(&body).map_err(|_| {
@@ -658,7 +733,129 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-#[derive(Deserialize)]
-struct TokenError {
-    error: Option<String>,
+fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
+        "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
+        "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
+        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
+            TokenRefreshFailureKind::InvalidatedRefreshToken
+        }
+        _ => TokenRefreshFailureKind::Transient,
+    }
+}
+
+fn provider_error_code(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = [
+        value
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        value.get("code").and_then(serde_json::Value::as_str),
+        value.get("error").and_then(serde_json::Value::as_str),
+        value
+            .pointer("/error/type")
+            .and_then(serde_json::Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(safe_provider_code);
+    code
+}
+
+fn safe_provider_code(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then(|| value.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+
+    #[test]
+    fn refresh_errors_keep_distinct_reauthentication_reasons() {
+        assert_eq!(
+            token_refresh_failure_kind("invalid_grant"),
+            TokenRefreshFailureKind::InvalidGrant
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_reused"),
+            TokenRefreshFailureKind::ReusedRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_expired"),
+            TokenRefreshFailureKind::ExpiredRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_invalidated"),
+            TokenRefreshFailureKind::InvalidatedRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("unsupported_country_region_territory"),
+            TokenRefreshFailureKind::Transient
+        );
+    }
+
+    #[test]
+    fn provider_refresh_error_prefers_specific_rotation_code() {
+        assert_eq!(
+            provider_error_code(br#"{"error":"invalid_grant","code":"refresh_token_reused"}"#)
+                .as_deref(),
+            Some("refresh_token_reused")
+        );
+        assert_eq!(
+            provider_error_code(
+                br#"{"error":{"type":"invalid_request_error","code":"refresh_token_expired"}}"#
+            )
+            .as_deref(),
+            Some("refresh_token_expired")
+        );
+    }
+
+    #[test]
+    fn scheduler_uses_the_tightest_fresh_quota_window() {
+        let window = |kind, available_basis_points| QuotaWindow {
+            kind,
+            available_basis_points: Some(available_basis_points),
+            explicitly_full: None,
+            reset_at_ms: None,
+            window_minutes: None,
+            full_transition_fingerprint: None,
+            observed_at_ms: 1_000,
+        };
+        let quota = QuotaSnapshot {
+            primary: Some(window(QuotaWindowKind::Primary, 9_000)),
+            secondary: Some(window(QuotaWindowKind::Secondary, 2_500)),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            candidate_quota(&quota, 2_000),
+            CandidateQuota::Available(2_500)
+        );
+        assert_eq!(
+            candidate_quota(&quota, QUOTA_STALE_AFTER_MS + 1_001),
+            CandidateQuota::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_client_never_falls_back_to_direct_for_unknown_account() {
+        let clients = ServerRefreshClients {
+            direct: CodexRefreshClient::new_with_proxy(None).unwrap(),
+            direct_accounts: HashSet::new(),
+            clients: HashMap::new(),
+        };
+        let failure = clients
+            .refresh("proxy-required", "unused-refresh-token", 1)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "proxy_client_missing");
+    }
 }

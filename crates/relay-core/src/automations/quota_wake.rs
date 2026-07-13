@@ -8,6 +8,22 @@ const MAX_WAKE_ATTEMPTS: u8 = 2;
 const MAX_WAKE_JITTER_SECONDS: u32 = 3_600;
 const MAX_VERIFICATION_DELAY_MS: u64 = 10 * 60_000;
 const MAX_OUTPUT_TOKEN_CAP: u16 = 256;
+const MODEL_RANK_STRIDE: u32 = 4_096;
+
+pub fn model_lightness_rank(model: &str, index: usize) -> u32 {
+    let model = model.to_ascii_lowercase();
+    let tier = if model.contains("nano") {
+        0
+    } else if model.contains("mini") {
+        1
+    } else {
+        2
+    };
+    tier * MODEL_RANK_STRIDE
+        + u32::try_from(index)
+            .unwrap_or(u32::MAX)
+            .min(MODEL_RANK_STRIDE - 1)
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "values")]
@@ -977,6 +993,7 @@ mod tests {
             token_updated_at_ms: Some(1),
             tags: ["default".to_string()].into(),
             enabled: true,
+            in_pool: true,
             draining: false,
             created_at_ms: 1,
             last_used_at_ms: None,
@@ -1425,5 +1442,11 @@ mod tests {
             invalid.validate(),
             Err(WakeTaskValidationError::UnsupportedSchedule)
         );
+    }
+
+    #[test]
+    fn lightest_model_rank_prefers_nano_then_mini() {
+        assert!(model_lightness_rank("gpt-nano", 9) < model_lightness_rank("gpt-mini", 1));
+        assert!(model_lightness_rank("gpt-mini", 9) < model_lightness_rank("gpt-large", 0));
     }
 }

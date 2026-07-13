@@ -17,8 +17,8 @@ use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
     accounts::AccountAuthState,
     automations::{
-        verify_wake_countdown, WakeAdapterPolicy, WakeCompletion, WakeCompletionOutcome, WakeModel,
-        WakePermit, WakeVerificationOutcome,
+        model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
+        WakeCompletionOutcome, WakeModel, WakePermit, WakeVerificationOutcome,
     },
     quota::QuotaAdapterCapabilities,
 };
@@ -28,7 +28,6 @@ const WAKE_BATCH_SIZE: usize = 2;
 const WORKER_ERROR_RETRY_MS: u64 = 60_000;
 const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
-const MODEL_RANK_STRIDE: u32 = 4_096;
 
 pub(crate) fn start(app: AppHandle) {
     let quota_app = app.clone();
@@ -133,7 +132,7 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
         let account_id = permit.account_id.clone();
         let task = workers.spawn(async move {
             let state = worker_app.state::<DesktopState>();
-            refresh_account_quota_once(&state, &account_id).await
+            refresh_account_quota_once(&state, &account_id, false).await
         });
         active_permits.insert(task.id(), permit);
     }
@@ -199,7 +198,10 @@ fn settle_quota_refresh(
 ) -> Result<()> {
     match response {
         Ok(response) => {
-            if let Some(due_at_ms) = next_quota_refresh_at(&response, current_time_ms()) {
+            let refresh_interval_seconds = state.store()?.gateway().quota_refresh_interval_seconds;
+            if let Some(due_at_ms) =
+                next_quota_refresh_at(&response, current_time_ms(), refresh_interval_seconds)
+            {
                 state.reschedule_quota_refresh(permit, due_at_ms)?;
             } else {
                 state.complete_quota_refresh(permit)?;
@@ -323,7 +325,7 @@ async fn execute_wake_permit(
         if !state.is_wake_permit_active(permit)? {
             return Ok(None);
         }
-        match refresh_account_quota_once(state, &permit.account_id).await {
+        match refresh_account_quota_once(state, &permit.account_id, false).await {
             Ok(response) => {
                 let _ = settle_verification_quota(state, &permit.account_id, &response);
                 let _ = evaluate_updated_transitions(state, &response);
@@ -346,7 +348,10 @@ fn settle_verification_quota(
     account_id: &str,
     response: &AccountQuotaRefreshResponse,
 ) -> Result<()> {
-    if let Some(due_at_ms) = next_quota_refresh_at(response, current_time_ms()) {
+    let refresh_interval_seconds = state.store()?.gateway().quota_refresh_interval_seconds;
+    if let Some(due_at_ms) =
+        next_quota_refresh_at(response, current_time_ms(), refresh_interval_seconds)
+    {
         state.mark_quota_refresh(account_id, due_at_ms)?;
     } else {
         state.remove_quota_refresh(account_id)?;
@@ -422,21 +427,6 @@ fn model_allowed(account: &LocalAccountRecord, model: &str) -> bool {
             .excluded_models
             .iter()
             .any(|excluded| excluded.eq_ignore_ascii_case(model))
-}
-
-fn model_lightness_rank(model: &str, index: usize) -> u32 {
-    let model = model.to_ascii_lowercase();
-    let tier = if model.contains("nano") {
-        0
-    } else if model.contains("mini") {
-        1
-    } else {
-        2
-    };
-    tier * MODEL_RANK_STRIDE
-        + u32::try_from(index)
-            .unwrap_or(u32::MAX)
-            .min(MODEL_RANK_STRIDE - 1)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -651,6 +641,7 @@ mod tests {
                 token_updated_at_ms: Some(1),
                 tags: BTreeSet::new(),
                 enabled: true,
+                in_pool: true,
                 draining: false,
                 created_at_ms: 1,
                 last_used_at_ms: None,

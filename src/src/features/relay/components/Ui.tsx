@@ -1,8 +1,37 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
-import { CheckCircle2, CircleAlert, CircleHelp, Copy, Eye, EyeOff, Loader2, X } from "lucide-react";
+import { CheckCircle2, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { QuotaSnapshot, QuotaWindow } from "../api/types";
+
+export function formatAccountPlan(planType: string | null, unknown: string) {
+  const value = planType?.trim();
+  if (!value) return unknown;
+  const key = value.toLocaleLowerCase().replace(/[\s_-]/g, "");
+  if (key.includes("team") || key.includes("business")) return "Business";
+  if (key.includes("enterprise")) return "Enterprise";
+  if (key === "prolite") return "Pro 5x";
+  if (key === "promax") return "Pro 20x";
+  if (key === "pro") return "Pro";
+  if (key.includes("plus")) return "Plus";
+  if (key === "free") return "Free";
+  if (key === "go") return "Go";
+  if (key === "edu" || key.includes("education")) return "Edu";
+  return value;
+}
+
+const accountPlanOrder = ["plus", "pro", "pro-5x", "pro-20x", "business", "enterprise", "free", "go", "edu", "unknown"];
+
+export function accountPlanOption(planType: string | null, unknown: string) {
+  const label = formatAccountPlan(planType, unknown);
+  return { id: label.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown", label };
+}
+
+export function compareAccountPlans(left: { id: string; label: string }, right: { id: string; label: string }) {
+  const leftRank = accountPlanOrder.indexOf(left.id);
+  const rightRank = accountPlanOrder.indexOf(right.id);
+  return (leftRank < 0 ? accountPlanOrder.length : leftRank) - (rightRank < 0 ? accountPlanOrder.length : rightRank) || left.label.localeCompare(right.label);
+}
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
@@ -14,20 +43,39 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
 }
 
 export function Button({ children, icon, variant = "secondary", busy, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
-  return <button className={`relay-button ${variant}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
+  return <button type={props.type ?? "button"} className={`relay-button ${variant}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
 }
 
 export function IconButton({ label, icon, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
-  return <button className="relay-icon-button" aria-label={label} title={label} {...props}>{icon}</button>;
+  return <button type={props.type ?? "button"} className="relay-icon-button" aria-label={label} title={label} {...props}>{icon}</button>;
+}
+
+export function ActionMenu({ children, className = "", label }: { children: ReactNode; className?: string; label?: string }) {
+  const { t } = useTranslation();
+  const resolvedLabel = label ?? t("common.actions");
+  return <details className={`relay-action-menu ${className}`.trim()}><summary aria-label={resolvedLabel} title={resolvedLabel} aria-haspopup="menu"><MoreHorizontal aria-hidden /></summary><div role="menu">{children}</div></details>;
+}
+
+export function ActionMenuItem({ children, icon, danger = false, className = "", onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
+  const classes = [danger ? "danger" : "", className].filter(Boolean).join(" ");
+  return <button type="button" role="menuitem" className={classes || undefined} {...props} onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}>{icon}<span>{children}</span></button>;
 }
 
 export function StatusBadge({ status, label }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string }) {
-  const Icon = status === "ready" ? CheckCircle2 : status === "error" ? CircleAlert : status === "warning" ? CircleAlert : CircleHelp;
+  const Icon = status === "ready" ? CheckCircle2 : status === "disabled" ? CircleOff : status === "info" ? CircleHelp : CircleAlert;
   return <span className={`relay-status ${status}`}><Icon aria-hidden />{label}</span>;
 }
 
 export function Tabs({ value, items, onChange, label }: { value: string; items: Array<{ id: string; label: string }>; onChange: (id: string) => void; label: string }) {
-  return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item) => <button key={item.id} role="tab" aria-selected={value === item.id} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} type="button">{item.label}</button>)}</div>;
+  const selectAdjacent = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : direction ? (index + direction + items.length) % items.length : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    onChange(items[nextIndex].id);
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[nextIndex]?.focus();
+  };
+  return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
 export function Dialog({ title, children, onClose, footer, wide = false }: { title: string; children: ReactNode; onClose: () => void; footer: ReactNode; wide?: boolean }) {
@@ -73,8 +121,14 @@ export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null
 
 export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
   const { t } = useTranslation();
+  const coreBlocked = [snapshot.primary, snapshot.secondary]
+    .some((window) => window?.availableBasisPoints === 0);
   const reported = [
-    ...(["primary", "secondary"] as const).flatMap((kind) => snapshot[kind] ? [{ id: kind, label: "", window: snapshot[kind] }] : []),
+    ...(["primary", "secondary"] as const).flatMap((kind) => {
+      const window = snapshot[kind];
+      if (!window) return [];
+      return [{ id: kind, label: "", window: coreBlocked ? { ...window, availableBasisPoints: 0 } : window }];
+    }),
     ...(snapshot.supplemental ?? []),
   ];
   if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} /></div>;

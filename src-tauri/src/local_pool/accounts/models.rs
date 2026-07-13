@@ -187,6 +187,8 @@ struct ModelEntry {
     slug: String,
     #[serde(default)]
     supported_in_api: Option<bool>,
+    #[serde(default)]
+    visibility: Option<String>,
 }
 
 fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
@@ -202,6 +204,12 @@ fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
         .models
         .into_iter()
         .filter(|model| model.supported_in_api != Some(false))
+        .filter(|model| {
+            !model
+                .visibility
+                .as_deref()
+                .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
+        })
         .filter_map(|model| {
             let slug = model.slug.trim();
             (!slug.is_empty()
@@ -288,7 +296,11 @@ mod tests {
             spawn(Router::new().route("/backend-api/codex/models", get(successful_models))).await;
         let models = CodexModelsClient::with_endpoint(endpoint)
             .unwrap()
-            .discover("access-secret", "account-123", "1.0.5")
+            .discover(
+                "access-secret",
+                "account-123",
+                zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+            )
             .await
             .unwrap();
 
@@ -322,7 +334,11 @@ mod tests {
                 spawn(Router::new().route("/backend-api/codex/models", handler)).await;
             let error = CodexModelsClient::with_endpoint(endpoint)
                 .unwrap()
-                .discover("access-secret", "account-123", "1.0.5")
+                .discover(
+                    "access-secret",
+                    "account-123",
+                    zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                )
                 .await
                 .unwrap_err();
             assert_eq!(error.code, expected);
@@ -360,7 +376,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(CODEX_ORIGINATOR)
         );
-        assert_eq!(uri.query(), Some("client_version=1.0.5"));
+        assert_eq!(uri.query(), Some("client_version=1.0.0"));
         Json(json!({
             "models": [
                 {
@@ -371,6 +387,7 @@ mod tests {
                 },
                 { "slug": " gpt-5 " },
                 { "slug": "gpt-hidden", "supported_in_api": false },
+                { "slug": "gpt-internal", "visibility": "hide" },
                 { "slug": "" },
                 { "slug": "gpt-5-mini" }
             ]

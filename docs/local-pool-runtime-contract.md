@@ -230,6 +230,7 @@ GET  /health
 GET  /capabilities
 GET  /state
 GET  /accounts
+POST /accounts/{id}/refresh
 POST /accounts/import/preview
 POST /accounts/import/confirm
 POST /accounts/import/batch/preview
@@ -238,12 +239,16 @@ POST /accounts/proxies/assign
 POST /accounts/{id}/proxy
 DELETE /accounts/{id}
 POST /proxies/common
+POST /proxies/policy
+POST /pool/members
+POST /pool/quota/refresh
 GET  /sources
 POST /sources
 PATCH /sources/{id}
 DELETE /sources/{id}
 POST /sources/{id}/test
 GET  /quota
+POST /quota/settings
 GET  /models
 POST /gateway/start
 POST /gateway/stop
@@ -274,9 +279,20 @@ encrypted override per account. Effective routing is `account override ->
 common proxy -> direct`. A configured proxy that is missing or invalid fails
 closed for that account; runtime requests, token refresh, quota refresh, model
 discovery, and wake requests must never silently fall back to a direct route.
+The optional `accountProxyRequired` policy removes the final direct route for
+OAuth accounts. Accounts without a valid account or common proxy remain stored
+and visible but are excluded from execution until a proxy becomes available.
 Management snapshots expose only proxy mode and availability, never a saved URL
 or credentials. Bulk assignment maps submitted proxy lines to submitted account
 IDs in order and reports unused lines.
+
+New connections default to `inPool=false`. `POST /pool/members` changes
+membership atomically without deleting the underlying connection.
+`POST /pool/quota/refresh` refreshes only enabled, non-draining OAuth members
+with bounded concurrency. `POST /quota/settings` accepts a background interval
+from 120 through 3600 seconds and a network timeout from 10 through 20 seconds;
+both values persist in local/server runtime state and are returned in the
+redacted gateway snapshot.
 
 Optional proxy endpoints:
 
@@ -714,7 +730,6 @@ request_id
 local_key_id
 source_id
 account_id
-credential_stable_index
 requested_model
 resolved_model
 wire_api
@@ -725,20 +740,39 @@ latency_ms
 ttft_ms
 input_tokens
 output_tokens
-reasoning_tokens
-cache_read_tokens
-cache_creation_tokens
-cache_creation_1h_tokens
 total_tokens
-estimated_local_cost
 ```
 
 Usage publishing is async. Sink failure must not fail user request.
+Local UI groups recorded requests by the current account/source label and shows
+request count plus input, output, and total tokens. The remote management API
+keeps the stored candidate id hashed; it may attach the label already exposed
+by the current runtime snapshot, but never a raw provider account id or email.
+Relay does not estimate monetary API cost without an authoritative,
+provider-specific pricing contract.
+
+For model ids covered by Relay's versioned official OpenAI price catalog, the
+local and remote snapshots may also expose an `api_equivalent` aggregate:
+
+```text
+micro_usd
+priced_tokens
+unpriced_tokens
+```
+
+The calculation uses recorded input/output tokens and integer micro-USD math.
+It is an informational OpenAI API comparison, not the cost of a subscription,
+the upstream provider's invoice, Zenith billing, or scheduler input. Unknown
+models and totals without a usable input/output split increase
+`unpriced_tokens`; Relay never assigns them an invented price. The catalog
+stores its source URL, verification date, and version so price updates remain
+reviewable and centralized.
 
 ## Request Log Query Contract
 
-Request logs need server-side pagination and filters. Do not load all local
-logs into the frontend.
+Remote request logs use server-side pagination and filters. Desktop-local logs
+use a bounded recent page; neither path loads an unbounded history into the
+frontend.
 
 Query:
 

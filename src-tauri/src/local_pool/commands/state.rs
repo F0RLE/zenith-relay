@@ -9,12 +9,12 @@ use crate::local_pool::{
     state::DesktopState,
     store::secret_store,
 };
-use std::collections::BTreeSet;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    AccountSummary, Capabilities, GatewaySummary, KeySummary, RuntimeStateSnapshot,
-    RuntimeTargetSummary, SourceSummary,
+    pool_model_summaries, AccountSummary, Capabilities, GatewaySummary, KeySummary,
+    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
+use zenith_relay_core::ApiEquivalentSummary;
 
 #[tauri::command]
 pub async fn get_local_pool_state(
@@ -30,22 +30,63 @@ pub async fn get_local_runtime_state(
     let snapshot = state.snapshot().await?;
     let running = snapshot.runtime_target.connected;
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
-    let visible_model_ids = snapshot
+    let equivalents = state.telemetry.api_equivalents()?;
+    let source_summaries = snapshot
         .sources
         .iter()
-        .filter(|record| record.enabled && !record.draining)
-        .flat_map(|record| record.models.iter().cloned())
-        .chain(
-            snapshot
-                .accounts
-                .iter()
-                .filter(|record| record.account.enabled && !record.account.draining)
-                .flat_map(|record| record.models.iter().cloned()),
-        )
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .map(|record| {
+            local_source_summary(
+                record,
+                equivalents
+                    .sources
+                    .get(&record.id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let account_summaries = snapshot
+        .accounts
+        .iter()
+        .map(|record| {
+            local_account_summary(
+                record,
+                &snapshot.gateway,
+                common_proxy_available,
+                equivalents
+                    .accounts
+                    .get(&record.account.id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let models = pool_model_summaries(
+        &source_summaries,
+        &account_summaries,
+        &snapshot.gateway.hidden_models,
+    );
+    let visible_model_ids = models
+        .iter()
+        .filter(|model| model.enabled)
+        .map(|model| model.id.clone())
         .collect();
-    let candidate_count = snapshot.sources.len() + snapshot.accounts.len();
+    let candidate_count = source_summaries
+        .iter()
+        .filter(|record| {
+            record.enabled && record.in_pool && !record.draining && record.secret_available
+        })
+        .count()
+        + account_summaries
+            .iter()
+            .filter(|record| {
+                record.enabled
+                    && record.in_pool
+                    && !record.draining
+                    && record.secret_available
+                    && record.proxy_available
+            })
+            .count();
     let base_url = format!(
         "http://{}:{}/v1",
         snapshot.gateway.client_host, snapshot.gateway.port
@@ -67,21 +108,17 @@ pub async fn get_local_runtime_state(
             base_url,
             candidate_count,
             visible_model_ids,
+            models,
             common_proxy_configured: snapshot.gateway.common_proxy_configured,
             common_proxy_available,
+            account_proxy_required: snapshot.gateway.account_proxy_required,
+            quota_refresh_interval_seconds: snapshot.gateway.quota_refresh_interval_seconds,
+            quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
         },
         platform: snapshot.platform.to_string(),
         capabilities: Capabilities::desktop_local(),
-        sources: snapshot
-            .sources
-            .iter()
-            .map(local_source_summary)
-            .collect::<Result<_, _>>()?,
-        accounts: snapshot
-            .accounts
-            .iter()
-            .map(|record| local_account_summary(record, &snapshot.gateway, common_proxy_available))
-            .collect::<Result<_, _>>()?,
+        sources: source_summaries,
+        accounts: account_summaries,
         keys: snapshot.keys.iter().map(local_key_summary).collect(),
         automations: snapshot.automations,
         wake_history: snapshot.wake_history,
@@ -91,11 +128,13 @@ pub async fn get_local_runtime_state(
 
 fn local_source_summary(
     record: &ProviderSourceRecord,
+    api_equivalent: ApiEquivalentSummary,
 ) -> crate::local_pool::error::Result<SourceSummary> {
     Ok(SourceSummary {
         id: record.id.clone(),
         name: record.name.clone(),
         enabled: record.enabled,
+        in_pool: record.in_pool,
         draining: record.draining,
         base_url: record.base_url.clone(),
         wire_api: record.wire_api,
@@ -104,6 +143,7 @@ fn local_source_summary(
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        api_equivalent,
         secret_available: secret_store::load(&record.secret_ref)?.is_some(),
         last_error_code: record.last_error.clone(),
     })
@@ -113,6 +153,7 @@ fn local_account_summary(
     record: &LocalAccountRecord,
     settings: &crate::local_pool::models::GatewaySettings,
     common_proxy_available: bool,
+    api_equivalent: ApiEquivalentSummary,
 ) -> crate::local_pool::error::Result<AccountSummary> {
     let secret_available = record
         .account
@@ -145,6 +186,7 @@ fn local_account_summary(
             .take(12)
             .collect(),
         enabled: record.account.enabled,
+        in_pool: record.account.in_pool,
         draining: record.account.draining,
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
@@ -153,6 +195,7 @@ fn local_account_summary(
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        api_equivalent,
         subscription: record.account.subscription.clone(),
         quota: record.account.quota.clone(),
         secret_available,
@@ -203,8 +246,12 @@ mod parity_tests {
                 base_url: "http://127.0.0.1:14998/v1".into(),
                 candidate_count: 0,
                 visible_model_ids: Vec::new(),
+                models: Vec::new(),
                 common_proxy_configured: false,
                 common_proxy_available: false,
+                account_proxy_required: false,
+                quota_refresh_interval_seconds: 300,
+                quota_request_timeout_seconds: 20,
             },
             platform: "test".into(),
             capabilities: Capabilities::desktop_local(),

@@ -10,7 +10,9 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use tauri::State;
 use uuid::Uuid;
-use zenith_relay_core::{discover_source_models, ProviderSource, WireApi};
+use zenith_relay_core::{
+    discover_source_models, source_points_to_gateway, ProviderSource, WireApi,
+};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -45,6 +47,8 @@ pub struct UpdateSourceInput {
     wire_api: WireApi,
     models: Vec<String>,
     #[serde(default)]
+    in_pool: Option<bool>,
+    #[serde(default)]
     draining: bool,
     #[serde(default)]
     allowed_models: Vec<String>,
@@ -72,6 +76,7 @@ pub async fn create_local_source(
         models: input.models,
     };
     runtime_source.validate().map_err(core_error)?;
+    ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
     runtime_source.models = discover_source_models(&runtime_source)
         .await
         .map_err(core_error)?;
@@ -87,6 +92,7 @@ pub async fn create_local_source(
         id,
         name: runtime_source.name,
         enabled: true,
+        in_pool: false,
         draining: input.draining,
         base_url: runtime_source.base_url,
         secret_ref: secret_ref.clone(),
@@ -133,6 +139,7 @@ pub async fn update_local_source(
         id: current.id.clone(),
         name: input.name,
         enabled: current.enabled,
+        in_pool: current.in_pool,
         draining: input.draining,
         base_url: input.base_url,
         secret_ref: current.secret_ref.clone(),
@@ -147,8 +154,11 @@ pub async fn update_local_source(
         last_test_status: current.last_test_status,
         last_error: current.last_error,
     };
+    if let Some(in_pool) = input.in_pool {
+        updated.in_pool = in_pool;
+    }
     updated.normalize();
-    validate_source_record(&updated)?;
+    validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
     state.store()?.upsert_source(updated)?;
     sync_records_or_rollback(&state, old_sources, old_keys).await?;
@@ -171,7 +181,7 @@ pub async fn set_local_source_enabled(
         return state.snapshot().await.map_err(Into::into);
     }
     if enabled {
-        validate_source_record(&source)?;
+        validate_source_record(&state, &source)?;
     }
     let (old_sources, old_keys) = current_records(&state)?;
     source.enabled = enabled;
@@ -259,6 +269,7 @@ pub async fn rotate_local_source_key(
     }
     .validate()
     .map_err(core_error)?;
+    ensure_not_gateway_self_source(&state, &source.base_url)?;
     let old_secret = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     secret_store::save(&source.secret_ref, &api_key)?;
@@ -288,6 +299,7 @@ pub async fn test_local_source(
         wire_api: source.wire_api,
         models: source.models.clone(),
     };
+    ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
     let models = match discover_source_models(&runtime_source).await {
         Ok(models) => models,
         Err(error) => {
@@ -322,7 +334,7 @@ pub async fn test_local_source(
     Ok(updated)
 }
 
-fn validate_source_record(source: &ProviderSourceRecord) -> LocalResult<()> {
+fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -> LocalResult<()> {
     ensure_supported_wire_api(source.wire_api)?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
@@ -332,16 +344,28 @@ fn validate_source_record(source: &ProviderSourceRecord) -> LocalResult<()> {
             "source must expose at least one model",
         ));
     }
-    ProviderSource {
+    let runtime_source = ProviderSource {
         id: source.id.clone(),
         name: source.name.clone(),
         base_url: source.base_url.clone(),
         api_key,
         wire_api: source.wire_api,
         models: source.models.clone(),
+    };
+    runtime_source.validate().map_err(core_error)?;
+    ensure_not_gateway_self_source(state, &runtime_source.base_url)
+}
+
+fn ensure_not_gateway_self_source(state: &DesktopState, base_url: &str) -> LocalResult<()> {
+    let gateway = state.store()?.gateway().clone();
+    let gateway_base_url = format!("http://{}:{}/v1", gateway.client_host, gateway.port);
+    if source_points_to_gateway(base_url, &gateway_base_url) {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source base URL must not point back to this Relay gateway",
+        ));
     }
-    .validate()
-    .map_err(core_error)
+    Ok(())
 }
 
 fn ensure_supported_wire_api(wire_api: WireApi) -> LocalResult<()> {

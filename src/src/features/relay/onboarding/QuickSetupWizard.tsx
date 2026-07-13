@@ -9,7 +9,7 @@ import { useRelayState } from "../state/RelayStateProvider";
 
 export function QuickSetupWizard() {
   const { t } = useTranslation();
-  const { finishOnboarding, perform, busy } = useRelayState();
+  const { finishOnboarding, perform, activateCodexProfile, busy } = useRelayState();
   const [intro, setIntro] = useState(true);
   const [step, setStep] = useState(1);
   const [mode, setMode] = useState<RelayMode>("local");
@@ -25,6 +25,7 @@ export function QuickSetupWizard() {
   const [checkError, setCheckError] = useState(false);
   const [checkedEndpoint, setCheckedEndpoint] = useState("");
   const [localKeyId, setLocalKeyId] = useState<string | null>(null);
+  const [localOauthAccountId, setLocalOauthAccountId] = useState<string | null>(null);
 
   const runCheck = useCallback(async () => {
     const stages = ["credentials", "endpoint", "models", "capacity"];
@@ -36,6 +37,7 @@ export function QuickSetupWizard() {
       if (mode === "local") {
         let snapshot = await relayCommands.localState();
         if (!snapshot.accounts.length && !snapshot.sources.length) throw new Error("missing local connection");
+        setLocalOauthAccountId(snapshot.accounts.find((account) => account.enabled && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active")?.id ?? null);
         mark(active, "success"); active = "endpoint"; mark(active, "running");
         let key = snapshot.keys.find((candidate) => candidate.enabled);
         if (!key) {
@@ -94,7 +96,7 @@ export function QuickSetupWizard() {
     }
     if (step === 4 && client === "codex" && mode === "local") {
       if (!localKeyId) return;
-      const ok = await perform("onboarding-client", () => relayCommands.attachCodexGateway(localKeyId), "feedback.profileAttached");
+      const ok = await activateCodexProfile("onboarding-client", () => relayCommands.attachCodexGateway(localKeyId, localOauthAccountId));
       if (!ok) return;
     }
     if (step === 4 && client === "opencode" && mode === "local") {
