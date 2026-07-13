@@ -740,12 +740,12 @@ fn random_urlsafe<const N: usize>() -> String {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LimitedBodyError {
+pub(crate) enum LimitedBodyError {
     Transport,
     TooLarge,
 }
 
-pub(super) async fn collect_limited(
+pub(crate) async fn collect_limited(
     mut response: reqwest::Response,
     limit: usize,
 ) -> Result<Vec<u8>, LimitedBodyError> {

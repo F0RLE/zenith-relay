@@ -177,8 +177,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallback = 1;
+    const eventListeners = new Map<number, { event: string; handler: number }>();
+    let nextEventListener = 1;
 
     const tauri = {
+      metadata: {
+        currentWindow: { label: "main" },
+        currentWebview: { windowLabel: "main", label: "main" },
+      },
       transformCallback(callback: (...args: unknown[]) => unknown, once = false) {
         const id = nextCallback++;
         callbacks.set(id, (...args: unknown[]) => { const result = callback(...args); if (once) callbacks.delete(id); return result; });
@@ -362,8 +368,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
           case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };
           case "execute_remote_server_action": return remoteAction(args);
-          case "plugin:event|listen": return 1;
-          case "plugin:event|unlisten":
+          case "plugin:event|listen": {
+            const eventId = nextEventListener++;
+            eventListeners.set(eventId, { event: String(args.event), handler: Number(args.handler) });
+            return eventId;
+          }
+          case "plugin:event|unlisten": eventListeners.delete(Number(args.eventId)); return null;
           case "plugin:updater|check":
           case "plugin:process|relaunch":
           case "close_window":
@@ -478,6 +488,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: tauri });
+    Object.defineProperty(window, "__TAURI_EVENT_PLUGIN_INTERNALS__", {
+      configurable: true,
+      value: { unregisterListener: (_event: string, id: number) => callbacks.delete(id) },
+    });
     Object.defineProperty(window, "__TAURI_TEST_INVOKES__", { configurable: true, value: invocations });
+    Object.defineProperty(window, "__TAURI_TEST_EMIT__", {
+      configurable: true,
+      value: (event: string, payload: unknown) => {
+        for (const [id, listener] of eventListeners) {
+          if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
+        }
+      },
+    });
   }, options);
 }

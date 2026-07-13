@@ -136,6 +136,36 @@ test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ pa
   await dialog.getByRole("button", { name: "Cancel" }).click();
 });
 
+test("dropping JSON files anywhere opens the shared import preview", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__;
+    return calls.filter((call) => call.command === "plugin:event|listen").length;
+  })).toBeGreaterThanOrEqual(4);
+  const paths = ["C:\\Temp\\cockpit-one.json", "C:\\Temp\\sub2api-two.json"];
+  await page.evaluate((droppedPaths) => {
+    const emit = (window as unknown as { __TAURI_TEST_EMIT__: (event: string, payload: unknown) => void }).__TAURI_TEST_EMIT__;
+    emit("tauri://drag-enter", { paths: droppedPaths, position: { x: 200, y: 160 } });
+  }, paths);
+  await expect(page.getByText("Drop JSON files to preview accounts")).toBeVisible();
+  await page.evaluate((droppedPaths) => {
+    const emit = (window as unknown as { __TAURI_TEST_EMIT__: (event: string, payload: unknown) => void }).__TAURI_TEST_EMIT__;
+    emit("tauri://drag-drop", { paths: droppedPaths, position: { x: 200, y: 160 } });
+  }, paths);
+
+  const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await expect(dialog.getByLabel("Select Imported account for import")).toBeChecked();
+  await expect(dialog.getByLabel("Select Second imported account for import")).toBeChecked();
+  await expect(page.getByText("Drop JSON files to preview accounts")).toBeHidden();
+  const call = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { paths?: string[] } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((item) => item.command === "preview_local_account_import_files");
+  });
+  expect(call?.args.paths).toEqual(paths);
+});
+
 for (const scenario of [
   { mode: "local", locale: "en", code: "provider_account_id_missing", nav: "Connections", action: "Import", title: "Import accounts", input: "Account import JSON", preview: "Preview import", confirm: "Import 2 account(s)", heading: "Some accounts were not imported", reason: "The imported record and its token claims do not contain a ChatGPT account ID.", close: "Close" },
   { mode: "local", locale: "ru", code: "models_http_status", nav: "Подключения", action: "Импорт", title: "Импортировать учётные записи", input: "JSON для импорта учётных записей", preview: "Проверить импорт", confirm: "Импортировать: 2", heading: "Часть учётных записей не импортирована", reason: "При проверке доступных моделей провайдер вернул неожиданный ответ.", close: "Закрыть" },
@@ -182,6 +212,12 @@ test("missing import session keeps the dialog open with recovery guidance", asyn
   await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(dialog.getByRole("alert")).toContainText("Start a fresh preview");
   await expect(dialog.getByLabel("Resume import session ID")).toHaveValue("11111111-2222-4333-8444-555555555555");
+  await expect(page.locator(".global-feedback.error")).toBeVisible();
+  const layers = await page.evaluate(() => ({
+    feedback: Number.parseInt(getComputedStyle(document.querySelector(".global-feedback")!).zIndex, 10),
+    modal: Number.parseInt(getComputedStyle(document.querySelector(".relay-modal-backdrop")!).zIndex, 10),
+  }));
+  expect(layers.feedback).toBeGreaterThan(layers.modal);
 });
 
 test("Ready API top-up uses the stored-key backend command", async ({ page }) => {

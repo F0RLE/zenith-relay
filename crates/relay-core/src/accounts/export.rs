@@ -495,6 +495,23 @@ mod tests {
     }
 
     #[test]
+    fn access_token_only_accounts_export_in_every_supported_format() {
+        let mut account = fixture();
+        account.refresh_token = None;
+        account.id_token = None;
+        account.account_id = None;
+        account.user_id = None;
+        account.organization_id = None;
+        for format in formats() {
+            let document =
+                build_account_export(format, std::slice::from_ref(&account), 1_788_000_000_000)
+                    .unwrap();
+            document.validate().unwrap();
+            assert!(document.content.contains(ACCESS), "{format:?}");
+        }
+    }
+
+    #[test]
     fn codex_export_preserves_the_required_null_api_key_field() {
         let document =
             build_account_export(AccountExportFormat::Codex, &[fixture()], 1_788_000_000_000)

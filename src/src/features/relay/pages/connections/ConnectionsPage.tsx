@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, CirclePause, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -25,7 +25,7 @@ import {
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
-type DialogKind = "source" | "oauth" | "import" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
+type DialogKind = "source" | "oauth" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
 type AccountSort = "pool" | "participation" | "primary" | "secondary" | "primary_reset" | "secondary_reset" | "plan" | "name";
 type AccountLayout = "compact" | "list" | "grid";
 type SortDirection = "asc" | "desc";
@@ -42,7 +42,7 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string }>
   { value: "codex_manager", label: "Codex-Manager" },
 ];
 
-export function ConnectionsPage() {
+export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, readyState, busy, perform, refresh } = useRelayState();
   const [view, setView] = useState<View>(mode === "zenith" ? "api" : "accounts");
@@ -102,6 +102,10 @@ export function ConnectionsPage() {
 
   const primaryAction = () => {
     if (view === "accounts" && !canImportAccounts) return;
+    if (view === "accounts" && mode === "remote") {
+      onImport();
+      return;
+    }
     if (view === "remote" && runtime) {
       void perform("remote-refresh", relayCommands.refreshRemoteCapabilities, "feedback.refreshed");
       return;
@@ -113,7 +117,7 @@ export function ConnectionsPage() {
     setEditingSource(null);
     setEditingAutomation(null);
     setDialog(
-      view === "accounts" ? (mode === "local" ? "oauth" : "import")
+      view === "accounts" ? "oauth"
         : view === "sources" ? "source"
           : view === "automations" ? "automation"
             : view === "remote" ? "remote"
@@ -129,7 +133,7 @@ export function ConnectionsPage() {
         actions={
           <>
             {view === "accounts" && mode === "local" ? (
-              <Button variant="secondary" icon={<Upload aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={() => setDialog("import")}>
+              <Button variant="secondary" icon={<Upload aria-hidden />} disabled={!canImportAccounts} title={!canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>
                 {t("connections.import")}
               </Button>
             ) : null}
@@ -150,14 +154,13 @@ export function ConnectionsPage() {
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={() => setDialog("import")} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={onImport} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
       {dialog === "oauth" ? <OAuthDialog onClose={() => setDialog(null)} /> : null}
-      {dialog === "import" ? <ImportDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
       {dialog === "remote" ? <RemoteDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
@@ -582,7 +585,7 @@ function OAuthDialog({ onClose }: { onClose: () => void }) {
   </Dialog>;
 }
 
-function ImportDialog({ onClose }: { onClose: () => void }) {
+export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[]; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, perform, busy } = useRelayState();
   const [content, setContent] = useState("");
@@ -592,9 +595,12 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [commandFailed, setCommandFailed] = useState(false);
   const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
+  const activeSessionId = useRef<string | null>(null);
+  const initialPreviewStarted = useRef(false);
   const acceptSession = (next: ImportSession) => {
     setSession(next);
     setOwnedSessionId(next.sessionId);
+    activeSessionId.current = next.sessionId;
     setCommandFailed(false);
     setCompleted(null);
     setSelected(next.preview.rows
@@ -604,6 +610,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const cancel = async () => {
     const sessionId = session?.sessionId ?? ownedSessionId;
     if (mode === "local" && sessionId && !completed) await perform("import-cancel", () => relayCommands.cancelImport(sessionId));
+    activeSessionId.current = null;
     onClose();
   };
   const preview = async () => {
@@ -626,12 +633,12 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
     if (ok && result.current) acceptSession(result.current);
     else if (!ok) setCommandFailed(true);
   };
-  const chooseFiles = async () => {
+  const chooseFiles = async (paths?: string[]) => {
     const result: { current: ImportSession | null } = { current: null };
     const ok = await perform("import-files", async () => {
       result.current = mode === "local"
-        ? await relayCommands.previewImportFiles()
-        : await relayCommands.previewRemoteImportFiles();
+        ? await relayCommands.previewImportFiles(paths)
+        : await relayCommands.previewRemoteImportFiles(paths);
     });
     if (ok && result.current) acceptSession(result.current);
     else if (!ok) setCommandFailed(true);
@@ -651,9 +658,11 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
         setSession(null);
         setSelected([]);
         setCommandFailed(true);
+        activeSessionId.current = null;
         return;
       }
       const failures = collectImportFailures(result.current, session);
+      activeSessionId.current = null;
       if (failures.length) {
         setCompleted(failures);
         return;
@@ -673,9 +682,20 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     const failures = collectImportFailures(result.current, session);
+    activeSessionId.current = null;
     if (failures.length) setCompleted(failures);
     else onClose();
   };
+  useEffect(() => {
+    if (!initialPaths?.length || initialPreviewStarted.current) return;
+    initialPreviewStarted.current = true;
+    void chooseFiles(initialPaths);
+  }, [initialPaths]);
+  useEffect(() => () => {
+    if (mode === "local" && activeSessionId.current) {
+      void relayCommands.cancelImport(activeSessionId.current).catch(() => undefined);
+    }
+  }, [mode]);
   const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
     ? current.filter((id) => id !== itemId)
     : [...current, itemId]);
@@ -685,7 +705,7 @@ function ImportDialog({ onClose }: { onClose: () => void }) {
   const body = completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
     return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>;
-  })}</tbody></table></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={chooseFiles}>{t("accounts.chooseImportFiles")}</Button></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label> : null}</div>;
+  })}</tbody></table></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={() => chooseFiles()}>{t("accounts.chooseImportFiles")}</Button><span>{t("accounts.importFileHint")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <details className="import-resume"><summary>{t("accounts.resumeExistingImport")}</summary><label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label></details> : null}</div>;
   return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }
 
@@ -898,6 +918,9 @@ function collectImportFailures(response: ConfirmAccountImportResponse | null, se
 
 function importFailureReason(code: string, t: TFunction) {
   if (code === "provider_account_id_missing") return t("accounts.importFailureReasons.providerAccountIdMissing");
+  if (code === "provider_account_lookup_failed") return t("accounts.importFailureReasons.providerAccountLookupFailed");
+  if (code === "access_token_rejected") return t("accounts.importFailureReasons.accessTokenRejected");
+  if (code === "account_profile_rate_limited") return t("accounts.importFailureReasons.accountProfileRateLimited");
   if (code === "models_http_status") return t("accounts.importFailureReasons.modelsHttpStatus");
   if (code === "models_forbidden") return t("accounts.importFailureReasons.modelsForbidden");
   return t("accounts.importFailureReasons.unknown");

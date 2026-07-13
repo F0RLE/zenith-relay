@@ -79,6 +79,41 @@ for (const locale of locales) {
   }
 }
 
+for (const theme of themes) {
+  for (const viewport of viewports) {
+    test(`account import ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Подключения", exact: true }).click();
+      await page.getByRole("button", { name: "Импорт", exact: true }).click();
+
+      const dialog = page.getByRole("dialog", { name: "Импортировать учётные записи" });
+      await expect(dialog).toBeVisible();
+      expect(await dialog.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+      })).toBe(true);
+      expect(await dialog.locator("button span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+      await page.screenshot({ path: `output/playwright/account-import-empty-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+
+      await dialog.getByRole("button", { name: "Выбрать JSON-файлы" }).click();
+      await expect(dialog.getByLabel("Выбрать Imported account для импорта")).toBeChecked();
+      await expect(dialog.getByLabel("Выбрать Second imported account для импорта")).toBeChecked();
+      expect(await dialog.locator(".relay-dialog-body").evaluate((body) => {
+        const preview = body.querySelector<HTMLElement>(".import-preview")!;
+        const table = preview.querySelector<HTMLElement>(".relay-table")!;
+        return {
+          body: body.scrollWidth - body.clientWidth,
+          preview: preview.scrollWidth - preview.clientWidth,
+          table: table.scrollWidth - table.clientWidth,
+        };
+      })).toEqual({ body: 0, preview: 0, table: 0 });
+      await page.screenshot({ path: `output/playwright/account-import-preview-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    });
+  }
+}
+
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 840, height: 560 });

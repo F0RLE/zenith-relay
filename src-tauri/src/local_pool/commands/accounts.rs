@@ -19,7 +19,7 @@ use crate::local_pool::{
             MAX_IMPORT_ITEMS,
         },
         models::{CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode},
-        oauth::CodexOAuthClient,
+        oauth::{collect_limited, CodexOAuthClient, LimitedBodyError},
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
         quota::{CodexQuotaClient, QuotaRefreshOutcome},
         quota_service::{apply_quota_failure, apply_quota_success},
@@ -36,6 +36,7 @@ use crate::local_pool::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{TimeZone, Utc};
+use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -65,6 +66,8 @@ const MAX_MODELS: usize = 4_096;
 const MAX_JWT_BYTES: usize = 64 * 1024;
 const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 const DEFAULT_OPENAI_SOURCE_URL: &str = "https://api.openai.com/v1";
+const CODEX_ACCOUNT_CHECK_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/accounts/check";
+const MAX_ACCOUNT_PROFILE_RESPONSE_BYTES: usize = 256 * 1024;
 const TOKEN_REFRESH_SKEW_MS: u64 = 60_000;
 const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration = Duration::from_secs(5);
 const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
@@ -445,6 +448,8 @@ struct ImportedAuthClaims {
     #[serde(default)]
     chatgpt_account_id: Option<String>,
     #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
     chatgpt_account_is_fedramp: bool,
 }
 
@@ -520,10 +525,15 @@ pub async fn start_local_account_import(
 
 #[tauri::command]
 pub async fn preview_local_account_import_files(
+    paths: Option<Vec<PathBuf>>,
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<Option<ImportSessionResponse>> {
-    let Some(documents) = pick_account_import_documents(&app)? else {
+    let documents = match paths {
+        Some(paths) => Some(read_import_documents(paths)?),
+        None => pick_account_import_documents(&app)?,
+    };
+    let Some(documents) = documents else {
         return Ok(None);
     };
     let _mutation = state.setup_guard().await;
@@ -586,7 +596,7 @@ pub(crate) fn pick_account_import_documents(app: &AppHandle) -> CommandResult<Op
     read_import_documents(paths).map(Some).map_err(Into::into)
 }
 
-fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
+pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
     if paths.is_empty() || paths.len() > MAX_IMPORT_ITEMS {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -596,6 +606,16 @@ fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<String>> {
     let mut total_bytes = 0usize;
     let mut documents = Vec::with_capacity(paths.len());
     for path in paths {
+        if !path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "selected import file must use the .json extension",
+            ));
+        }
         let metadata = std::fs::metadata(&path).map_err(|_| {
             LocalPoolError::new(ErrorCode::Io, "failed to read selected import file")
         })?;
@@ -1664,6 +1684,7 @@ async fn prepare_import_preview(
                 .as_deref()
                 .and_then(parse_subscription_timestamp_ms),
             import_proxy,
+            settings.quota_request_timeout_seconds,
         )
         .await
         {
@@ -2258,6 +2279,7 @@ async fn import_account_item(
         context.plan.as_deref(),
         context.subscription_active_until_ms,
         import_proxy,
+        settings.quota_request_timeout_seconds,
     )
     .await?;
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
@@ -2394,6 +2416,7 @@ async fn build_import_credential_material(
     plan_hint: Option<&str>,
     subscription_active_until_hint: Option<u64>,
     proxy: Option<&ProxyConfig>,
+    request_timeout_seconds: u64,
 ) -> ItemResult<ImportedCredentialMaterial> {
     let email = item.email().map(str::to_string);
     let item_account_id = item.account_id.clone();
@@ -2404,7 +2427,7 @@ async fn build_import_credential_material(
     let imported_identity = imported_identity(secrets.id_token(), secrets.access_token());
 
     if let Some(access_token) = secrets.access_token() {
-        return Ok(ImportedCredentialMaterial {
+        let material = ImportedCredentialMaterial {
             access_token: access_token.to_string(),
             refresh_token: original_refresh,
             id_token: secrets.id_token().map(str::to_string),
@@ -2420,7 +2443,8 @@ async fn build_import_credential_material(
                 .subscription_active_until_ms
                 .or(subscription_active_until_hint),
             account_is_fedramp: imported_identity.account_is_fedramp,
-        });
+        };
+        return resolve_import_account_identity(material, proxy, request_timeout_seconds).await;
     }
 
     let refresh_token = original_refresh.ok_or_else(|| {
@@ -2464,7 +2488,7 @@ async fn build_import_credential_material(
         .as_ref()
         .is_some_and(|claims| claims.account_is_fedramp());
     let (access_token, rotated_refresh, id_token, expires_at_ms) = tokens.into_secret_parts();
-    Ok(ImportedCredentialMaterial {
+    let material = ImportedCredentialMaterial {
         access_token,
         refresh_token: rotated_refresh.or(Some(refresh_token)),
         id_token,
@@ -2485,7 +2509,173 @@ async fn build_import_credential_material(
             .or(oauth_subscription_active_until_ms)
             .or(subscription_active_until_hint),
         account_is_fedramp: account_is_fedramp || imported_identity.account_is_fedramp,
+    };
+    resolve_import_account_identity(material, proxy, request_timeout_seconds).await
+}
+
+async fn resolve_import_account_identity(
+    mut material: ImportedCredentialMaterial,
+    proxy: Option<&ProxyConfig>,
+    request_timeout_seconds: u64,
+) -> ItemResult<ImportedCredentialMaterial> {
+    if material.provider_account_id.is_some() {
+        return Ok(material);
+    }
+    let endpoint = Url::parse(CODEX_ACCOUNT_CHECK_ENDPOINT).map_err(|_| {
+        ImportItemError::new(
+            "provider_account_lookup_failed",
+            "ChatGPT account lookup is unavailable",
+        )
+    })?;
+    material.provider_account_id = Some(
+        lookup_import_account_id(
+            endpoint,
+            &material.access_token,
+            proxy,
+            Duration::from_secs(request_timeout_seconds.max(1)),
+        )
+        .await?,
+    );
+    Ok(material)
+}
+
+async fn lookup_import_account_id(
+    endpoint: Url,
+    access_token: &str,
+    proxy: Option<&ProxyConfig>,
+    timeout: Duration,
+) -> ItemResult<String> {
+    let authorization = HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
+        ImportItemError::new("access_token_rejected", "imported access token is invalid")
+    })?;
+    let builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(timeout)
+        .user_agent("Zenith Relay");
+    let http = match proxy {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| {
+        ImportItemError::new(
+            "provider_account_lookup_failed",
+            "ChatGPT account lookup client could not be created",
+        )
+    })?;
+    let response = http
+        .get(endpoint)
+        .header(reqwest::header::AUTHORIZATION, authorization)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|_| {
+            ImportItemError::new(
+                "provider_account_lookup_failed",
+                "ChatGPT account lookup request failed",
+            )
+        })?;
+    let status = response.status();
+    let body = collect_limited(response, MAX_ACCOUNT_PROFILE_RESPONSE_BYTES)
+        .await
+        .map_err(|error| match error {
+            LimitedBodyError::Transport => ImportItemError::new(
+                "provider_account_lookup_failed",
+                "ChatGPT account lookup response could not be read",
+            ),
+            LimitedBodyError::TooLarge => ImportItemError::new(
+                "provider_account_lookup_failed",
+                "ChatGPT account lookup response was too large",
+            ),
+        })?;
+    if !status.is_success() {
+        let (code, message) = match status.as_u16() {
+            401 | 403 => (
+                "access_token_rejected",
+                "ChatGPT rejected the imported access token",
+            ),
+            429 => (
+                "account_profile_rate_limited",
+                "ChatGPT rate limited the account lookup request",
+            ),
+            _ => (
+                "provider_account_lookup_failed",
+                "ChatGPT account lookup returned an unexpected status",
+            ),
+        };
+        return Err(ImportItemError::new(code, message));
+    }
+    let payload: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+        ImportItemError::new(
+            "provider_account_lookup_failed",
+            "ChatGPT account lookup returned invalid JSON",
+        )
+    })?;
+    account_id_from_check_response(&payload).ok_or_else(|| {
+        ImportItemError::new(
+            "provider_account_id_missing",
+            "ChatGPT account lookup did not return an account id",
+        )
     })
+}
+
+fn account_id_from_check_response(payload: &serde_json::Value) -> Option<String> {
+    if payload.get("accounts").is_none() {
+        if let Some(account_id) = account_id_from_profile_record(payload) {
+            return Some(account_id);
+        }
+    }
+    let accounts = payload.get("accounts").unwrap_or(payload);
+    if let Some(records) = accounts.as_object() {
+        if let Some(ordering) = payload
+            .get("account_ordering")
+            .and_then(|value| value.as_array())
+        {
+            for key in ordering.iter().filter_map(|value| value.as_str()) {
+                if let Some(record) = records.get(key) {
+                    if let Some(account_id) = account_id_from_profile_record(record) {
+                        return Some(account_id);
+                    }
+                    if let Some(account_id) = normalized_profile_account_id(key) {
+                        return Some(account_id);
+                    }
+                }
+            }
+        }
+        for (key, record) in records {
+            if let Some(account_id) = account_id_from_profile_record(record) {
+                return Some(account_id);
+            }
+            if let Some(account_id) = normalized_profile_account_id(key) {
+                return Some(account_id);
+            }
+        }
+    }
+    accounts
+        .as_array()?
+        .iter()
+        .find_map(account_id_from_profile_record)
+}
+
+fn account_id_from_profile_record(record: &serde_json::Value) -> Option<String> {
+    let record = record
+        .get("account")
+        .filter(|value| value.is_object())
+        .unwrap_or(record);
+    ["id", "account_id", "chatgpt_account_id", "workspace_id"]
+        .into_iter()
+        .find_map(|key| {
+            record
+                .get(key)
+                .and_then(|value| value.as_str())
+                .and_then(normalized_profile_account_id)
+        })
+}
+
+fn normalized_profile_account_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control))
+        .then(|| value.to_string())
 }
 
 fn hinted_import_proxy(
@@ -3120,7 +3310,9 @@ fn imported_identity(id_token: Option<&str>, access_token: Option<&str>) -> Impo
             .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.user_id)),
         provider_account_id: auth_string(id_auth, |auth| &auth.chatgpt_account_id)
-            .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_account_id)),
+            .or_else(|| auth_string(id_auth, |auth| &auth.account_id))
+            .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_account_id))
+            .or_else(|| auth_string(access_auth, |auth| &auth.account_id)),
         account_is_fedramp: id_auth
             .or(access_auth)
             .is_some_and(|auth| auth.chatgpt_account_is_fedramp),
@@ -3526,7 +3718,9 @@ fn default_true() -> bool {
 mod tests {
     use super::*;
     use crate::local_pool::accounts::imports::parse_import;
+    use axum::{routing::get, Json, Router};
     use std::collections::BTreeSet;
+    use tokio::net::TcpListener;
     use zenith_relay_core::{
         automations::{
             AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask, WakeTrigger,
@@ -3717,6 +3911,17 @@ mod tests {
 
         assert_eq!(parsed.items.len(), 3);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn dropped_import_rejects_non_json_files() {
+        let path = std::env::temp_dir().join(format!(
+            "zenith-relay-import-{}.txt",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::write(&path, "{}").unwrap();
+        assert!(read_import_documents(vec![path.clone()]).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]
@@ -4332,7 +4537,7 @@ mod tests {
                     "chatgpt_plan_type": "pro",
                     "chatgpt_subscription_active_until": 1_767_225_600,
                     "chatgpt_user_id": "user-private",
-                    "chatgpt_account_id": "account-private"
+                    "account_id": "account-private"
                 }
             })
             .to_string(),
@@ -4351,6 +4556,41 @@ mod tests {
         );
         assert_eq!(identity.access_expires_at_ms, Some(123_000));
         assert!(!format!("{:x}", Sha256::digest(token.as_bytes())).contains("private"));
+    }
+
+    #[tokio::test]
+    async fn account_check_recovers_an_id_from_an_access_only_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/accounts/check",
+            get(|| async {
+                Json(serde_json::json!({
+                    "account_ordering": ["workspace-private"],
+                    "accounts": {
+                        "workspace-private": {
+                            "account": { "workspace_id": "workspace-private" }
+                        }
+                    }
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let endpoint = Url::parse(&format!("http://{address}/accounts/check")).unwrap();
+
+        let account_id = lookup_import_account_id(
+            endpoint,
+            "synthetic-access-only-token",
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(account_id, "workspace-private");
+        server.abort();
     }
 
     #[tokio::test]
@@ -4377,7 +4617,7 @@ mod tests {
         )
         .unwrap();
         let material =
-            build_import_credential_material(parsed.items.remove(0), 1, None, None, None)
+            build_import_credential_material(parsed.items.remove(0), 1, None, None, None, 20)
                 .await
                 .unwrap();
         assert_eq!(material.email.as_deref(), Some("member@example.test"));

@@ -2396,16 +2396,26 @@ textarea:focus-visible {
 }
 
 .global-feedback {
-  position: sticky;
-  z-index: 20;
-  top: 0;
+  position: fixed;
+  z-index: 300;
+  top: 48px;
+  right: 16px;
+  width: min(480px, calc(100vw - 32px));
   min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 16px;
-  border-bottom: 1px solid var(--relay-border);
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 7px;
+  box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
   font-size: 12px;
+  pointer-events: none;
+}
+
+.global-feedback > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .global-feedback.success {
@@ -2424,6 +2434,7 @@ textarea:focus-visible {
   border: 0;
   background: transparent;
   color: currentColor;
+  pointer-events: auto;
 }
 
 .relay-loading {
@@ -4475,26 +4486,31 @@ textarea {
   margin: 0;
 }
 
-.oauth-resume {
+.oauth-resume,
+.import-resume {
   padding-top: 12px;
   border-top: 1px solid var(--relay-border);
 }
 
-.oauth-resume summary {
+.oauth-resume summary,
+.import-resume summary {
   color: var(--relay-accent-hover);
   font-weight: 600;
   cursor: pointer;
 }
 
-.oauth-resume[open] summary {
+.oauth-resume[open] summary,
+.import-resume[open] summary {
   margin-bottom: 12px;
 }
 
-.oauth-resume .inline-actions {
+.oauth-resume .inline-actions,
+.import-resume .inline-actions {
   justify-content: stretch;
 }
 
-.oauth-resume .inline-actions input {
+.oauth-resume .inline-actions input,
+.import-resume .inline-actions input {
   min-width: 0;
   flex: 1;
 }
@@ -4854,7 +4870,57 @@ textarea {
 .import-file-picker {
   display: flex;
   align-items: center;
+  gap: 10px;
   min-width: 0;
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.import-file-picker > span {
+  overflow-wrap: anywhere;
+}
+
+.import-preview .relay-table {
+  table-layout: fixed;
+  white-space: normal;
+}
+
+.import-preview .relay-table th:first-child { width: 42px; }
+.import-preview .relay-table th:nth-child(2) { width: 120px; }
+.import-preview .relay-table th:nth-child(4) { width: 22%; }
+.import-preview .relay-table th:nth-child(5) { width: 90px; }
+
+.import-preview .relay-table td {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-preview .relay-table td code {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.import-drop-overlay {
+  position: fixed;
+  z-index: 220;
+  inset: 36px 0 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  border: 2px dashed var(--relay-accent);
+  margin: 18px;
+  background: var(--relay-overlay);
+  color: var(--relay-accent-hover);
+  backdrop-filter: blur(3px);
+  pointer-events: none;
+}
+
+.import-drop-overlay svg {
+  width: 40px;
+  height: 40px;
 }
 
 .secret-field {
@@ -5293,7 +5359,7 @@ input[type="password"] {
   .proxy-settings-form { grid-template-columns: 20px minmax(0, 1fr); }
   .proxy-settings-form .inline-actions { grid-column: 2; }
   .usage-filters { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
-  .relay-shell[data-page="connections"] .relay-table { min-width: 820px; }
+  .relay-shell[data-page="connections"] .relay-page .relay-table { min-width: 820px; }
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table,
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table {
     min-width: 700px;

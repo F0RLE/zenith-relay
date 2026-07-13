@@ -1,9 +1,10 @@
-import { Activity, Cable, Check, ChevronDown, CircleHelp, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, UserRoundCog, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Activity, Cable, Check, ChevronDown, CircleHelp, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, UserRoundCog, X } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
-import { ConnectionsPage } from "../pages/connections/ConnectionsPage";
+import { ConnectionsPage, ImportDialog } from "../pages/connections/ConnectionsPage";
 import { PoolPage } from "../pages/pool/PoolPage";
 import { GatewayPage } from "../pages/gateway/GatewayPage";
 import { UsagePage } from "../pages/usage/UsagePage";
@@ -27,9 +28,17 @@ export function RelayShell() {
   const { mode, setMode, page, setPage, feedback, clearFeedback, loading, resetOnboarding } = useRelayState();
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
   const [modeOpen, setModeOpen] = useState(false);
+  const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
+  const [importDragActive, setImportDragActive] = useState(false);
+  const nextImportRequest = useRef(0);
   const modePickerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const visiblePages = pages.filter((item) => !(item.id === "pool" && mode === "zenith"));
+  const openImport = useCallback((paths?: string[]) => {
+    if (mode === "zenith") setMode("local");
+    setPage("connections");
+    setImportRequest({ id: ++nextImportRequest.current, paths });
+  }, [mode, setMode, setPage]);
 
   useEffect(() => {
     if (contentRef.current) {
@@ -58,6 +67,32 @@ export function RelayShell() {
       document.removeEventListener("keydown", closeWithEscape);
     };
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    try {
+      void getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type === "enter" || event.payload.type === "over") {
+          setImportDragActive(true);
+          return;
+        }
+        setImportDragActive(false);
+        if (event.payload.type === "drop" && event.payload.paths.length) {
+          openImport(event.payload.paths);
+        }
+      }).then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      }).catch(() => undefined);
+    } catch {
+      // Browser previews do not expose Tauri webview metadata.
+    }
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openImport]);
 
   return (
     <div className={`relay-shell ${collapsed ? "sidebar-collapsed" : ""}`} data-mode={mode} data-page={page}>
@@ -131,8 +166,10 @@ export function RelayShell() {
             <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
           </div>
         ) : null}
-        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Page page={page} />}
+        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Page page={page} onImport={() => openImport()} />}
       </div>
+      {importDragActive ? <div className="import-drop-overlay" role="status"><Upload aria-hidden /><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
+      {importRequest ? <ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /> : null}
     </div>
   );
 }
@@ -141,9 +178,9 @@ function ModeIcon({ mode }: { mode: RelayMode }) {
   return mode === "local" ? <Laptop aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
 }
 
-function Page({ page }: { page: PageId }) {
+function Page({ page, onImport }: { page: PageId; onImport: () => void }) {
   if (page === "overview") return <OverviewPage />;
-  if (page === "connections") return <ConnectionsPage />;
+  if (page === "connections") return <ConnectionsPage onImport={onImport} />;
   if (page === "pool") return <PoolPage />;
   if (page === "gateway") return <GatewayPage />;
   if (page === "usage") return <UsagePage />;

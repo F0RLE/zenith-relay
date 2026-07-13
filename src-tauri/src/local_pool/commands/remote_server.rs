@@ -21,7 +21,7 @@ use zenith_relay_core::protocol::{
     UsagePage, UsageQuery,
 };
 
-use super::accounts::pick_account_import_documents;
+use super::accounts::{pick_account_import_documents, read_import_documents};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -293,6 +293,7 @@ pub fn prepare_remote_server_deployment(
 
 #[tauri::command]
 pub async fn preview_remote_account_import_files(
+    paths: Option<Vec<std::path::PathBuf>>,
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<Option<serde_json::Value>, CommandError> {
@@ -301,7 +302,11 @@ pub async fn preview_remote_account_import_files(
             LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
         );
     };
-    let Some(documents) = pick_account_import_documents(&app)? else {
+    let documents = match paths {
+        Some(paths) => Some(read_import_documents(paths)?),
+        None => pick_account_import_documents(&app)?,
+    };
+    let Some(documents) = documents else {
         return Ok(None);
     };
     let payload = serde_json::json!({ "documents": documents });
