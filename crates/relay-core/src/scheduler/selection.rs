@@ -23,6 +23,7 @@ pub struct Selection {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     affinity: AffinityCache,
+    in_flight: BTreeMap<String, u32>,
 }
 
 impl PoolScheduler {
@@ -30,6 +31,7 @@ impl PoolScheduler {
         Self {
             candidates: BTreeMap::new(),
             affinity: AffinityCache::new(max_affinity_entries, affinity_ttl_ms),
+            in_flight: BTreeMap::new(),
         }
     }
 
@@ -39,6 +41,7 @@ impl PoolScheduler {
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.affinity.invalidate_candidate(candidate_id);
+        self.in_flight.remove(candidate_id);
         self.candidates.remove(candidate_id)
     }
 
@@ -98,7 +101,14 @@ impl PoolScheduler {
                         request.now_ms,
                     )
             })
-            .max_by(|left, right| compare_preference(left, right))
+            .max_by(|left, right| {
+                compare_preference(
+                    left,
+                    right,
+                    self.in_flight.get(&left.id).copied().unwrap_or_default(),
+                    self.in_flight.get(&right.id).copied().unwrap_or_default(),
+                )
+            })
             .map(|candidate| Selection {
                 candidate_id: candidate.id.clone(),
                 affinity_hit: false,
@@ -145,6 +155,27 @@ impl PoolScheduler {
         self.affinity.clear();
     }
 
+    pub(crate) fn reserve(&mut self, candidate_id: &str) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        let in_flight = self.in_flight.entry(candidate_id.to_string()).or_default();
+        *in_flight = in_flight.saturating_add(1);
+        true
+    }
+
+    pub(crate) fn release(&mut self, candidate_id: &str) -> bool {
+        let Some(in_flight) = self.in_flight.get_mut(candidate_id) else {
+            return false;
+        };
+        if *in_flight <= 1 {
+            self.in_flight.remove(candidate_id);
+        } else {
+            *in_flight -= 1;
+        }
+        true
+    }
+
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
@@ -185,13 +216,29 @@ impl PoolScheduler {
     }
 }
 
-fn compare_preference(left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
+fn compare_preference(
+    left: &RuntimeCandidate,
+    right: &RuntimeCandidate,
+    left_in_flight: u32,
+    right_in_flight: u32,
+) -> Ordering {
     left.priority
         .cmp(&right.priority)
+        .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
         .then_with(|| left.quota.compare_preference(right.quota))
         .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.weight.cmp(&right.weight))
         .then_with(|| right.id.cmp(&left.id))
+}
+
+fn compare_weighted_load(
+    left: &RuntimeCandidate,
+    right: &RuntimeCandidate,
+    left_in_flight: u32,
+    right_in_flight: u32,
+) -> Ordering {
+    (u128::from(right_in_flight) * u128::from(left.weight))
+        .cmp(&(u128::from(left_in_flight) * u128::from(right.weight)))
 }
 
 fn compare_lru(left: Option<u64>, right: Option<u64>) -> Ordering {
@@ -405,6 +452,34 @@ mod tests {
                 .unwrap()
                 .candidate_id,
             "a"
+        );
+    }
+
+    #[test]
+    fn active_requests_spread_before_quota_and_release_restores_preference() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut full = candidate("full");
+        full.quota = CandidateQuota::Available(100);
+        scheduler.upsert(full);
+        let mut low = candidate("low");
+        low.quota = CandidateQuota::Available(1);
+        scheduler.upsert(low);
+
+        let first = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(first.candidate_id, "full");
+        assert!(scheduler.reserve(&first.candidate_id));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "low"
+        );
+        assert!(scheduler.release(&first.candidate_id));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "full"
         );
     }
 

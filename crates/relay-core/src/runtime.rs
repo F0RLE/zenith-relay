@@ -14,6 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -181,6 +182,30 @@ pub struct GatewayRuntime {
     max_retry_candidates: usize,
     affinity_enabled: bool,
     pub(crate) usage: UsageCallback,
+}
+
+pub(crate) struct CandidateLease {
+    scheduler: Arc<Mutex<PoolScheduler>>,
+    candidate_id: String,
+    released: AtomicBool,
+}
+
+impl CandidateLease {
+    pub(crate) fn release(&self) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release(&self.candidate_id);
+    }
+}
+
+impl Drop for CandidateLease {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 #[derive(Clone)]
@@ -603,7 +628,7 @@ impl GatewayRuntime {
         )
     }
 
-    pub(crate) fn select(
+    pub(crate) fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -611,14 +636,23 @@ impl GatewayRuntime {
         tried: &HashSet<String>,
         affinity_key: Option<&str>,
         now_ms: u64,
-    ) -> Option<Selection> {
-        self.lock_scheduler().select(SelectionRequest {
+    ) -> Option<(Selection, CandidateLease)> {
+        let mut scheduler = self.lock_scheduler();
+        let selection = scheduler.select(SelectionRequest {
             model,
             allowed_protocols,
             scope: &key.scope,
             tried,
             affinity_key,
             now_ms,
+        })?;
+        scheduler.reserve(&selection.candidate_id).then(|| {
+            let lease = CandidateLease {
+                scheduler: self.scheduler.clone(),
+                candidate_id: selection.candidate_id.clone(),
+                released: AtomicBool::new(false),
+            };
+            (selection, lease)
         })
     }
 

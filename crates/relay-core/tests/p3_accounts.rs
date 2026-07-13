@@ -52,6 +52,7 @@ enum StreamChunk {
 struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
+    delay: Duration,
 }
 
 struct TestServer {
@@ -572,6 +573,35 @@ async fn concurrent_gateway_requests_rotate_and_persist_one_token_once() {
 }
 
 #[tokio::test]
+async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
+    let (first_upstream, first_state) = spawn_delayed_upstream(Duration::from_millis(100)).await;
+    let (second_upstream, second_state) = spawn_delayed_upstream(Duration::from_millis(100)).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "account-first", "first-access").await;
+    register_ready(&authority, "account-second", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("account-first", "provider-first", &first_upstream, 10),
+            account("account-second", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let responses = join_all((0..8).map(|_| request(&gateway, false))).await;
+
+    assert!(responses
+        .iter()
+        .all(|response| response.status() == StatusCode::OK));
+    assert_eq!(first_state.requests.lock().unwrap().len(), 4);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
 async fn account_stream_never_falls_back_after_first_event() {
     let (account_upstream, account_state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
@@ -747,6 +777,18 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         replies: Arc::new(Mutex::new(replies.into())),
         requests: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::ZERO,
+    };
+    let app = Router::new()
+        .route("/v1/responses", post(upstream))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) {
+    let state = UpstreamState {
+        delay,
+        ..UpstreamState::default()
     };
     let app = Router::new()
         .route("/v1/responses", post(upstream))
@@ -777,6 +819,7 @@ async fn upstream(
         originator: header(&headers, "originator"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
+    tokio::time::sleep(state.delay).await;
     match state
         .replies
         .lock()

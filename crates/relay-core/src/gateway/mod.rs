@@ -174,7 +174,7 @@ async fn execute_request(
         .is_some_and(|value| !value.trim().is_empty());
 
     while usize::from(attempt) < runtime.max_retry_candidates() {
-        let selected = runtime.select(
+        let selected = runtime.select_and_reserve(
             &key,
             &resolved_model,
             candidate_protocols(wire_api),
@@ -182,7 +182,7 @@ async fn execute_request(
             affinity_key.as_deref(),
             now_ms(),
         );
-        let Some(selected) = selected else {
+        let Some((selected, lease)) = selected else {
             if attempt == 0 {
                 if let Some(retry_at) = runtime.earliest_retry_at(
                     &key,
@@ -524,6 +524,7 @@ async fn execute_request(
                 let completion_model = source_model.clone();
                 let completion_affinity = affinity_key.clone();
                 let completion: CompletionCallback = Arc::new(move |event| {
+                    lease.release();
                     if event.success {
                         completion_runtime.record_success(
                             &completion_source,
