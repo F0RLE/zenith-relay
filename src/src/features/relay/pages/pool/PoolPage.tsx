@@ -45,7 +45,7 @@ export function PoolPage() {
       && candidate.secretAvailable
       && (typeof candidate.authState === "string" ? candidate.authState : candidate.authState.state) === "active");
     return relayCommands.attachCodexGateway(key.id, account?.id ?? null);
-  });
+  }, true);
   const action = <>{viewAction}{mode === "local" ? <>
     <Button variant={runtime?.gateway.running && view !== "keys" ? "primary" : "secondary"} icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
     <Button data-action="pool-toggle" variant={!runtime?.gateway.running && view !== "keys" ? "primary" : "secondary"} icon={runtime?.gateway.running ? <Power aria-hidden /> : <Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!runtime?.gateway.running && !poolReady} title={!runtime?.gateway.running && !poolReady ? t("pool.startUnavailable") : runtime?.gateway.running ? t("pool.stop") : t("pool.start")} onClick={() => void perform("pool-toggle", runtime?.gateway.running ? relayCommands.stopGateway : relayCommands.startGateway, runtime?.gateway.running ? "feedback.stopped" : "feedback.started")}>{runtime?.gateway.running ? t("pool.stop") : t("pool.start")}</Button>

@@ -572,13 +572,19 @@ fn attach_local_locked(
             "managed Codex provider exists without a profile backup",
         ));
     }
+    let external_takeover = existing_backup
+        .as_ref()
+        .is_some_and(|backup| external_provider_took_over(&document, backup));
     if existing_backup.is_some()
         && !managed_config_matches(&document, existing_backup.as_ref().unwrap())
+        && !external_takeover
     {
         return Err(profile_restore_blocked());
     }
     if let Some(backup) = existing_backup.as_ref() {
-        if !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)? {
+        if !external_takeover
+            && !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)?
+        {
             return Err(profile_restore_blocked());
         }
     }
@@ -594,6 +600,24 @@ fn attach_local_locked(
         bound_oauth_account_id: None,
         managed_oauth_access_hash: None,
     });
+    let rebased_secret = if external_takeover {
+        backup.previous_model_provider = root_model_provider(&document);
+        let secret_ref = backup
+            .previous_auth_secret_ref
+            .clone()
+            .unwrap_or_else(|| BACKUP_SECRET_REF.to_string());
+        let previous_secret = secrets.load(&secret_ref)?;
+        if let Some(previous_auth) = original_auth.filter(|value| !value.trim().is_empty()) {
+            secrets.save(&secret_ref, previous_auth)?;
+            backup.previous_auth_secret_ref = Some(secret_ref.clone());
+        } else {
+            secrets.delete(&secret_ref)?;
+            backup.previous_auth_secret_ref = None;
+        }
+        Some((secret_ref, previous_secret))
+    } else {
+        None
+    };
     if created_backup {
         if let Some(previous_auth) = original_auth.filter(|value| !value.trim().is_empty()) {
             secrets.save(BACKUP_SECRET_REF, previous_auth)?;
@@ -612,12 +636,26 @@ fn attach_local_locked(
         .as_ref()
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
-    let backup_content = serialize_backup(&backup)?;
+    let backup_content = match serialize_backup(&backup) {
+        Ok(content) => content,
+        Err(error) => {
+            return Err(with_rollback(
+                error,
+                merge_rollbacks(
+                    cleanup_created_backup_secret(created_backup, &backup, secrets),
+                    restore_secret_snapshot(&rebased_secret, secrets),
+                ),
+            ));
+        }
+    };
     if let Err(error) = replace_if_unchanged(&backup_path, &original_backup_bytes, &backup_content)
     {
         return Err(with_rollback(
             error,
-            cleanup_created_backup_secret(created_backup, &backup, secrets),
+            merge_rollbacks(
+                cleanup_created_backup_secret(created_backup, &backup, secrets),
+                restore_secret_snapshot(&rebased_secret, secrets),
+            ),
         ));
     }
 
@@ -627,13 +665,16 @@ fn attach_local_locked(
     {
         return Err(with_rollback(
             error,
-            rollback_backup(
-                created_backup,
-                &backup_path,
-                &backup_content,
-                &original_backup_bytes,
-                &backup,
-                secrets,
+            merge_rollbacks(
+                rollback_backup(
+                    created_backup,
+                    &backup_path,
+                    &backup_content,
+                    &original_backup_bytes,
+                    &backup,
+                    secrets,
+                ),
+                restore_secret_snapshot(&rebased_secret, secrets),
             ),
         ));
     }
@@ -645,13 +686,16 @@ fn attach_local_locked(
     };
     if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
-        let backup_rollback = rollback_backup(
-            created_backup,
-            &backup_path,
-            &backup_content,
-            &original_backup_bytes,
-            &backup,
-            secrets,
+        let backup_rollback = merge_rollbacks(
+            rollback_backup(
+                created_backup,
+                &backup_path,
+                &backup_content,
+                &original_backup_bytes,
+                &backup,
+                secrets,
+            ),
+            restore_secret_snapshot(&rebased_secret, secrets),
         );
         return Err(with_rollback(
             error,
@@ -1344,33 +1388,39 @@ fn document_has_provider(document: &DocumentMut) -> bool {
 }
 
 fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
+    root_model_provider(document).as_deref() == Some(PROVIDER_ID)
+        && managed_provider_matches(document, backup)
+}
+
+fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
+    root_model_provider(document).is_some_and(|provider| provider != PROVIDER_ID)
+        && managed_provider_matches(document, backup)
+}
+
+fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     document
-        .get("model_provider")
-        .and_then(Item::as_str)
-        .is_some_and(|provider| provider == PROVIDER_ID)
-        && document
-            .get("model_providers")
-            .and_then(Item::as_table)
-            .and_then(|providers| providers.get(PROVIDER_ID))
-            .and_then(Item::as_table)
-            .is_some_and(|provider| {
-                provider
-                    .get("name")
+        .get("model_providers")
+        .and_then(Item::as_table)
+        .and_then(|providers| providers.get(PROVIDER_ID))
+        .and_then(Item::as_table)
+        .is_some_and(|provider| {
+            provider
+                .get("name")
+                .and_then(Item::as_str)
+                .is_some_and(|name| name == "Zenith Relay Local")
+                && provider
+                    .get("base_url")
                     .and_then(Item::as_str)
-                    .is_some_and(|name| name == "Zenith Relay Local")
-                    && provider
-                        .get("base_url")
-                        .and_then(Item::as_str)
-                        .is_some_and(|base_url| {
-                            base_url.trim_end_matches('/') == backup.managed_base_url
-                        })
-                    && provider
-                        .get("wire_api")
-                        .and_then(Item::as_str)
-                        .is_some_and(|wire_api| wire_api == "responses")
-                    && provider.get("requires_openai_auth").and_then(Item::as_bool) == Some(true)
-                    && provider.get("supports_websockets").and_then(Item::as_bool) == Some(false)
-            })
+                    .is_some_and(|base_url| {
+                        base_url.trim_end_matches('/') == backup.managed_base_url
+                    })
+                && provider
+                    .get("wire_api")
+                    .and_then(Item::as_str)
+                    .is_some_and(|wire_api| wire_api == "responses")
+                && provider.get("requires_openai_auth").and_then(Item::as_bool) == Some(true)
+                && provider.get("supports_websockets").and_then(Item::as_bool) == Some(false)
+        })
 }
 
 fn auth_content(local_key: &str) -> String {
@@ -1502,6 +1552,19 @@ fn cleanup_created_backup_secret(
         secrets.delete(secret_ref)?;
     }
     Ok(())
+}
+
+fn restore_secret_snapshot(
+    snapshot: &Option<(String, Option<String>)>,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let Some((secret_ref, value)) = snapshot else {
+        return Ok(());
+    };
+    match value {
+        Some(value) => secrets.save(secret_ref, value),
+        None => secrets.delete(secret_ref),
+    }
 }
 
 fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
@@ -1874,6 +1937,62 @@ mod tests {
             .code,
             ErrorCode::ProfileRestoreBlocked
         ));
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("fresh"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_attach_rebases_external_takeover_and_restores_latest_profile() {
+        let (root, home, backups) = profile_dirs("repeat-external-takeover");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+
+        let external_config = fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .replacen(
+                "model_provider = \"zenith_relay_local\"",
+                "model_provider = \"codex_local_access\"",
+                1,
+            )
+            + "\n[model_providers.codex_local_access]\nname = \"Codex API Service\"\nbase_url = \"http://127.0.0.1:49976/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+        fs::write(home.join(CONFIG_FILE), external_config).unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
+        )
+        .unwrap();
+
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_next_key",
+            &secrets,
+        )
+        .unwrap();
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .starts_with("model_provider = \"zenith_relay_local\""));
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        let restored_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(restored_config.starts_with("model_provider = \"codex_local_access\""));
+        assert!(!restored_config.contains("[model_providers.zenith_relay_local]"));
         assert!(fs::read_to_string(home.join(AUTH_FILE))
             .unwrap()
             .contains("fresh"));

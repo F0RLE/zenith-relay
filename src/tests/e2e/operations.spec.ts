@@ -823,16 +823,16 @@ test("pool toggle changes state without switching Codex", async ({ page }) => {
   expect(workflow.map((call) => call.command)).toEqual(["start_local_gateway", "stop_local_gateway"]);
 });
 
-test("switch Codex creates a pool key and attaches it without starting either runtime", async ({ page }) => {
+test("switch Codex creates a pool key, attaches it, and relaunches Codex without starting the gateway", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: false, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
-  await expect(page.getByText("Profile attached. A backup was preserved.")).toBeVisible();
+  await expect(page.getByText("Client launched.")).toBeVisible();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
-  expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway"]);
+  const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(call.command));
+  expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ label: "Codex pool" });
   expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
 });
