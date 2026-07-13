@@ -898,13 +898,19 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
-  await expect(page.getByText("Client launched.")).toBeVisible();
+  const feedback = page.locator(".global-feedback.success");
+  await expect(feedback).toContainText("Client launched.");
+  const feedbackBox = await feedback.boundingBox();
+  expect(feedbackBox).not.toBeNull();
+  expect(feedbackBox!.x).toBeLessThan(page.viewportSize()!.width / 2);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeGreaterThan(page.viewportSize()!.height - 64);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ label: "Codex pool" });
-  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null });
+  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
+  await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
 test("runtime state refreshes when the app regains focus", async ({ page }) => {

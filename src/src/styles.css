@@ -2398,19 +2398,24 @@ textarea:focus-visible {
 .global-feedback {
   position: fixed;
   z-index: 300;
-  top: 48px;
-  right: 16px;
-  width: min(480px, calc(100vw - 32px));
+  bottom: 16px;
+  left: 248px;
+  width: min(340px, calc(100vw - 264px));
   min-height: 36px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 0 6px 0 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
   font-size: 12px;
   pointer-events: none;
+}
+
+.relay-shell.sidebar-collapsed .global-feedback {
+  left: 72px;
+  width: min(340px, calc(100vw - 88px));
 }
 
 .global-feedback > span {

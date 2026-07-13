@@ -9,6 +9,7 @@ type Feedback = { kind: "success" | "error"; key: string } | null;
 type PendingProfileRepair = { preview: HistoryRepairPreview; launchAfter: boolean };
 
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
+const SUCCESS_FEEDBACK_TIMEOUT_MS = 4_000;
 
 type RelayContextValue = {
   mode: RelayMode;
@@ -140,6 +141,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = theme;
     document.documentElement.dataset.compact = compact ? "true" : "false";
   }, [theme, compact]);
+
+  useEffect(() => {
+    if (feedback?.kind !== "success") return;
+    const timeout = window.setTimeout(() => setFeedback(null), SUCCESS_FEEDBACK_TIMEOUT_MS);
+    return () => window.clearTimeout(timeout);
+  }, [feedback]);
 
   const setMode = useCallback((next: RelayMode) => {
     localStorage.setItem("relay.mode", next);

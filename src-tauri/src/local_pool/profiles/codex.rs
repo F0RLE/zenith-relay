@@ -36,6 +36,8 @@ struct ProfileBackup {
     bound_oauth_account_id: Option<String>,
     #[serde(default)]
     managed_oauth_access_hash: Option<String>,
+    #[serde(default)]
+    managed_bearer_in_config: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -599,6 +601,7 @@ fn attach_local_locked(
         managed_base_url: String::new(),
         bound_oauth_account_id: None,
         managed_oauth_access_hash: None,
+        managed_bearer_in_config: false,
     });
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
@@ -636,6 +639,7 @@ fn attach_local_locked(
         .as_ref()
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
+    backup.managed_bearer_in_config = true;
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,
         Err(error) => {
@@ -659,7 +663,7 @@ fn attach_local_locked(
         ));
     }
 
-    attach_config(&mut document, base_url);
+    attach_config(&mut document, base_url, local_key);
     let managed_config = document.to_string();
     if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
     {
@@ -1341,7 +1345,7 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
     Ok(())
 }
 
-fn attach_config(document: &mut DocumentMut, base_url: &str) {
+fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
     document["model_provider"] = value(PROVIDER_ID);
     if document
         .get("model_providers")
@@ -1356,6 +1360,7 @@ fn attach_config(document: &mut DocumentMut, base_url: &str) {
     provider["base_url"] = value(base_url);
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
+    provider["experimental_bearer_token"] = value(local_key);
     provider["supports_websockets"] = value(false);
 }
 
@@ -1419,6 +1424,11 @@ fn managed_provider_matches(document: &DocumentMut, backup: &ProfileBackup) -> b
                     .and_then(Item::as_str)
                     .is_some_and(|wire_api| wire_api == "responses")
                 && provider.get("requires_openai_auth").and_then(Item::as_bool) == Some(true)
+                && (!backup.managed_bearer_in_config
+                    || provider
+                        .get("experimental_bearer_token")
+                        .and_then(Item::as_str)
+                        .is_some_and(|token| key_hash(token.trim()) == backup.managed_key_hash))
                 && provider.get("supports_websockets").and_then(Item::as_bool) == Some(false)
         })
 }
@@ -1903,6 +1913,72 @@ mod tests {
             restore_with(&home, &backups, &secrets).unwrap_err().code,
             ErrorCode::ProfileRestoreBlocked
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restore_blocks_changed_gateway_bearer() {
+        let (root, home, backups) = profile_dirs("changed-bearer");
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        let changed = fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .replace("zlr_key", "zlr_other");
+        fs::write(home.join(CONFIG_FILE), changed).unwrap();
+
+        assert!(matches!(
+            restore_with(&home, &backups, &secrets).unwrap_err().code,
+            ErrorCode::ProfileRestoreBlocked
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_attach_upgrades_a_profile_without_managed_bearer_metadata() {
+        let (root, home, backups) = profile_dirs("legacy-missing-bearer");
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        let config = fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("experimental_bearer_token ="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(home.join(CONFIG_FILE), config).unwrap();
+        let backup_path = backup_path(&backups);
+        let mut backup: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        backup
+            .as_object_mut()
+            .unwrap()
+            .remove("managedBearerInConfig");
+        fs::write(&backup_path, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("experimental_bearer_token = \"zlr_key\""));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2512,6 +2588,9 @@ mod tests {
         assert!(fs::read_to_string(home.join(CONFIG_FILE))
             .unwrap()
             .contains("model_provider = \"zenith_relay_local\""));
+        assert!(fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("experimental_bearer_token = \"zlr_key\""));
         let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
         assert!(projected.contains("bound-access"));
         assert!(!projected.contains("zlr_key"));

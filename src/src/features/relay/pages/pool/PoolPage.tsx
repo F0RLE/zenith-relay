@@ -40,7 +40,11 @@ export function PoolPage() {
       && !candidate.excludedModels.length
       && !candidate.modelPrefix)
       ?? (await relayCommands.createKey(t("pool.codexKeyLabel"))).key;
-    return relayCommands.attachCodexGateway(key.id, null);
+    const oauthIdentity = snapshot.accounts.find((account) => account.enabled
+      && account.inPool
+      && account.secretAvailable
+      && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active");
+    return relayCommands.attachCodexGateway(key.id, oauthIdentity?.id ?? null);
   }, true);
   const action = <>{viewAction}{mode === "local" ? <>
     <Button variant={runtime?.gateway.running && view !== "keys" ? "primary" : "secondary"} icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
