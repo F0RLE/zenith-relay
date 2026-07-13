@@ -2102,6 +2102,11 @@ textarea {
   white-space: nowrap;
 }
 
+.mode-menu button {
+  gap: 7px;
+  padding-inline: 7px;
+}
+
 .mode-menu {
   position: absolute;
   z-index: 40;
@@ -2116,8 +2121,10 @@ textarea {
 }
 
 .mode-menu button span {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
+  font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -4144,9 +4151,9 @@ textarea {
   min-height: 24px;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   overflow: hidden;
-  padding: 0 4px;
+  padding: 0;
   border-radius: 4px;
   color: var(--relay-muted);
 }
