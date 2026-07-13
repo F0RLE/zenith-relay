@@ -262,7 +262,16 @@ async fn sse_chunks_cross_the_gateway_before_the_stream_finishes() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second, "data: [DONE]\n\n");
+    assert_eq!(
+        second,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+    );
+    let third = tokio::time::timeout(Duration::from_secs(1), chunks.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(third, "data: [DONE]\n\n");
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -276,7 +285,10 @@ async fn sse_chunks_cross_the_gateway_before_the_stream_finishes() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
-    assert!(events[0].ttft_ms.is_some());
+    assert!(events[0].ttft_ms.is_some_and(|ttft| ttft >= 50));
+    assert!(events[0]
+        .ttft_ms
+        .is_some_and(|ttft| ttft <= events[0].latency_ms));
     assert!(events[0].latency_ms >= 50);
 }
 
@@ -571,10 +583,16 @@ async fn upstream_responses(
                 1 => {
                     release_stream.notified().await;
                     Some((
-                        Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n")),
+                        Ok::<_, Infallible>(Bytes::from_static(
+                            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                        )),
                         2,
                     ))
                 }
+                2 => Some((
+                    Ok::<_, Infallible>(Bytes::from_static(b"data: [DONE]\n\n")),
+                    3,
+                )),
                 _ => None,
             }
         }

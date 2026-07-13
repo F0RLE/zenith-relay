@@ -3030,10 +3030,18 @@ textarea {
 }
 
 .usage-request-table th:nth-child(1) { width: 124px; }
-.usage-request-table th:nth-child(2) { width: 96px; }
-.usage-request-table th:nth-child(5) { width: 84px; }
-.usage-request-table th:nth-child(6) { width: 70px; }
-.usage-request-table th:nth-child(7) { width: 160px; }
+.usage-request-table th:nth-child(2) { width: 88px; }
+.usage-request-table th:nth-child(3) { width: 90px; }
+.usage-request-table th:nth-child(4) { width: 112px; }
+.usage-request-table th:nth-child(5) { width: 112px; }
+.usage-request-table th:nth-child(6) { width: 72px; }
+.usage-request-table th:nth-child(7) { width: 133px; }
+
+.usage-request-table th {
+  line-height: 15px;
+  white-space: normal;
+  text-overflow: clip;
+}
 
 .usage-request-table .request-link {
   width: 100%;

@@ -287,6 +287,8 @@ pub struct UsageSummary {
     pub http_status: u16,
     pub error_category: Option<String>,
     pub latency_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -413,6 +415,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.reasoning_tokens, None);
+        assert_eq!(summary.ttft_ms, None);
     }
 
     #[test]

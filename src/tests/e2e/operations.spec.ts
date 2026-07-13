@@ -721,7 +721,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Connections" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "20", "12", "5", "8", "28", "428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "20", "12", "5", "8", "28", "128 / 428 ms"]);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -731,6 +731,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
+  await expect(details).toContainText("First output128 ms");
+  await expect(details).toContainText("Total time428 ms");
 });
 
 test("pool member fields explain routing priority and traffic share", async ({ page }) => {

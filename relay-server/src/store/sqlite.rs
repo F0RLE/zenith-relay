@@ -70,6 +70,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "008_reasoning_tokens",
         sql: include_str!("../../migrations/008_reasoning_tokens.sql"),
     },
+    Migration {
+        version: 9,
+        name: "009_ttft_ms",
+        sql: include_str!("../../migrations/009_ttft_ms.sql"),
+    },
 ];
 
 struct Migration {
@@ -504,8 +509,8 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -534,6 +539,7 @@ impl Store {
                         i64::from(event.http_status),
                         event.error_category,
                         event.latency_ms as i64,
+                        event.ttft_ms.map(|value| value as i64),
                         event.input_tokens.map(|value| value as i64),
                         event.cached_input_tokens.map(|value| value as i64),
                         event.reasoning_tokens.map(|value| value as i64),
@@ -565,7 +571,7 @@ impl Store {
             .max(0) as u64;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -589,12 +595,13 @@ impl Store {
                     http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
                     error_category: row.get(10)?,
                     latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
-                    input_tokens: optional_u64(row.get(12)?),
-                    cached_input_tokens: optional_u64(row.get(13)?),
-                    reasoning_tokens: optional_u64(row.get(14)?),
-                    output_tokens: optional_u64(row.get(15)?),
-                    total_tokens: optional_u64(row.get(16)?),
-                    created_at_ms: row.get::<_, i64>(17)?.max(0) as u64,
+                    ttft_ms: optional_u64(row.get(12)?),
+                    input_tokens: optional_u64(row.get(13)?),
+                    cached_input_tokens: optional_u64(row.get(14)?),
+                    reasoning_tokens: optional_u64(row.get(15)?),
+                    output_tokens: optional_u64(row.get(16)?),
+                    total_tokens: optional_u64(row.get(17)?),
+                    created_at_ms: row.get::<_, i64>(18)?.max(0) as u64,
                 })
             })
             .map_err(db_error)?;
@@ -1270,7 +1277,8 @@ mod tests {
                 (5, "005_pool_membership".to_string()),
                 (6, "006_model_rules".to_string()),
                 (7, "007_cached_input_tokens".to_string()),
-                (8, "008_reasoning_tokens".to_string())
+                (8, "008_reasoning_tokens".to_string()),
+                (9, "009_ttft_ms".to_string())
             ]
         );
         drop(store);
@@ -1385,7 +1393,7 @@ mod tests {
                         retry_at_ms: None,
                         consecutive_failures: None,
                         latency_ms: 10,
-                        ttft_ms: None,
+                        ttft_ms: Some(4),
                         input_tokens: Some(1),
                         cached_input_tokens: Some(1),
                         reasoning_tokens: Some(1),
@@ -1414,6 +1422,7 @@ mod tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.total_pages, 1);
         assert_eq!(page.events[0].request_id, "req_2");
+        assert_eq!(page.events[0].ttft_ms, Some(4));
         let hint = format!("{:x}", Sha256::digest(b"source_alpha"))[..12].to_string();
         assert_eq!(
             store.api_equivalents().unwrap().get(&hint),

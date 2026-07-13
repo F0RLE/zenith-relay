@@ -673,3 +673,23 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
   })).toBe(true);
 });
+
+for (const scenario of [
+  { locale: "en" as const, theme: "light" as const, width: 1160, label: "First / total", file: "usage-timing-en-light-1160x760.png" },
+  { locale: "ru" as const, theme: "dark" as const, width: 840, label: "Первый / всего", file: "usage-timing-ru-dark-840x560.png" },
+]) {
+  test(`usage timing ${scenario.locale} ${scenario.theme} ${scenario.width}`, async ({ page }) => {
+    await installTauriMock(page, { locale: scenario.locale, mode: "local", theme: scenario.theme, populated: true });
+    await page.setViewportSize({ width: scenario.width, height: scenario.width === 840 ? 560 : 760 });
+    await page.goto("/");
+    await page.locator(".relay-sidebar nav button").nth(4).click();
+
+    await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
+    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).getByRole("cell").nth(4);
+    await expect(timing).toHaveText("128 / 428 ms");
+    expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));
+    expect(clippedHeaders).toEqual([]);
+    await page.screenshot({ path: `output/playwright/${scenario.file}` });
+  });
+}

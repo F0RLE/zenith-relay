@@ -1832,7 +1832,7 @@ impl<S> UsageStream<S> {
                 self.terminated = true;
                 return;
             }
-            if terminal.has_data
+            if terminal.has_output_delta
                 && self
                     .event
                     .as_ref()
@@ -1880,15 +1880,6 @@ where
         let this = self.as_mut().get_mut();
         loop {
             if let Some(bytes) = this.output_pending.pop_front() {
-                if this
-                    .event
-                    .as_ref()
-                    .is_some_and(|event| event.ttft_ms.is_none() && !bytes.is_empty())
-                {
-                    if let Some(event) = this.event.as_mut() {
-                        event.ttft_ms = Some(this.started.elapsed().as_millis() as u64);
-                    }
-                }
                 return Poll::Ready(Some(Ok(bytes)));
             }
             if this.terminated {
@@ -1921,6 +1912,7 @@ where
 struct TerminalEvent {
     has_data: bool,
     valid: bool,
+    has_output_delta: bool,
     outcome: Option<TerminalOutcome>,
     usage: Option<Value>,
     response: Option<Value>,
@@ -1965,6 +1957,7 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         return TerminalEvent {
             has_data: true,
             valid: true,
+            has_output_delta: false,
             outcome: Some(TerminalOutcome::Success),
             usage: None,
             response: None,
@@ -1977,11 +1970,15 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             ..TerminalEvent::default()
         };
     };
-    let outcome = match value.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => Some(TerminalOutcome::Success),
+    let event_type = value.get("type").and_then(Value::as_str);
+    let outcome = match event_type {
+        Some("response.completed" | "response.done" | "message_stop") => {
+            Some(TerminalOutcome::Success)
+        }
         Some("response.failed" | "response.incomplete" | "error") => Some(TerminalOutcome::Failure),
         _ => None,
     };
+    let has_output_delta = has_output_delta(&value, event_type);
     let usage = find_usage(&value).cloned();
     let response = value.get("response").cloned();
     let output_item = (value.get("type").and_then(Value::as_str)
@@ -1991,11 +1988,73 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     TerminalEvent {
         has_data: true,
         valid: true,
+        has_output_delta,
         outcome,
         usage,
         response,
         output_item,
     }
+}
+
+fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool {
+    if event_type.is_some_and(|kind| kind.starts_with("response.") && kind.ends_with(".delta"))
+        && value
+            .get("delta")
+            .and_then(Value::as_str)
+            .is_some_and(|delta| !delta.is_empty())
+    {
+        return true;
+    }
+    if event_type == Some("content_block_delta")
+        && value.get("delta").is_some_and(|delta| {
+            ["text", "partial_json"].into_iter().any(|key| {
+                delta
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+            })
+        })
+    {
+        return true;
+    }
+    value
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| choices.iter().any(chat_choice_has_output_delta))
+}
+
+fn chat_choice_has_output_delta(choice: &Value) -> bool {
+    let Some(delta) = choice.get("delta") else {
+        return false;
+    };
+    ["content", "refusal"].into_iter().any(|key| {
+        delta
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    }) || delta
+        .get("function_call")
+        .is_some_and(function_delta_has_output)
+        || delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| {
+                calls.iter().any(|call| {
+                    call.get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                        || call.get("function").is_some_and(function_delta_has_output)
+                })
+            })
+}
+
+fn function_delta_has_output(function: &Value) -> bool {
+    ["name", "arguments"].into_iter().any(|key| {
+        function
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+    })
 }
 
 fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
@@ -2208,6 +2267,24 @@ mod tests {
                 parse_sse_event(event.as_bytes()).outcome,
                 Some(TerminalOutcome::Failure)
             );
+        }
+    }
+
+    #[test]
+    fn ttft_requires_real_output_for_supported_stream_protocols() {
+        for event in [
+            "data: {\"type\":\"response.created\"}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null}}\n\n",
+        ] {
+            assert!(!parse_sse_event(event.as_bytes()).has_output_delta);
+        }
+        for event in [
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+        ] {
+            assert!(parse_sse_event(event.as_bytes()).has_output_delta);
         }
     }
 

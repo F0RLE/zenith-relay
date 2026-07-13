@@ -330,7 +330,7 @@ mod tests {
             retry_at_ms: None,
             consecutive_failures: Some(0),
             latency_ms: 12,
-            ttft_ms: None,
+            ttft_ms: Some(4),
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
             reasoning_tokens: Some(2),
@@ -343,6 +343,7 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert!(logs[0].created_at.ends_with('Z'));
         assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
+        assert_eq!(logs[0].ttft_ms, Some(4));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
         database.clear().unwrap();
