@@ -67,11 +67,12 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await page.getByRole("tab", { name: "Keys" }).click();
-  await page.getByRole("button", { name: "Edit policy" }).click();
+  const keyRow = page.getByRole("row").filter({ has: page.getByRole("button", { name: "Edit policy" }) });
+  await keyRow.getByRole("button", { name: "Edit policy" }).click();
   const keyPolicy = page.getByRole("dialog", { name: "Edit policy" });
   await keyPolicy.getByLabel("Model prefix").fill("team");
   await keyPolicy.getByRole("button", { name: "Save" }).click();
-  await page.locator(".relay-page[data-view='keys'] .relay-action-menu summary").click();
+  await keyRow.locator(".relay-action-menu summary").click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("menuitem", { name: "Rotate" }).click();
   await expect(page.getByText("zlr_synthetic_rotated_key")).toBeVisible();
@@ -82,11 +83,20 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Apply and restart" }).click();
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
   await page.getByRole("tab", { name: "Client Setup" }).click();
-  await expect(page.getByLabel("OAuth account for Codex (optional)")).toHaveValue("");
+  await expect(page.getByLabel("OAuth account for Codex")).toHaveValue("account_synthetic");
   await page.getByRole("button", { name: "Attach current endpoint" }).click();
   await expect(page.getByText(/backup was preserved/i)).toBeVisible();
   await page.getByRole("button", { name: "OpenCode" }).click();
-  await page.getByRole("button", { name: "Attach current endpoint" }).click();
+  const openCodeProvider = page.locator(".opencode-provider-summary");
+  await expect(openCodeProvider.getByRole("heading", { name: "OpenCode provider" })).toBeVisible();
+  await expect(openCodeProvider).toContainText("zenith_relay_local");
+  await expect(openCodeProvider).toContainText("http://127.0.0.1:15001/v1");
+  await expect(openCodeProvider).toContainText("Codex");
+  await expect(openCodeProvider).toContainText("gpt-5.4");
+  await expect(openCodeProvider).toContainText("gpt-5.4-mini");
+  await expect(openCodeProvider).toContainText("Models: 2");
+  await expect(page.getByRole("button", { name: "Remove provider" })).toBeVisible();
+  await page.getByRole("button", { name: "Add provider to OpenCode" }).click();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
   await expect(page.getByText(/gpt-5.4-mini completed in 321 ms/)).toBeVisible();
@@ -97,7 +107,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(gatewayCalls).toEqual([{ command: "restart_local_gateway", args: {} }, { command: "update_local_gateway_port", args: { port: 15001 } }]);
   const profileCalls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "attach_codex_to_local_gateway" || call.command === "attach_opencode_to_local_gateway"));
   expect(profileCalls).toEqual([
-    { command: "attach_codex_to_local_gateway", args: { keyId: "key_synthetic", boundOauthAccountId: null } },
+    { command: "attach_codex_to_local_gateway", args: { keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" } },
     { command: "attach_opencode_to_local_gateway", args: { keyId: "key_synthetic" } },
   ]);
   const policyCalls = await page.evaluate(() => {
@@ -509,10 +519,15 @@ test("pool display order defaults to routing priority and can be changed to quot
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const order = page.getByLabel("Display order");
+  await expect(order.locator("option")).toHaveText(["Routing order", "Available quota", "Name"]);
+  await expect(page.locator(".pool-member-card").first().getByText("Priority", { exact: true })).toHaveCount(0);
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
   expect(await names()).toEqual(["Business Workspace", "Personal Plus", "Example compatible API", "Backup account"]);
-  await page.getByLabel("Display order").selectOption("quota");
+  await order.selectOption("quota");
   expect(await names()).toEqual(["Backup account", "Business Workspace", "Personal Plus", "Example compatible API"]);
+  await order.selectOption("name");
+  expect(await names()).toEqual(["Backup account", "Business Workspace", "Example compatible API", "Personal Plus"]);
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
@@ -886,8 +901,11 @@ test("pool toggle changes state without switching Codex", async ({ page }) => {
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Start pool", exact: true }).click();
   await expect(page.getByText("Endpoint started.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Stop pool", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Stop pool", exact: true }).click();
+  const header = page.locator(".relay-page-header");
+  await expect(header.getByRole("button", { name: "Switch Codex to pool", exact: true })).toBeVisible();
+  await expect(header.locator(".relay-page-actions > *")).toHaveCount(2);
+  await header.locator(".relay-action-menu summary").click();
+  await header.getByRole("menuitem", { name: "Stop pool", exact: true }).click();
   await expect(page.getByText("Endpoint stopped.")).toBeVisible();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -911,7 +929,7 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ label: "Codex pool" });
-  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
+  expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null });
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 

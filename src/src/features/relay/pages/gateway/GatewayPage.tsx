@@ -49,26 +49,46 @@ function EndpointView({ running, endpoint }: { running: boolean; endpoint: strin
 }
 
 function ClientSetup({ endpoint }: { endpoint: string }) {
-  const { t } = useTranslation(); const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState(); const [client, setClient] = useState("codex"); const [boundOauthAccountId, setBoundOauthAccountId] = useState(""); const key = runtime?.keys[0];
-  const eligibleAccounts = (runtime?.accounts ?? []).filter((account) => account.enabled && account.secretAvailable && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active");
+  const { t } = useTranslation(); const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState(); const [client, setClient] = useState("codex"); const [boundOauthAccountId, setBoundOauthAccountId] = useState(""); const key = runtime?.keys.find((item) => item.enabled);
+  const visibleModels = runtime?.gateway.visibleModelIds ?? [];
+  const eligibleAccounts = (runtime?.accounts ?? []).filter((account) => account.enabled
+    && account.inPool
+    && !account.draining
+    && account.secretAvailable
+    && !account.routingExclusion
+    && (!key?.accountIds || key.accountIds.includes(account.id))
+    && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active")
+    .sort((left, right) => left.id.localeCompare(right.id));
   const eligibleAccountIds = eligibleAccounts.map((account) => account.id).join("\0");
   useEffect(() => {
     const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
-    setBoundOauthAccountId((current) => current && !ids.includes(current) ? "" : current);
+    let cancelled = false;
+    void relayCommands.profileBindings()
+      .then((bindings) => bindings.find((binding) => binding.credentialKind === "local_gateway")?.boundOauthAccountId
+        ?? bindings.find((binding) => binding.credentialKind === "oauth_account")?.credentialId
+        ?? "")
+      .catch(() => "")
+      .then((activeAccountId) => {
+        if (cancelled) return;
+        setBoundOauthAccountId((current) => current && ids.includes(current)
+          ? current
+          : ids.includes(activeAccountId) ? activeAccountId : ids[0] ?? "");
+      });
+    return () => { cancelled = true; };
   }, [eligibleAccountIds]);
-  const config = client === "codex" ? `base_url = "${endpoint}"\nwire_api = "responses"\nrequires_openai_auth = true` : client === "opencode" ? JSON.stringify({provider:{zenith_relay_local:{npm:"@ai-sdk/openai-compatible",name:"Zenith Relay Local",options:{baseURL:endpoint}}}}, null, 2) : `OPENAI_BASE_URL=${endpoint}`;
-  const attach = () => key && (client === "opencode" ? perform("profile-attach", () => relayCommands.attachOpenCodeGateway(key.id), "feedback.profileAttached") : activateCodexProfile("profile-attach", () => relayCommands.attachCodexGateway(key.id, boundOauthAccountId || null)));
-  const restore = () => perform("profile-restore", client === "opencode" ? relayCommands.restoreOpenCode : relayCommands.restoreCodex, "feedback.restored");
+  const config = client === "codex" ? `base_url = "${endpoint}"\nwire_api = "responses"\nrequires_openai_auth = true` : `OPENAI_BASE_URL=${endpoint}`;
+  const attach = () => key && (client === "opencode" ? perform("profile-attach", () => relayCommands.attachOpenCodeGateway(key.id), "feedback.openCodeProviderAdded") : activateCodexProfile("profile-attach", () => relayCommands.attachCodexGateway(key.id, boundOauthAccountId || null)));
+  const restore = () => perform("profile-restore", client === "opencode" ? relayCommands.restoreOpenCode : relayCommands.restoreCodex, client === "opencode" ? "feedback.openCodeProviderRemoved" : "feedback.restored");
   return <div className="client-setup">
     <div className="segmented">{["codex","opencode","other"].map((value) => <button type="button" key={value} className={client === value ? "active" : ""} onClick={() => setClient(value)}>{t(`clients.${value}`)}</button>)}</div>
     {client === "codex" && mode === "local" ? <section className="client-oauth-binding">
-      <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={boundOauthAccountId ? "ready" : "warning"} label={boundOauthAccountId ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingOptional")} /></header>
-      <label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={boundOauthAccountId} onChange={(event) => setBoundOauthAccountId(event.target.value)}><option value="">{t("gateway.oauthBindingNone")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.subscription.planType ? ` - ${account.subscription.planType.toUpperCase()}` : ""}</option>)}</select></label>
+      <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={eligibleAccounts.length ? "ready" : "warning"} label={boundOauthAccountId ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingAutomatic")} /></header>
+      <label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={boundOauthAccountId} onChange={(event) => setBoundOauthAccountId(event.target.value)}><option value="">{t("gateway.oauthBindingAutomatic")}</option>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label}{account.subscription.planType ? ` - ${account.subscription.planType.toUpperCase()}` : ""}</option>)}</select></label>
       {!eligibleAccounts.length ? <p className="form-note warning-text">{t("gateway.oauthBindingUnavailable")}</p> : null}
     </section> : null}
-    <section className="config-preview"><header><h2>{t("gateway.generatedConfig")}</h2><Button variant="ghost" icon={<Copy aria-hidden />} onClick={() => copyText(config)}>{t("common.copy")}</Button></header><pre>{config}</pre></section>
-    {client !== "other" ? <div className="inline-actions"><Button variant="primary" busy={busy === "profile-attach"} disabled={mode !== "local" || !key} icon={<ClipboardCheck aria-hidden />} onClick={attach}>{t("profiles.attachCurrent")}</Button><Button variant="secondary" busy={busy === "profile-restore"} disabled={mode !== "local"} onClick={restore}>{t("profiles.restore")}</Button></div> : null}
-    <p className="form-note">{mode !== "local" || client === "other" ? t("gateway.manualOnly") : t("profiles.backupHint")}</p>
+    {client === "opencode" ? <section className="opencode-provider-summary"><header><div><h2>{t("gateway.openCodeProvider")}</h2><p>{t("gateway.openCodeProviderHint")}</p></div><StatusBadge status={key && visibleModels.length ? "ready" : "warning"} label={t("gateway.modelCount", { count: visibleModels.length })} /></header><dl><div><dt>{t("gateway.provider")}</dt><dd><code>zenith_relay_local</code></dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code title={endpoint}>{endpoint}</code></dd></div><div><dt>{t("gateway.poolKey")}</dt><dd>{key?.label ?? t("common.notConfigured")}</dd></div></dl><div className="opencode-models"><strong>{t("gateway.availableModels")}</strong>{visibleModels.length ? <div>{visibleModels.map((model) => <code key={model}>{model}</code>)}</div> : <p>{t("gateway.noAvailableModels")}</p>}</div><p className="form-note">{t("gateway.openCodeCredentialsHint")}</p></section> : <section className="config-preview"><header><h2>{t("gateway.generatedConfig")}</h2><Button variant="ghost" icon={<Copy aria-hidden />} onClick={() => copyText(config)}>{t("common.copy")}</Button></header><pre>{config}</pre></section>}
+    {client !== "other" ? <div className="inline-actions"><Button variant="primary" busy={busy === "profile-attach"} disabled={mode !== "local" || !key || (client === "opencode" && !visibleModels.length)} icon={<ClipboardCheck aria-hidden />} onClick={attach}>{client === "opencode" ? t("profiles.addOpenCodeProvider") : t("profiles.attachCurrent")}</Button><Button variant="secondary" busy={busy === "profile-restore"} disabled={mode !== "local"} onClick={restore}>{client === "opencode" ? t("profiles.removeOpenCodeProvider") : t("profiles.restore")}</Button></div> : null}
+    {client !== "opencode" ? <p className="form-note">{mode !== "local" || client === "other" ? t("gateway.manualOnly") : t("profiles.backupHint")}</p> : null}
   </div>;
 }
 

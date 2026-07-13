@@ -616,6 +616,33 @@ for (const viewport of viewports) {
   });
 }
 
+for (const theme of themes) {
+  for (const viewport of viewports) {
+    test(`OpenCode native provider ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Адрес API", exact: true }).click();
+      await page.getByRole("tab", { name: "Настройка клиента" }).click();
+      await page.getByRole("button", { name: "OpenCode" }).click();
+
+      const summary = page.locator(".opencode-provider-summary");
+      await expect(summary.getByRole("heading", { name: "Провайдер OpenCode" })).toBeVisible();
+      await expect(summary).toContainText("zenith_relay_local");
+      await expect(summary).toContainText("gpt-5.4-mini");
+      await expect(page.getByRole("button", { name: "Добавить провайдера в OpenCode" })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Удалить провайдера" })).toBeVisible();
+      expect(await summary.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+      })).toBe(true);
+      expect(await page.locator(".client-setup > .inline-actions button span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      await page.screenshot({ path: `output/playwright/opencode-provider-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    });
+  }
+}
+
 test("automation table fits the standard window without horizontal scrolling", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 1160, height: 760 });

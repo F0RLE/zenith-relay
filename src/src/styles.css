@@ -2776,8 +2776,7 @@ textarea:focus-visible {
 }
 
 .pool-member-routing {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(64px, auto));
+  display: flex;
   gap: 14px;
   margin: 0;
 }
@@ -3564,6 +3563,97 @@ textarea {
   border-radius: 6px;
   background: var(--relay-subtle);
   color: var(--relay-text);
+}
+
+.opencode-provider-summary {
+  margin: 16px 0;
+  padding: 14px 0;
+  border-top: 1px solid var(--relay-border);
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.opencode-provider-summary > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.opencode-provider-summary > header > div {
+  min-width: 0;
+}
+
+.opencode-provider-summary h2,
+.opencode-provider-summary header p,
+.opencode-provider-summary > .form-note,
+.opencode-models p {
+  margin: 0;
+}
+
+.opencode-provider-summary h2 {
+  font-size: 15px;
+  line-height: 20px;
+}
+
+.opencode-provider-summary header p {
+  margin-top: 3px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.opencode-provider-summary dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  margin: 14px 0;
+}
+
+.opencode-provider-summary dl > div {
+  min-width: 0;
+}
+
+.opencode-provider-summary dt {
+  margin-bottom: 3px;
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.opencode-provider-summary dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-models {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.opencode-models > strong {
+  font-size: 12px;
+}
+
+.opencode-models > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.opencode-models code {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 3px 6px;
+  border: 1px solid var(--relay-border);
+  border-radius: 4px;
+  background: var(--relay-subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostics-list {
@@ -5499,6 +5589,15 @@ input[type="password"] {
   .client-oauth-binding {
     grid-template-columns: 1fr;
     align-items: stretch;
+  }
+
+  .opencode-provider-summary > header {
+    flex-direction: column;
+  }
+
+  .opencode-provider-summary dl {
+    grid-template-columns: 1fr;
+    gap: 10px;
   }
 
   .model-sort-select {

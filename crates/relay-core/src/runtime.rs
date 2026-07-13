@@ -1,5 +1,6 @@
 use crate::accounts::{
-    TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter, TokenRefreshAdapter,
+    AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
+    TokenRefreshAdapter,
 };
 use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
@@ -180,6 +181,7 @@ pub struct GatewayRuntime {
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     registry: ModelRegistry,
+    codex_responses_lite_models: Mutex<BTreeSet<String>>,
     max_retry_candidates: usize,
     affinity_enabled: bool,
     pub(crate) usage: UsageCallback,
@@ -533,6 +535,7 @@ impl GatewayRuntime {
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
             registry,
+            codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             max_retry_candidates: options.max_retry_candidates,
             affinity_enabled: options.session_affinity_ttl.is_some(),
             usage,
@@ -595,31 +598,80 @@ impl GatewayRuntime {
             .collect()
     }
 
-    pub(crate) fn codex_models_route(&self, key: &AuthenticatedKey) -> Option<(String, Url)> {
-        let scheduler = self.lock_scheduler();
-        self.accounts
-            .values()
-            .filter_map(|account| {
-                let candidate = scheduler.candidate(&account.id)?;
-                let visible_models = account
-                    .configured_models
-                    .iter()
-                    .filter(|model| {
-                        key.model_rules.allows(model)
-                            && candidate.is_visible(model, &[WireApi::Responses], &key.scope)
-                    })
-                    .count();
-                if visible_models == 0 {
-                    return None;
+    pub(crate) async fn codex_models_routes(
+        &self,
+        key: &AuthenticatedKey,
+        now_ms: u64,
+    ) -> Vec<(String, Url)> {
+        let routes = {
+            let scheduler = self.lock_scheduler();
+            self.accounts
+                .values()
+                .filter_map(|account| {
+                    let candidate = scheduler.candidate(&account.id)?;
+                    let visible_models = account
+                        .configured_models
+                        .iter()
+                        .filter(|model| {
+                            key.model_rules.allows(model)
+                                && candidate.is_visible(model, &[WireApi::Responses], &key.scope)
+                        })
+                        .count();
+                    if visible_models == 0 {
+                        return None;
+                    }
+                    let mut url = account.responses_url.clone();
+                    let mut segments = url.path_segments_mut().ok()?;
+                    segments.pop_if_empty().pop().push("models");
+                    drop(segments);
+                    Some((account.id.clone(), url, visible_models))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut ranked = Vec::with_capacity(routes.len());
+        for (account_id, url, visible_models) in routes {
+            let Some(account) = self.accounts.get(&account_id) else {
+                continue;
+            };
+            let auth_state = account.token_authority.auth_state(&account_id).await;
+            let tokens = account.token_authority.tokens(&account_id).await;
+            let can_prepare = !matches!(auth_state, Some(AccountAuthState::RequiresReauth(_)));
+            let token_rank = match tokens {
+                Some(tokens)
+                    if can_prepare && tokens.is_access_usable(now_ms, account.refresh_skew_ms) =>
+                {
+                    2_u8
                 }
-                let mut url = account.responses_url.clone();
-                let mut segments = url.path_segments_mut().ok()?;
-                segments.pop_if_empty().pop().push("models");
-                drop(segments);
-                Some((account.id.clone(), url, visible_models))
-            })
-            .max_by_key(|(_, _, visible_models)| *visible_models)
-            .map(|(account_id, url, _)| (account_id, url))
+                Some(tokens) if can_prepare && tokens.refresh_token().is_some() => 1_u8,
+                _ => 0_u8,
+            };
+            ranked.push((account_id, url, visible_models, token_rank));
+        }
+        ranked.sort_by(|left, right| {
+            right
+                .3
+                .cmp(&left.3)
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        ranked
+            .into_iter()
+            .map(|(account_id, url, _, _)| (account_id, url))
+            .collect()
+    }
+
+    pub(crate) fn remember_codex_responses_lite_model(&self, model: &str) {
+        self.codex_responses_lite_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(model.to_ascii_lowercase());
+    }
+
+    pub(crate) fn codex_model_uses_responses_lite(&self, model: &str) -> bool {
+        self.codex_responses_lite_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&model.to_ascii_lowercase())
     }
 
     pub fn visible_models_for_secret(

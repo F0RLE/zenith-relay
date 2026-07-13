@@ -629,7 +629,8 @@ mod tests {
                     "allowed":true,
                     "limit_reached":false,
                     "primary_window":{"used_percent":25}
-                }
+                },
+                "additional_rate_limits":null
             }"#,
             1_000,
         )

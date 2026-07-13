@@ -1,3 +1,4 @@
+use crate::accounts::CODEX_MODELS_CLIENT_VERSION;
 use crate::runtime::{AuthenticatedKey, ExecutorPrepareError, ExecutorRoute};
 use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
@@ -22,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
+const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
@@ -87,32 +89,53 @@ async fn codex_models_response(
     visible_models: &[String],
     client_version: &str,
 ) -> Option<Value> {
-    let (candidate_id, mut url) = runtime.codex_models_route(key)?;
-    url.query_pairs_mut()
-        .append_pair("client_version", client_version);
-    let prepared = runtime
-        .prepare_authorization(&candidate_id, now_ms())
-        .await
-        .ok()?;
-    let mut request = runtime
-        .request_client(&candidate_id, false)
-        .get(url)
-        .header(AUTHORIZATION, prepared.authorization)
-        .timeout(Duration::from_secs(10));
-    if let Some(account_id) = prepared.chatgpt_account_id {
-        request = request.header("ChatGPT-Account-Id", account_id);
+    let now_ms = now_ms();
+    let routes = runtime.codex_models_routes(key, now_ms).await;
+    let client_versions = if client_version == CODEX_MODELS_CLIENT_VERSION {
+        vec![client_version]
+    } else {
+        vec![client_version, CODEX_MODELS_CLIENT_VERSION]
+    };
+    for (candidate_id, mut url) in routes
+        .into_iter()
+        .take(runtime.max_retry_candidates().max(1))
+    {
+        let Ok(prepared) = runtime.prepare_authorization(&candidate_id, now_ms).await else {
+            continue;
+        };
+        for client_version in &client_versions {
+            url.query_pairs_mut()
+                .clear()
+                .append_pair("client_version", client_version);
+            let mut request = runtime
+                .request_client(&candidate_id, false)
+                .get(url.clone())
+                .header(AUTHORIZATION, prepared.authorization.clone())
+                .timeout(Duration::from_secs(10));
+            if let Some(account_id) = prepared.chatgpt_account_id.as_ref() {
+                request = request.header("ChatGPT-Account-Id", account_id.clone());
+            }
+            if let Some(originator) = prepared.originator.as_ref() {
+                request = request.header("originator", originator.clone());
+            }
+            let Ok(response) = request.send().await else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(body) =
+                crate::runtime::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES).await
+            else {
+                continue;
+            };
+            if let Some(catalog) = filter_codex_models_response(runtime, key, visible_models, &body)
+            {
+                return Some(catalog);
+            }
+        }
     }
-    if let Some(originator) = prepared.originator {
-        request = request.header("originator", originator);
-    }
-    let response = request.send().await.ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body = crate::runtime::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES)
-        .await
-        .ok()?;
-    filter_codex_models_response(runtime, key, visible_models, &body)
+    None
 }
 
 fn filter_codex_models_response(
@@ -155,6 +178,17 @@ fn filter_codex_models_response(
             let display_id = visible.get(&normalized)?;
             if !seen.insert(normalized) {
                 return None;
+            }
+            if model
+                .get("use_responses_lite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                runtime.remember_codex_responses_lite_model(slug);
+                model.insert(
+                    "supports_parallel_tool_calls".to_string(),
+                    Value::Bool(false),
+                );
             }
             model.insert("slug".to_string(), Value::String(display_id.clone()));
             Some(Value::Object(model))
@@ -252,6 +286,14 @@ async fn execute_client_request(
         );
     };
     let session = affinity_session(&headers, &request);
+    let responses_lite = headers
+        .get(CODEX_RESPONSES_LITE_HEADER)
+        .cloned()
+        .or_else(|| {
+            runtime
+                .codex_model_uses_responses_lite(&resolved_model)
+                .then(|| HeaderValue::from_static("true"))
+        });
     let affinity_key = runtime.affinity_key(&key.id, wire_api, &resolved_model, session.as_deref());
     execute_request(
         runtime,
@@ -263,6 +305,7 @@ async fn execute_client_request(
         request_id(),
         affinity_key,
         wire_api,
+        responses_lite,
     )
     .await
 }
@@ -278,6 +321,7 @@ async fn execute_request(
     request_id: String,
     affinity_key: Option<String>,
     wire_api: WireApi,
+    responses_lite: Option<HeaderValue>,
 ) -> Response<Body> {
     let mut tried = HashSet::new();
     let mut attempt = 0_u16;
@@ -330,13 +374,15 @@ async fn execute_request(
             }
         } else if chat_via_responses {
             match translate_chat_request(&request, &source_model, false) {
-                Ok(body) if account_route => match normalize_account_request_body(&body) {
-                    Ok(body) => body,
-                    Err(failure) => {
-                        last_failure = Some(failure);
-                        continue;
+                Ok(body) if account_route => {
+                    match normalize_account_request_body(&body, responses_lite.is_some()) {
+                        Ok(body) => body,
+                        Err(failure) => {
+                            last_failure = Some(failure);
+                            continue;
+                        }
                     }
-                },
+                }
                 Ok(body) => body,
                 Err(failure) => {
                     last_failure = Some(failure);
@@ -350,7 +396,7 @@ async fn execute_request(
             };
             object.insert("model".to_string(), Value::String(source_model.clone()));
             if account_route {
-                normalize_account_request(object);
+                normalize_account_request(object, responses_lite.is_some());
             }
             match serde_json::to_vec(&upstream_request) {
                 Ok(body) => body,
@@ -403,6 +449,11 @@ async fn execute_request(
         }
         if let Some(originator) = prepared.originator {
             upstream_request = upstream_request.header("originator", originator);
+        }
+        if account_route {
+            if let Some(value) = responses_lite.as_ref() {
+                upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value);
+            }
         }
         let upstream = upstream_request.body(request_body).send().await;
         let upstream = match upstream {
@@ -982,20 +1033,26 @@ fn translate_chat_request(
     serde_json::to_vec(&Value::Object(translated)).map_err(|_| AttemptFailure::invalid_request())
 }
 
-fn normalize_account_request_body(body: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
+fn normalize_account_request_body(
+    body: &[u8],
+    responses_lite: bool,
+) -> Result<Vec<u8>, AttemptFailure> {
     let mut request =
         serde_json::from_slice::<Value>(body).map_err(|_| AttemptFailure::invalid_request())?;
     let object = request
         .as_object_mut()
         .ok_or_else(AttemptFailure::invalid_request)?;
-    normalize_account_request(object);
+    normalize_account_request(object, responses_lite);
     serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())
 }
 
-fn normalize_account_request(object: &mut serde_json::Map<String, Value>) {
+fn normalize_account_request(object: &mut serde_json::Map<String, Value>, responses_lite: bool) {
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
     object.remove("max_output_tokens");
+    if responses_lite {
+        object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+    }
     if let Some(Value::String(text)) = object.get("input") {
         let text = text.clone();
         object.insert(
@@ -1490,7 +1547,7 @@ fn apply_status_cooldown(
         StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN => {
             ("*", 30 * 60_000)
         }
-        StatusCode::NOT_FOUND => (model, 12 * 60 * 60_000),
+        StatusCode::NOT_FOUND => (model, TRANSIENT_COOLDOWN_MS),
         StatusCode::TOO_MANY_REQUESTS => (
             model,
             retry_after_ms(headers, now_system)

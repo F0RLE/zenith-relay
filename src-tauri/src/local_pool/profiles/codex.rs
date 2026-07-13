@@ -6,6 +6,7 @@ use crate::{
         store::secret_store,
     },
 };
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -1134,11 +1135,14 @@ fn sync_account_profile_with(
 }
 
 fn attach_account_config(document: &mut DocumentMut) {
-    document["model_provider"] = value("openai");
+    document.remove("model_provider");
 }
 
 fn account_managed_config_matches(document: &DocumentMut) -> bool {
-    root_model_provider(document).as_deref() == Some("openai") && !document_has_provider(document)
+    matches!(
+        root_model_provider(document).as_deref(),
+        None | Some("openai")
+    ) && !document_has_provider(document)
 }
 
 fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<String> {
@@ -1163,8 +1167,16 @@ fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<
             serde_json::Value::String(id_token.to_string()),
         );
     }
+    let last_refresh = i64::try_from(tokens.issued_at_ms())
+        .ok()
+        .filter(|milliseconds| *milliseconds > 0)
+        .and_then(DateTime::<Utc>::from_timestamp_millis)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
     let content = serde_json::to_string_pretty(&serde_json::json!({
+        "OPENAI_API_KEY": null,
         "auth_mode": "chatgpt",
+        "last_refresh": last_refresh,
         "tokens": token_values,
     }))
     .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
@@ -2360,6 +2372,9 @@ mod tests {
         .unwrap();
         assert_eq!(binding.credential_id, "account-local");
         assert_eq!(account_bindings(&backups).unwrap(), vec![binding.clone()]);
+        assert!(!fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .contains("model_provider ="));
 
         let canonical_home = canonical_profile_dir(&home).unwrap();
         let backup_path = account_backup_path(&backups, &canonical_home);
@@ -2693,6 +2708,11 @@ mod tests {
         let projected = fs::read_to_string(home.join(AUTH_FILE)).unwrap();
         assert!(projected.contains("bound-access"));
         assert!(!projected.contains("zlr_key"));
+        let projected_value = serde_json::from_str::<serde_json::Value>(&projected).unwrap();
+        assert!(projected_value["OPENAI_API_KEY"].is_null());
+        assert_eq!(projected_value["auth_mode"], "chatgpt");
+        assert_eq!(projected_value["tokens"]["account_id"], "provider-account");
+        DateTime::parse_from_rfc3339(projected_value["last_refresh"].as_str().unwrap()).unwrap();
 
         let refreshed = TokenSet::new(
             "bound-access-refreshed",

@@ -15,8 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use zenith_relay_core::accounts::{
-    AccountAuthState, TokenAuthority, TokenPersistenceAdapter, TokenPersistenceFailure,
-    TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenSet,
+    AccountAuthState, ReauthReason, TokenAuthority, TokenPersistenceAdapter,
+    TokenPersistenceFailure, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenSet,
+    CODEX_MODELS_CLIENT_VERSION,
 };
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
@@ -33,6 +34,7 @@ struct ObservedRequest {
     authorization: Option<String>,
     chatgpt_account_id: Option<String>,
     originator: Option<String>,
+    responses_lite: Option<String>,
     body: Value,
 }
 
@@ -187,7 +189,7 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
 
     let catalog: Value = reqwest::Client::new()
         .get(format!(
-            "{}/v1/models?client_version=1.2.3",
+            "{}/v1/models?client_version=26.707.8479.0",
             gateway.base_url
         ))
         .bearer_auth(LOCAL_KEY)
@@ -199,6 +201,8 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         .unwrap();
     assert_eq!(catalog["models"][0]["slug"], MODEL);
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
+    assert_eq!(catalog["models"][0]["use_responses_lite"], true);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -206,7 +210,8 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         .json(&json!({
             "model": MODEL,
             "input": "hello",
-            "service_tier": "priority"
+            "service_tier": "priority",
+            "parallel_tool_calls": true
         }))
         .send()
         .await
@@ -214,7 +219,7 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 3);
     assert_eq!(
         requests[0].authorization.as_deref(),
         Some("Bearer account-access")
@@ -223,8 +228,95 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         requests[0].chatgpt_account_id.as_deref(),
         Some("provider-account")
     );
-    assert_eq!(requests[0].body["client_version"], "1.2.3");
-    assert_eq!(requests[1].body["service_tier"], "priority");
+    assert_eq!(requests[0].body["client_version"], "26.707.8479.0");
+    assert_eq!(
+        requests[1].body["client_version"],
+        CODEX_MODELS_CLIENT_VERSION
+    );
+    assert_eq!(requests[2].body["service_tier"], "priority");
+    assert_eq!(requests[2].responses_lite.as_deref(), Some("true"));
+    assert_eq!(requests[2].body["parallel_tool_calls"], false);
+}
+
+#[tokio::test]
+async fn codex_catalog_prefers_a_usable_account_token() {
+    let (upstream, state) = spawn_upstream(Vec::new()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    authority
+        .register(
+            "stale-account",
+            TokenSet::access_only("stale-access", Some(1), 0).unwrap(),
+            AccountAuthState::RequiresReauth(ReauthReason::ExpiredRefreshToken),
+        )
+        .await
+        .unwrap();
+    register_ready(&authority, "ready-account", "ready-access").await;
+    let mut stale = account("stale-account", "stale-provider", &upstream, 10);
+    stale.models.push("gpt-extra".to_string());
+    let ready = account("ready-account", "ready-provider", &upstream, 10);
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![stale, ready],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url,
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer ready-access")
+    );
+}
+
+#[tokio::test]
+async fn account_requests_preserve_responses_lite_compatibility() {
+    let (upstream, state) = spawn_upstream(vec![success_reply("lite-response")]).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .json(&json!({
+            "model": MODEL,
+            "input": "hello",
+            "parallel_tool_calls": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
+    assert_eq!(requests[0].body["parallel_tool_calls"], false);
 }
 
 #[tokio::test]
@@ -876,6 +968,7 @@ async fn upstream(
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
+        responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     tokio::time::sleep(state.delay).await;
@@ -915,7 +1008,7 @@ async fn upstream_models(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
     uri: axum::http::Uri,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let client_version = uri
         .query()
         .and_then(|query| query.strip_prefix("client_version="))
@@ -924,22 +1017,33 @@ async fn upstream_models(
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
+        responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
         body: json!({ "client_version": client_version }),
     });
-    Json(json!({
-        "models": [{
-            "slug": MODEL,
-            "display_name": "GPT P3",
-            "visibility": "list",
-            "supported_in_api": true,
-            "service_tiers": [{
-                "id": "priority",
-                "name": "Fast",
-                "description": "Synthetic fast tier"
-            }],
-            "additional_speed_tiers": ["fast"]
-        }]
-    }))
+    let status = if client_version == CODEX_MODELS_CLIENT_VERSION {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (
+        status,
+        Json(json!({
+            "models": [{
+                "slug": MODEL,
+                "display_name": "GPT P3",
+                "visibility": "list",
+                "supported_in_api": true,
+                "service_tiers": [{
+                    "id": "priority",
+                    "name": "Fast",
+                    "description": "Synthetic fast tier"
+                }],
+                "additional_speed_tiers": ["fast"],
+                "use_responses_lite": true,
+                "supports_parallel_tool_calls": true
+            }]
+        })),
+    )
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {

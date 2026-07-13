@@ -7,7 +7,7 @@ import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, Pag
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "members" | "keys" | "models";
-type MemberSort = "routing" | "priority" | "quota" | "name";
+type MemberSort = "routing" | "quota" | "name";
 type MemberLayout = "compact" | "list" | "grid";
 type ModelSort = "catalog" | "price_desc" | "price_asc" | "name";
 type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source"; health: string; quota: null });
@@ -30,6 +30,11 @@ export function PoolPage() {
     : view === "members"
       ? <Button variant="secondary" icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</Button>
       : null;
+  const viewMenuAction = view === "keys"
+    ? <ActionMenuItem icon={<KeyRound aria-hidden />} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : undefined} onClick={() => setCreateKey(true)}>{t("keys.create")}</ActionMenuItem>
+    : view === "members"
+      ? <ActionMenuItem icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</ActionMenuItem>
+      : null;
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   const switchCodexToPool = () => activateCodexProfile("pool-switch", async () => {
     const snapshot = await relayCommands.localState();
@@ -40,16 +45,18 @@ export function PoolPage() {
       && !candidate.excludedModels.length
       && !candidate.modelPrefix)
       ?? (await relayCommands.createKey(t("pool.codexKeyLabel"))).key;
-    const oauthIdentity = snapshot.accounts.find((account) => account.enabled
-      && account.inPool
-      && account.secretAvailable
-      && (typeof account.authState === "string" ? account.authState : account.authState.state) === "active");
-    return relayCommands.attachCodexGateway(key.id, oauthIdentity?.id ?? null);
+    return relayCommands.attachCodexGateway(key.id, null);
   }, true);
-  const action = <>{viewAction}{mode === "local" ? <>
-    <Button variant={runtime?.gateway.running && view !== "keys" ? "primary" : "secondary"} icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
-    <Button data-action="pool-toggle" variant={!runtime?.gateway.running && view !== "keys" ? "primary" : "secondary"} icon={runtime?.gateway.running ? <Power aria-hidden /> : <Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!runtime?.gateway.running && !poolReady} title={!runtime?.gateway.running && !poolReady ? t("pool.startUnavailable") : runtime?.gateway.running ? t("pool.stop") : t("pool.start")} onClick={() => void perform("pool-toggle", runtime?.gateway.running ? relayCommands.stopGateway : relayCommands.startGateway, runtime?.gateway.running ? "feedback.stopped" : "feedback.started")}>{runtime?.gateway.running ? t("pool.stop") : t("pool.start")}</Button>
-  </> : null}</>;
+  const running = Boolean(runtime?.gateway.running);
+  const action = mode === "local" ? <>
+    {running
+      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
+      : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
+    {viewMenuAction || running ? <ActionMenu label={t("common.actions")}>
+      {viewMenuAction}
+      {running ? <ActionMenuItem icon={<Power aria-hidden />} disabled={busy === "pool-toggle"} onClick={() => void perform("pool-toggle", relayCommands.stopGateway, "feedback.stopped")}>{t("pool.stop")}</ActionMenuItem> : null}
+    </ActionMenu> : null}
+  </> : viewAction;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
@@ -85,7 +92,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
   const counts = { healthy: members.filter(poolMemberReady).length, limited: members.filter((item) => item.enabled && !poolMemberReady(item)).length, disabled: members.filter((item) => !item.enabled).length };
   return <>
     <div className="table-toolbar pool-member-toolbar">
-      <label className="account-sort-select"><ArrowUpDown aria-hidden /><span>{t("pool.sortLabel")}</span><select aria-label={t("pool.sortLabel")} value={sortBy} onChange={(event) => setSortBy(event.target.value as MemberSort)}><option value="routing">{t("pool.sort.routing")}</option><option value="priority">{t("pool.sort.priority")}</option><option value="quota">{t("pool.sort.quota")}</option><option value="name">{t("pool.sort.name")}</option></select></label>
+      <label className="account-sort-select"><ArrowUpDown aria-hidden /><span>{t("pool.sortLabel")}</span><select aria-label={t("pool.sortLabel")} value={sortBy} onChange={(event) => setSortBy(event.target.value as MemberSort)}><option value="routing">{t("pool.sort.routing")}</option><option value="quota">{t("pool.sort.quota")}</option><option value="name">{t("pool.sort.name")}</option></select></label>
       <small>{t("pool.routingOrderHint")}</small>
       <div className="inline-actions pool-quota-actions"><div className="view-layout-switcher" role="group" aria-label={t("pool.layout.label")}><button type="button" aria-label={t("pool.layout.compact")} title={t("pool.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")}><Rows3 aria-hidden /></button><button type="button" aria-label={t("pool.layout.list")} title={t("pool.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")}><List aria-hidden /></button><button type="button" aria-label={t("pool.layout.grid")} title={t("pool.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")}><LayoutGrid aria-hidden /></button></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button><IconButton label={t("pool.refreshPolicy")} icon={<Settings2 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} /></div>
     </div>
@@ -108,7 +115,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
             <div className="pool-member-state"><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} /><small>{t(`pool.types.${member.kind}`)}</small></div>
             <div className="pool-member-identity"><strong title={identity}>{identity}</strong><small title={detail}>{detail}</small></div>
             <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("common.quota")}><span>{t("common.quota")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
-            <dl className="pool-member-routing"><div><dt>{t("pool.priority")}</dt><dd>{member.priority}</dd></div><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
+            <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
             <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
           </div>
           {member.kind === "account" ? <div className="account-card-quota pool-member-quota"><QuotaStack snapshot={member.quota} /></div> : null}
@@ -343,7 +350,6 @@ function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1
 function comparePoolMembers(left: Member, right: Member, sortBy: MemberSort) {
   if (sortBy === "name") return memberName(left).localeCompare(memberName(right));
   if (sortBy === "quota") return comparePoolQuota(right, left) || right.priority - left.priority || memberName(left).localeCompare(memberName(right));
-  if (sortBy === "priority") return right.priority - left.priority || memberName(left).localeCompare(memberName(right));
   return Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right)) || right.priority - left.priority || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
 }
 function comparePoolQuota(left: Member, right: Member) {

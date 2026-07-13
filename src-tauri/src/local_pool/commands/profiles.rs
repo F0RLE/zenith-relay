@@ -2,8 +2,11 @@ use super::runtime_from_store;
 use crate::{
     launcher::{launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
-        commands::accounts::{prepare_account_credentials, sync_managed_account_profile},
-        error::{CommandError, ErrorCode, LocalPoolError},
+        commands::accounts::{
+            prepare_account_credentials, sync_managed_account_profile, PreparedAccountCredentials,
+        },
+        error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+        models::LocalGatewayKeyRecord,
         profiles::{codex, opencode, repair},
         state::DesktopState,
         store::secret_store,
@@ -52,17 +55,13 @@ pub async fn attach_codex_to_local_gateway(
     let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result: Result<ProfileActivation, CommandError> = async {
-        let bound_oauth = match bound_oauth_account_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            Some(account_id) => Some((
-                account_id.to_string(),
-                prepare_account_credentials(&state, account_id).await?,
-            )),
-            None => None,
-        };
+        let bound_oauth = resolve_gateway_oauth_binding(
+            &state,
+            &key,
+            bound_oauth_account_id.as_deref(),
+            &profile_dir,
+        )
+        .await?;
         let base_url = format!("http://127.0.0.1:{port}/v1");
         let binding = match bound_oauth.as_ref() {
             Some((account_id, prepared)) => codex::attach_with_oauth(
@@ -89,6 +88,108 @@ pub async fn attach_codex_to_local_gateway(
     }
     .await;
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+}
+
+async fn resolve_gateway_oauth_binding(
+    state: &DesktopState,
+    key: &LocalGatewayKeyRecord,
+    requested_account_id: Option<&str>,
+    profile_dir: &std::path::Path,
+) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
+    let requested_account_id = requested_account_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let preferred_account_id = match requested_account_id {
+        Some(account_id) => Some(account_id.to_string()),
+        None => codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?,
+    };
+    let mut candidates = {
+        let store = state.store()?;
+        let gateway = store.gateway();
+        let mut candidates = Vec::new();
+        for account in store.accounts() {
+            let scoped = key
+                .account_ids
+                .as_ref()
+                .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id));
+            if !scoped
+                || !account.account.enabled
+                || !account.account.in_pool
+                || account.account.draining
+                || account.account.auth_state
+                    != zenith_relay_core::accounts::AccountAuthState::Active
+                || !matches!(
+                    account.account.auth_mode,
+                    zenith_relay_core::accounts::AccountAuthMode::OAuth
+                        | zenith_relay_core::accounts::AccountAuthMode::ImportedToken
+                )
+                || !super::account_routing_allowed(gateway, &account.account.subscription)
+                || account.account.secret_refs.is_empty()
+            {
+                continue;
+            }
+            let mut secrets_available = true;
+            for secret_ref in &account.account.secret_refs {
+                if secret_store::load(secret_ref)?.is_none() {
+                    secrets_available = false;
+                    break;
+                }
+            }
+            if secrets_available {
+                candidates.push(account.account.id.clone());
+            }
+        }
+        candidates
+    };
+    prioritize_account_ids(&mut candidates, preferred_account_id.as_deref());
+    if requested_account_id.is_some()
+        && candidates
+            .first()
+            .is_none_or(|candidate| Some(candidate.as_str()) != requested_account_id)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "selected OAuth account is not available to this local pool key",
+        ));
+    }
+
+    let mut last_error = None;
+    for account_id in candidates {
+        match prepare_account_credentials(state, &account_id).await {
+            Ok(prepared)
+                if prepared.tokens().refresh_token().is_some()
+                    && prepared.tokens().id_token().is_some() =>
+            {
+                return Ok(Some((account_id, prepared)));
+            }
+            Ok(_) => {
+                last_error = Some(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "OAuth binding requires refresh, identity, and account tokens",
+                ));
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if requested_account_id.is_some() {
+            break;
+        }
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+fn prioritize_account_ids(candidates: &mut Vec<String>, preferred: Option<&str>) {
+    candidates.sort();
+    candidates.dedup();
+    if let Some(index) = preferred.and_then(|preferred| {
+        candidates
+            .iter()
+            .position(|candidate| candidate == preferred)
+    }) {
+        candidates[..=index].rotate_right(1);
+    }
 }
 
 #[tauri::command]
@@ -431,5 +532,17 @@ mod tests {
 
         assert!(launched.get());
         assert!(matches!(error.code, ErrorCode::Conflict));
+    }
+
+    #[test]
+    fn oauth_binding_order_is_stable_and_preserves_the_active_account() {
+        let mut candidates = vec!["account-z".into(), "account-a".into(), "account-m".into()];
+
+        prioritize_account_ids(&mut candidates, Some("account-m"));
+
+        assert_eq!(
+            candidates,
+            ["account-m", "account-a", "account-z"].map(str::to_string)
+        );
     }
 }
