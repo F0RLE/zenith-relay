@@ -7,7 +7,7 @@ use zenith_relay_core::{
     WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 9;
+pub const CURRENT_SCHEMA_VERSION: u32 = 10;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
@@ -171,7 +171,7 @@ impl Default for GatewaySettings {
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
-            session_affinity: true,
+            session_affinity: false,
             session_affinity_ttl_seconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
             common_proxy_configured: false,
             account_proxy_required: false,
@@ -260,7 +260,7 @@ fn default_max_retry_candidates() -> u8 {
 }
 
 fn default_session_affinity() -> bool {
-    true
+    false
 }
 
 fn default_session_affinity_ttl_seconds() -> u64 {

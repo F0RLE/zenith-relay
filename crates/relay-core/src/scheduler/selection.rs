@@ -1,8 +1,11 @@
 use super::affinity::AffinityCache;
-use super::candidate::{CandidateHealth, CandidateScope, RuntimeCandidate};
+use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use crate::WireApi;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
+
+const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
+const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 
 pub struct SelectionRequest<'a> {
     pub model: &'a str,
@@ -222,13 +225,28 @@ fn compare_preference(
     left_in_flight: u32,
     right_in_flight: u32,
 ) -> Ordering {
-    left.priority
-        .cmp(&right.priority)
+    routing_tier(left)
+        .cmp(&routing_tier(right))
         .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
-        .then_with(|| left.quota.compare_preference(right.quota))
+        .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
         .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
+        .then_with(|| left.quota.compare_preference(right.quota))
+        .then_with(|| left.priority.cmp(&right.priority))
         .then_with(|| left.weight.cmp(&right.weight))
         .then_with(|| right.id.cmp(&left.id))
+}
+
+fn routing_tier(candidate: &RuntimeCandidate) -> i8 {
+    match candidate.kind {
+        CandidateKind::OAuthAccount => 0,
+        CandidateKind::ApiSource if candidate.priority >= API_SOURCE_PRIMARY_PRIORITY => 1,
+        CandidateKind::ApiSource if candidate.priority <= API_SOURCE_RESERVE_PRIORITY => -1,
+        CandidateKind::ApiSource => 0,
+    }
+}
+
+fn candidate_kind_preference(candidate: &RuntimeCandidate) -> u8 {
+    u8::from(candidate.kind == CandidateKind::OAuthAccount)
 }
 
 fn compare_weighted_load(
@@ -276,6 +294,14 @@ mod tests {
             last_used_at: None,
             consecutive_failures: 0,
             secret_available: true,
+        }
+    }
+
+    fn oauth_candidate(id: &str) -> RuntimeCandidate {
+        RuntimeCandidate {
+            kind: CandidateKind::OAuthAccount,
+            account_id: Some(id.to_string()),
+            ..candidate(id)
         }
     }
 
@@ -382,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_orders_priority_quota_lru_weight_then_id() {
+    fn selection_orders_ties_by_quota_lru_priority_weight_then_id() {
         let mut scheduler = PoolScheduler::new(1, 100);
         let mut low_priority = candidate("priority-low");
         low_priority.priority = 1;
@@ -390,6 +416,7 @@ mod tests {
         scheduler.upsert(low_priority);
         let mut high_priority = candidate("priority-high");
         high_priority.priority = 2;
+        high_priority.quota = CandidateQuota::Available(100);
         scheduler.upsert(high_priority);
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
@@ -453,6 +480,69 @@ mod tests {
                 .candidate_id,
             "a"
         );
+    }
+
+    #[test]
+    fn oauth_requests_rotate_before_manual_priority() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut high_priority = oauth_candidate("high-priority");
+        high_priority.priority = 100;
+        high_priority.last_used_at = Some(20);
+        scheduler.upsert(high_priority);
+        let mut low_priority = oauth_candidate("low-priority");
+        low_priority.priority = 1;
+        low_priority.last_used_at = Some(10);
+        scheduler.upsert(low_priority);
+
+        let first = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(first.candidate_id, "low-priority");
+        assert!(scheduler.record_success("low-priority", "gpt-5", 30));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "high-priority"
+        );
+    }
+
+    #[test]
+    fn api_source_roles_remain_strict_around_fair_oauth_routing() {
+        let scope = CandidateScope::default();
+        let tried = HashSet::new();
+        let request = |scheduler: &mut PoolScheduler| {
+            scheduler
+                .select(SelectionRequest {
+                    model: "gpt-5",
+                    allowed_protocols: &[WireApi::Responses],
+                    scope: &scope,
+                    tried: &tried,
+                    affinity_key: None,
+                    now_ms: 100,
+                })
+                .unwrap()
+                .candidate_id
+        };
+
+        let mut primary = PoolScheduler::new(1, 100);
+        let mut source = candidate("primary-source");
+        source.priority = API_SOURCE_PRIMARY_PRIORITY;
+        primary.upsert(source);
+        primary.upsert(oauth_candidate("account"));
+        assert_eq!(request(&mut primary), "primary-source");
+
+        let mut reserve = PoolScheduler::new(1, 100);
+        let mut source = candidate("reserve-source");
+        source.priority = API_SOURCE_RESERVE_PRIORITY;
+        reserve.upsert(source);
+        reserve.upsert(oauth_candidate("account"));
+        assert_eq!(request(&mut reserve), "account");
+
+        let mut stabilizer = PoolScheduler::new(1, 100);
+        stabilizer.upsert(candidate("stabilizer-source"));
+        stabilizer.upsert(oauth_candidate("account"));
+        assert_eq!(request(&mut stabilizer), "account");
+        assert!(stabilizer.reserve("account"));
+        assert_eq!(request(&mut stabilizer), "stabilizer-source");
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 6 => migrate_v6_to_v7(root, &gateway_path)?,
                 7 => migrate_v7_to_v8(root, &gateway_path)?,
                 8 => migrate_v8_to_v9(root)?,
+                9 => migrate_v9_to_v10(root, &gateway_path)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -70,6 +71,20 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v9_to_v10(root: &Path, gateway_path: &Path) -> Result<()> {
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway.insert("sessionAffinity".to_string(), Value::Bool(false));
+    save_json(gateway_path, gateway)
 }
 
 fn migrate_v8_to_v9(root: &Path) -> Result<()> {
@@ -670,6 +685,29 @@ mod tests {
         assert_eq!(accounts[0]["cooldowns"], serde_json::json!({}));
         assert_eq!(accounts[0]["consecutiveFailures"], 0);
         assert_eq!(accounts[0]["account"]["id"], "account_1");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v9_to_request_rotation_by_default() {
+        let root = temp_root();
+        let gateway_path = root.join("settings").join("gateway.json");
+        let mut gateway =
+            serde_json::to_value(crate::local_pool::models::GatewaySettings::default()).unwrap();
+        gateway["sessionAffinity"] = Value::Bool(true);
+        save_json(&gateway_path, &gateway).unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 9 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        assert_eq!(gateway["sessionAffinity"], false);
         fs::remove_dir_all(root).unwrap();
     }
 

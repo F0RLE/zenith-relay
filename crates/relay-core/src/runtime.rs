@@ -165,7 +165,7 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             max_retry_candidates: 3,
-            session_affinity_ttl: Some(Duration::from_secs(3_600)),
+            session_affinity_ttl: None,
             max_affinity_entries: 4_096,
             hidden_models: Vec::new(),
         }

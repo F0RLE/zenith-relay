@@ -84,6 +84,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "010_reset_legacy_cooldowns",
         sql: include_str!("../../migrations/010_reset_legacy_cooldowns.sql"),
     },
+    Migration {
+        version: 11,
+        name: "011_request_rotation_default",
+        sql: include_str!("../../migrations/011_request_rotation_default.sql"),
+    },
 ];
 
 struct Migration {
@@ -269,7 +274,7 @@ impl Store {
         )?;
         let session_affinity = self
             .metadata("session_affinity")?
-            .is_none_or(|value| value == "true");
+            .is_some_and(|value| value == "true");
         let session_affinity_ttl_seconds = self.metadata("session_affinity_ttl_seconds")?.map_or(
             Ok(DEFAULT_SESSION_AFFINITY_TTL_SECONDS),
             |value| {
@@ -1307,7 +1312,7 @@ mod tests {
         let root = test_root("routing-policy");
         let path = root.join("relay.sqlite");
         let store = Store::open(path.clone()).unwrap();
-        assert_eq!(store.routing_policy().unwrap(), (3, true, 3_600));
+        assert_eq!(store.routing_policy().unwrap(), (3, false, 3_600));
         assert!(store.set_routing_policy(0, true, 3_600).is_err());
         assert!(store.set_routing_policy(3, true, 59).is_err());
         store.set_routing_policy(5, false, 300).unwrap();
@@ -1399,7 +1404,8 @@ mod tests {
                 (7, "007_cached_input_tokens".to_string()),
                 (8, "008_reasoning_tokens".to_string()),
                 (9, "009_ttft_ms".to_string()),
-                (10, "010_reset_legacy_cooldowns".to_string())
+                (10, "010_reset_legacy_cooldowns".to_string()),
+                (11, "011_request_rotation_default".to_string())
             ]
         );
         drop(store);

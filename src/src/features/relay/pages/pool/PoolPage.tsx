@@ -163,10 +163,8 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
-  const [sessionAffinity, setSessionAffinity] = useState(runtime?.gateway.sessionAffinity ?? true);
+  const [sessionAffinity, setSessionAffinity] = useState(runtime?.gateway.sessionAffinity ?? false);
   const [sessionAffinityTtlSeconds, setSessionAffinityTtlSeconds] = useState(runtime?.gateway.sessionAffinityTtlSeconds ?? 3_600);
-  const poolAccounts = (runtime?.accounts ?? []).filter((account) => account.inPool);
-  const prioritiesVary = new Set(poolAccounts.map((account) => account.priority)).size > 1;
   const save = async () => {
     const payload = { maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds };
     const ok = await perform("routing-policy", () => mode === "local"
@@ -174,17 +172,7 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
       : relayCommands.remoteAction({ type: "set_routing_policy" }, payload), "feedback.saved");
     if (ok) onClose();
   };
-  const equalizePriorities = async () => {
-    const targets = poolAccounts.filter((account) => account.priority !== 0);
-    if (!targets.length || !window.confirm(t("pool.equalizePrioritiesConfirm"))) return;
-    await perform("priority-equalize", async () => {
-      for (const account of targets) {
-        if (mode === "local") await relayCommands.updateAccount({ accountId: account.id, priority: 0 });
-        else await relayCommands.remoteAction({ type: "update_account", id: account.id }, { priority: 0 });
-      }
-    }, "feedback.saved");
-  };
-  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="toggle-row" title={t("pool.sessionAffinityHelp")}><input type="checkbox" checked={sessionAffinity} onChange={(event) => setSessionAffinity(event.target.checked)} /><span>{t("pool.sessionAffinity")}</span></label><label className="relay-field"><span>{t("pool.sessionAffinityTtl")}</span><select value={sessionAffinityTtlSeconds} disabled={!sessionAffinity} onChange={(event) => setSessionAffinityTtlSeconds(Number(event.target.value))}><option value={60}>{t("pool.affinityDurations.oneMinute")}</option><option value={300}>{t("pool.affinityDurations.fiveMinutes")}</option><option value={900}>{t("pool.affinityDurations.fifteenMinutes")}</option><option value={3600}>{t("pool.affinityDurations.oneHour")}</option><option value={21600}>{t("pool.affinityDurations.sixHours")}</option><option value={86400}>{t("pool.affinityDurations.oneDay")}</option></select></label><label className="relay-field"><span>{t("pool.retryCandidates")}</span><select value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{prioritiesVary ? <><p className="form-note routing-priority-note">{t("pool.priorityTiersWarning")}</p><Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "priority-equalize"} onClick={() => void equalizePriorities()}>{t("pool.equalizePriorities")}</Button></> : null}{!sessionAffinity ? <p className="form-note">{t("pool.affinityDisabledWarning")}</p> : null}</div></Dialog>;
+  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="toggle-row" title={t("pool.sessionAffinityHelp")}><input type="checkbox" checked={sessionAffinity} onChange={(event) => setSessionAffinity(event.target.checked)} /><span>{t("pool.sessionAffinity")}</span></label><label className="relay-field"><span>{t("pool.sessionAffinityTtl")}</span><select value={sessionAffinityTtlSeconds} disabled={!sessionAffinity} onChange={(event) => setSessionAffinityTtlSeconds(Number(event.target.value))}><option value={60}>{t("pool.affinityDurations.oneMinute")}</option><option value={300}>{t("pool.affinityDurations.fiveMinutes")}</option><option value={900}>{t("pool.affinityDurations.fifteenMinutes")}</option><option value={3600}>{t("pool.affinityDurations.oneHour")}</option><option value={21600}>{t("pool.affinityDurations.sixHours")}</option><option value={86400}>{t("pool.affinityDurations.oneDay")}</option></select></label><label className="relay-field"><span>{t("pool.retryCandidates")}</span><select value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{!sessionAffinity ? <p className="form-note">{t("pool.affinityDisabledWarning")}</p> : null}</div></Dialog>;
 }
 
 function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {
@@ -403,8 +391,8 @@ function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1
 }
 function comparePoolMembers(left: Member, right: Member, sortBy: MemberSort) {
   if (sortBy === "name") return memberName(left).localeCompare(memberName(right));
-  if (sortBy === "quota") return comparePoolQuota(right, left) || right.priority - left.priority || memberName(left).localeCompare(memberName(right));
-  return Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right)) || right.priority - left.priority || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
+  if (sortBy === "quota") return comparePoolQuota(right, left) || memberRoutingTier(right) - memberRoutingTier(left) || memberName(left).localeCompare(memberName(right));
+  return Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right)) || memberRoutingTier(right) - memberRoutingTier(left) || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
 }
 function comparePoolQuota(left: Member, right: Member) {
   const leftQuota = memberQuota(left);
@@ -422,6 +410,11 @@ function memberQuota(member: Member) {
   return values.length ? Math.min(...values) : null;
 }
 function memberName(member: Member) { return member.kind === "source" ? member.name : member.label; }
+function memberRoutingTier(member: Member) {
+  if (member.kind !== "source") return 0;
+  const role = apiSourceRole(member.priority);
+  return role === "primary" ? 1 : role === "reserve" ? -1 : 0;
+}
 function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
 function poolMemberReady(member: Member) {
   if (!member.enabled || member.draining || member.health !== "healthy" || !member.secretAvailable || memberRoutingExcluded(member)) return false;

@@ -514,11 +514,9 @@ for (const viewport of viewports) {
     await header.locator(".relay-action-menu summary").click();
     await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
-    await dialog.getByLabel("Закреплять чат за аккаунтом").uncheck();
+    await expect(dialog.getByLabel("Закреплять один чат за аккаунтом")).not.toBeChecked();
     await expect(dialog.getByLabel("Срок закрепления")).toBeDisabled();
-    await expect(dialog).toContainText("может перейти на другой аккаунт");
-    await expect(dialog).toContainText("Активны разные ручные приоритеты");
-    await expect(dialog.getByRole("button", { name: "Уравнять приоритеты аккаунтов" })).toBeVisible();
+    await expect(dialog).toContainText("Ротация включена");
     expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     await page.screenshot({ path: `output/playwright/routing-distribution-ru-dark-${viewport.width}x${viewport.height}.png` });

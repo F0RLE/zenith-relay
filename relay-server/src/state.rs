@@ -15,7 +15,7 @@ use zenith_relay_core::{
     GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 10;
+pub const SERVER_SCHEMA_VERSION: u32 = 11;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 
