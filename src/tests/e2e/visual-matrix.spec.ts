@@ -571,11 +571,11 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
     let dialog = page.getByRole("dialog", { name: "Sign in" });
-    await expect(dialog.getByText("Continue an unfinished sign-in", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
     await page.screenshot({ path: `output/playwright/oauth-dialog-${viewport.width}x${viewport.height}.png` });
-    await dialog.getByText("Continue an unfinished sign-in", { exact: true }).click();
-    await expect(dialog.getByLabel("Resume sign-in ID")).toBeVisible();
-    expect(await dialog.getByLabel("Resume sign-in ID").evaluate((element) => element.getBoundingClientRect().width >= 180)).toBe(true);
+    await dialog.getByText("Sign-in did not finish automatically", { exact: true }).click();
+    await expect(dialog.getByLabel(/Callback URL/)).toBeVisible();
+    expect(await dialog.getByLabel(/Callback URL/).evaluate((element) => element.getBoundingClientRect().width >= 180)).toBe(true);
     await page.screenshot({ path: `output/playwright/oauth-resume-dialog-${viewport.width}x${viewport.height}.png` });
     await dialog.getByRole("button", { name: "Close" }).click();
 

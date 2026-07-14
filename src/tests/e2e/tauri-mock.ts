@@ -26,7 +26,14 @@ export type MockOptions = {
   importFailureCode?: string;
   remoteConnected?: boolean;
   remoteFeatures?: string[];
+  oauthCallbackBeforeStartReturns?: boolean;
 };
+
+export async function emitTauriEvent(page: Page, event: string, payload: unknown) {
+  await page.evaluate(([name, value]) => {
+    (window as unknown as { __TAURI_TEST_EMIT__: (event: string, payload: unknown) => void }).__TAURI_TEST_EMIT__(name, value);
+  }, [event, payload] as const);
+}
 
 export async function installTauriMock(page: Page, options: MockOptions = {}) {
   await page.addInitScript((input) => {
@@ -357,7 +364,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "reveal_local_account_identity":
           case "reveal_remote_account_identity": return { accountId: String(args.accountId), identity: "person@example.test" };
-          case "start_codex_oauth": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
+          case "start_codex_oauth": {
+            const flow = { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
+            if (input.oauthCallbackBeforeStartReturns) {
+              for (const [id, listener] of eventListeners) {
+                if (listener.event === "relay-oauth-status") callbacks.get(listener.handler)?.({ event: listener.event, id, payload: { loginId: flow.loginId, status: "callback_received" } });
+              }
+            }
+            return flow;
+          }
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "get_codex_oauth_status": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "callback_received" };
           case "submit_codex_oauth_callback":

@@ -19,6 +19,7 @@ use uuid::Uuid;
 const SNAPSHOT_VERSION: u32 = 1;
 const AUTHORIZATION_ENDPOINT: &str = "https://auth.openai.com/oauth/authorize";
 const CALLBACK_PATH: &str = "/auth/callback";
+const CALLBACK_SUCCESS_HTML: &str = r#"<!doctype html><html lang="en"><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Zenith Relay</title><style>body{min-height:100vh;display:grid;place-items:center;margin:0;font:15px system-ui,sans-serif;background:Canvas;color:CanvasText}main{max-width:420px;padding:32px}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:GrayText;line-height:1.5}</style><body><main><h1>Account connected</h1><p>You can close this tab and return to Zenith Relay.</p></main><script>window.close()</script></body></html>"#;
 const MAX_SNAPSHOT_BYTES: u64 = 64 * 1024;
 const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_REQUEST_HEADER_BYTES: usize = 16 * 1024;
@@ -610,12 +611,7 @@ where
     };
     match inner.accept_callback(&snapshot.login_id, &callback_url) {
         Ok(()) => {
-            let _ = write_response(
-                &mut stream,
-                200,
-                "OAuth callback received. Return to Zenith Relay.",
-            )
-            .await;
+            let _ = write_callback_success(&mut stream).await;
             RequestOutcome::Accepted
         }
         Err(error) if error.code == OAuthFlowErrorCode::CallbackInvalid => {
@@ -704,6 +700,25 @@ fn callback_url(pending: &OAuthPendingSession, target: &str) -> Result<String, O
 }
 
 async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::Result<()> {
+    write_http_response(stream, status, "text/plain; charset=utf-8", body).await
+}
+
+async fn write_callback_success(stream: &mut TcpStream) -> io::Result<()> {
+    write_http_response(
+        stream,
+        200,
+        "text/html; charset=utf-8",
+        CALLBACK_SUCCESS_HTML,
+    )
+    .await
+}
+
+async fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &str,
+) -> io::Result<()> {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -711,7 +726,7 @@ async fn write_response(stream: &mut TcpStream, status: u16, body: &str) -> io::
         _ => "Internal Server Error",
     };
     let response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await?;
@@ -1042,6 +1057,9 @@ mod tests {
 
         let response = send_callback(&start.redirect_uri, &request_target(&callback)).await;
         assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("Content-Type: text/html; charset=utf-8"));
+        assert!(response.contains("window.close()"));
+        assert!(!response.contains("authorization-code"));
         wait_until(|| events.has(&start.login_id, OAuthFlowStatus::CallbackReceived)).await;
         assert!(secrets.contains(&callback_secret_ref(&start.login_id)));
         let material = manager.exchange_material(&start.login_id).unwrap();

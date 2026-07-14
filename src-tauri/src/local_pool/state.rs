@@ -2,7 +2,7 @@ use super::{
     accounts::{
         authority::{AccountMetadataSink, MetadataSinkError},
         credentials::CredentialStore,
-        oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager},
+        oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
@@ -22,7 +22,7 @@ use std::{
         Arc, Mutex, MutexGuard,
     },
 };
-use tauri::Emitter;
+use tauri::{Emitter, Manager, UserAttentionType};
 use tokio::sync::Notify;
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, AccountRecord, TokenAuthority},
@@ -709,6 +709,12 @@ impl OAuthFlowEventSink for DesktopOAuthEvents {
     fn emit(&self, event: OAuthFlowEvent) {
         let app = self.app.lock().ok().and_then(|app| app.clone());
         if let Some(app) = app {
+            if event.status == OAuthFlowStatus::CallbackReceived {
+                crate::tray::show_main_window(&app);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+                }
+            }
             let _ = app.emit("relay-oauth-status", event);
         }
     }

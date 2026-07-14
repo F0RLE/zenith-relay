@@ -25,10 +25,11 @@ import {
   formatAccountPlan,
 } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
+import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
-type DialogKind = "source" | "oauth" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
+type DialogKind = "source" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
 type AccountSort = "pool" | "participation" | "primary" | "secondary" | "primary_reset" | "secondary_reset" | "plan" | "name";
 type AccountLayout = "compact" | "list" | "grid";
 type SortDirection = "asc" | "desc";
@@ -56,6 +57,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
   const [bulkProxyAccountIds, setBulkProxyAccountIds] = useState<string[]>([]);
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
+  const oauth = useOAuthSignIn();
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
   const canImportAccounts = mode !== "remote" || supports("account_batch_import");
@@ -105,6 +107,10 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 
   const primaryAction = () => {
     if (view === "accounts" && !canImportAccounts) return;
+    if (view === "accounts" && mode === "local") {
+      void oauth.start();
+      return;
+    }
     if (view === "accounts" && mode === "remote") {
       onImport();
       return;
@@ -120,8 +126,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     setEditingSource(null);
     setEditingAutomation(null);
     setDialog(
-      view === "accounts" ? "oauth"
-        : view === "sources" ? "source"
+      view === "sources" ? "source"
           : view === "automations" ? "automation"
             : view === "remote" ? "remote"
               : "ready",
@@ -140,7 +145,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
                 {t("connections.import")}
               </Button>
             ) : null}
-            <Button variant="primary" icon={view === "accounts" ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden /> : view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
+            <Button variant="primary" icon={view === "accounts" ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden /> : view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} busy={view === "accounts" && mode === "local" && busy === "oauth-start"} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
               {primaryLabel}
             </Button>
           </>
@@ -157,13 +162,13 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       </div> : null}
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
-      {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={onImport} onSignIn={() => setDialog("oauth")} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
+      {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={onImport} onSignIn={() => void oauth.start()} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
-      {dialog === "oauth" ? <OAuthDialog onClose={() => setDialog(null)} /> : null}
+      {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} onComplete={oauth.complete} /> : null}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
       {dialog === "remote" ? <RemoteDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
@@ -578,50 +583,25 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiKey.trim()} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><label className="relay-field"><span>{t("sources.protocol")}</span><select value={wireApi} onChange={(event) => setWireApi(event.target.value as SourceSummary["wireApi"])}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><label className="relay-field"><span>{t("common.models")}</span><input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><div className="settings-row"><label><span>{t("sources.poolRole")}</span><select value={role} onChange={(event) => setRole(event.target.value as ApiSourceRole)}><option value="primary">{t("sources.roles.primary")}</option><option value="stabilizer">{t("sources.roles.stabilizer")}</option><option value="reserve">{t("sources.roles.reserve")}</option></select><small>{t(`sources.roleHints.${role}`)}</small></label><label><span>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
 }
 
-function OAuthDialog({ onClose }: { onClose: () => void }) {
+function OAuthDialog({ flow, onCancel, onComplete }: { flow: OAuthFlow; onCancel: () => Promise<void>; onComplete: (callbackUrl?: string) => Promise<boolean> }) {
   const { t, i18n } = useTranslation();
-  const { perform, busy } = useRelayState();
-  const [flow, setFlow] = useState<OAuthFlow | null>(null);
+  const { busy } = useRelayState();
   const [callbackUrl, setCallbackUrl] = useState("");
-  const [loginId, setLoginId] = useState("");
-  const start = async () => {
-    const result: { current: OAuthFlow | null } = { current: null };
-    const ok = await perform("oauth-start", async () => { result.current = await relayCommands.startOAuth(); });
-    if (ok) setFlow(result.current);
-  };
-  const resume = async () => {
-    const result: { current: OAuthFlow | null } = { current: null };
-    const ok = await perform("oauth-resume", async () => { result.current = await relayCommands.resumeOAuth(loginId.trim()); });
-    if (ok) setFlow(result.current);
-  };
-  const finish = async () => {
-    if (!flow) return;
-    const ok = await perform("oauth-complete", async () => {
-      if (callbackUrl.trim()) await relayCommands.submitOAuthCallback(flow.loginId, callbackUrl.trim());
-      else await relayCommands.oauthStatus(flow.loginId);
-      await relayCommands.completeOAuth(flow.loginId);
-    }, "feedback.accountAdded");
-    if (ok) onClose();
-  };
-  const cancel = async () => {
-    if (flow) await perform("oauth-cancel", () => relayCommands.cancelOAuth(flow.loginId));
-    onClose();
-  };
-  const expiresAt = flow ? new Intl.DateTimeFormat(i18n.language, { timeStyle: "short" }).format(new Date(flow.expiresAtMs)) : "";
+  const expiresAt = new Intl.DateTimeFormat(i18n.language, { timeStyle: "short" }).format(new Date(flow.expiresAtMs));
+  const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
+  const flowFailed = flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed";
   return <Dialog
     title={t("accounts.signIn")}
-    onClose={cancel}
-    footer={<><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{flow ? <Button variant="primary" busy={busy === "oauth-complete"} onClick={finish}>{t("accounts.finishSignIn")}</Button> : <Button variant="primary" busy={busy === "oauth-start"} onClick={start}>{t("accounts.openSignIn")}</Button>}</>}
+    onClose={() => void onCancel()}
+    footer={<Button variant="secondary" busy={busy === "oauth-cancel"} onClick={() => void onCancel()}>{t("common.cancel")}</Button>}
   >
-    {flow ? <div className="relay-form">
-      <p>{t("accounts.browserOpened")}</p>
-      <label className="relay-field"><span>{t("accounts.callbackUrl")}</span><input value={callbackUrl} onChange={(event) => setCallbackUrl(event.target.value)} placeholder={flow.redirectUri} /></label>
+    <div className="relay-form oauth-waiting">
+      <div className="oauth-waiting-status"><Loader2 className="spin" aria-hidden /><div><strong>{t(callbackReceived ? "accounts.completingSignIn" : "accounts.waitingForSignIn")}</strong><p>{t("accounts.waitingForSignInHint")}</p></div></div>
+      {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
       <a href={flow.authorizationUrl} target="_blank" rel="noreferrer">{t("accounts.reopenSignIn")}</a>
       <small>{t("accounts.oauthExpires", { value: expiresAt })}</small>
-    </div> : <div className="relay-form oauth-intro">
-      <p>{t("accounts.oauthDescription")}</p>
-      <details className="oauth-resume"><summary>{t("accounts.resumeExisting")}</summary><label className="relay-field"><span>{t("accounts.resumeLoginId")}</span><div className="inline-actions"><input value={loginId} onChange={(event) => setLoginId(event.target.value)} /><Button variant="secondary" busy={busy === "oauth-resume"} disabled={!loginId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label></details>
-    </div>}
+      <details className="oauth-resume"><summary>{t("accounts.manualCompletion")}</summary><label className="relay-field"><span>{t("accounts.callbackUrl")}</span><div className="inline-actions"><input value={callbackUrl} onChange={(event) => setCallbackUrl(event.target.value)} placeholder={flow.redirectUri} /><Button variant="primary" busy={busy === "oauth-complete"} disabled={!callbackUrl.trim() && !callbackReceived} onClick={() => void onComplete(callbackUrl.trim() || undefined)}>{t("accounts.finishSignIn")}</Button></div></label></details>
+    </div>
   </Dialog>;
 }
 

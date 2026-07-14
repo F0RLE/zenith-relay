@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { installTauriMock } from "./tauri-mock";
+import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 test("quick setup covers all three runtime choices", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
@@ -23,7 +23,8 @@ test("local quick setup verifies runtime and applies Codex only after explicit c
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: "Finish sign-in" }).click();
+  await expect(page.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
+  await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
   await page.getByLabel("Create a persistent local gateway key if no key exists.").check();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".check-stages strong")).toHaveText(["Ready", "Ready", "Ready", "Ready"]);

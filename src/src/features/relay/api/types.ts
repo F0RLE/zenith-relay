@@ -316,13 +316,17 @@ export type ConfirmAccountImportResponse = {
   }>;
 };
 
+export type OAuthFlowStatus = "pending" | "callback_received" | "callback_rejected" | "canceled" | "completed" | "expired" | "failed";
+
 export type OAuthFlow = {
   loginId: string;
   authorizationUrl: string;
   redirectUri: string;
   expiresAtMs: number;
-  status: string;
+  status: OAuthFlowStatus;
 };
+
+export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;
 
 export type RemoteTarget = {
   origin: string;

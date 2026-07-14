@@ -4918,6 +4918,36 @@ textarea {
   margin: 0;
 }
 
+.oauth-waiting-status {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+}
+
+.oauth-waiting-status > svg {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--relay-accent);
+}
+
+.oauth-waiting-status strong {
+  display: block;
+}
+
+.oauth-waiting-status p {
+  margin: 3px 0 0;
+  color: var(--relay-secondary);
+}
+
+.oauth-waiting > a,
+.oauth-progress > a {
+  width: fit-content;
+  color: var(--relay-accent-hover);
+  font-weight: 600;
+}
+
 .oauth-resume,
 .import-resume {
   padding-top: 12px;
