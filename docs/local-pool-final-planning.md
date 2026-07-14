@@ -115,17 +115,20 @@ Hard filters always win:
 - outside local-key scope;
 - failed health threshold.
 
-MVP ordering is intentionally small:
+Runtime ordering is intentionally small:
 
 1. valid session affinity when the candidate still passes hard filters;
-2. highest explicit priority;
-3. enough known quota;
-4. least recently used inside the same priority;
-5. weight only as a tie-break/spread control.
+2. explicit API-source role: primary first, stabilizer with OAuth accounts,
+   reserve last;
+3. lowest active-request load normalized by traffic share;
+4. OAuth preference within an otherwise equal stabilizer comparison;
+5. greatest known minimum quota reserve;
+6. least recently used;
+7. manual priority only as a final tie-breaker;
+8. weight and stable id for the remaining tie.
 
-Creation defaults may prefer personal account capacity over paid API sources,
-but the stored priority is explicit and editable. Source type must not create a
-hidden routing rule.
+Source role is explicit and editable. Subscription plan names and expiry dates
+must not create a hidden routing rule.
 
 Retry rules:
 
