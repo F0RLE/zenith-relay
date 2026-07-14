@@ -229,8 +229,8 @@ fn compare_preference(
         .cmp(&routing_tier(right))
         .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
         .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-        .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.quota.compare_preference(right.quota))
+        .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.priority.cmp(&right.priority))
         .then_with(|| left.weight.cmp(&right.weight))
         .then_with(|| right.id.cmp(&left.id))
@@ -372,6 +372,12 @@ mod tests {
         assert_eq!(select(&mut scheduler, &HashSet::new()), None);
 
         scheduler.upsert(candidate("ready"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "ready"
+        );
         let scope = CandidateScope {
             source_ids: Some(["different-source".to_string()].into()),
             ..CandidateScope::default()
@@ -408,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_orders_ties_by_quota_lru_priority_weight_then_id() {
+    fn selection_orders_equal_quota_by_lru_priority_weight_then_id() {
         let mut scheduler = PoolScheduler::new(1, 100);
         let mut low_priority = candidate("priority-low");
         low_priority.priority = 1;
@@ -479,6 +485,28 @@ mod tests {
                 .unwrap()
                 .candidate_id,
             "a"
+        );
+    }
+
+    #[test]
+    fn quota_reserve_beats_lru_and_manual_priority() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut low_quota = oauth_candidate("low-quota");
+        low_quota.quota = CandidateQuota::Available(1);
+        low_quota.priority = 100;
+        low_quota.last_used_at = None;
+        scheduler.upsert(low_quota);
+        let mut high_quota = oauth_candidate("high-quota");
+        high_quota.quota = CandidateQuota::Available(9_000);
+        high_quota.priority = 1;
+        high_quota.last_used_at = Some(99);
+        scheduler.upsert(high_quota);
+
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "high-quota"
         );
     }
 

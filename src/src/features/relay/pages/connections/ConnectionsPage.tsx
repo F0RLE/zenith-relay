@@ -399,7 +399,6 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
               <strong className={revealedIdentities[account.id] ? "revealed" : undefined} title={revealedIdentities[account.id] ?? account.label}>{revealedIdentities[account.id] ?? account.label}</strong>
               <div>
                 <span className={`account-health ${accountHealthTone(account.health)}`}>{t(`health.${account.health}`, { defaultValue: account.health })}</span>
-                {account.inPool && account.priority !== 0 ? <span className="account-priority" title={t("pool.priorityHelp")}>{t("pool.priorityValue", { value: account.priority })}</span> : null}
               </div>
             </div>
             <div className="account-facts">
@@ -853,9 +852,10 @@ function compareAccounts(
   unknownPlanRank: number,
 ) {
   if (sortBy === "pool") {
-    return Number(accountRouted(right)) - Number(accountRouted(left))
-      || right.priority - left.priority
+    return Number(accountPoolReady(right)) - Number(accountPoolReady(left))
+      || Number(accountRouted(right)) - Number(accountRouted(left))
       || compareOptional(quotaFloor(left), quotaFloor(right), "desc")
+      || right.priority - left.priority
       || right.weight - left.weight
       || left.label.localeCompare(right.label);
   }
@@ -888,6 +888,16 @@ function accountParticipates(account: AccountSummary) {
 
 function accountRouted(account: AccountSummary) {
   return account.inPool && account.routingExclusion == null;
+}
+
+function accountPoolReady(account: AccountSummary) {
+  return accountRouted(account)
+    && account.enabled
+    && !account.draining
+    && account.secretAvailable
+    && account.proxyAvailable !== false
+    && ["unknown", "healthy", "degraded"].includes(account.health)
+    && ![account.quota.primary, account.quota.secondary].some((window) => window?.availableBasisPoints === 0);
 }
 
 function quotaFloor(account: AccountSummary) {

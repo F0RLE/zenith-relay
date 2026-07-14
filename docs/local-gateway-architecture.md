@@ -23,8 +23,8 @@ The local Codex-compatible pool should include:
   reasoning tokens, error categories, and local estimated cost;
 - account health with last success/failure, consecutive failures, cooldowns,
   quota-limited state, and image capability status;
-- routing strategies: auto, single account, quota high/low first, plan high/low
-  first, expiry soon first, and custom priority/weight;
+- automatic routing by API-source role, active load, minimum quota reserve, LRU,
+  and final priority/weight tie-breaks; key scope covers single-account use;
 - stream-safe retry rule: retry only before response bytes are sent.
 
 ## Implementation Risks To Avoid
@@ -92,7 +92,7 @@ zenith-relay/
           accounts.rs           account import/CRUD/quota commands
           gateway.rs            start/stop/key/profile gateway commands
           keys.rs               generated local API-key commands
-          routing.rs            strategy, priority, weight, affinity commands
+          routing.rs            automatic order, priority, weight, affinity commands
           telemetry.rs          log/stat query commands
           profile.rs            attach/restore/repair commands
           diagnostics.rs        tests and support bundle commands
@@ -275,7 +275,7 @@ Required command groups:
   update bind scope, update client host, and update advanced timeouts;
 - `keys`: create, update label, enable/disable, rotate, delete, and update
   scope/model policy;
-- `routing`: update strategy, priority, weight, session affinity, retry limits,
+- `routing`: update tie-break priority, weight, session affinity, retry limits,
   and cooldown policy;
 - `models`: update aliases, hidden/excluded models, per-source/account model
   blocks, and local pricing used only for estimates;
@@ -525,7 +525,7 @@ client request
 -> local log/write stats
 ```
 
-Hard filters before priority:
+Hard filters before automatic ranking:
 
 ```text
 disabled
@@ -538,7 +538,8 @@ protocol_not_supported
 capability_missing
 ```
 
-API-source role, priority, and traffic share apply only after hard filters.
+API-source role and traffic share apply only after hard filters. Manual priority
+is the final tie-breaker.
 
 ## Scheduler Design
 
@@ -559,7 +560,7 @@ RuntimeCandidate
   source/account identity and protocol
   enabled, draining, secret availability, health, quota
   models and allowed/excluded rules
-  API-source role priority and traffic share
+  API-source role marker, manual priority, and traffic share
   per-model cooldowns and last-used time
 ```
 
@@ -581,7 +582,8 @@ Selection contract:
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
 6. Prefer the lowest active-request load normalized by traffic share.
 7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then least recently used, known quota, priority, weight, and stable id.
+   then the greatest known minimum quota reserve, least recently used, manual
+   tie-break priority, weight, and stable id.
 8. Exclude candidates already tried for this request.
 9. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
@@ -654,7 +656,7 @@ A monolithic `collection` shape combines:
 - service state: enabled, port, bind scope, client host, gateway mode, proxy;
 - key records: default key plus named keys;
 - account membership: collection account ids and per-key account ids;
-- routing: strategy, custom priority/weight, session affinity, retry limits;
+- routing: automatic tie-break policy, session affinity, and retry limits;
 - model rules: aliases, hidden/excluded models, per-account excluded models;
 - timeouts, debug flag, stats, and health snapshots.
 
@@ -706,7 +708,7 @@ Rules:
 - enabled local keys must have a secret and at least one usable source/account
   after inherited scope resolution;
 - deleting a source/account removes its id from default membership, local key
-  scopes, custom priority/weight rules, per-account model rules, profile
+  scopes, per-account model rules, profile
   bindings, scheduler state, and model registry;
 - if a local key loses all usable scope, keep the key record but mark it
   unavailable until user edits scope or pool membership;
@@ -863,15 +865,12 @@ key.account_ids set   -> key.account_ids
 
 Then it applies:
 
-1. round-robin starting offset;
-2. session affinity or previous response id pinning;
-3. routing strategy;
-4. custom priority/weight if selected;
-5. model block per account;
-6. health block;
-7. per-account per-model cooldown;
-8. free-account restriction;
-9. prepared account/token refresh.
+1. model, health, cooldown, quota, and Free-policy hard filters;
+2. valid session affinity or previous response id pinning;
+3. API-source role tier;
+4. active load normalized by traffic share;
+5. OAuth preference, minimum quota reserve, LRU, and final manual tie-breaks;
+6. prepared account/token refresh.
 
 Zenith should use the same logical order, but with source/account terminology:
 
@@ -879,7 +878,7 @@ Zenith should use the same logical order, but with source/account terminology:
 scope -> hard gates -> affinity candidate -> routing order -> executor
 ```
 
-Hard gates must always run before priority and weight. Affinity may pin only a
+Hard gates must always run before affinity or ranking. Affinity may pin only a
 currently healthy, model-capable candidate.
 
 ### Execution Attempt Loop
@@ -965,32 +964,23 @@ Model pool execution:
 
 ### Routing Strategies
 
-Supported routing strategies:
-
-- `auto`;
-- `single_account`;
-- `quota_high_first`;
-- `quota_low_first`;
-- `plan_high_first`;
-- `plan_low_first`;
-- `expiry_soon_first`;
-- `custom`.
-
-Custom routing groups accounts by priority descending. Inside the same priority
-group, weight decides the first pick, then order rotates through the group.
-
-Zenith UI should show simple presets first:
+The runtime uses one automatic strategy. A local key may narrow its scope to a
+single account/source or a selected set, but visible list sorting never changes
+runtime order:
 
 ```text
-Auto
-Single source/account
-Prefer more quota
-Prefer expiring soon
-Custom priority/weight
+hard filters
+API-source role
+active load normalized by traffic share
+OAuth preference inside the stabilizer tier
+greatest minimum quota reserve
+least recently used
+manual priority/weight tie-breaks
 ```
 
-Advanced plan/tier strategies can stay hidden until quotas/subscriptions are
-proven across supported account types.
+Subscription plan names and expiry dates do not determine runtime priority.
+Manual priority remains an advanced final tie-breaker rather than a routing
+group that starves otherwise eligible accounts.
 
 ### Session Affinity
 

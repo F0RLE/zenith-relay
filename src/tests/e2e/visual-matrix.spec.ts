@@ -718,7 +718,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.getByRole("button", { name: "Правила участника пула: Personal Plus", exact: true }).click();
   let dialog = page.getByRole("dialog", { name: /Правила участника пула/ });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Приоритет маршрутизации", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Приоритет при равенстве", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Доля трафика", { exact: true })).toBeVisible();
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();

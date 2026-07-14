@@ -123,7 +123,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
           ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
-          : [member.label, formatAccountPlan(member.subscription.planType, t("common.unknown")), member.priority !== 0 ? t("pool.priorityValue", { value: member.priority }) : null].filter(Boolean).join(" · ");
+          : [member.label, formatAccountPlan(member.subscription.planType, t("common.unknown"))].join(" · ");
         const quota = memberQuota(member);
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label}>
@@ -391,8 +391,14 @@ function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1
 }
 function comparePoolMembers(left: Member, right: Member, sortBy: MemberSort) {
   if (sortBy === "name") return memberName(left).localeCompare(memberName(right));
-  if (sortBy === "quota") return comparePoolQuota(right, left) || memberRoutingTier(right) - memberRoutingTier(left) || memberName(left).localeCompare(memberName(right));
-  return Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right)) || memberRoutingTier(right) - memberRoutingTier(left) || comparePoolQuota(right, left) || right.weight - left.weight || memberName(left).localeCompare(memberName(right));
+  if (sortBy === "quota") return Number(poolMemberReady(right)) - Number(poolMemberReady(left)) || comparePoolQuota(right, left) || memberRoutingTier(right) - memberRoutingTier(left) || memberName(left).localeCompare(memberName(right));
+  return Number(poolMemberReady(right)) - Number(poolMemberReady(left))
+    || Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right))
+    || memberRoutingTier(right) - memberRoutingTier(left)
+    || comparePoolQuota(right, left)
+    || right.priority - left.priority
+    || right.weight - left.weight
+    || memberName(left).localeCompare(memberName(right));
 }
 function comparePoolQuota(left: Member, right: Member) {
   const leftQuota = memberQuota(left);
@@ -417,6 +423,6 @@ function memberRoutingTier(member: Member) {
 }
 function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
 function poolMemberReady(member: Member) {
-  if (!member.enabled || member.draining || member.health !== "healthy" || !member.secretAvailable || memberRoutingExcluded(member)) return false;
+  if (!member.enabled || member.draining || !["unknown", "healthy", "degraded"].includes(member.health) || !member.secretAvailable || memberRoutingExcluded(member)) return false;
   return member.kind === "source" || (member.proxyAvailable !== false && ![member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0));
 }

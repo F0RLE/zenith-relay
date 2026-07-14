@@ -751,9 +751,9 @@ Layout:
 + Summary -----------------------------------------------------------------+
 | Healthy | Cooling | Limited | Disabled | Visible models                  |
 + Table -------------------------------------------------------------------+
-| enabled | type | name | health | quota | priority | last used | menu     |
+| enabled | type | name | health | quota reserve | last used | menu       |
 + Selected editor ----------------------------------------------------------+
-| routing priority | traffic share | drain | allowed models | exclusions   |
+| tie-break priority | traffic share | drain | allowed models | exclusions |
 +---------------------------------------------------------------------------+
 ```
 
@@ -762,7 +762,7 @@ User-editable policy:
 ```text
 enabled
 draining
-priority
+manual tie-break priority
 weight
 allowed/excluded models
 ```
@@ -775,9 +775,9 @@ valid session affinity
 API source role tier
 active requests normalized by traffic share
 OAuth preference inside the stabilizer tier
+greatest minimum known quota reserve
 least recently used
-enough known quota
-priority and weight tie-breaks
+manual priority and weight tie-breaks
 ```
 
 The scheduler makes this choice for every request. `API first` sources run before
@@ -788,8 +788,9 @@ visible member list never changes runtime order.
 
 Creating or importing a connection does not add it to the pool. The empty
 Members view asks the user to choose existing connections, and only confirmed
-selections become eligible runtime candidates. The table defaults to runtime
-order and may be sorted by priority, effective quota, or name for inspection.
+selections become eligible runtime candidates. The table defaults to an
+availability/quota approximation of runtime order and may be sorted by
+effective quota or name for inspection.
 
 Member rows may show an `API equivalent` derived from recorded input and
 output tokens for model ids present in Relay's versioned official OpenAI price
@@ -1439,7 +1440,7 @@ Frontend never:
   separate top-level scenario.
 - Account pool works with OAuth accounts only, can start the endpoint, copy
   key/URL, and attach a client without requiring an external API source.
-- Pool policy exposes priority/weight/model rules without exposing internal
+- Pool policy exposes tie-break priority/weight/model rules without exposing internal
   Zenith routing.
 - Self-hosted can connect or deploy and remains clearly user-managed.
 - Wake automation runs at most once per account/window cycle and never stores

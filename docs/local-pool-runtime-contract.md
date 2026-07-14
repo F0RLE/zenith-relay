@@ -615,7 +615,7 @@ HTTP request
 -> usage event queue
 ```
 
-Hard gates before priority/weight:
+Hard gates before automatic ranking:
 
 ```text
 disabled
@@ -636,8 +636,9 @@ Selection:
 3. If session binding still points to healthy capable candidate, use it.
 4. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
 5. Prefer the lowest active-request load normalized by traffic share.
-6. Within the tier, prefer OAuth when otherwise equal, then least recently
-   used, known quota, priority, weight, and stable id.
+6. Within the tier, prefer OAuth when otherwise equal, then the greatest known
+   minimum quota reserve, least recently used, manual tie-break priority,
+   weight, and stable id.
 7. Exclude already tried candidates for this request.
 8. If all candidates are cooling down, return cooldown diagnostic.
 

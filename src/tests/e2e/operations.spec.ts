@@ -450,6 +450,7 @@ test("account sorting follows pool and quota window usage", async ({ page }) => 
   await expect(labels).toHaveText(["Personal Plus", "Backup account", "Business Workspace"]);
   await page.getByLabel("Sort accounts").selectOption("pool");
   await expect(labels).toHaveText(["Business Workspace", "Personal Plus", "Backup account"]);
+  await expect(page.locator(".account-priority")).toHaveCount(0);
 });
 
 test("account layouts switch between compact, detailed, and grid views", async ({ page }) => {
@@ -724,17 +725,18 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("pool display order defaults to routing priority and can be changed to quota", async ({ page }) => {
+test("pool display order follows availability and quota without exposing raw priority", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const order = page.getByLabel("Display order");
-  await expect(order.locator("option")).toHaveText(["Routing order", "Available quota", "Name"]);
+  await expect(order.locator("option")).toHaveText(["Routing order", "Minimum quota reserve", "Name"]);
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Business Workspace", "Personal Plus", "Example compatible API", "Backup account"]);
+  expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
+  await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
   await order.selectOption("quota");
-  expect(await names()).toEqual(["Backup account", "Business Workspace", "Personal Plus", "Example compatible API"]);
+  expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
   await order.selectOption("name");
   expect(await names()).toEqual(["Backup account", "Business Workspace", "Example compatible API", "Personal Plus"]);
 });
@@ -1050,15 +1052,15 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Total time428 ms");
 });
 
-test("pool member fields explain routing priority and traffic share", async ({ page }) => {
+test("pool member fields explain tie-break priority and traffic share", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool member policy: Personal Plus", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: /Pool member policy/ });
-  await expect(dialog.getByText("Routing priority", { exact: true })).toHaveAttribute("title", "Lower-priority accounts receive no new requests while a higher-priority account remains eligible.");
-  await expect(dialog).toContainText("Lower-priority accounts receive no new requests");
+  await expect(dialog.getByText("Tie-break priority", { exact: true })).toHaveAttribute("title", "Used only when eligible members have equal active load, quota reserve, and recent-use order.");
+  await expect(dialog).toContainText("Used only when eligible members have equal active load");
   await expect(dialog.getByText("Traffic share", { exact: true })).toHaveAttribute("title", "Among equally eligible members, a higher share receives more requests.");
 });
 
