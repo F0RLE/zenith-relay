@@ -1,5 +1,5 @@
 use axum::body::{Body, Bytes};
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST};
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::response::IntoResponse;
@@ -21,6 +21,7 @@ use zenith_relay_core::{
 const LOCAL_KEY: &str = "local-test-key";
 const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
+const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -182,6 +183,40 @@ async fn non_stream_response_and_usage_are_redacted() {
     assert!(!serialized.contains("private prompt"));
     assert!(!serialized.contains(LOCAL_KEY));
     assert!(!serialized.contains(SOURCE_KEY));
+}
+
+#[tokio::test]
+async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
+    let (upstream, state) = spawn_upstream().await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "x".repeat(2 * 1024 * 1024),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "x".repeat(MAX_CLIENT_REQUEST_BODY_BYTES),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "request_too_large");
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -452,6 +487,7 @@ async fn spawn_upstream() -> (TestServer, UpstreamState) {
     let app = Router::new()
         .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream_responses))
+        .layer(DefaultBodyLimit::max(MAX_CLIENT_REQUEST_BODY_BYTES))
         .with_state(state.clone());
     (spawn(app).await, state)
 }

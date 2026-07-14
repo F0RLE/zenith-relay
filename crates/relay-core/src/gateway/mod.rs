@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, RETRY_AFTER, WWW_AUTHENTICATE,
 };
-use axum::http::{HeaderMap, HeaderValue, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -24,6 +24,7 @@ mod websocket;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
@@ -209,31 +210,40 @@ fn valid_codex_client_version(value: &str) -> bool {
 
 async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request<Body>,
 ) -> Response<Body> {
-    execute_client_request(runtime, headers, body, WireApi::Responses).await
+    execute_client_request(runtime, request, WireApi::Responses).await
 }
 
 async fn chat_completions(
     State(runtime): State<Arc<GatewayRuntime>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request<Body>,
 ) -> Response<Body> {
-    execute_client_request(runtime, headers, body, WireApi::ChatCompletions).await
+    execute_client_request(runtime, request, WireApi::ChatCompletions).await
 }
 
 async fn execute_client_request(
     runtime: Arc<GatewayRuntime>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request<Body>,
     wire_api: WireApi,
 ) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
     if !valid_local_host(&headers) {
         return invalid_host();
     }
     let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
         return unauthorized();
+    };
+    let body = match axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(_) => {
+            return api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body exceeds 16 MiB",
+                "request_too_large",
+            )
+        }
     };
 
     let request: Value = match serde_json::from_slice(&body) {
