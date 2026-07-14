@@ -538,31 +538,29 @@ protocol_not_supported
 capability_missing
 ```
 
-Priority and weight apply only after hard filters.
+API-source role, priority, and traffic share apply only after hard filters.
 
 ## Scheduler Design
 
-The local scheduler should be incremental. Updating one source/account must
-refresh only affected provider/model shards instead of rebuilding the whole
-pool on every request.
+The local scheduler is incremental. Updating one source/account upserts or
+removes that candidate; request selection evaluates its model and key scope
+without rebuilding the whole pool.
 
 Core scheduler state:
 
 ```text
 PoolScheduler
-  sources: source_id -> SourceScheduler
-  account_source: account_id -> source_id
-  mixed_cursors: model/scope -> cursor
+  candidates: candidate_id -> RuntimeCandidate
+  affinity: bounded session key -> candidate id
+  in_flight: candidate_id -> active request count
 
-SourceScheduler
-  source_id
-  candidates: account/source metadata
-  model_shards: model_id -> ModelScheduler
-
-ModelScheduler
-  entries: candidate_id -> CandidateState
-  ready_by_priority: priority -> ready bucket
-  cooldown_queue: sorted next_retry_at
+RuntimeCandidate
+  kind: OAuth account or API source
+  source/account identity and protocol
+  enabled, draining, secret availability, health, quota
+  models and allowed/excluded rules
+  API-source role priority and traffic share
+  per-model cooldowns and last-used time
 ```
 
 Candidate states:
@@ -580,10 +578,12 @@ Selection contract:
 2. Apply hard gates.
 3. Promote expired cooldown entries.
 4. If session affinity points to a valid ready candidate, use it.
-5. Pick highest ready priority.
-6. Within same priority, rotate by weight and cursor.
-7. Exclude candidates already tried for this request.
-8. If all candidates are cooling down, return a local cooldown diagnostic with
+5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+6. Prefer the lowest active-request load normalized by traffic share.
+7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
+   then least recently used, known quota, priority, weight, and stable id.
+8. Exclude candidates already tried for this request.
+9. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
 
 Single-source and mixed-source paths should share the same candidate state

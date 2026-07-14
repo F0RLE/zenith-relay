@@ -634,10 +634,12 @@ Selection:
 1. Use local key source/account scope.
 2. Apply hard gates.
 3. If session binding still points to healthy capable candidate, use it.
-4. Pick highest priority bucket.
-5. Rotate inside bucket by weight/cursor.
-6. Exclude already tried candidates for this request.
-7. If all candidates are cooling down, return cooldown diagnostic.
+4. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+5. Prefer the lowest active-request load normalized by traffic share.
+6. Within the tier, prefer OAuth when otherwise equal, then least recently
+   used, known quota, priority, weight, and stable id.
+7. Exclude already tried candidates for this request.
+8. If all candidates are cooling down, return cooldown diagnostic.
 
 `tried` and `attempted` stay separate. A candidate can be tried but not
 attempted when it fails mapping/preparation before executor call.
@@ -927,7 +929,8 @@ runtime, self-host, gateway, and failure contracts only.
 - Runtime-only credential survives file-backed auth refresh.
 - Deleting a source/account removes local key scopes, model rules, and runtime
   registry entries.
-- Candidate selector uses highest priority first, then rotates by weight.
+- Candidate selector applies API-source roles, spreads concurrent requests by
+  traffic share, and rotates otherwise equal OAuth accounts per request.
 - Mixed-source selector does not select cooling-down credentials when another
   healthy candidate exists.
 - `tried` candidate without attempted execution does not count against

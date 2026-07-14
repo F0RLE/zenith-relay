@@ -579,22 +579,24 @@ Name
 Host
 Protocol
 Models
-Last check
-Priority
-Menu
+Pool and role
+Actions
 ```
 
 Inline actions:
 
 - Test;
-- Refresh models.
+- Edit;
+- include/exclude from the pool without changing the saved connection.
 
 Menu actions:
 
-- Open details;
-- Edit;
 - Enable/Disable;
 - Delete.
+
+The pool column names the runtime effect instead of exposing sentinel priority
+numbers: `API first`, `Stabilizer`, or `Last resort`. Creating a source from
+Connections leaves it outside the pool until the user explicitly includes it.
 
 ### Accounts Table
 
@@ -770,15 +772,19 @@ There is no MVP strategy selector. Runtime order is fixed:
 ```text
 hard filters
 valid session affinity
-highest priority
-enough known quota
+API source role tier
+active requests normalized by traffic share
+OAuth preference inside the stabilizer tier
 least recently used
-weight tie-break
+enough known quota
+priority and weight tie-breaks
 ```
 
-The editor names these controls by effect: higher routing priority is considered
-first, while traffic share distributes requests only among otherwise equal
-eligible members. Sorting the visible members table never changes runtime order.
+The scheduler makes this choice for every request. `API first` sources run before
+OAuth accounts, `Stabilizer` sources absorb concurrent load and retryable account
+failures, and `Last resort` sources wait behind other eligible members. Traffic
+share affects concurrent distribution inside the same role tier. Sorting the
+visible member list never changes runtime order.
 
 Creating or importing a connection does not add it to the pool. The empty
 Members view asks the user to choose existing connections, and only confirmed

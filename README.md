@@ -3,6 +3,16 @@
 Zenith Relay is a Tauri desktop application for routing a user's own accounts
 and compatible APIs through one OpenAI-compatible endpoint.
 
+```text
+Codex / OpenCode / another client
+              |
+      one local or remote /v1 endpoint
+              |
+   scoped client key and per-request scheduler
+              |
+  OAuth account or user-owned compatible API
+```
+
 ## Runtime Modes
 
 - **This computer** runs a private loopback endpoint from the desktop app.
@@ -18,6 +28,49 @@ usage diagnostics, quota-wake automation, profile backup/restore, and RU/EN UI.
 The public app never contains Zenith private selling-pool inventory, billing,
 provider economy, or internal routing policy. User credentials stay in the
 device secret store or encrypted vault on the server selected by that user.
+
+## Product Tour
+
+All screenshots use synthetic Playwright data. They contain no real account,
+API key, proxy, prompt, or response content.
+
+### Overview
+
+The first screen shows the active endpoint, usable capacity, visible models,
+errors, and recent request health.
+
+![Zenith Relay overview](docs/screenshots/overview.png)
+
+### Connections And Pool
+
+Connections are the user's inventory. Adding an account or API source does not
+silently enable it for traffic. The user chooses pool membership, then assigns
+an API source as `API first`, `Stabilizer`, or `Last resort`.
+
+| API sources | Pool routing order |
+| --- | --- |
+| ![API source inventory and pool membership](docs/screenshots/api-sources.png) | ![Pool members and routing state](docs/screenshots/pool.png) |
+
+### Usage
+
+Usage keeps request metadata, latency, token classes, routing attempts, and
+errors without storing prompt or response bodies.
+
+![Request usage diagnostics](docs/screenshots/usage.png)
+
+## Screen Responsibilities
+
+- **Connections** owns accounts, compatible API sources, proxies, import/export,
+  OAuth sign-in, and quota-wake automation.
+- **Pool** owns traffic eligibility, API-source roles, client access keys, model
+  visibility, quota refresh, and routing policy.
+- **Gateway** owns the local endpoint, bind scope, common proxy, Codex setup,
+  diagnostics, and redacted support bundles.
+- **Usage** owns request, model, connection, latency, token, and error views.
+- **Profiles** owns reversible Codex/OpenCode attachment, snapshots, restore,
+  and repair.
+- **Settings** owns language, theme, local storage, updates, security, and data
+  recovery.
 
 ## Components
 
@@ -48,6 +101,17 @@ cd src
 bun run verify
 bun run test:e2e
 bun run app:build
+```
+
+Dependency and server gates:
+
+```bash
+cd src
+bun audit
+cd ..
+cargo audit --file src-tauri/Cargo.lock
+cargo audit --file relay-server/Cargo.lock
+cargo build --manifest-path relay-server/Cargo.toml --release --locked
 ```
 
 Run the user-managed server:

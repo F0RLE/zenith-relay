@@ -397,6 +397,12 @@ const relayRu = {
     protocol: "Протокол",
     address: "Адрес API",
     apiKey: "Ключ внешнего API",
+    poolMembership: "Пул и роль",
+    inPool: "В пуле",
+    outOfPool: "Не в пуле",
+    includeInPool: "Добавить {{name}} в пул",
+    removeFromPool: "Убрать {{name}} из пула",
+    modelListPlaceholder: "model-id, другая-модель",
     poolRole: "Роль API-источника",
     roles: {
       primary: "API сначала",

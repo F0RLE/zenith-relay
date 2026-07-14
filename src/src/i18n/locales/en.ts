@@ -397,6 +397,12 @@ const relayEn = {
     protocol: "Protocol",
     address: "API address",
     apiKey: "Upstream API key",
+    poolMembership: "Pool and role",
+    inPool: "In pool",
+    outOfPool: "Not in pool",
+    includeInPool: "Add {{name}} to the pool",
+    removeFromPool: "Remove {{name}} from the pool",
+    modelListPlaceholder: "model-id, another-model",
     poolRole: "API source role",
     roles: {
       primary: "API first",

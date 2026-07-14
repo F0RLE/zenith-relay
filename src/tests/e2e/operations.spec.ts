@@ -632,6 +632,35 @@ test("connections stay outside the pool until the user adds selected members", a
 });
 
 for (const mode of ["local", "remote"] as const) {
+  test(`${mode} API sources expose routing role and pool membership`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await page.getByRole("tab", { name: "Sources" }).click();
+
+    const row = page.getByRole("row").filter({ hasText: "Example compatible API" });
+    await expect(row).toContainText("Stabilizer");
+    const membership = row.getByRole("checkbox", { name: "Remove Example compatible API from the pool" });
+    await expect(membership).toBeChecked();
+    await membership.uncheck();
+    await expect(row.getByRole("checkbox", { name: "Add Example compatible API to the pool" })).not.toBeChecked();
+    await row.getByRole("checkbox", { name: "Add Example compatible API to the pool" }).check();
+    await expect(row.getByRole("checkbox", { name: "Remove Example compatible API from the pool" })).toBeChecked();
+
+    const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+    if (mode === "local") {
+      expect(calls.filter((call) => call.command === "set_local_pool_membership").map((call) => call.args)).toEqual([
+        { input: { accountIds: [], sourceIds: ["source_synthetic"], inPool: false } },
+        { input: { accountIds: [], sourceIds: ["source_synthetic"], inPool: true } },
+      ]);
+    } else {
+      expect(calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input).filter((input) => (input as { action?: { type?: string } }).action?.type === "set_pool_membership")).toEqual([
+        { action: { type: "set_pool_membership" }, payload: { accountIds: [], sourceIds: ["source_synthetic"], inPool: false } },
+        { action: { type: "set_pool_membership" }, payload: { accountIds: [], sourceIds: ["source_synthetic"], inPool: true } },
+      ]);
+    }
+  });
+
   test(`${mode} pool creates an API source and applies all three routing roles`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: false, gatewayRunning: false });
     await page.goto("/");

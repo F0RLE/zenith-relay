@@ -3217,6 +3217,31 @@ textarea {
   border-color: transparent;
 }
 
+.source-pool-membership {
+  min-width: 108px;
+  display: grid;
+  gap: 4px;
+}
+
+.source-pool-membership > strong {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.source-pool-membership label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--relay-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.source-pool-membership label:has(input:disabled) {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .relay-table td.row-actions,
 .relay-shell[data-page="profiles"] .relay-table th:last-child,
 .relay-shell[data-page="profiles"] .relay-table td:last-child {
@@ -6158,8 +6183,8 @@ input[type="password"] {
   .relay-shell[data-page="pool"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="usage"] .relay-table { min-width: 720px; }
   .relay-shell[data-page="profiles"] .relay-table { min-width: 720px; }
-  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(6),
-  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(6),
+  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
+  .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:nth-child(5),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(6),
