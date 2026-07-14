@@ -362,13 +362,15 @@ for (const viewport of viewports) {
       const actions = bar.lastElementChild?.getBoundingClientRect();
       const bounds = bar.getBoundingClientRect();
       const separated = count && actions && (count.right <= actions.left || actions.right <= count.left || count.bottom <= actions.top || actions.bottom <= count.top);
-      return Boolean(separated && count.left >= bounds.left && count.right <= bounds.right && actions.left >= bounds.left && actions.right <= bounds.right);
+      const verticallyAligned = count && actions && Math.abs(count.top + count.height / 2 - actions.top - actions.height / 2) <= 1;
+      return Boolean(separated && verticallyAligned && count.left >= bounds.left && count.right <= bounds.right && actions.left >= bounds.left && actions.right <= bounds.right);
     })).toBe(true);
     expect(await page.locator(".account-card").evaluate((card) => {
       const cardRect = card.getBoundingClientRect();
       const actions = card.querySelector<HTMLElement>(".account-row-action-list")?.getBoundingClientRect();
       return Boolean(actions && actions.left >= cardRect.left && actions.right <= cardRect.right && actions.top >= cardRect.top && actions.bottom <= cardRect.bottom);
     })).toBe(true);
+    expect(await page.locator(".account-card-main").evaluate((main) => getComputedStyle(main).backgroundColor)).toBe("rgba(0, 0, 0, 0)");
   });
 
   test(`account identity ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
@@ -410,11 +412,14 @@ for (const viewport of viewports) {
       const columns = items.map((item) => [".account-identity", ".account-facts", ".account-row-action-list"].map((selector) => item.querySelector<HTMLElement>(selector)?.getBoundingClientRect().left ?? -1));
       return columns.every((row) => row.every((left, index) => Math.abs(left - columns[0][index]) <= 1));
     })).toBe(true);
-    expect(await cards.evaluateAll((items) => items.every((item) => {
+    expect(await cards.evaluateAll((items, narrow) => items.every((item) => {
       const identity = item.querySelector<HTMLElement>(".account-identity")?.getBoundingClientRect();
       const facts = item.querySelector<HTMLElement>(".account-facts")?.getBoundingClientRect();
-      return Boolean(identity && facts && Math.abs(identity.top - facts.top) <= 1 && Math.abs(identity.height - facts.height) <= 1);
-    }))).toBe(true);
+      if (!identity || !facts) return false;
+      return narrow
+        ? facts.top >= identity.bottom
+        : Math.abs(identity.top - facts.top) <= 1 && Math.abs(identity.height - facts.height) <= 1;
+    }), viewport.width <= 1050)).toBe(true);
     expect(await page.locator(".account-plan-filters").evaluateAll((items) => items.every((element) => element.scrollWidth >= element.clientWidth))).toBe(true);
     expect(await page.locator(".account-error-line").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
@@ -436,6 +441,7 @@ for (const viewport of viewports) {
       }];
     }));
     expect(overflowingLabels).toEqual([]);
+    await expect(page.locator(".proxy-status-button > svg")).toHaveCount(0);
 
     await page.getByRole("button", { name: "Компактный вид учётных записей" }).click();
     await expect(page.locator(".account-list")).toHaveAttribute("data-layout", "compact");
