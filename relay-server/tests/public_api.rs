@@ -394,21 +394,28 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap()
         .contains("account-response-test"));
 
-    let account_usage: Value = client
-        .get(format!("{}/usage?page=1&pageSize=50", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let account_event = account_usage["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|event| event["candidateKind"] == "account")
-        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let account_event = loop {
+        let account_usage: Value = client
+            .get(format!("{}/usage?page=1&pageSize=50", first.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(event) = account_usage["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["candidateKind"] == "account")
+        {
+            break event.clone();
+        }
+        assert!(Instant::now() < deadline, "account usage was not persisted");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(account_event["candidateLabel"], "Synthetic OAuth account");
     assert_eq!(account_event["inputTokens"], 1);
     assert_eq!(account_event["cachedInputTokens"], 1);
