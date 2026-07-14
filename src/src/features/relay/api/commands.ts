@@ -48,7 +48,7 @@ export const relayCommands = {
   previewRemoteImportFiles: (paths?: string[]) => invoke<ImportSession | null>("preview_remote_account_import_files", paths ? { paths } : {}),
   resumeImport: (sessionId: string) => invoke<ImportSession>("resume_local_account_import", { sessionId }),
   prepareImport: (sessionId: string, probeQuota = true) => invoke<ImportSession>("prepare_local_account_import", { input: { sessionId, probeQuota } }),
-  confirmImport: (sessionId: string, selectedItemIds: string[]) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: true, probeQuota: true, models: [] } }),
+  confirmImport: (sessionId: string, selectedItemIds: string[], addToPool = false) => invoke<ConfirmAccountImportResponse>("confirm_local_account_import", { input: { sessionId, selectedItemIds, discoverModels: true, probeQuota: true, models: [], addToPool } }),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
   refreshAllAccountQuotas: () => invoke("refresh_all_local_account_quotas"),

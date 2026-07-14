@@ -101,6 +101,8 @@ pub struct PrepareAccountImportInput {
 pub struct ConfirmAccountImportInput {
     session_id: String,
     selected_item_ids: Vec<String>,
+    #[serde(default)]
+    add_to_pool: bool,
     #[serde(default = "default_true")]
     discover_models: bool,
     #[serde(default)]
@@ -820,7 +822,15 @@ async fn confirm_local_account_import_inner(
             continue;
         };
         if context.auth_mode == ImportAuthMode::ApiKey {
-            match import_source_item(state, item, input.discover_models, &configured_models).await {
+            match import_source_item(
+                state,
+                item,
+                input.add_to_pool,
+                input.discover_models,
+                &configured_models,
+            )
+            .await
+            {
                 Ok(source) => results.push(ImportItemResult::source_success(item_id, source)),
                 Err(error) => results.push(ImportItemResult::failure(item_id, error)),
             }
@@ -830,6 +840,7 @@ async fn confirm_local_account_import_inner(
                 &credentials,
                 item,
                 context,
+                input.add_to_pool,
                 input.discover_models,
                 probe_quota,
                 &configured_models,
@@ -1951,6 +1962,7 @@ fn timestamp_from_ms(value: u64) -> Option<String> {
 async fn import_source_item(
     state: &DesktopState,
     item: ParsedImportItem,
+    add_to_pool: bool,
     discover_models: bool,
     configured_models: &[String],
 ) -> ItemResult<ProviderSourceRecord> {
@@ -2014,13 +2026,14 @@ async fn import_source_item(
         ));
     }
 
-    let record = imported_source_record(
+    let mut record = imported_source_record(
         &item,
         runtime_source,
         secret_ref,
         existing.as_ref(),
         discover_models.then(|| Utc::now().to_rfc3339()),
     );
+    record.in_pool |= add_to_pool;
     persist_imported_source(state, &record, &api_key, existing.as_ref()).await?;
     Ok(record)
 }
@@ -2256,6 +2269,7 @@ async fn import_account_item(
     credential_store: &CredentialStore<NativeSecretBackend>,
     item: ParsedImportItem,
     context: &ImportRowContext,
+    add_to_pool: bool,
     discover_models: bool,
     probe_quota: bool,
     configured_models: &[String],
@@ -2372,6 +2386,7 @@ async fn import_account_item(
     )
     .map_err(|_| ImportItemError::new("invalid_account", "imported account record is invalid"))?;
     merge_existing_account(&mut account, existing_account.as_ref());
+    account.account.in_pool |= add_to_pool;
     if let Some(active_until_ms) = subscription_active_until_ms {
         account.account.subscription = zenith_relay_core::quota::Subscription::normalize(
             zenith_relay_core::quota::SubscriptionInput {
@@ -3965,6 +3980,7 @@ mod tests {
             ConfirmAccountImportInput {
                 session_id: session.session_id,
                 selected_item_ids,
+                add_to_pool: true,
                 discover_models: false,
                 probe_quota: false,
                 models: vec!["gpt-test".into()],
@@ -4002,6 +4018,7 @@ mod tests {
             .subscription
             .active_until_ms
             .is_some()));
+        assert!(accounts.iter().all(|account| account.account.in_pool));
 
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -4031,6 +4048,7 @@ mod tests {
             ConfirmAccountImportInput {
                 session_id: session.session_id,
                 selected_item_ids,
+                add_to_pool: true,
                 discover_models: false,
                 probe_quota: true,
                 models: vec!["gpt-test".into()],
@@ -4047,6 +4065,7 @@ mod tests {
             .all(|result| result.status == ImportItemStatus::Succeeded));
         let sources = state.store().unwrap().sources().to_vec();
         assert_eq!(sources.len(), 2);
+        assert!(sources.iter().all(|source| source.in_pool));
         assert_eq!(
             sources
                 .iter()

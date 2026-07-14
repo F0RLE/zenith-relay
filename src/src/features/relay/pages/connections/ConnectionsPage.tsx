@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, CirclePause, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
@@ -265,6 +265,9 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const exportIds = selected.length ? selected : allAccounts.map((account) => account.id);
+  const selectedAccounts = allAccounts.filter((account) => selected.includes(account.id));
+  const canIncludeSelected = selectedAccounts.some((account) => !accountParticipates(account));
+  const canExcludeSelected = selectedAccounts.some(accountParticipates);
   const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
   const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? [...new Set([...selected, ...accounts.map((account) => account.id)])] : selected.filter((id) => !accounts.some((account) => account.id === id)));
@@ -279,7 +282,6 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     );
   };
   const updateSelectedParticipation = async (participate: boolean) => {
-    const selectedAccounts = allAccounts.filter((account) => selected.includes(account.id));
     const ok = await perform("pool-membership-bulk", async () => {
       const accountIds = selectedAccounts.map((account) => account.id);
       if (mode === "local") await relayCommands.setPoolMembership(accountIds, [], participate);
@@ -338,8 +340,8 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       </div>
       <div className="account-command-actions">
         {selected.length ? <>
-          <IconButton label={t("accounts.includeSelectedInPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(true)} />
-          <IconButton label={t("accounts.excludeSelectedFromPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <CirclePause aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(false)} />
+          {canIncludeSelected ? <IconButton label={t("accounts.includeSelectedInPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(true)} /> : null}
+          {canExcludeSelected ? <IconButton label={t("accounts.excludeSelectedFromPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(false)} /> : null}
           <IconButton label={t("accounts.exportSelected", { count: selected.length })} icon={<Download aria-hidden />} disabled={!canExport || Boolean(busy)} title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selected.length })} onClick={() => onExport(exportIds)} />
           <IconButton className="danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
@@ -607,7 +609,7 @@ function OAuthDialog({ flow, onCancel, onComplete }: { flow: OAuthFlow; onCancel
 
 export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[]; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, perform, busy } = useRelayState();
+  const { mode, runtime, perform, busy } = useRelayState();
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(null);
   const [resumeId, setResumeId] = useState("");
@@ -615,8 +617,10 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
   const [selected, setSelected] = useState<string[]>([]);
   const [commandFailed, setCommandFailed] = useState(false);
   const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
+  const [addToPool, setAddToPool] = useState(false);
   const activeSessionId = useRef<string | null>(null);
   const initialPreviewStarted = useRef(false);
+  const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
   const acceptSession = (next: ImportSession) => {
     setSession(next);
     setOwnedSessionId(next.sessionId);
@@ -673,7 +677,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
     if (!session) return;
     if (mode === "local") {
       const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
-      const ok = await perform("import-confirm", async () => { result.current = await relayCommands.confirmImport(session.sessionId, selected); });
+      const ok = await perform("import-confirm", async () => { result.current = await relayCommands.confirmImport(session.sessionId, selected, addToPool); });
       if (!ok) {
         setSession(null);
         setSelected([]);
@@ -694,7 +698,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
     const ok = await perform("import-confirm", async () => {
       result.current = await relayCommands.remoteAction(
         { type: "confirm_account_batch_import" },
-        { sessionId: session.sessionId, selectedItemIds: selected, probeMetadata: true },
+        { sessionId: session.sessionId, selectedItemIds: selected, probeMetadata: true, addToPool },
       ) as Awaited<ReturnType<typeof relayCommands.confirmImport>>;
     }, "feedback.accountAdded");
     if (!ok) {
@@ -721,7 +725,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
     : [...current, itemId]);
   const footer = completed
     ? <Button variant="primary" onClick={cancel}>{t("common.close")}</Button>
-    : <><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
+    : <>{session && canImportToPool ? <label className="toggle-row import-pool-option"><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span>{t("accounts.addImportedToPool")}</span></label> : null}<Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
   const body = completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
     return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>;

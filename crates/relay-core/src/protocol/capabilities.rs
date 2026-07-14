@@ -8,6 +8,7 @@ pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
 pub enum Feature {
     Accounts,
     AccountBatchImport,
+    AccountImportToPool,
     AccountExport,
     AccountIdentityReveal,
     Sources,
@@ -29,6 +30,7 @@ impl Feature {
         match self {
             Self::Accounts => "accounts",
             Self::AccountBatchImport => "account_batch_import",
+            Self::AccountImportToPool => "account_import_to_pool",
             Self::AccountExport => "account_export",
             Self::AccountIdentityReveal => "account_identity_reveal",
             Self::Sources => "sources",
@@ -86,6 +88,7 @@ impl Capabilities {
         let features = [
             Feature::Accounts,
             Feature::AccountBatchImport,
+            Feature::AccountImportToPool,
             Feature::AccountExport,
             Feature::AccountIdentityReveal,
             Feature::Sources,

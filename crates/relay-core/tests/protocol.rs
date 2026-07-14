@@ -10,6 +10,7 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
 
     assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
     assert!(capabilities.supports(Feature::Accounts));
+    assert!(capabilities.supports(Feature::AccountImportToPool));
     assert!(capabilities.supports(Feature::AccountIdentityReveal));
     assert!(capabilities.supports(Feature::Sources));
     assert!(!capabilities.supports(Feature::ProfileAttach));

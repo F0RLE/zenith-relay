@@ -896,7 +896,9 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     let first_confirm: Value = client
         .post(format!("{}/accounts/import/batch/confirm", server.origin))
         .bearer_auth("synthetic-management-token-value")
-        .json(&json!({"sessionId": batch_id, "selectedItemIds": [first_item_id]}))
+        .json(
+            &json!({"sessionId": batch_id, "selectedItemIds": [first_item_id], "addToPool": true}),
+        )
         .send()
         .await
         .unwrap()
@@ -907,6 +909,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     assert_eq!(first_confirm["results"][0]["status"], "succeeded");
     assert_eq!(server.state.store.accounts().unwrap().len(), 1);
     let first_account = server.state.store.accounts().unwrap().remove(0);
+    assert!(first_account.in_pool);
     assert_eq!(
         first_account.subscription.plan_type.as_deref(),
         Some("plus")
@@ -945,6 +948,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         .into_iter()
         .find(|account| account.label == "Portable second")
         .unwrap();
+    assert!(!second_account.in_pool);
     assert_eq!(
         second_account.subscription.plan_type.as_deref(),
         Some("business")

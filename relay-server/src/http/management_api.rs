@@ -941,6 +941,8 @@ pub struct BatchImportConfirmInput {
     session_id: String,
     selected_item_ids: Vec<String>,
     #[serde(default)]
+    add_to_pool: bool,
+    #[serde(default)]
     probe_metadata: bool,
 }
 
@@ -988,6 +990,7 @@ pub async fn confirm_account_batch_import(
             &state,
             &item_id,
             Some(&input.session_id),
+            input.add_to_pool,
             probe_metadata,
         )
         .await
@@ -1417,6 +1420,8 @@ fn invalid_batch_row(ordinal: usize, code: String, message: String) -> BatchImpo
 pub struct ConfirmImportInput {
     session_id: String,
     #[serde(default)]
+    add_to_pool: bool,
+    #[serde(default)]
     probe_metadata: bool,
 }
 
@@ -1424,15 +1429,22 @@ pub async fn confirm_account_import(
     State(state): State<Arc<AppState>>,
     Json(input): Json<ConfirmImportInput>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
-    confirm_one_account_import(&state, &input.session_id, None, input.probe_metadata)
-        .await
-        .map(Json)
+    confirm_one_account_import(
+        &state,
+        &input.session_id,
+        None,
+        input.add_to_pool,
+        input.probe_metadata,
+    )
+    .await
+    .map(Json)
 }
 
 async fn confirm_one_account_import(
     state: &Arc<AppState>,
     session_id: &str,
     batch_session_id: Option<&str>,
+    add_to_pool: bool,
     probe_metadata: bool,
 ) -> Result<AccountSummary, ManagementError> {
     if !valid_generated_id(session_id, "import_") {
@@ -1491,7 +1503,7 @@ async fn confirm_one_account_import(
         label: preview.label,
         identity_hint: preview.identity_hint,
         enabled: true,
-        in_pool: existing.as_ref().is_some_and(|value| value.in_pool),
+        in_pool: add_to_pool || existing.as_ref().is_some_and(|value| value.in_pool),
         draining: false,
         source_id: "openai_codex".to_string(),
         secret_ref: pending.secret_ref.clone(),

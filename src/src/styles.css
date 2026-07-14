@@ -5251,6 +5251,10 @@ textarea {
   border-bottom: 0;
 }
 
+.import-pool-option {
+  margin-right: auto;
+}
+
 .relay-dialog-body {
   overflow: auto;
   padding: 18px;

@@ -31,13 +31,16 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(imported).toBeChecked();
   await expect(secondImported).toBeChecked();
   await expect(existing).not.toBeChecked();
+  await importDialog.getByLabel("Add selected to pool after import").check();
   await importDialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(importDialog).toBeHidden();
   const importCalls = await page.evaluate(() => {
-    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { selectedItemIds?: string[] } } }> }).__TAURI_TEST_INVOKES__;
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { selectedItemIds?: string[]; addToPool?: boolean } } }> }).__TAURI_TEST_INVOKES__;
+    const confirmation = calls.findLast((call) => call.command === "confirm_local_account_import")?.args.input;
     return {
       filePreviewCalls: calls.filter((call) => call.command === "preview_local_account_import_files").length,
-      selected: calls.findLast((call) => call.command === "confirm_local_account_import")?.args.input?.selectedItemIds,
+      selected: confirmation?.selectedItemIds,
+      addToPool: confirmation?.addToPool,
     };
   });
   expect(importCalls.filePreviewCalls).toBe(1);
@@ -45,6 +48,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
     "import_0123456789abcdef",
     "import_1111222233334444",
   ]);
+  expect(importCalls.addToPool).toBe(true);
 
   await page.getByRole("tab", { name: "Automations" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
@@ -480,14 +484,15 @@ test("plan filters and pool controls exclude a selected account without deleting
   await page.getByRole("button", { name: "Free (1)", exact: true }).click();
   await expect(page.locator(".account-card")).toHaveCount(1);
   await page.getByLabel("Select all accounts").check();
-  await page.getByRole("button", { name: "Exclude selected", exact: true }).click();
+  await page.getByRole("button", { name: "Remove selected from pool", exact: true }).click();
 
   await page.getByRole("button", { name: "Excluded (1)", exact: true }).click();
   const card = page.locator(".account-card").filter({ hasText: "Backup account" });
   await expect(card).toBeVisible();
-  const participation = card.getByRole("switch", { name: "Use Backup account in the pool" });
-  await expect(participation).not.toBeChecked();
-  await participation.click();
+  await page.getByLabel("Select all accounts").check();
+  await expect(page.getByRole("button", { name: "Add selected to pool", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove selected from pool", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Add selected to pool", exact: true }).click();
   await expect(card).toBeHidden();
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(2);
@@ -507,9 +512,9 @@ test("bulk account actions stay compact and delete the selected records", async 
 
   const actions = page.locator(".account-command-bar > div:last-child");
   await expect(actions.locator(".relay-button")).toHaveCount(0);
-  await expect(actions.locator(".relay-icon-button")).toHaveCount(5);
-  await expect(actions.getByRole("button", { name: "Include selected" })).toBeVisible();
-  await expect(actions.getByRole("button", { name: "Exclude selected" })).toBeVisible();
+  await expect(actions.locator(".relay-icon-button")).toHaveCount(4);
+  await expect(actions.getByRole("button", { name: "Add selected to pool" })).toHaveCount(0);
+  await expect(actions.getByRole("button", { name: "Remove selected from pool" })).toBeVisible();
   await expect(actions.getByRole("button", { name: "Export selected (3)" })).toBeVisible();
 
   page.once("dialog", (dialog) => dialog.accept());
@@ -1463,6 +1468,7 @@ test("remote bulk import previews multiple files and confirms selected rows", as
   await expect(imported).toBeChecked();
   await expect(secondImported).toBeChecked();
   await expect(existing).not.toBeChecked();
+  await dialog.getByLabel("Add selected to pool after import").check();
   await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(dialog).toBeHidden();
   await page.getByRole("tab", { name: "Sources" }).click();
@@ -1485,6 +1491,7 @@ test("remote bulk import previews multiple files and confirms selected rows", as
         sessionId: "remote_import",
         selectedItemIds: ["import_0123456789abcdef", "import_1111222233334444"],
         probeMetadata: true,
+        addToPool: true,
       },
     },
     { action: { type: "test_source", id: "source_synthetic" }, payload: null },

@@ -191,7 +191,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy"] };
 
     function sourceFromPayload(payload: Record<string, unknown>, id: string) {
       return {
