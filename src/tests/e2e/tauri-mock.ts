@@ -376,8 +376,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "resume_codex_oauth": return { loginId: String(args.loginId ?? "oauth_synthetic"), authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "pending" };
           case "get_codex_oauth_status": return { loginId: "oauth_synthetic", authorizationUrl: "https://auth.example.invalid/authorize", redirectUri: "http://localhost:1455/auth/callback", expiresAtMs: Date.now() + 600_000, status: "callback_received" };
           case "submit_codex_oauth_callback":
-          case "complete_codex_oauth":
           case "cancel_codex_oauth": return null;
+          case "complete_codex_oauth": return { account: { id: "account_synthetic" } };
           case "create_local_gateway_key": localRuntime.keys = [key]; return { key: structuredClone(key), secret: "zlr_synthetic_local_key" };
           case "update_local_gateway_key": {
             const request = args.input as Record<string, unknown> & { keyId?: string };

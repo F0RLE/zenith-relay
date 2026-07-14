@@ -4,7 +4,8 @@ import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, Copy, CreditCard, Downlo
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, RuntimeSnapshot, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, RelayMode, RuntimeSnapshot, SourceSummary, WakeTask } from "../../api/types";
+import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
   Button,
   ActionMenu,
@@ -607,9 +608,10 @@ function OAuthDialog({ flow, onCancel, onComplete }: { flow: OAuthFlow; onCancel
   </Dialog>;
 }
 
-export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[]; onClose: () => void }) {
+export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = false, onImported, onClose }: { initialPaths?: string[]; modeOverride?: RelayMode; defaultAddToPool?: boolean; onImported?: () => void; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode: currentMode, runtime, perform, busy } = useRelayState();
+  const mode = modeOverride ?? currentMode;
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(null);
   const [resumeId, setResumeId] = useState("");
@@ -617,7 +619,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
   const [selected, setSelected] = useState<string[]>([]);
   const [commandFailed, setCommandFailed] = useState(false);
   const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
-  const [addToPool, setAddToPool] = useState(false);
+  const [addToPool, setAddToPool] = useState(defaultAddToPool);
   const activeSessionId = useRef<string | null>(null);
   const initialPreviewStarted = useRef(false);
   const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
@@ -686,6 +688,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
         return;
       }
       const failures = collectImportFailures(result.current, session);
+      if (result.current?.results.some((item) => item.status === "succeeded")) onImported?.();
       activeSessionId.current = null;
       if (failures.length) {
         setCompleted(failures);
@@ -706,6 +709,7 @@ export function ImportDialog({ initialPaths, onClose }: { initialPaths?: string[
       return;
     }
     const failures = collectImportFailures(result.current, session);
+    if (result.current?.results.some((item) => item.status === "succeeded")) onImported?.();
     activeSessionId.current = null;
     if (failures.length) setCompleted(failures);
     else onClose();
@@ -792,10 +796,22 @@ function DeployDialog({ onClose }: { onClose: () => void }) {
 
 function ReadyApiDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
-  const { perform, busy } = useRelayState();
-  const [apiKey, setApiKey] = useState("");
-  const save = async () => { const ok = await perform("ready-save", () => saveKey(apiKey), "feedback.connected"); if (ok) onClose(); };
-  return <Dialog title={t("readyApi.connect")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "ready-save"} disabled={!apiKey.trim()} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><div className="recommended-line"><strong>Zenith API</strong><span>{t("common.recommended")}</span></div><SecretField label={t("readyApi.key")} value={apiKey} onChange={setApiKey} /></div></Dialog>;
+  const { perform, busy, setMode } = useRelayState();
+  const [provider, setProvider] = useState(defaultApiProviderValue);
+  const save = async () => {
+    const ok = await perform("ready-save", async () => {
+      if (provider.kind === "zenith") {
+        await saveKey(provider.apiKey);
+        return;
+      }
+      const created = await relayCommands.createSource(apiProviderSourceInput(provider)) as { id: string };
+      await relayCommands.setPoolMembership([], [created.id], true);
+    }, "feedback.connected");
+    if (!ok) return;
+    if (provider.kind !== "zenith") setMode("local");
+    onClose();
+  };
+  return <Dialog wide title={t("apiProviders.connect")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "ready-save"} disabled={!apiProviderReady(provider)} onClick={save}>{t("apiProviders.connectAction")}</Button></>}><ApiProviderForm value={provider} onChange={setProvider} /></Dialog>;
 }
 
 function TopUpDialog({ onClose }: { onClose: () => void }) {

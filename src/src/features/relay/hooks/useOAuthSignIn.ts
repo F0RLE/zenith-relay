@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { relayCommands } from "../api/commands";
-import type { OAuthFlow, OAuthFlowEvent } from "../api/types";
+import type { OAuthCompletion, OAuthFlow, OAuthFlowEvent } from "../api/types";
 import { useRelayState } from "../state/RelayStateProvider";
 
-export function useOAuthSignIn(onComplete?: () => void) {
+export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | Promise<void>) {
   const { perform } = useRelayState();
   const [flow, setFlow] = useState<OAuthFlow | null>(null);
   const flowRef = useRef<OAuthFlow | null>(null);
@@ -29,15 +29,16 @@ export function useOAuthSignIn(onComplete?: () => void) {
   const finish = useCallback(async (loginId: string, callbackUrl?: string) => {
     if (completingRef.current) return false;
     completingRef.current = true;
+    const completed: { current: OAuthCompletion | null } = { current: null };
     const ok = await perform("oauth-complete", async () => {
       if (callbackUrl) await relayCommands.submitOAuthCallback(loginId, callbackUrl);
-      await relayCommands.completeOAuth(loginId);
+      completed.current = await relayCommands.completeOAuth(loginId);
     }, "feedback.accountAdded");
     completingRef.current = false;
-    if (ok) {
+    if (ok && completed.current) {
       flowRef.current = null;
       setFlow(null);
-      onCompleteRef.current?.();
+      await onCompleteRef.current?.(completed.current);
     }
     return ok;
   }, [perform]);

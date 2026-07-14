@@ -15,9 +15,9 @@ storage behavior remain owned by the architecture documents.
 Zenith Relay has three user-facing runtime scenarios:
 
 ```text
-This computer
-My server
+Account pool
 Ready API
+Self-hosted
 ```
 
 The modes share one shell and the same object names:
@@ -35,9 +35,9 @@ Mode differences:
 
 | Public label | Internal id | Runtime | Secrets | Endpoint |
 | --- | --- | --- | --- | --- |
-| This computer | `local` | Desktop process | Device secret store | `http://127.0.0.1:<port>/v1` |
-| My server | `remote` | User-managed server | Selected server | User server `/v1` |
+| Account pool | `local` | Desktop process | Device secret store | `http://127.0.0.1:<port>/v1` |
 | Ready API | `zenith` | Selected compatible cloud service | Device secret store | Selected service `/v1` |
+| Self-hosted | `remote` | User-managed server | Selected server | User server `/v1` |
 
 The legacy internal ids `local`, `remote`, and `zenith` remain implementation
 details. They are not public product names and do not force Ready API to use
@@ -110,7 +110,7 @@ Models, Instances, Backups, or Diagnostics.
 
 Mode visibility:
 
-| Navigation | Ready API | This computer | My server |
+| Navigation | Ready API | Account pool | Self-hosted |
 | --- | --- | --- | --- |
 | Overview | yes | yes | yes |
 | Connections | yes | yes | yes |
@@ -176,14 +176,14 @@ buttons.
 The mode selector sits at the top of the sidebar under the product name.
 
 ```text
-[ icon ] This computer                      chevron
+[ icon ] Account pool                       chevron
 ```
 
 Click opens a menu:
 
 ```text
-This computer
-My server
+Account pool
+Self-hosted
 Ready API
 ```
 
@@ -289,8 +289,9 @@ primary action, and keeps technical details collapsed.
 
 ### Language And Localization
 
-The app reads the operating-system language on first launch. A language select
-remains visible in the setup header and later under Settings -> General.
+The app reads the operating-system language on first launch. A compact language
+select floats at the top-right of setup and later remains under Settings ->
+General.
 
 Localization rules:
 
@@ -300,8 +301,8 @@ Localization rules:
 - English mode uses the corresponding English strings everywhere;
 - product and protocol names such as `Zenith`, `Codex`, `OpenCode`, `OpenAI`,
   `OAuth`, model ids, URLs, and file paths remain unchanged;
-- user-facing labels use `На этом компьютере`, `На своём сервере`, `Готовый
-  API`, `Адрес API`, and `Совместимый API`, not internal mode ids or unexplained
+- user-facing labels use `Пул аккаунтов`, `Свой сервер`, `Готовый API`, `Адрес
+  API`, and `Совместимый API`, not internal mode ids or unexplained
   English terms;
 - every UI string comes from translation resources; components do not contain
   hardcoded prose;
@@ -313,9 +314,8 @@ Localization rules:
 ### Setup Shell
 
 ```text
-+ Title bar ---------------------------------------------------------------+
-| Zenith Relay                                      Language   Skip setup   |
-+ Progress ----------------------------------------------------------------+
++ Native title bar --------------------------------------------------------+
++ Progress -------------------------------------------- Language ----------+
 | Mode -------- Connection -------- Check -------- Client -------- Ready    |
 + Body --------------------------------------------------------------------+
 | one question                                                             |
@@ -343,19 +343,19 @@ Choices:
 
 | UI label | One-line explanation | Flow preview |
 | --- | --- | --- |
-| На этом компьютере | Sign in to personal accounts and expose a local endpoint | Accounts -> Relay -> application |
-| На своём сервере | Run the same personal setup around the clock | Accounts -> server -> devices |
-| Подключить готовый API | Use Zenith or another compatible hosted API | Ready API -> profile -> application |
+| Пул аккаунтов | Sign in to personal accounts and expose a local endpoint | Accounts -> Relay -> application |
+| Готовый API | Use Zenith or another compatible hosted API | Ready API -> profile -> application |
+| Свой сервер | Run the same personal setup around the clock | Accounts -> server -> devices |
 
 The selected choice uses a check icon, border, and soft accent background.
-`На этом компьютере` is selected by default. `Continue` is disabled only when
+`Пул аккаунтов` is selected by default. `Continue` is disabled only when
 no choice is selected.
 
 ### Step 2: Connection
 
 The entire step changes for the selected mode.
 
-This computer:
+Account pool:
 
 ```text
 Sign in to a Codex account through OAuth
@@ -363,7 +363,7 @@ Import an existing local session
 Optionally add another supported account type later
 ```
 
-My server:
+Self-hosted:
 
 ```text
 [ Connect existing server | Deploy new server ]
@@ -374,9 +374,9 @@ or deployment method + generated configuration
 Ready API:
 
 ```text
-[ Zenith, Recommended | Another compatible API ]
+[ Zenith, Recommended | OpenAI | OpenRouter | Custom API ]
 masked key
-custom API address only for the second option
+name, API address, and protocol for non-Zenith sources
 ```
 
 The local path is account-first and never requires an external API key. Zenith
@@ -511,11 +511,11 @@ Mode primary action:
 | --- | --- |
 | Ready API disconnected | Connect API |
 | Ready API connected | Open connection |
-| This computer stopped | Start endpoint |
-| This computer running | Stop endpoint |
-| My server disconnected | Connect server |
-| My server offline | Retry |
-| My server online | Open endpoint |
+| Account pool stopped | Start endpoint |
+| Account pool running | Stop endpoint |
+| Self-hosted disconnected | Connect server |
+| Self-hosted offline | Retry |
+| Self-hosted online | Open endpoint |
 
 Metrics are a flat horizontal band. They are not separate floating cards.
 
@@ -544,8 +544,8 @@ Visible tabs:
 | Mode | Tabs |
 | --- | --- |
 | Ready API | API connection |
-| This computer | Sources, Accounts, Automations |
-| My server | Sources, Accounts, Automations, Remote Server |
+| Account pool | Sources, Accounts, Automations |
+| Self-hosted | Sources, Accounts, Automations, Remote Server |
 
 ### Add Connection
 
@@ -563,11 +563,11 @@ Deploy server
 
 Only actions valid for the current mode are shown.
 
-In Ready API mode, the menu offers `Zenith API` with a `Recommended` badge and
-`Another compatible API`. Account import is hidden. In This computer and My
-server modes, account actions appear first; optional API-source actions follow
-them without highlighting Zenith. `Import` opens account/session import
-directly.
+In Ready API mode, the menu offers `Zenith API` with a `Recommended` badge,
+`OpenAI`, `OpenRouter`, and `Custom API`. Account import is hidden. In Account
+pool and Self-hosted server modes, account actions appear first; optional
+API-source actions follow them without highlighting Zenith. `Import` opens
+account/session import directly.
 
 ### Sources Table
 
@@ -633,7 +633,7 @@ quota windows and supports a harmless wake request.
 
 ### Automations
 
-Visible only in This computer and My server modes. Purpose: start a new quota
+Visible only in Account pool and Self-hosted modes. Purpose: start a new quota
 countdown after a selected account window has fully recovered, before client
 demand arrives.
 
@@ -727,7 +727,7 @@ Do not edit authentication, model lists, quota, or protocol in a narrow drawer.
 
 ## Pool
 
-Visible only in This computer and My server modes.
+Visible only in Account pool and Self-hosted modes.
 
 Purpose: control which connected accounts and sources may serve requests.
 
@@ -889,8 +889,8 @@ Mode behavior:
 | Mode | Header action | Editable runtime settings |
 | --- | --- | --- |
 | Ready API | none | none |
-| This computer | Start/Stop | port, host, bind scope |
-| My server | Retry/Restart when supported | capability-dependent |
+| Account pool | Start/Stop | port, host, bind scope |
+| Self-hosted | Retry/Restart when supported | capability-dependent |
 
 Key rotation is owned by `Pool -> Keys`, not the endpoint header.
 
@@ -1056,7 +1056,7 @@ Security:
 
 - secret store state;
 - temporary reveal timeout;
-- LAN and insecure My server warnings.
+- LAN and insecure Self-hosted warnings.
 
 Recovery:
 
@@ -1120,7 +1120,7 @@ Failed rows remain visible with a reason. Partial import is allowed.
 2. Generate configuration
 3. Show command/package
 4. Test deployed server
-5. Save as active My server runtime
+5. Save as active Self-hosted runtime
 ```
 
 MVP methods:
@@ -1419,7 +1419,7 @@ Frontend never:
 7. Quota wake Automations and execution history.
 8. Usage table and request drawer.
 9. Profiles attach/restore/repair.
-10. My server connect/deploy/server view.
+10. Self-hosted connect/deploy/server view.
 11. Settings, recovery, dark theme, and compact layout.
 
 ## Acceptance Checklist
@@ -1431,11 +1431,11 @@ Frontend never:
   duplicate sidebar pages.
 - Ready API supports Zenith and custom compatible APIs without making Zenith a
   separate top-level scenario.
-- This computer works with OAuth accounts only, can start the endpoint, copy
+- Account pool works with OAuth accounts only, can start the endpoint, copy
   key/URL, and attach a client without requiring an external API source.
 - Pool policy exposes priority/weight/model rules without exposing internal
   Zenith routing.
-- My server can connect or deploy and remains clearly user-managed.
+- Self-hosted can connect or deploy and remains clearly user-managed.
 - Wake automation runs at most once per account/window cycle and never stores
   generated response content.
 - Every command has loading, failure, disabled reason, and success feedback.

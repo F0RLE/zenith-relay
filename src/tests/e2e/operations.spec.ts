@@ -258,6 +258,23 @@ test("Ready API top-up uses the stored-key backend command", async ({ page }) =>
   await expect(page.getByText("Top-up opened in Telegram.")).toBeVisible();
 });
 
+test("Ready API connection dialog can switch to a custom local source", async ({ page }) => {
+  await installTauriMock(page, { mode: "zenith", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Update key" }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect API" });
+  await dialog.getByRole("radio", { name: /Custom API/ }).click();
+  await dialog.getByLabel("Name").fill("Private gateway");
+  await dialog.getByLabel("API address").fill("https://gateway.example.invalid/v1");
+  await dialog.getByLabel("Upstream API key").fill("synthetic-private-key");
+  await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Mode: Account pool", exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Private gateway", baseUrl: "https://gateway.example.invalid/v1", wireApi: "responses" });
+  expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_2"], inPool: true } });
+});
+
 test("recovery and export controls call the Rust-owned operations", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");

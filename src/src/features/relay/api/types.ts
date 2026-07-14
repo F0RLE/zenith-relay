@@ -328,6 +328,10 @@ export type OAuthFlow = {
 
 export type OAuthFlowEvent = Pick<OAuthFlow, "loginId" | "status">;
 
+export type OAuthCompletion = {
+  account: { id: string };
+};
+
 export type RemoteTarget = {
   origin: string;
   serverId: string;

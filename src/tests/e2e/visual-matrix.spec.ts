@@ -527,11 +527,11 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     const shell = page.locator(".relay-shell");
-    const modeButton = page.getByRole("button", { name: "Mode: This computer" });
+    const modeButton = page.getByRole("button", { name: "Mode: Account pool" });
     await modeButton.click();
     const modeMenu = page.getByRole("menu");
     await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
-    await expect(modeMenu.getByRole("menuitemradio", { name: "This computer" })).toHaveAttribute("aria-checked", "true");
+    await expect(modeMenu.getByRole("menuitemradio", { name: "Account pool" })).toHaveAttribute("aria-checked", "true");
     expect(await modeMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;

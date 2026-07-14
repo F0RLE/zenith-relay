@@ -13,6 +13,7 @@ import type {
   OpenCodeProfileState,
   OAuthFlow,
   OAuthFlowEvent,
+  OAuthCompletion,
   ProfileActivation,
   ProfileBinding,
   ProfileSnapshot,
@@ -67,7 +68,7 @@ export const relayCommands = {
   startOAuth: () => invoke<OAuthFlow>("start_codex_oauth"),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
   submitOAuthCallback: (loginId: string, callbackUrl: string) => invoke("submit_codex_oauth_callback", { loginId, callbackUrl }),
-  completeOAuth: (loginId: string) => invoke("complete_codex_oauth", { loginId }),
+  completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
   cancelOAuth: (loginId: string) => invoke("cancel_codex_oauth", { loginId }),
 
   createKey: (label: string) => invoke<{ key: KeySummary; secret: string }>("create_local_gateway_key", { label }),
