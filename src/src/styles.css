@@ -2320,6 +2320,15 @@ textarea {
   padding: 0;
 }
 
+.relay-icon-button.danger {
+  color: var(--relay-error);
+}
+
+.relay-icon-button.danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--relay-error) 55%, var(--relay-border));
+  background: var(--relay-error-soft);
+}
+
 .relay-button:hover:not(:disabled),
 .relay-icon-button:hover:not(:disabled) {
   border-color: var(--relay-border-strong);

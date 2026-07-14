@@ -3,8 +3,10 @@ import { ArrowRightLeft, ArrowUpDown, CheckCheck, KeyRound, LayoutGrid, List, Lo
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, KeySummary, ModelSummary, SourceSummary } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
+import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { SourceDialog } from "../connections/ConnectionsPage";
 
 type View = "members" | "keys" | "models";
 type MemberSort = "routing" | "quota" | "name";
@@ -17,6 +19,7 @@ export function PoolPage() {
   const { mode, runtime, activateCodexProfile, busy, perform, codexPoolOauthSelection } = useRelayState();
   const [view, setView] = useState<View>("members");
   const [createKey, setCreateKey] = useState(false);
+  const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
   const [quotaPolicy, setQuotaPolicy] = useState(false);
   const supportsKeys = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
@@ -62,7 +65,7 @@ export function PoolPage() {
     </ActionMenu> : null}
   </> : viewAction;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
-  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
+  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
 
 function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolicy: () => void }) {
@@ -110,7 +113,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
         const statusTone = !member.enabled ? "disabled" : ready ? "ready" : "warning";
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
-          ? `${member.wireApi} · ${member.baseUrl}`
+          ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
           : `${member.label} · ${formatAccountPlan(member.subscription.planType, t("common.unknown"))}`;
         const quota = memberQuota(member);
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
@@ -152,6 +155,7 @@ function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: 
   const { mode, runtime, perform, busy } = useRelayState();
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [priority, setPriority] = useState(member.priority);
+  const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [weight, setWeight] = useState(member.weight);
   const [allowed, setAllowed] = useState(member.allowedModels.join(", "));
   const [excluded, setExcluded] = useState(member.excludedModels.join(", "));
@@ -159,22 +163,24 @@ function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: 
   const save = async () => {
     const allowedModels = parseList(allowed);
     const excludedModels = parseList(excluded);
-    const payload = { priority, weight, allowedModels, excludedModels, draining };
+    const resolvedPriority = member.kind === "source" ? apiSourcePriority(sourceRole) : priority;
+    const payload = { priority: resolvedPriority, weight, allowedModels, excludedModels, draining };
     const ok = await perform(`member-${member.id}`, () => {
       if (member.kind === "account") return mode === "local"
-        ? relayCommands.updateAccount({ accountId: member.id, priority, weight, allowedModels, excludedModels, draining })
+        ? relayCommands.updateAccount({ accountId: member.id, priority: resolvedPriority, weight, allowedModels, excludedModels, draining })
         : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
-      const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, allowedModels, excludedModels, draining, priority, weight };
+      const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, allowedModels, excludedModels, draining, priority: resolvedPriority, weight };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="danger" onClick={onRemove}>{t("pool.removeMember")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}><div className="relay-form"><div className="settings-row"><label><span title={t("pool.priorityHelp")}>{t("pool.routingPriority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label><label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><p className="form-note">{t("pool.modelListHint")}</p></div></Dialog>;
+  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="danger" onClick={onRemove}>{t("pool.removeMember")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}><div className="relay-form"><div className="settings-row">{member.kind === "source" ? <label><span>{t("sources.poolRole")}</span><select value={sourceRole} onChange={(event) => setSourceRole(event.target.value as ApiSourceRole)}><option value="primary">{t("sources.roles.primary")}</option><option value="stabilizer">{t("sources.roles.stabilizer")}</option><option value="reserve">{t("sources.roles.reserve")}</option></select><small>{t(`sources.roleHints.${sourceRole}`)}</small></label> : <label><span title={t("pool.priorityHelp")}>{t("pool.routingPriority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label>}<label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><p className="form-note">{t("pool.modelListHint")}</p></div></Dialog>;
 }
 
-function AddMembersDialog({ onClose }: { onClose: () => void }) {
+function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const canAddSource = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("sources"));
   const [accountIds, setAccountIds] = useState<string[]>([]);
   const [sourceIds, setSourceIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -212,8 +218,9 @@ function AddMembersDialog({ onClose }: { onClose: () => void }) {
     if (ok) onClose();
   };
   return <Dialog wide title={t("pool.addMembersTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "pool-add-members"} disabled={!selectedCount} onClick={add}>{t("pool.addSelected", { count: selectedCount })}</Button></>}>
-    {availableCount ? <div className="relay-form pool-member-picker">
-      <div className="pool-member-picker-intro"><p className="form-note">{t("pool.addMembersHint")}</p><Button variant="secondary" icon={allSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} onClick={toggleAll}>{allSelected ? t("accounts.clearSelection") : t("pool.selectAllMembers", { count: availableCount })}</Button></div>
+    <div className="relay-form pool-member-picker">
+      <div className="pool-member-picker-intro"><p className="form-note">{t("pool.addMembersHint")}</p><div className="inline-actions">{availableCount ? <Button variant="secondary" icon={allSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} onClick={toggleAll}>{allSelected ? t("accounts.clearSelection") : t("pool.selectAllMembers", { count: availableCount })}</Button> : null}<Button variant="secondary" icon={<Plus aria-hidden />} disabled={!canAddSource} title={!canAddSource ? t("remote.capabilityUnavailable") : undefined} onClick={onAddSource}>{t("sources.addToPool")}</Button></div></div>
+      {availableCount ? <>
       {allAccounts.length ? <section>
         <header><strong>{t("connections.accounts")}</strong><span>{t("pool.availableAccounts", { count: allAccounts.length })}</span></header>
         <label className="relay-field"><span>{t("pool.searchAccounts")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchAccountsPlaceholder")} /></label>
@@ -221,8 +228,9 @@ function AddMembersDialog({ onClose }: { onClose: () => void }) {
         <div className="pool-member-options">{accounts.map((account) => { const plan = formatAccountPlan(account.subscription.planType, t("common.unknown")); return <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><em data-plan={plan.toLocaleLowerCase()}>{plan}</em></label>; })}</div>
         {!accounts.length ? <p className="form-note">{t("pool.noMatchingAccounts")}</p> : null}
       </section> : null}
-      {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span><strong>{source.name}</strong><small>{source.baseUrl}</small></span></label>)}</div></section> : null}
-    </div> : <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} />}
+      {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
+      </> : <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} />}
+    </div>
   </Dialog>;
 }
 
@@ -250,7 +258,7 @@ function KeysView({ onCreate }: { onCreate: () => void }) {
           await perform(`rotate-${key.id}`, async () => { result.current = mode === "local" ? await relayCommands.rotateKey(key.id) : await relayCommands.remoteAction({ type: "rotate_key", id: key.id }) as { secret: string }; }, "feedback.keyRotated");
           if (result.current) setRevealed(result.current.secret);
         }}>{t("keys.rotate")}</ActionMenuItem>
-        <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("keys.deleteConfirm"))) void perform(`delete-${key.id}`, () => mode === "local" ? relayCommands.deleteKey(key.id) : relayCommands.remoteAction({ type: "delete_key", id: key.id }), "feedback.deleted"); }}>{t("common.delete")}</ActionMenuItem>
+        <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("keys.deleteConfirm"))) void perform(`delete-${key.id}`, () => mode === "local" ? relayCommands.deleteKey(key.id) : relayCommands.remoteAction({ type: "delete_key", id: key.id }), "feedback.deleted"); }}>{t("keys.delete")}</ActionMenuItem>
       </ActionMenu></td>
     </tr>)}</tbody></table></div>
     {revealed ? <div className="one-time-secret" role="status"><strong>{t("keys.copyNow")}</strong><code>{revealed}</code><Button variant="secondary" onClick={() => navigator.clipboard.writeText(revealed)}>{t("common.copy")}</Button></div> : null}
@@ -272,7 +280,12 @@ function KeyPolicyDialog({ value, onClose }: { value: KeySummary; onClose: () =>
     const ok = await perform(`key-policy-${value.id}`, () => mode === "local" ? relayCommands.updateKey({ keyId: value.id, ...payload }) : relayCommands.remoteAction({ type: "update_key", id: value.id }, payload), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog wide title={t("keys.editPolicy")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `key-policy-${value.id}`} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("keys.label")}</span><input value={label} onChange={(event) => setLabel(event.target.value)} /></label><fieldset><legend>{t("pool.members")}</legend><div className="scope-grid">{runtime?.accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} />{account.label}</label>)}{runtime?.sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} />{source.name}</label>)}</div></fieldset><label className="relay-field"><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label className="relay-field"><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label><label className="relay-field"><span>{t("keys.modelPrefix")}</span><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></label></div></Dialog>;
+  const remove = async () => {
+    if (!window.confirm(t("keys.deleteConfirm"))) return;
+    const ok = await perform(`delete-${value.id}`, () => mode === "local" ? relayCommands.deleteKey(value.id) : relayCommands.remoteAction({ type: "delete_key", id: value.id }), "feedback.deleted");
+    if (ok) onClose();
+  };
+  return <Dialog wide title={t("keys.editPolicy")} onClose={onClose} footer={<><Button variant="danger" busy={busy === `delete-${value.id}`} onClick={() => void remove()}>{t("keys.delete")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `key-policy-${value.id}`} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><p className="form-note">{t("keys.clientHint")}</p><label className="relay-field"><span>{t("keys.label")}</span><input value={label} onChange={(event) => setLabel(event.target.value)} /></label><fieldset><legend>{t("pool.members")}</legend><div className="scope-grid">{runtime?.accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} />{account.label}</label>)}{runtime?.sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} />{source.name}</label>)}</div></fieldset><label className="relay-field"><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label className="relay-field"><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label><label className="relay-field"><span>{t("keys.modelPrefix")}</span><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></label></div></Dialog>;
 }
 
 function ModelsView() {

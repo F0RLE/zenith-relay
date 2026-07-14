@@ -38,6 +38,23 @@ export function compareAccountPlans(left: { id: string; label: string }, right: 
   return (leftRank < 0 ? accountPlanOrder.length : leftRank) - (rightRank < 0 ? accountPlanOrder.length : rightRank) || left.label.localeCompare(right.label);
 }
 
+export type ApiSourceRole = "primary" | "stabilizer" | "reserve";
+
+const API_SOURCE_PRIMARY_PRIORITY = 1_000_000;
+const API_SOURCE_RESERVE_PRIORITY = -1_000_000;
+
+export function apiSourceRole(priority: number): ApiSourceRole {
+  if (priority >= API_SOURCE_PRIMARY_PRIORITY) return "primary";
+  if (priority <= API_SOURCE_RESERVE_PRIORITY) return "reserve";
+  return "stabilizer";
+}
+
+export function apiSourcePriority(role: ApiSourceRole) {
+  if (role === "primary") return API_SOURCE_PRIMARY_PRIORITY;
+  if (role === "reserve") return API_SOURCE_RESERVE_PRIORITY;
+  return 0;
+}
+
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
   return (
     <header className="relay-page-header">

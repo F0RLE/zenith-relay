@@ -1,10 +1,10 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, CirclePause, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, CirclePause, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, RuntimeSnapshot, SourceSummary, WakeTask } from "../../api/types";
 import {
   Button,
   ActionMenu,
@@ -19,9 +19,12 @@ import {
   Tabs,
   copyText,
   accountPlanOption,
+  apiSourcePriority,
+  apiSourceRole,
   compareAccountPlans,
   formatAccountPlan,
 } from "../../components/Ui";
+import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
@@ -279,6 +282,34 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     }, "feedback.saved");
     if (ok) setSelected([]);
   };
+  const deleteAccounts = async (accountIds: string[], operation: string) => {
+    const ok = await perform(operation, async () => {
+      for (const accountId of accountIds) {
+        if (mode === "local") await relayCommands.deleteAccount(accountId);
+        else await relayCommands.remoteAction({ type: "delete_account", id: accountId });
+      }
+    }, "feedback.deleted");
+    if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
+    return ok;
+  };
+  const deleteSelected = () => {
+    const accountIds = allAccounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
+    if (accountIds.length && window.confirm(t("accounts.deleteSelectedConfirm", { count: accountIds.length }))) {
+      void deleteAccounts(accountIds, "delete-selected-accounts");
+    }
+  };
+  const refreshAndDeleteNonWorking = async () => {
+    const refreshedSnapshot: { current: RuntimeSnapshot | null } = { current: null };
+    const refreshed = await perform("refresh-non-working-accounts", async () => {
+      await relayCommands.refreshAllAccountQuotas();
+      refreshedSnapshot.current = await relayCommands.localState();
+    }, "feedback.refreshed");
+    if (!refreshed || !refreshedSnapshot.current) return;
+    const accountIds = refreshedSnapshot.current.accounts.filter(accountIsTerminallyUnusable).map((account) => account.id);
+    if (accountIds.length && window.confirm(t("accounts.deleteNonWorkingConfirm", { count: accountIds.length }))) {
+      await deleteAccounts(accountIds, "delete-non-working-accounts");
+    }
+  };
   const toggleIdentity = async (account: AccountSummary) => {
     if (revealedIdentities[account.id]) {
       setRevealedIdentities((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== account.id)));
@@ -302,9 +333,10 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       </div>
       <div>
         {selected.length ? <>
-          <Button variant="secondary" icon={<Play aria-hidden />} busy={busy === "pool-membership-bulk"} onClick={() => void updateSelectedParticipation(true)}>{t("accounts.includeSelectedInPool")}</Button>
-          <Button variant="secondary" icon={<CirclePause aria-hidden />} busy={busy === "pool-membership-bulk"} onClick={() => void updateSelectedParticipation(false)}>{t("accounts.excludeSelectedFromPool")}</Button>
-          <Button variant="secondary" icon={<Download aria-hidden />} disabled={!canExport} title={!canExport ? t("remote.capabilityUnavailable") : undefined} onClick={() => onExport(exportIds)}>{t("accounts.exportSelected", { count: selected.length })}</Button>
+          <IconButton label={t("accounts.includeSelectedInPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(true)} />
+          <IconButton label={t("accounts.excludeSelectedFromPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <CirclePause aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(false)} />
+          <IconButton label={t("accounts.exportSelected", { count: selected.length })} icon={<Download aria-hidden />} disabled={!canExport || Boolean(busy)} title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selected.length })} onClick={() => onExport(exportIds)} />
+          <IconButton className="relay-icon-button danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
           <div className="account-sort-controls">
@@ -313,6 +345,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           </div>
           <div className="view-layout-switcher" role="group" aria-label={t("accounts.layout.label")}><button type="button" aria-label={t("accounts.layout.compact")} title={t("accounts.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")}><Rows3 aria-hidden /></button><button type="button" aria-label={t("accounts.layout.list")} title={t("accounts.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")}><List aria-hidden /></button><button type="button" aria-label={t("accounts.layout.grid")} title={t("accounts.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")}><LayoutGrid aria-hidden /></button></div>
           {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={<RefreshCw className={busy === "quota-all" ? "spin" : undefined} aria-hidden />} disabled={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")} /> : null}
+          {mode === "local" ? <IconButton className="relay-icon-button danger" label={t("accounts.deleteNonWorking")} icon={busy === "refresh-non-working-accounts" || busy === "delete-non-working-accounts" ? <Loader2 className="spin" aria-hidden /> : <UserRoundX aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAndDeleteNonWorking()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
             <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport} onClick={() => onExport(exportIds)}>{t("accounts.exportAll")}</ActionMenuItem>
             <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onBulkProxies(accounts.map((account) => account.id))}>{t("proxies.assignBulk")}</ActionMenuItem>
@@ -505,7 +538,7 @@ function ReadyApiView({ connected, onConnect, onTopUp }: { connected: boolean; o
   return <section className="ready-api-connection"><div className="recommended-line"><div><strong>Zenith API</strong><small>https://api.zenithmarket.dev/v1</small></div><span>{t("common.recommended")}</span></div><StatusBadge status={connected ? "ready" : "warning"} label={connected ? t("common.connected") : t("common.notConfigured")} /><p>{t("readyApi.connectionHint")}</p>{connected ? <><dl className="detail-list"><div><dt>{t("readyApi.balance")}</dt><dd>{readyStats?.balance ?? "-"}</dd></div><div><dt>{t("usage.requests")}</dt><dd>{readyStats?.requestsDisplay ?? readyStats?.requests ?? "-"}</dd></div></dl><div className="inline-actions"><Button variant="secondary" onClick={onTopUp}>{t("readyApi.topUp")}</Button><Button variant="secondary" onClick={onConnect}>{t("readyApi.updateKey")}</Button><Button variant="danger" onClick={() => { if (window.confirm(t("readyApi.disconnectConfirm"))) void perform("ready-disconnect", resetKey, "feedback.disconnected"); }}>{t("remote.disconnect")}</Button></div></> : <Button variant="primary" onClick={onConnect}>{t("readyApi.connect")}</Button>}</section>;
 }
 
-function SourceDialog({ source, onClose }: { source: SourceSummary | null; onClose: () => void }) {
+export function SourceDialog({ source, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
   const { t } = useTranslation();
   const { mode, perform, busy } = useRelayState();
   const [name, setName] = useState(source?.name ?? "");
@@ -515,16 +548,21 @@ function SourceDialog({ source, onClose }: { source: SourceSummary | null; onClo
   const [models, setModels] = useState(source?.models.join(", ") ?? "");
   const [allowed, setAllowed] = useState(source?.allowedModels.join(", ") ?? "");
   const [excluded, setExcluded] = useState(source?.excludedModels.join(", ") ?? "");
-  const [priority, setPriority] = useState(source?.priority ?? 0);
+  const [role, setRole] = useState<ApiSourceRole>(apiSourceRole(source?.priority ?? 0));
   const [weight, setWeight] = useState(source?.weight ?? 100);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    const base = { name, baseUrl, wireApi, models: parseList(models), allowedModels: parseList(allowed), excludedModels: parseList(excluded), draining: source?.draining ?? false, priority, weight };
+    const base = { name, baseUrl, wireApi, models: parseList(models), allowedModels: parseList(allowed), excludedModels: parseList(excluded), draining: source?.draining ?? false, priority: apiSourcePriority(role), weight };
     const ok = await perform("source-save", async () => {
       if (!source) {
         const payload = { ...base, apiKey };
-        if (mode === "local") await relayCommands.createSource(payload);
-        else await relayCommands.remoteAction({ type: "create_source" }, payload);
+        const created = mode === "local"
+          ? await relayCommands.createSource(payload) as { id: string }
+          : await relayCommands.remoteAction({ type: "create_source" }, payload) as { id: string };
+        if (addToPool) {
+          if (mode === "local") await relayCommands.setPoolMembership([], [created.id], true);
+          else await relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds: [], sourceIds: [created.id], inPool: true });
+        }
         return;
       }
       if (mode === "local") {
@@ -536,7 +574,7 @@ function SourceDialog({ source, onClose }: { source: SourceSummary | null; onClo
     }, source ? "feedback.saved" : "feedback.sourceAdded");
     if (ok) onClose();
   };
-  return <Dialog wide title={source ? t("sources.edit") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiKey.trim()} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><label className="relay-field"><span>{t("sources.protocol")}</span><select value={wireApi} onChange={(event) => setWireApi(event.target.value as SourceSummary["wireApi"])}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><label className="relay-field"><span>{t("common.models")}</span><input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><div className="settings-row"><label><span>{t("pool.priority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label><label><span>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
+  return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiKey.trim()} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><label className="relay-field"><span>{t("sources.protocol")}</span><select value={wireApi} onChange={(event) => setWireApi(event.target.value as SourceSummary["wireApi"])}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><label className="relay-field"><span>{t("common.models")}</span><input value={models} onChange={(event) => setModels(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><div className="settings-row"><label><span>{t("sources.poolRole")}</span><select value={role} onChange={(event) => setRole(event.target.value as ApiSourceRole)}><option value="primary">{t("sources.roles.primary")}</option><option value="stabilizer">{t("sources.roles.stabilizer")}</option><option value="reserve">{t("sources.roles.reserve")}</option></select><small>{t(`sources.roleHints.${role}`)}</small></label><label><span>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
 }
 
 function OAuthDialog({ onClose }: { onClose: () => void }) {
@@ -867,6 +905,22 @@ function accountErrorCode(account: AccountSummary) {
   if (!account.secretAvailable) return "credentials_missing";
   if (account.health === "blocked" || account.health === "unhealthy") return "health_" + account.health;
   return null;
+}
+
+function accountIsTerminallyUnusable(account: AccountSummary) {
+  const auth = typeof account.authState === "string" ? { state: account.authState } : account.authState;
+  if (auth.state === "requires_reauth" || auth.state === "error" || !account.secretAvailable) return true;
+  const code = (account.lastErrorCode?.trim() || account.quota.error?.code.trim() || "").toLowerCase();
+  return new Set([
+    "credentials_missing",
+    "invalid_chatgpt_account_id",
+    "models_forbidden",
+    "models_invalid_access_token",
+    "models_invalid_account_id",
+    "models_unauthorized",
+    "quota_forbidden",
+    "quota_unauthorized",
+  ]).has(code) || code.startsWith("auth_");
 }
 
 function accountErrorLabel(code: string, t: TFunction) {

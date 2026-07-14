@@ -105,6 +105,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.id = `account_synthetic_${index + 1}`;
       item.label = variant.label;
       item.identityHint = ["p***@example.test", "b***@example.test", "r***@example.test", "q***@example.test", "s***@example.test", "t***@example.test"][index % 6];
+      item.authState = "active";
       item.subscription.planType = variant.plan;
       item.subscription.activeUntilMs = variant.activeUntilMs;
       item.proxyMode = variant.proxyMode;
@@ -185,6 +186,23 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.platform = "linux";
     remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy"] };
 
+    function sourceFromPayload(payload: Record<string, unknown>, id: string) {
+      return {
+        ...structuredClone(source),
+        id,
+        name: String(payload.name ?? source.name),
+        baseUrl: String(payload.baseUrl ?? source.baseUrl),
+        wireApi: String(payload.wireApi ?? source.wireApi),
+        models: payload.models as string[] ?? [],
+        allowedModels: payload.allowedModels as string[] ?? [],
+        excludedModels: payload.excludedModels as string[] ?? [],
+        priority: Number(payload.priority ?? 0),
+        weight: Number(payload.weight ?? 100),
+        draining: Boolean(payload.draining),
+        inPool: false,
+      };
+    }
+
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28 }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", candidateLabel: account.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now() }] : [];
     let readyKey = "zrk_synthetic_ready_key";
@@ -229,8 +247,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.candidateHint.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0 };
           }
-          case "create_local_source": source.inPool = false; localRuntime.sources = [source]; return structuredClone(source);
-          case "update_local_source": return structuredClone(localRuntime);
+          case "create_local_source": {
+            const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);
+            localRuntime.sources = [...localRuntime.sources, created];
+            return structuredClone(created);
+          }
+          case "update_local_source": {
+            const request = args.input as Record<string, unknown> & { sourceId?: string };
+            const target = localRuntime.sources.find((item) => item.id === request.sourceId);
+            if (target) Object.assign(target, request);
+            refreshGatewayModels(localRuntime);
+            return structuredClone(localRuntime);
+          }
           case "rotate_local_source_key": return structuredClone(localRuntime);
           case "set_local_source_enabled": source.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
           case "delete_local_source": localRuntime.sources = []; return structuredClone(localRuntime);
@@ -284,7 +312,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             applyFreeRoutingPolicy(localRuntime);
             return structuredClone(localRuntime);
           }
-          case "delete_local_account": localRuntime.accounts = []; return structuredClone(localRuntime);
+          case "delete_local_account": {
+            localRuntime.accounts = localRuntime.accounts.filter((item) => item.id !== args.accountId);
+            refreshGatewayModels(localRuntime);
+            return structuredClone(localRuntime);
+          }
           case "set_local_account_proxy": {
             const request = args.input as { accountId: string; proxyUrl: string | null };
             account.proxyMode = request.proxyUrl ? "account" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
@@ -318,7 +350,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "complete_codex_oauth":
           case "cancel_codex_oauth": return null;
           case "create_local_gateway_key": localRuntime.keys = [key]; return { key: structuredClone(key), secret: "zlr_synthetic_local_key" };
-          case "update_local_gateway_key": return structuredClone(localRuntime);
+          case "update_local_gateway_key": {
+            const request = args.input as Record<string, unknown> & { keyId?: string };
+            const target = localRuntime.keys.find((item) => item.id === request.keyId);
+            if (target) Object.assign(target, request);
+            return structuredClone(localRuntime);
+          }
           case "rotate_local_gateway_key": return { key: structuredClone(key), secret: "zlr_synthetic_rotated_key" };
           case "set_local_gateway_key_enabled": key.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
           case "delete_local_gateway_key": localRuntime.keys = []; return structuredClone(localRuntime);
@@ -457,6 +494,26 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       const type = input?.action?.type;
       if (type === "rotate_key") return { key, secret: "zlr_synthetic_remote_rotated_key" };
       if (type === "create_key") return { key, secret: "zlr_synthetic_remote_key" };
+      if (type === "create_source") {
+        const created = sourceFromPayload(input.payload ?? {}, `source_remote_created_${remoteRuntime.sources.length + 1}`);
+        remoteRuntime.sources = [...remoteRuntime.sources, created];
+        return structuredClone(created);
+      }
+      if (type === "update_source") {
+        const target = remoteRuntime.sources.find((item) => item.id === input.action?.id);
+        if (target) Object.assign(target, input.payload);
+        refreshGatewayModels(remoteRuntime);
+        return structuredClone(target ?? null);
+      }
+      if (type === "update_key") {
+        const target = remoteRuntime.keys.find((item) => item.id === input.action?.id);
+        if (target) Object.assign(target, input.payload);
+        return structuredClone(target ?? null);
+      }
+      if (type === "delete_key") {
+        remoteRuntime.keys = remoteRuntime.keys.filter((item) => item.id !== input.action?.id);
+        return null;
+      }
       if (type === "preview_account_batch_import") return importSession("remote_import");
       if (type === "confirm_account_batch_import") return importConfirmation("remote_import", input.payload?.selectedItemIds as string[] ?? []);
       if (type === "update_account") {
@@ -464,6 +521,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (target && typeof input.payload?.enabled === "boolean") target.enabled = input.payload.enabled;
         if (target && typeof input.payload?.draining === "boolean") target.draining = input.payload.draining;
         return structuredClone(target ?? null);
+      }
+      if (type === "delete_account") {
+        remoteRuntime.accounts = remoteRuntime.accounts.filter((item) => item.id !== input.action?.id);
+        refreshGatewayModels(remoteRuntime);
+        return null;
       }
       if (type === "test_source") return structuredClone(source);
       if (type === "test_wake_task") return { taskId: String(input.action?.id), status: "ready", eligibleAccounts: 1 };

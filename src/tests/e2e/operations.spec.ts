@@ -66,10 +66,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
-  await page.getByRole("tab", { name: "Keys" }).click();
-  const keyRow = page.getByRole("row").filter({ has: page.getByRole("button", { name: "Edit policy" }) });
-  await keyRow.getByRole("button", { name: "Edit policy" }).click();
-  const keyPolicy = page.getByRole("dialog", { name: "Edit policy" });
+  await page.getByRole("tab", { name: "Client Access" }).click();
+  const keyRow = page.getByRole("row").filter({ has: page.getByRole("button", { name: "Configure access" }) });
+  await keyRow.getByRole("button", { name: "Configure access" }).click();
+  const keyPolicy = page.getByRole("dialog", { name: "Configure access" });
   await keyPolicy.getByLabel("Model prefix").fill("team");
   await keyPolicy.getByRole("button", { name: "Save" }).click();
   await keyRow.locator(".relay-action-menu summary").click();
@@ -468,6 +468,46 @@ test("plan filters and pool controls exclude a selected account without deleting
   expect(calls.some((call) => call.command === "delete_local_account")).toBe(false);
 });
 
+test("bulk account actions stay compact and delete the selected records", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByLabel("Select all accounts").check();
+
+  const actions = page.locator(".account-command-bar > div:last-child");
+  await expect(actions.locator(".relay-button")).toHaveCount(0);
+  await expect(actions.locator(".relay-icon-button")).toHaveCount(5);
+  await expect(actions.getByRole("button", { name: "Include selected" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Exclude selected" })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Export selected (3)" })).toBeVisible();
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await actions.getByRole("button", { name: "Delete selected accounts" }).click();
+  await expect(page.getByText("No accounts", { exact: true })).toBeVisible();
+
+  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "delete_local_account").map((call) => call.args.accountId));
+  expect(deleted).toEqual(["account_synthetic", "account_synthetic_2", "account_synthetic_3"]);
+});
+
+test("global cleanup refreshes first and deletes only terminal account errors", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, accountAuthReason: "invalid_grant" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  page.once("dialog", (dialog) => {
+    expect(dialog.message()).toContain("1 account(s)");
+    dialog.accept();
+  });
+  await page.getByRole("button", { name: "Refresh and delete non-working accounts" }).click();
+  await expect(page.locator(".account-card")).toHaveCount(2);
+  await expect(page.getByText("Personal Plus", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Backup account", { exact: true })).toBeVisible();
+
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands.indexOf("refresh_all_local_account_quotas")).toBeLessThan(commands.indexOf("delete_local_account"));
+  expect(commands.filter((command) => command === "delete_local_account")).toHaveLength(1);
+});
+
 test("pool summary keeps healthy and limited members mutually exclusive", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
@@ -497,6 +537,70 @@ test("connections stay outside the pool until the user adds selected members", a
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "set_local_pool_membership"));
   expect(call?.args).toEqual({ input: { accountIds: ["account_synthetic_2"], sourceIds: [], inPool: true } });
 });
+
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} pool creates an API source and applies all three routing roles`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: false, gatewayRunning: false });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Add member", exact: true }).first().click();
+    await page.getByRole("dialog", { name: "Add connections to pool" }).getByRole("button", { name: "Add API source" }).click();
+
+    const sourceDialog = page.getByRole("dialog", { name: "Add API source" });
+    await sourceDialog.getByLabel("Name", { exact: true }).fill("Failover API");
+    await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
+    await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
+    await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4");
+    const role = sourceDialog.getByLabel("API source role");
+    await expect(role.locator("option")).toHaveText(["API first", "Stabilizer", "Last resort"]);
+    await role.selectOption("primary");
+    await sourceDialog.getByRole("button", { name: "Save" }).click();
+
+    const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
+    await expect(member).toContainText("API first");
+    await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
+    let editor = page.getByRole("dialog", { name: /Pool member policy/ });
+    await editor.getByLabel("API source role").selectOption("stabilizer");
+    await editor.getByRole("button", { name: "Save policy" }).click();
+    await expect(member).toContainText("Stabilizer");
+
+    await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
+    editor = page.getByRole("dialog", { name: /Pool member policy/ });
+    await editor.getByLabel("API source role").selectOption("reserve");
+    await editor.getByRole("button", { name: "Save policy" }).click();
+    await expect(member).toContainText("Last resort");
+
+    const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+    if (mode === "local") {
+      expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 1_000_000 });
+      expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
+      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([0, -1_000_000]);
+    } else {
+      const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
+      expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 1_000_000 });
+      expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
+      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([0, -1_000_000]);
+    }
+  });
+
+  test(`${mode} client access key can be deleted from its configuration dialog`, async ({ page }) => {
+    await installTauriMock(page, { mode, locale: "en", populated: true });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("tab", { name: "Client Access" }).click();
+    await page.getByRole("row").filter({ hasText: "Codex" }).getByRole("button", { name: "Configure access" }).click();
+    const dialog = page.getByRole("dialog", { name: "Configure access" });
+    await expect(dialog).toContainText("It is not an upstream API source");
+    page.once("dialog", (confirmation) => confirmation.accept());
+    await dialog.getByRole("button", { name: "Delete access key" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText("No client access keys", { exact: true })).toBeVisible();
+
+    const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+    if (mode === "local") expect(calls.some((call) => call.command === "delete_local_gateway_key" && call.args.keyId === "key_synthetic")).toBe(true);
+    else expect(calls.some((call) => call.command === "execute_remote_server_action" && (call.args.input as { action?: { type?: string; id?: string } }).action?.type === "delete_key" && (call.args.input as { action?: { id?: string } }).action?.id === "key_synthetic")).toBe(true);
+  });
+}
 
 test("pool display order defaults to routing priority and can be changed to quota", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
@@ -672,11 +776,11 @@ test("source, automation, and key rows keep rare actions in consistent menus", a
   await expect(page.getByRole("menuitem")).toHaveText("Delete");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("tab", { name: "Keys" }).click();
+  await page.getByRole("tab", { name: "Client Access" }).click();
   actions = page.locator(".relay-table .row-actions");
-  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Edit policy", "Actions"]);
+  expect(await actions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Configure access", "Actions"]);
   await actions.locator("summary").click();
-  expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Disable", "Rotate key", "Delete"]);
+  expect(await page.getByRole("menuitem").allTextContents()).toEqual(["Disable", "Rotate key", "Delete access key"]);
 });
 
 test("empty connection views keep the page header as the single action area", async ({ page }) => {
@@ -849,7 +953,7 @@ test("key and OAuth timestamps follow the active locale", async ({ page }) => {
   await page.goto("/");
 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
-  await page.getByRole("tab", { name: "Ключи" }).click();
+  await page.getByRole("tab", { name: "Ключи доступа" }).click();
   await expect(page.getByRole("row").filter({ hasText: "Codex" })).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
@@ -1290,7 +1394,7 @@ test("remote capability omissions disable or hide unsupported operations", async
   await expect(page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" })).toBeDisabled();
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.getByRole("tab", { name: "Keys" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Client Access" })).toHaveCount(0);
   await expect(page.getByRole("tab", { name: "Model Rules" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();

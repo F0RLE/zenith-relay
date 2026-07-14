@@ -479,6 +479,73 @@ async fn account_non_stream_client_buffers_codex_stream_response() {
 }
 
 #[tokio::test]
+async fn high_priority_api_source_runs_before_a_healthy_oauth_account() {
+    let (source_upstream, source_state) = spawn_upstream(vec![success_reply("api-first")]).await;
+    let (account_upstream, account_state) =
+        spawn_upstream(vec![success_reply("oauth-must-not-run")]).await;
+    let authority = ready_authority("oauth-account", "oauth-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "api-source",
+            &source_upstream,
+            "source-key",
+            1_000_000,
+        )],
+        vec![account(
+            "oauth-account",
+            "provider-account",
+            &account_upstream,
+            0,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["id"], "api-first");
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
+    assert!(account_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn negative_priority_api_source_waits_behind_a_healthy_oauth_account() {
+    let (source_upstream, source_state) =
+        spawn_upstream(vec![success_reply("api-must-not-run")]).await;
+    let (account_upstream, account_state) =
+        spawn_upstream(vec![success_reply("oauth-first")]).await;
+    let authority = ready_authority("oauth-account", "oauth-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "api-source",
+            &source_upstream,
+            "source-key",
+            -1_000_000,
+        )],
+        vec![account(
+            "oauth-account",
+            "provider-account",
+            &account_upstream,
+            0,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["id"], "oauth-first");
+    assert_eq!(account_state.requests.lock().unwrap().len(), 1);
+    assert!(source_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn failed_account_falls_back_to_api_source_in_the_same_scheduler() {
     let (account_upstream, account_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::SERVICE_UNAVAILABLE,
