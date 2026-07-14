@@ -136,33 +136,37 @@ jobs:
           tagName: ""
           releaseDraft: ${{ !startsWith(github.ref, 'refs/tags/') }}
           prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
-      - name: Collect release files
+      - name: Collect and verify release files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          function Copy-First($Filter, $Destination) {
+          function Copy-Required($Filter, $Destination) {
             $file = Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File -Filter $Filter | Select-Object -First 1
-            if ($file) {
-              Copy-Item $file.FullName $Destination
+            if (!$file) {
+              throw "Missing required $env:RUNNER_OS release artifact: $Filter"
             }
+            Copy-Item $file.FullName $Destination
           }
           $patterns = @("*.msi", "*.exe", "*.dmg", "*.app.tar.gz", "*.deb", "*.rpm", "*.AppImage", "*.sig", "latest.json")
           Get-ChildItem -Path src-tauri/target/release/bundle -Recurse -File |
             Where-Object { $file = $_; $patterns | Where-Object { $file.Name -like $_ } } |
             Copy-Item -Destination artifacts
-          if ($env:RUNNER_OS -eq "Windows" -and (Test-Path "src-tauri/target/release/zenith-relay.exe")) {
+          if ($env:RUNNER_OS -eq "Windows") {
+            if (!(Test-Path "src-tauri/target/release/zenith-relay.exe")) {
+              throw "Missing required Windows portable executable"
+            }
             Copy-Item "src-tauri/target/release/zenith-relay.exe" "artifacts/zenith-relay-${{ matrix.name }}.exe"
-            Copy-First "*.msi" "artifacts/zenith-relay-${{ matrix.name }}.msi"
-            Copy-First "*setup.exe" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe"
+            Copy-Required "*.msi" "artifacts/zenith-relay-${{ matrix.name }}.msi"
+            Copy-Required "*setup.exe" "artifacts/zenith-relay-${{ matrix.name }}-setup.exe"
           }
           if ($env:RUNNER_OS -eq "macOS") {
-            Copy-First "*.dmg" "artifacts/zenith-relay-${{ matrix.name }}.dmg"
-            Copy-First "*.app.tar.gz" "artifacts/zenith-relay-${{ matrix.name }}.app.tar.gz"
+            Copy-Required "*.dmg" "artifacts/zenith-relay-${{ matrix.name }}.dmg"
+            Copy-Required "*.app.tar.gz" "artifacts/zenith-relay-${{ matrix.name }}.app.tar.gz"
           }
           if ($env:RUNNER_OS -eq "Linux") {
-            Copy-First "*.AppImage" "artifacts/zenith-relay-${{ matrix.name }}.AppImage"
-            Copy-First "*.deb" "artifacts/zenith-relay-${{ matrix.name }}.deb"
-            Copy-First "*.rpm" "artifacts/zenith-relay-${{ matrix.name }}.rpm"
+            Copy-Required "*.AppImage" "artifacts/zenith-relay-${{ matrix.name }}.AppImage"
+            Copy-Required "*.deb" "artifacts/zenith-relay-${{ matrix.name }}.deb"
+            Copy-Required "*.rpm" "artifacts/zenith-relay-${{ matrix.name }}.rpm"
           }
       - name: Upload stable release assets
         if: startsWith(github.ref, 'refs/tags/')
