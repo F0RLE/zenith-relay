@@ -627,8 +627,9 @@ for (const theme of themes) {
 
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Codex в режиме пула" })).toBeVisible();
-      await expect(page.getByLabel("Аккаунт интерфейса Codex")).toBeVisible();
-      await expect(setup).toContainText("Выбранный аккаунт");
+      await expect(page.getByLabel("Аккаунт интерфейса Codex")).toHaveValue("auto");
+      await expect(setup).not.toContainText("Выбран");
+      await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
       await expect(page.locator(".client-setup button")).toHaveCount(0);
       expect(await setup.evaluate((element) => {
         const rect = element.getBoundingClientRect();

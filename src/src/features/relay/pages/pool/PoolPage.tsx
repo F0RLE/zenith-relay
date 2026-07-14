@@ -14,7 +14,7 @@ type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: 
 
 export function PoolPage() {
   const { t } = useTranslation();
-  const { mode, runtime, activateCodexProfile, busy, perform, codexPoolOauthAccountId } = useRelayState();
+  const { mode, runtime, activateCodexProfile, busy, perform, codexPoolOauthSelection } = useRelayState();
   const [view, setView] = useState<View>("members");
   const [createKey, setCreateKey] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
@@ -36,8 +36,9 @@ export function PoolPage() {
       ? <ActionMenuItem icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</ActionMenuItem>
       : null;
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
-  const selectedOauthAccountId = runtime?.accounts.some((account) => account.id === codexPoolOauthAccountId && isCodexOauthAccountEligible(account))
-    ? codexPoolOauthAccountId
+  const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
+    && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
+    ? codexPoolOauthSelection
     : null;
   const switchCodexToPool = () => activateCodexProfile("pool-switch", async () => {
     const snapshot = await relayCommands.localState();
@@ -48,7 +49,7 @@ export function PoolPage() {
       && !candidate.excludedModels.length
       && !candidate.modelPrefix)
       ?? (await relayCommands.createKey(t("pool.codexKeyLabel"))).key;
-    return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId);
+    return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId, codexPoolOauthSelection === "none");
   }, true);
   const running = Boolean(runtime?.gateway.running);
   const action = mode === "local" ? <>

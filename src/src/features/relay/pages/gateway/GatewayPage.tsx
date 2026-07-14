@@ -50,35 +50,27 @@ function EndpointView({ running, endpoint }: { running: boolean; endpoint: strin
 
 function ClientSetup() {
   const { t } = useTranslation();
-  const { mode, runtime, codexPoolOauthAccountId, setCodexPoolOauthAccountId } = useRelayState();
+  const { mode, runtime, codexPoolOauthSelection, setCodexPoolOauthSelection } = useRelayState();
   const eligibleAccounts = (runtime?.accounts ?? [])
     .filter(isCodexOauthAccountEligible)
     .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id));
   const eligibleAccountIds = eligibleAccounts.map((account) => account.id).join("\0");
   useEffect(() => {
-    if (mode !== "local") return;
+    if (!runtime || mode !== "local" || codexPoolOauthSelection === "none" || codexPoolOauthSelection === "auto") return;
     const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
-    if (codexPoolOauthAccountId && ids.includes(codexPoolOauthAccountId)) return;
-    let cancelled = false;
-    void relayCommands.profileBindings()
-      .then((bindings) => bindings.find((binding) => binding.credentialKind === "local_gateway")?.boundOauthAccountId
-        ?? bindings.find((binding) => binding.credentialKind === "oauth_account")?.credentialId
-        ?? "")
-      .catch(() => "")
-      .then((activeAccountId) => {
-        if (cancelled) return;
-        setCodexPoolOauthAccountId(ids.includes(activeAccountId) ? activeAccountId : ids[0] ?? "");
-      });
-    return () => { cancelled = true; };
-  }, [codexPoolOauthAccountId, eligibleAccountIds, mode, setCodexPoolOauthAccountId]);
+    if (!ids.includes(codexPoolOauthSelection)) setCodexPoolOauthSelection("auto");
+  }, [codexPoolOauthSelection, eligibleAccountIds, mode, runtime, setCodexPoolOauthSelection]);
   if (mode !== "local") return <EmptyState title={t("gateway.oauthBindingLocalOnly")} description={t("gateway.oauthBindingLocalOnlyHint")} />;
-  const selectedAccount = eligibleAccounts.find((account) => account.id === codexPoolOauthAccountId) ?? null;
+  const automaticUnavailable = codexPoolOauthSelection === "auto" && !eligibleAccounts.length;
+  const selectionHint = codexPoolOauthSelection === "none"
+    ? t("gateway.oauthBindingNoneHint")
+    : codexPoolOauthSelection === "auto"
+      ? automaticUnavailable ? t("gateway.oauthBindingUnavailable") : t("gateway.oauthBindingAutomaticHint")
+      : t("gateway.oauthBindingManualHint");
   return <div className="client-setup codex-client-setup"><section className="client-oauth-binding">
-    <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div><StatusBadge status={selectedAccount ? "ready" : "warning"} label={selectedAccount ? t("gateway.oauthBindingSelected") : t("gateway.oauthBindingUnavailableShort")} /></header>
-    <div className="codex-oauth-account-control"><label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} disabled={!eligibleAccounts.length} value={selectedAccount?.id ?? ""} onChange={(event) => setCodexPoolOauthAccountId(event.target.value)}>{!eligibleAccounts.length ? <option value="">{t("gateway.oauthBindingUnavailableShort")}</option> : null}{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {formatAccountPlan(account.subscription.planType, t("common.unknown"))}</option>)}</select></label>
-      {selectedAccount ? <div className="codex-oauth-account-summary"><div><span>{t("gateway.oauthBindingSelectedAccount")}</span><strong title={selectedAccount.label}>{selectedAccount.label}</strong></div><em>{formatAccountPlan(selectedAccount.subscription.planType, t("common.unknown"))}</em></div> : null}
-    </div>
-    <p className={`form-note${selectedAccount ? "" : " warning-text"}`}>{selectedAccount ? t("gateway.oauthBindingNextSwitch") : t("gateway.oauthBindingUnavailable")}</p>
+    <header><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div></header>
+    <div className="codex-oauth-account-control"><label className="relay-field"><span>{t("gateway.oauthBindingAccount")}</span><select aria-label={t("gateway.oauthBindingAccount")} value={codexPoolOauthSelection} onChange={(event) => setCodexPoolOauthSelection(event.target.value)}><option value="none">{t("gateway.oauthBindingNone")}</option><option value="auto">{t("gateway.oauthBindingAutomatic")}</option>{eligibleAccounts.length ? <optgroup label={t("gateway.oauthBindingManual")}>{eligibleAccounts.map((account) => <option key={account.id} value={account.id}>{account.label} · {formatAccountPlan(account.subscription.planType, t("common.unknown"))}</option>)}</optgroup> : null}</select></label></div>
+    <p className={`form-note${automaticUnavailable ? " warning-text" : ""}`}>{selectionHint}</p>
   </section></div>;
 }
 

@@ -83,7 +83,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Apply and restart" }).click();
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await expect(page.getByLabel("Codex interface account")).toHaveValue("account_synthetic");
+  await expect(page.getByLabel("Codex interface account")).toHaveValue("auto");
   await expect(page.getByRole("heading", { name: "Codex in pool mode" })).toBeVisible();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
@@ -693,18 +693,20 @@ test("empty connection views keep the page header as the single action area", as
   await expect(page.getByPlaceholder("Search")).toHaveCount(0);
 });
 
-test("Codex client setup persists the selected pool identity for switching", async ({ page }) => {
+test("Codex client setup offers no account, automatic, and manual pool identity modes", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, gatewayRunning: true, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
   const setup = page.locator(".client-setup");
   const account = page.getByLabel("Codex interface account");
-  await expect(account).toHaveValue("account_synthetic_2");
-  await account.selectOption("account_synthetic");
-  await expect(setup).toContainText("Personal Plus");
-  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthAccountId"))).toBe("account_synthetic");
+  await expect(account).toHaveValue("auto");
+  await expect(account.locator("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business", "Personal Plus · Plus"]);
+  await expect(account.locator("optgroup")).toHaveAttribute("label", "Manual selection");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("auto");
   await expect(setup.getByRole("button")).toHaveCount(0);
+  await expect(setup).not.toContainText("Selected account");
+  await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
   await expect(setup).not.toContainText("Generated configuration");
   const selectionMatchesTheme = await setup.evaluate((element) => {
     const probe = document.createElement("span");
@@ -716,11 +718,34 @@ test("Codex client setup persists the selected pool identity for switching", asy
   });
   expect(selectionMatchesTheme).toBe(true);
 
+  await account.selectOption("none");
+  await expect(setup).toContainText("No OAuth account will be applied");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("none");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
-  await expect(page.getByText("Client launched.")).toBeVisible();
-  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_local_gateway").length)).toBe(1);
+  let call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
+  expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null, disableOauthBinding: true });
+
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await page.getByRole("tab", { name: "Codex Setup" }).click();
+  await page.getByLabel("Codex interface account").selectOption("account_synthetic");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("account_synthetic");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_local_gateway").length)).toBe(2);
+  call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
   expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
+});
+
+test("Codex pool identity migrates the previous stored account selection", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.addInitScript(() => localStorage.setItem("relay.codexPoolOauthAccountId", "account_synthetic"));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await page.getByRole("tab", { name: "Codex Setup" }).click();
+  await expect(page.getByLabel("Codex interface account")).toHaveValue("account_synthetic");
+  expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic", legacy: null });
 });
 
 test("usage filters name independent choices", async ({ page }) => {

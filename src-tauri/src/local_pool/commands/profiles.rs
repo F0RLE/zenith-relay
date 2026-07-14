@@ -31,6 +31,7 @@ pub struct ProfileActivation {
 pub async fn attach_codex_to_local_gateway(
     key_id: String,
     bound_oauth_account_id: Option<String>,
+    disable_oauth_binding: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> Result<ProfileActivation, CommandError> {
     let _mutation = state.setup_guard().await;
@@ -55,13 +56,12 @@ pub async fn attach_codex_to_local_gateway(
     let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result: Result<ProfileActivation, CommandError> = async {
-        let bound_oauth = resolve_gateway_oauth_binding(
-            &state,
-            &key,
+        let binding_request = gateway_oauth_binding_request(
+            disable_oauth_binding.unwrap_or(false),
             bound_oauth_account_id.as_deref(),
-            &profile_dir,
-        )
-        .await?;
+        )?;
+        let bound_oauth =
+            resolve_gateway_oauth_binding(&state, &key, binding_request, &profile_dir).await?;
         let base_url = format!("http://127.0.0.1:{port}/v1");
         let binding = match bound_oauth.as_ref() {
             Some((account_id, prepared)) => codex::attach_with_oauth(
@@ -90,15 +90,48 @@ pub async fn attach_codex_to_local_gateway(
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
-async fn resolve_gateway_oauth_binding(
-    state: &DesktopState,
-    key: &LocalGatewayKeyRecord,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayOAuthBindingRequest<'a> {
+    Disabled,
+    Automatic,
+    Account(&'a str),
+}
+
+fn gateway_oauth_binding_request(
+    disabled: bool,
     requested_account_id: Option<&str>,
-    profile_dir: &std::path::Path,
-) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
+) -> LocalResult<GatewayOAuthBindingRequest<'_>> {
     let requested_account_id = requested_account_id
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    if disabled && requested_account_id.is_some() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "OAuth binding cannot be disabled and assigned to an account together",
+        ));
+    }
+    Ok(if disabled {
+        GatewayOAuthBindingRequest::Disabled
+    } else if let Some(account_id) = requested_account_id {
+        GatewayOAuthBindingRequest::Account(account_id)
+    } else {
+        GatewayOAuthBindingRequest::Automatic
+    })
+}
+
+async fn resolve_gateway_oauth_binding(
+    state: &DesktopState,
+    key: &LocalGatewayKeyRecord,
+    request: GatewayOAuthBindingRequest<'_>,
+    profile_dir: &std::path::Path,
+) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
+    if request == GatewayOAuthBindingRequest::Disabled {
+        return Ok(None);
+    }
+    let requested_account_id = match request {
+        GatewayOAuthBindingRequest::Account(account_id) => Some(account_id),
+        GatewayOAuthBindingRequest::Disabled | GatewayOAuthBindingRequest::Automatic => None,
+    };
     let preferred_account_id = match requested_account_id {
         Some(account_id) => Some(account_id.to_string()),
         None => codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?,
@@ -588,5 +621,22 @@ mod tests {
             candidates,
             ["account-m", "account-a", "account-z"].map(str::to_string)
         );
+    }
+
+    #[test]
+    fn oauth_binding_request_distinguishes_none_automatic_and_manual() {
+        assert_eq!(
+            gateway_oauth_binding_request(true, None).unwrap(),
+            GatewayOAuthBindingRequest::Disabled
+        );
+        assert_eq!(
+            gateway_oauth_binding_request(false, None).unwrap(),
+            GatewayOAuthBindingRequest::Automatic
+        );
+        assert_eq!(
+            gateway_oauth_binding_request(false, Some(" account-a ")).unwrap(),
+            GatewayOAuthBindingRequest::Account("account-a")
+        );
+        assert!(gateway_oauth_binding_request(true, Some("account-a")).is_err());
     }
 }
