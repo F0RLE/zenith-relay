@@ -475,6 +475,9 @@ for (const viewport of viewports) {
     await expect(accounts).toHaveAttribute("data-layout", "grid");
     const gridHeight = await accounts.locator(".account-card").first().evaluate((item) => item.getBoundingClientRect().height);
     expect(gridHeight).toBeGreaterThan(compactHeight);
+    if (viewport.width > 1023) {
+      expect(await accounts.locator(".account-card").evaluateAll((items) => Math.abs(items[0].getBoundingClientRect().height - items[1].getBoundingClientRect().height))).toBeLessThanOrEqual(1);
+    }
     await page.screenshot({ path: `output/playwright/account-layout-grid-en-light-${viewport.width}x${viewport.height}.png` });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     expect(await accounts.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

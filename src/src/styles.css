@@ -3848,7 +3848,7 @@ textarea {
 }
 
 .account-command-bar {
-  min-height: 54px;
+  min-height: 46px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3941,16 +3941,26 @@ textarea {
 }
 
 .account-plan-filters {
+  min-width: 0;
   max-width: 100%;
   display: flex;
   align-items: center;
   gap: 4px;
   overflow-x: auto;
-  padding: 0 0 10px;
+  padding: 0;
 }
 
 .account-filter-stack {
-  display: grid;
+  display: flex;
+  align-items: center;
+  gap: 6px 16px;
+  flex-wrap: wrap;
+  padding: 2px 0 12px;
+}
+
+.account-plan-filters + .account-plan-filters {
+  padding-left: 16px;
+  border-left: 1px solid var(--relay-border);
 }
 
 .account-filter-summary {
@@ -4105,12 +4115,21 @@ textarea {
 
 .account-list[data-layout="grid"] {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  align-items: start;
+  align-items: stretch;
+  gap: 10px;
+}
+
+.account-list[data-layout="grid"] .account-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .account-list[data-layout="grid"] .account-card-main {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
+  gap: 6px 8px;
+  padding: 8px 10px;
 }
 
 .account-list[data-layout="grid"] .account-identity {
@@ -4120,9 +4139,10 @@ textarea {
 .account-list[data-layout="grid"] .account-facts {
   grid-column: 1 / -1;
   grid-row: 2;
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
-  gap: 14px 18px;
+  gap: 10px;
   padding-left: 26px;
 }
 
@@ -4162,6 +4182,16 @@ textarea {
 .account-list[data-layout="grid"] .account-card-quota .quota-stack,
 .pool-member-list[data-layout="grid"] .account-card-quota .quota-stack {
   grid-template-columns: 1fr;
+}
+
+.account-list[data-layout="grid"] .account-card-quota {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.account-list[data-layout="grid"] .account-card-quota .quota-stack {
+  width: 100%;
 }
 
 .account-list[data-layout="grid"] .account-card-quota .quota-meter,
@@ -4423,17 +4453,28 @@ textarea {
 }
 
 .account-row-action-list {
-  min-width: 154px;
+  min-width: 144px;
   display: grid;
   grid-auto-columns: 34px;
   grid-auto-flow: column;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 0;
+  padding: 2px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-subtle);
 }
 
 .account-row-action-list .relay-icon-button {
   flex: 0 0 34px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.account-row-action-list .relay-action-menu summary {
+  border-color: transparent;
+  background: transparent;
 }
 
 .account-row-action-list .relay-icon-button svg {
@@ -5652,6 +5693,18 @@ input[type="password"] {
   .account-list[data-layout="list"] .account-row-action-list {
     grid-column: 3;
     grid-row: 1;
+  }
+}
+
+@media (max-width: 900px) {
+  .account-filter-stack {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .account-plan-filters + .account-plan-filters {
+    padding-left: 0;
+    border-left: 0;
   }
 }
 
