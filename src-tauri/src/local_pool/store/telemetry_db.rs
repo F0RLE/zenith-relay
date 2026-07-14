@@ -63,6 +63,22 @@ PRAGMA user_version = 5;
 COMMIT;
 "#;
 
+const MIGRATION_006: &str = r#"
+BEGIN IMMEDIATE;
+CREATE TRIGGER request_logs_retention
+AFTER INSERT ON request_logs
+WHEN NEW.id % 256 = 0
+BEGIN
+    DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days');
+END;
+PRAGMA user_version = 6;
+COMMIT;
+"#;
+
+const USAGE_SCHEMA_VERSION: u32 = 6;
+const PRUNE_USAGE_SQL: &str =
+    "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
+
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
 }
@@ -108,10 +124,12 @@ impl TelemetryDb {
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
-        if version > 5 {
+        if version > USAGE_SCHEMA_VERSION {
             return Err(LocalPoolError::new(
                 ErrorCode::UnsupportedSchema,
-                format!("usage database schema {version} is newer than supported schema 5"),
+                format!(
+                    "usage database schema {version} is newer than supported schema {USAGE_SCHEMA_VERSION}"
+                ),
             ));
         }
         if version == 0 {
@@ -129,6 +147,10 @@ impl TelemetryDb {
         if version <= 4 {
             connection.execute_batch(MIGRATION_005).map_err(db_error)?;
         }
+        if version <= 5 {
+            connection.execute_batch(MIGRATION_006).map_err(db_error)?;
+        }
+        connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -478,7 +500,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, USAGE_SCHEMA_VERSION);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -521,7 +543,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 6).unwrap();
+        connection.pragma_update(None, "user_version", 7).unwrap();
         drop(connection);
 
         assert!(matches!(
@@ -532,7 +554,75 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_retention_prunes_old_rows_on_open_and_periodically() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-retention-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("usage.sqlite");
+        drop(TelemetryDb::open(&path).unwrap());
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_logs (
+                    request_id, attempt, local_key_id, source_id, wire_api, success,
+                    http_status, latency_ms, created_at
+                ) VALUES ('old-open', 1, 'key', 'source', 'responses', 1, 200, 1,
+                    datetime('now', '-31 days'))",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = TelemetryDb::open(&path).unwrap();
+        assert!(database.list(10).unwrap().is_empty());
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO request_logs (
+                    id, request_id, attempt, local_key_id, source_id, wire_api, success,
+                    http_status, latency_ms, created_at
+                ) VALUES (255, 'old-trigger', 1, 'key', 'source', 'responses', 1, 200, 1,
+                    datetime('now', '-31 days'))",
+                [],
+            )
+            .unwrap();
+        database
+            .record(&UsageEvent {
+                request_id: "trigger-256".into(),
+                attempt: 1,
+                local_key_id: "key".into(),
+                source_id: "source".into(),
+                candidate_id: None,
+                account_id: None,
+                requested_model: None,
+                resolved_model: None,
+                wire_api: WireApi::Responses,
+                success: true,
+                http_status: 200,
+                error_category: None,
+                cooldown_scope: None,
+                retry_at_ms: None,
+                consecutive_failures: None,
+                latency_ms: 1,
+                ttft_ms: None,
+                input_tokens: None,
+                cached_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+            })
+            .unwrap();
+        assert_eq!(database.list(10).unwrap().len(), 1);
+        drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

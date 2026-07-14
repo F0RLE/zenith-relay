@@ -235,6 +235,48 @@ pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, Strin
     cleanup_history_repair_backups_preserving(backup_root, None)
 }
 
+pub fn cleanup_expired_previews(state_root: &Path) -> Result<usize, String> {
+    let directory = state_root.join("repair_previews");
+    if !directory.exists() {
+        return Ok(0);
+    }
+    let now = now_ms();
+    let mut stale = Vec::new();
+    for entry in fs::read_dir(&directory).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let file_type = entry.file_type().map_err(io_error)?;
+        if !file_type.is_file() || file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(session_id) = path.file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if path.extension().and_then(|value| value.to_str()) != Some("json")
+            || validate_id(session_id, "repair_").is_err()
+            || entry.metadata().map_err(io_error)?.len() > MAX_REPAIR_MANIFEST_BYTES
+        {
+            continue;
+        }
+        let Ok(snapshot) = fs::read(&path).map_err(io_error).and_then(|bytes| {
+            serde_json::from_slice::<RepairSnapshot>(&bytes)
+                .map_err(|_| "repair preview is invalid".to_string())
+        }) else {
+            continue;
+        };
+        if snapshot.version == SNAPSHOT_VERSION
+            && snapshot.session_id == session_id
+            && snapshot.expires_at_ms <= now
+        {
+            stale.push(path);
+        }
+    }
+    for path in &stale {
+        fs::remove_file(path).map_err(io_error)?;
+    }
+    Ok(stale.len())
+}
+
 fn cleanup_history_repair_backups_preserving(
     backup_root: &Path,
     preserve_id: Option<&str>,
@@ -499,6 +541,7 @@ fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> 
 }
 
 fn save_snapshot(state_root: &Path, snapshot: &RepairSnapshot) -> Result<(), String> {
+    let _ = cleanup_expired_previews(state_root);
     let directory = state_root.join("repair_previews");
     fs::create_dir_all(&directory).map_err(io_error)?;
     let path = snapshot_path(state_root, &snapshot.session_id)?;
@@ -977,6 +1020,42 @@ mod tests {
         assert!(!root.join(&ids[2]).exists());
         assert!(root.join(&ids[3]).exists());
         assert!(user_snapshot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_only_expired_valid_repair_previews() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-repair-preview-retention-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let directory = root.join("repair_previews");
+        fs::create_dir_all(&directory).unwrap();
+        let expired_id = format!("repair_{}", uuid::Uuid::new_v4().simple());
+        let active_id = format!("repair_{}", uuid::Uuid::new_v4().simple());
+        for (session_id, expires_at_ms) in [(&expired_id, 1), (&active_id, u64::MAX)] {
+            let snapshot = RepairSnapshot {
+                version: SNAPSHOT_VERSION,
+                session_id: session_id.clone(),
+                target_provider: "openai".into(),
+                profile_roots: Vec::new(),
+                rollout_files: Vec::new(),
+                databases: Vec::new(),
+                created_at_ms: 1,
+                expires_at_ms,
+            };
+            fs::write(
+                directory.join(format!("{session_id}.json")),
+                serde_json::to_vec(&snapshot).unwrap(),
+            )
+            .unwrap();
+        }
+        fs::write(directory.join("repair_invalid.json"), "invalid").unwrap();
+
+        assert_eq!(cleanup_expired_previews(&root).unwrap(), 1);
+        assert!(!directory.join(format!("{expired_id}.json")).exists());
+        assert!(directory.join(format!("{active_id}.json")).exists());
+        assert!(directory.join("repair_invalid.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -67,11 +67,14 @@ pub struct DesktopState {
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
         let repair_backups = root.join("backups").join("profiles");
-        if repair_backups.exists() {
+        let repair_previews = root.join("repair_previews");
+        if repair_backups.exists() || repair_previews.exists() {
+            let repair_state_root = root.clone();
             let _ = std::thread::Builder::new()
                 .name("history-repair-cleanup".to_string())
                 .spawn(move || {
                     let _ = repair::cleanup_history_repair_backups(&repair_backups);
+                    let _ = repair::cleanup_expired_previews(&repair_state_root);
                 });
         }
         let mut store = LocalPoolStore::open(root.clone())?;
