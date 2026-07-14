@@ -39,7 +39,7 @@ impl ModelRegistry {
                 continue;
             };
             for model in models {
-                if candidate.is_visible(model, allowed_protocols, scope) {
+                if candidate.is_catalog_visible(model, allowed_protocols, scope) {
                     visible
                         .entry(model.to_ascii_lowercase())
                         .or_insert_with(|| model.clone());
@@ -151,5 +151,30 @@ mod tests {
                 0,
             )
             .is_empty());
+    }
+
+    #[test]
+    fn exhausted_quota_keeps_catalog_visible_but_unhealthy_accounts_do_not() {
+        let mut scheduler = PoolScheduler::new(2, 100);
+        let mut exhausted = candidate("exhausted", "source-a");
+        exhausted.quota = CandidateQuota::Exhausted;
+        scheduler.upsert(exhausted);
+        let mut unhealthy = candidate("unhealthy", "source-b");
+        unhealthy.health = CandidateHealth::Unhealthy;
+        scheduler.upsert(unhealthy);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace("exhausted", ["gpt-5"]);
+        registry.replace("unhealthy", ["gpt-private"]);
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                100,
+            ),
+            vec!["gpt-5"]
+        );
     }
 }

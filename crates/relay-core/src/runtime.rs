@@ -624,7 +624,11 @@ impl GatewayRuntime {
                         .iter()
                         .filter(|model| {
                             key.model_rules.allows(model)
-                                && candidate.is_visible(model, &[WireApi::Responses], &key.scope)
+                                && candidate.is_catalog_visible(
+                                    model,
+                                    &[WireApi::Responses],
+                                    &key.scope,
+                                )
                         })
                         .count();
                     if visible_models == 0 {

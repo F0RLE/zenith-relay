@@ -96,9 +96,16 @@ impl RuntimeCandidate {
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
     ) -> bool {
-        self.is_configured(model, allowed_protocols, scope)
-            && self.health.is_eligible()
-            && self.quota.is_eligible()
+        self.is_catalog_visible(model, allowed_protocols, scope) && self.quota.is_eligible()
+    }
+
+    pub(crate) fn is_catalog_visible(
+        &self,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+    ) -> bool {
+        self.is_configured(model, allowed_protocols, scope) && self.health.is_eligible()
     }
 
     pub(crate) fn is_configured(

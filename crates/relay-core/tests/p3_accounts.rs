@@ -644,7 +644,7 @@ async fn exhausted_and_reauth_accounts_are_filtered_before_account_source_fallba
 }
 
 #[tokio::test]
-async fn exhausted_only_account_does_not_block_gateway_startup() {
+async fn exhausted_account_keeps_codex_catalog_but_does_not_receive_requests() {
     let (upstream, state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
     let authority = ready_authority("oauth-exhausted", "exhausted-access").await;
     let mut exhausted = account("oauth-exhausted", "provider-exhausted", &upstream, 100);
@@ -659,9 +659,28 @@ async fn exhausted_only_account_does_not_block_gateway_startup() {
     )
     .await;
 
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url,
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
+
     let response = request(&gateway, false).await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(state.requests.lock().unwrap().is_empty());
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "no_eligible_source"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
