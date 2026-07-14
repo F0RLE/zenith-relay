@@ -1,4 +1,5 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CheckCircle2, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
@@ -68,14 +69,110 @@ export function Button({ children, icon, variant = "secondary", busy, ...props }
   return <button type={props.type ?? "button"} className={`relay-button ${variant}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
 }
 
-export function IconButton({ label, icon, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
-  return <button type={props.type ?? "button"} className="relay-icon-button" aria-label={label} title={label} {...props}>{icon}</button>;
+function useTooltip<T extends HTMLElement>(label: string) {
+  const anchorRef = useRef<T>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const pointerDown = useRef(false);
+  const tooltipId = useId();
+  const [visible, setVisible] = useState(false);
+  const [position, setPosition] = useState<{ left: number; top: number; placement: "top" | "bottom" } | null>(null);
+
+  const show = () => {
+    setPosition(null);
+    setVisible(true);
+  };
+  const hide = () => setVisible(false);
+  const pointerStart = () => {
+    pointerDown.current = true;
+    hide();
+    window.setTimeout(() => { pointerDown.current = false; }, 0);
+  };
+
+  useLayoutEffect(() => {
+    if (!visible) return;
+    const anchor = anchorRef.current?.getBoundingClientRect();
+    const tooltip = tooltipRef.current;
+    if (!anchor || !tooltip) return;
+    const margin = 9;
+    const gap = 8;
+    let placement: "top" | "bottom" = "bottom";
+    let top = anchor.bottom + gap;
+    if (top + tooltip.offsetHeight > window.innerHeight - margin && anchor.top - tooltip.offsetHeight - gap >= margin) {
+      placement = "top";
+      top = anchor.top - tooltip.offsetHeight - gap;
+    }
+    const centered = anchor.left + anchor.width / 2 - tooltip.offsetWidth / 2;
+    const left = Math.max(margin, Math.min(centered, window.innerWidth - tooltip.offsetWidth - margin));
+    setPosition({ left, top, placement });
+  }, [label, visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") hide(); };
+    window.addEventListener("resize", hide);
+    window.addEventListener("scroll", hide, true);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("scroll", hide, true);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [visible]);
+
+  const tooltip = visible && typeof document !== "undefined" ? createPortal(
+    <div
+      ref={tooltipRef}
+      id={tooltipId}
+      className="relay-tooltip"
+      role="tooltip"
+      data-placement={position?.placement}
+      data-positioned={Boolean(position)}
+      style={position ? { left: position.left, top: position.top } : undefined}
+    >
+      {label}
+    </div>,
+    document.body,
+  ) : null;
+
+  return {
+    anchorRef,
+    describedBy: visible ? tooltipId : undefined,
+    hide,
+    hideAfterHover: () => { if (document.activeElement !== anchorRef.current) hide(); },
+    show,
+    showAfterFocus: () => { if (!pointerDown.current) show(); },
+    pointerStart,
+    tooltip,
+  };
+}
+
+export function IconButton({ label, icon, className = "", title, onMouseEnter, onMouseLeave, onFocus, onBlur, onPointerDown, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { label: string; icon: ReactNode }) {
+  const tooltip = useTooltip<HTMLButtonElement>(title ?? label);
+  return <>
+    <button
+      ref={tooltip.anchorRef}
+      type={props.type ?? "button"}
+      className={`relay-icon-button ${className}`.trim()}
+      aria-label={label}
+      aria-describedby={tooltip.describedBy}
+      {...props}
+      onMouseEnter={(event) => { tooltip.show(); onMouseEnter?.(event); }}
+      onMouseLeave={(event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
+      onFocus={(event) => { tooltip.showAfterFocus(); onFocus?.(event); }}
+      onBlur={(event) => { tooltip.hide(); onBlur?.(event); }}
+      onPointerDown={(event) => { tooltip.pointerStart(); onPointerDown?.(event); }}
+    >
+      {icon}
+    </button>
+    {tooltip.tooltip}
+  </>;
 }
 
 export function ActionMenu({ children, className = "", label }: { children: ReactNode; className?: string; label?: string }) {
   const { t } = useTranslation();
   const resolvedLabel = label ?? t("common.actions");
-  return <details className={`relay-action-menu ${className}`.trim()}><summary aria-label={resolvedLabel} title={resolvedLabel} aria-haspopup="menu"><MoreHorizontal aria-hidden /></summary><div role="menu">{children}</div></details>;
+  const tooltip = useTooltip<HTMLElement>(resolvedLabel);
+  return <details className={`relay-action-menu ${className}`.trim()}><summary ref={tooltip.anchorRef} aria-label={resolvedLabel} aria-describedby={tooltip.describedBy} aria-haspopup="menu" onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><MoreHorizontal aria-hidden /></summary>{tooltip.tooltip}<div role="menu">{children}</div></details>;
 }
 
 export function ActionMenuItem({ children, icon, danger = false, className = "", onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {

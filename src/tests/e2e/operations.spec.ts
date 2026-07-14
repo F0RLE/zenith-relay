@@ -508,6 +508,46 @@ test("global cleanup refreshes first and deletes only terminal account errors", 
   expect(commands.filter((command) => command === "delete_local_account")).toHaveLength(1);
 });
 
+test("icon actions explain themselves and scrollbars follow the active theme", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "ru", theme: "light", populated: true, accountCount: 3 });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+
+  const cleanup = page.getByRole("button", { name: "Обновить и удалить нерабочие записи" });
+  await cleanup.hover();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toHaveText("Обновить и удалить нерабочие записи");
+  const box = await tooltip.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(8);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(832);
+
+  await page.mouse.move(2, 2);
+  await expect(tooltip).toHaveCount(0);
+  await cleanup.focus();
+  await expect(page.getByRole("tooltip")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+  const readScrollbarTheme = () => page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const content = getComputedStyle(document.querySelector(".relay-content")!);
+    return {
+      thumb: root.getPropertyValue("--relay-scrollbar-thumb").trim(),
+      hover: root.getPropertyValue("--relay-scrollbar-thumb-hover").trim(),
+      scrollbar: content.getPropertyValue("scrollbar-color"),
+    };
+  });
+  const light = await readScrollbarTheme();
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  const dark = await readScrollbarTheme();
+  expect(light.thumb).toBe("#aab6bb");
+  expect(dark.thumb).toBe("#536169");
+  expect(light.hover).not.toBe(dark.hover);
+  expect(light.scrollbar).not.toBe(dark.scrollbar);
+});
+
 test("pool summary keeps healthy and limited members mutually exclusive", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");

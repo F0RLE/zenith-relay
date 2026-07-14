@@ -8,6 +8,7 @@ use super::{
     error::{ErrorCode, LocalPoolError, Result},
     host::GatewayManager,
     models::{AutomationRecords, LocalAccountRecord, LocalPoolSnapshot, RuntimeTarget},
+    profiles::repair,
     store::{telemetry_db::TelemetryDb, LocalPoolStore},
 };
 use crate::platform;
@@ -65,6 +66,14 @@ pub struct DesktopState {
 
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
+        let repair_backups = root.join("backups").join("profiles");
+        if repair_backups.exists() {
+            let _ = std::thread::Builder::new()
+                .name("history-repair-cleanup".to_string())
+                .spawn(move || {
+                    let _ = repair::cleanup_history_repair_backups(&repair_backups);
+                });
+        }
         let mut store = LocalPoolStore::open(root.clone())?;
         let mut quota_refresh =
             QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES).map_err(invalid_core_state)?;

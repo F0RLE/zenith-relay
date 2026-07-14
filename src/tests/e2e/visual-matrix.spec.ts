@@ -331,6 +331,23 @@ for (const viewport of viewports) {
     })).toBe(true);
   });
 
+  for (const theme of themes) {
+    test(`icon tooltip ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 3 });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Подключения", exact: true }).click();
+      await page.getByRole("button", { name: "Обновить и удалить нерабочие записи" }).hover();
+      const tooltip = page.getByRole("tooltip");
+      await expect(tooltip).toBeVisible();
+      await page.screenshot({ path: `output/playwright/icon-tooltip-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+      expect(await tooltip.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 8 && rect.right <= innerWidth - 8 && rect.top >= 36 && rect.bottom <= innerHeight;
+      })).toBe(true);
+    });
+  }
+
   test(`account selection ru ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);

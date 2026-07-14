@@ -1684,6 +1684,10 @@ svg {
   --relay-shadow: 0 8px 24px rgb(27 39 45 / 9%);
   --relay-shadow-soft: 0 1px 2px rgb(27 39 45 / 7%);
   --relay-overlay: rgb(18 26 30 / 52%);
+  --relay-scrollbar-thumb: #aab6bb;
+  --relay-scrollbar-thumb-hover: #829198;
+  --relay-tooltip-bg: #202a2f;
+  --relay-tooltip-text: #f7fafb;
 }
 
 :root[data-theme="dark"] {
@@ -1710,6 +1714,10 @@ svg {
   --relay-shadow: 0 12px 30px rgb(0 0 0 / 30%);
   --relay-shadow-soft: 0 1px 2px rgb(0 0 0 / 30%);
   --relay-overlay: rgb(0 0 0 / 62%);
+  --relay-scrollbar-thumb: #536169;
+  --relay-scrollbar-thumb-hover: #718087;
+  --relay-tooltip-bg: #2a3439;
+  --relay-tooltip-text: #f7fafb;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -1737,7 +1745,40 @@ svg {
     --relay-shadow: 0 12px 30px rgb(0 0 0 / 30%);
     --relay-shadow-soft: 0 1px 2px rgb(0 0 0 / 30%);
     --relay-overlay: rgb(0 0 0 / 62%);
+    --relay-scrollbar-thumb: #536169;
+    --relay-scrollbar-thumb-hover: #718087;
+    --relay-tooltip-bg: #2a3439;
+    --relay-tooltip-text: #f7fafb;
   }
+}
+
+* {
+  scrollbar-color: var(--relay-scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--relay-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--relay-scrollbar-thumb-hover);
+  background-clip: padding-box;
 }
 
 body,
@@ -2320,6 +2361,29 @@ textarea {
   padding: 0;
 }
 
+.relay-tooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: min(300px, calc(100vw - 16px));
+  padding: 7px 9px;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 5px;
+  background: var(--relay-tooltip-bg);
+  box-shadow: var(--relay-shadow);
+  color: var(--relay-tooltip-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  text-align: center;
+  opacity: 0;
+}
+
+.relay-tooltip[data-positioned="true"] {
+  opacity: 1;
+}
+
 .relay-icon-button.danger {
   color: var(--relay-error);
 }
@@ -2711,6 +2775,7 @@ textarea:focus-visible {
 .view-layout-switcher button {
   width: 28px;
   height: 28px;
+  min-height: 28px;
   display: grid;
   place-items: center;
   border: 0;

@@ -18,6 +18,8 @@ const MAX_ROLLOUT_FILES: usize = 4_096;
 const MAX_ROLLOUT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
+const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_HISTORY_REPAIR_BACKUPS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -100,6 +102,15 @@ struct RepairManifest {
     backup_id: String,
     profile_roots: Vec<String>,
     entries: Vec<BackupEntry>,
+    #[serde(default)]
+    created_at_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupTimestamp {
+    #[serde(default)]
+    created_at_ms: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -211,11 +222,84 @@ pub fn apply(
         });
     }
     let _ = fs::remove_file(snapshot_path(state_root, session_id)?);
+    let _ = cleanup_history_repair_backups_preserving(backup_root, Some(&backup_id));
     Ok(RepairResult {
         backup_id,
         backup_path: path_string(&directory),
         rollout_records_changed: snapshot.rollout_files.iter().map(|item| item.records).sum(),
         sqlite_rows_changed: snapshot.databases.iter().map(|item| item.rows).sum(),
+    })
+}
+
+pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, String> {
+    cleanup_history_repair_backups_preserving(backup_root, None)
+}
+
+fn cleanup_history_repair_backups_preserving(
+    backup_root: &Path,
+    preserve_id: Option<&str>,
+) -> Result<usize, String> {
+    if !backup_root.exists() {
+        return Ok(0);
+    }
+    let mut backups = Vec::new();
+    for entry in fs::read_dir(backup_root).map_err(io_error)? {
+        let entry = entry.map_err(io_error)?;
+        let file_type = entry.file_type().map_err(io_error)?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if validate_id(&name, "history_repair_").is_err() {
+            continue;
+        }
+        backups.push((backup_created_at_ms(&entry.path()), name, entry.path()));
+    }
+    if backups.len() <= MAX_HISTORY_REPAIR_BACKUPS {
+        return Ok(0);
+    }
+    backups.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let mut keep = HashSet::new();
+    if let Some(id) = preserve_id {
+        if backups.iter().any(|(_, name, _)| name == id) {
+            keep.insert(id.to_string());
+        }
+    }
+    for (_, name, _) in &backups {
+        if keep.len() == MAX_HISTORY_REPAIR_BACKUPS {
+            break;
+        }
+        keep.insert(name.clone());
+    }
+    let stale = backups
+        .into_iter()
+        .filter(|(_, name, _)| !keep.contains(name))
+        .map(|(_, _, path)| path)
+        .collect::<Vec<_>>();
+    for path in &stale {
+        fs::remove_dir_all(path).map_err(io_error)?;
+    }
+    Ok(stale.len())
+}
+
+fn backup_created_at_ms(directory: &Path) -> u64 {
+    let manifest = directory.join("manifest.json");
+    let declared = fs::metadata(&manifest)
+        .ok()
+        .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_REPAIR_MANIFEST_BYTES)
+        .and_then(|_| fs::read(manifest).ok())
+        .and_then(|bytes| serde_json::from_slice::<BackupTimestamp>(&bytes).ok())
+        .map(|timestamp| timestamp.created_at_ms)
+        .filter(|timestamp| *timestamp > 0);
+    declared.unwrap_or_else(|| {
+        fs::metadata(directory)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or_default()
     })
 }
 
@@ -502,6 +586,7 @@ fn create_backup(
         backup_id: backup_id.to_string(),
         profile_roots: snapshot.profile_roots.clone(),
         entries,
+        created_at_ms: now_ms(),
     };
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|_| "repair backup manifest serialization failed".to_string())?;
@@ -850,6 +935,49 @@ mod tests {
             rollout_provider(b"{\"type\":\"session_meta\",\"payload\":{}}\n"),
             Some(None)
         );
+    }
+
+    #[test]
+    fn cleanup_keeps_two_recent_internal_backups_and_preserves_user_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-repair-retention-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let ids = (1_u64..=4)
+            .map(|index| format!("history_repair_{index:032x}"))
+            .collect::<Vec<_>>();
+        for (index, id) in ids.iter().enumerate() {
+            let directory = root.join(id);
+            fs::create_dir_all(&directory).unwrap();
+            fs::write(
+                directory.join("manifest.json"),
+                format!("{{\"createdAtMs\":{}}}", index + 1),
+            )
+            .unwrap();
+        }
+        let user_snapshot = root.join("snapshot_user_named");
+        fs::create_dir_all(&user_snapshot).unwrap();
+
+        assert_eq!(cleanup_history_repair_backups(&root).unwrap(), 2);
+        assert!(!root.join(&ids[0]).exists());
+        assert!(!root.join(&ids[1]).exists());
+        assert!(root.join(&ids[2]).exists());
+        assert!(root.join(&ids[3]).exists());
+        assert!(user_snapshot.exists());
+
+        let preserved = root.join(&ids[0]);
+        fs::create_dir_all(&preserved).unwrap();
+        fs::write(preserved.join("manifest.json"), "{\"createdAtMs\":1}").unwrap();
+        assert_eq!(
+            cleanup_history_repair_backups_preserving(&root, Some(&ids[0])).unwrap(),
+            1
+        );
+        assert!(root.join(&ids[0]).exists());
+        assert!(!root.join(&ids[2]).exists());
+        assert!(root.join(&ids[3]).exists());
+        assert!(user_snapshot.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
