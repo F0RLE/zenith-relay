@@ -277,6 +277,7 @@ test("connection search and request ID filters change visible rows", async ({ pa
   await expect(page.getByText("Personal Plus", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "More filters" }).click();
   const requestFilter = page.getByRole("textbox", { name: "Request ID" });
   await requestFilter.fill("missing-request");
   await expect(page.getByText("No matching results")).toBeVisible();
@@ -837,6 +838,7 @@ test("connections distinguish pool membership from Free-policy routing", async (
 
 test("page navigation resets the shared content scroll position", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.locator(".relay-content").evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -962,6 +964,7 @@ test("usage filters name independent choices", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect(page.getByLabel("Status").locator("option").first()).toHaveText("Any status");
+  await page.getByRole("button", { name: "More filters" }).click();
   await expect(page.getByLabel("Protocol").locator("option").first()).toHaveText("Any protocol");
 });
 
@@ -972,7 +975,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Connections" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "20", "12", "5", "8", "28", "128 / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cached12Reason5Out8", "28", "128 / 428 ms"]);
+  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cached12", "Reason5", "Out8"]);
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -1475,6 +1479,7 @@ test("remote diagnostics, server-side usage filters, and clear logs use managed 
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("textbox", { name: "Model" }).fill("gpt-5.4");
+  await page.getByRole("button", { name: "More filters" }).click();
   await page.getByRole("textbox", { name: "Request ID" }).fill("req_synthetic_remote");
   await expect(page.getByText("req_synthetic_remote")).toBeVisible();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelQuery?: string; requestIdQuery?: string } } }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "get_remote_server_usage" && call.args.input?.modelQuery === "gpt-5.4" && call.args.input?.requestIdQuery === "req_synthetic_remote"))).toBe(true);

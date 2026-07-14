@@ -763,3 +763,31 @@ for (const scenario of [
     await page.screenshot({ path: `output/playwright/${scenario.file}` });
   });
 }
+
+for (const viewport of viewports) {
+  test(`usage filter hierarchy ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Использование", exact: true }).click();
+
+    const filters = page.locator(".usage-filter-panel");
+    await expect(filters.getByLabel("Период")).toBeVisible();
+    await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
+    await filters.getByRole("button", { name: "Другие фильтры" }).click();
+    await expect(filters.getByLabel("Локальный ключ")).toBeVisible();
+    await filters.getByLabel("Локальный ключ").fill("synthetic");
+    await expect(filters.locator(".usage-filter-toggle-wrap small")).toHaveText("1");
+    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toBeVisible();
+    await filters.getByRole("button", { name: "Сбросить фильтры" }).click();
+    await expect(filters.getByLabel("Локальный ключ")).toHaveValue("");
+    await expect(filters.getByRole("button", { name: "Сбросить фильтры" })).toHaveCount(0);
+    await page.screenshot({ path: `output/playwright/usage-filters-open-ru-dark-${viewport.width}x${viewport.height}.png` });
+
+    await page.getByRole("tab", { name: "Модели" }).click();
+    const aggregate = page.locator(".usage-aggregate-table");
+    await expect(aggregate.getByRole("columnheader")).toHaveCount(6);
+    expect(await aggregate.locator(".usage-token-breakdown").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  });
+}
