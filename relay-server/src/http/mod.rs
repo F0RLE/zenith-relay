@@ -86,6 +86,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/keys/{id}/rotate", post(management_api::rotate_key))
         .route("/quota", get(management_api::quota))
         .route("/quota/settings", post(management_api::set_quota_policy))
+        .route(
+            "/routing/settings",
+            post(management_api::set_routing_policy),
+        )
         .route("/models", get(management_api::models))
         .route("/models/rules", post(management_api::set_model_enabled))
         .route(

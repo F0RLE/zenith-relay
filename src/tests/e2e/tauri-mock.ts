@@ -168,7 +168,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const localRuntime = {
       schemaVersion: 8,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, sessionAffinity: true, sessionAffinityTtlSeconds: 3_600, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
       platform: "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy"] },
       sources: populated ? [source] : [],
@@ -278,7 +278,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "refresh_local_account_quota": return structuredClone(localRuntime);
           case "refresh_all_local_account_quotas": return structuredClone(localRuntime);
           case "refresh_local_pool_account_quotas": return [];
-          case "update_local_account": return structuredClone(localRuntime);
+          case "update_local_account": {
+            const request = args.input as { accountId?: string; priority?: number; weight?: number; draining?: boolean };
+            const target = localRuntime.accounts.find((item) => item.id === request.accountId);
+            if (target && typeof request.priority === "number") target.priority = request.priority;
+            if (target && typeof request.weight === "number") target.weight = request.weight;
+            if (target && typeof request.draining === "boolean") target.draining = request.draining;
+            return structuredClone(localRuntime);
+          }
           case "set_local_account_enabled": {
             const target = localRuntime.accounts.find((item) => item.id === args.accountId);
             if (target) target.enabled = Boolean(args.enabled);
@@ -310,6 +317,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.quotaRequestTimeoutSeconds = request.requestTimeoutSeconds;
             localRuntime.gateway.useFreeAccounts = request.useFreeAccounts;
             applyFreeRoutingPolicy(localRuntime);
+            return structuredClone(localRuntime);
+          }
+          case "update_local_routing": {
+            const request = args.input as { maxRetryCandidates: number; sessionAffinity: boolean; sessionAffinityTtlSeconds: number };
+            localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
+            localRuntime.gateway.sessionAffinity = request.sessionAffinity;
+            localRuntime.gateway.sessionAffinityTtlSeconds = request.sessionAffinityTtlSeconds;
             return structuredClone(localRuntime);
           }
           case "delete_local_account": {
@@ -520,6 +534,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         const target = remoteRuntime.accounts.find((item) => item.id === input.action?.id);
         if (target && typeof input.payload?.enabled === "boolean") target.enabled = input.payload.enabled;
         if (target && typeof input.payload?.draining === "boolean") target.draining = input.payload.draining;
+        if (target && typeof input.payload?.priority === "number") target.priority = input.payload.priority;
+        if (target && typeof input.payload?.weight === "number") target.weight = input.payload.weight;
         return structuredClone(target ?? null);
       }
       if (type === "delete_account") {
@@ -581,6 +597,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         remoteRuntime.gateway.quotaRequestTimeoutSeconds = Number(input.payload?.requestTimeoutSeconds);
         remoteRuntime.gateway.useFreeAccounts = Boolean(input.payload?.useFreeAccounts);
         applyFreeRoutingPolicy(remoteRuntime);
+        return structuredClone(remoteRuntime);
+      }
+      if (type === "set_routing_policy") {
+        remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
+        remoteRuntime.gateway.sessionAffinity = Boolean(input.payload?.sessionAffinity);
+        remoteRuntime.gateway.sessionAffinityTtlSeconds = Number(input.payload?.sessionAffinityTtlSeconds);
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_pool_quotas") return { refreshed: remoteRuntime.accounts.filter((item) => item.inPool && item.enabled).length, failed: 0, snapshot: structuredClone(remoteRuntime) };

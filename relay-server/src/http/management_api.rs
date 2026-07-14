@@ -2040,6 +2040,57 @@ pub async fn set_quota_policy(
     state.snapshot().map(Json).map_err(store_error)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RoutingPolicyInput {
+    max_retry_candidates: u8,
+    session_affinity: bool,
+    session_affinity_ttl_seconds: u64,
+}
+
+pub async fn set_routing_policy(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<RoutingPolicyInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    if !(1..=8).contains(&input.max_retry_candidates) {
+        return Err(ManagementError::validation(
+            "max_retry_candidates_invalid",
+            "max retry candidates must be between 1 and 8",
+        ));
+    }
+    if !(crate::store::MIN_SESSION_AFFINITY_TTL_SECONDS
+        ..=crate::store::MAX_SESSION_AFFINITY_TTL_SECONDS)
+        .contains(&input.session_affinity_ttl_seconds)
+    {
+        return Err(ManagementError::validation(
+            "session_affinity_ttl_invalid",
+            "session affinity TTL must be between 60 and 86400 seconds",
+        ));
+    }
+    let previous = state.store.routing_policy().map_err(store_error)?;
+    state
+        .store
+        .set_routing_policy(
+            input.max_retry_candidates,
+            input.session_affinity,
+            input.session_affinity_ttl_seconds,
+        )
+        .map_err(store_error)?;
+    if let Err(error) = state.rebuild_runtime().await {
+        state
+            .store
+            .set_routing_policy(previous.0, previous.1, previous.2)
+            .map_err(store_error)?;
+        if let Err(restore) = state.rebuild_runtime().await {
+            return Err(store_error(format!(
+                "{error}; failed to restore previous runtime: {restore}"
+            )));
+        }
+        return Err(store_error(error));
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
 #[derive(Serialize)]
 pub struct ModelList {
     data: Vec<ModelItem>,

@@ -4249,6 +4249,24 @@ textarea {
 .account-health.warning { color: var(--relay-warning); }
 .account-health.error { color: var(--relay-error); }
 
+.account-priority {
+  min-width: 0;
+  overflow: hidden;
+  padding: 1px 5px;
+  border: 1px solid var(--relay-border);
+  border-radius: 4px;
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.routing-priority-note {
+  color: var(--relay-warning);
+}
+
 .account-facts {
   min-width: 0;
   display: grid;

@@ -134,6 +134,9 @@ export type RuntimeSnapshot = {
     baseUrl: string;
     candidateCount: number;
     visibleModelIds: string[];
+    maxRetryCandidates?: number | null;
+    sessionAffinity?: boolean | null;
+    sessionAffinityTtlSeconds?: number | null;
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;

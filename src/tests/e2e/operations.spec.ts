@@ -648,7 +648,7 @@ test("pool display order defaults to routing priority and can be changed to quot
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const order = page.getByLabel("Display order");
   await expect(order.locator("option")).toHaveText(["Routing order", "Available quota", "Name"]);
-  await expect(page.locator(".pool-member-card").first().getByText("Priority", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".pool-member-card").first()).toContainText("Priority 30");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
   expect(await names()).toEqual(["Business Workspace", "Personal Plus", "Example compatible API", "Backup account"]);
   await order.selectOption("quota");
@@ -726,6 +726,71 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 10, useFreeAccounts: true } });
 });
 
+test("local pool exposes session affinity and retry distribution settings", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const header = page.locator(".relay-page-header");
+  await header.locator(".relay-action-menu summary").click();
+  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  const affinity = dialog.getByLabel("Keep each chat on one account");
+  const duration = dialog.getByLabel("Affinity duration");
+  await expect(affinity).toBeChecked();
+  await duration.selectOption("300");
+  await affinity.uncheck();
+  await expect(duration).toBeDisabled();
+  await dialog.getByLabel("Accounts tried after an error").selectOption("5");
+  await expect(dialog).toContainText("may lose response continuity and prompt cache");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { maxRetryCandidates: 5, sessionAffinity: false, sessionAffinityTtlSeconds: 300 } });
+});
+
+test("mixed account priorities are visible and can be equalized without changing API source roles", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.locator(".account-priority")).toHaveText(["Priority 30", "Priority 20", "Priority 10"]);
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const header = page.locator(".relay-page-header");
+  await header.locator(".relay-action-menu summary").click();
+  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  await expect(dialog).toContainText("Manual priority tiers differ");
+  page.once("dialog", (confirmation) => confirmation.accept());
+  await dialog.getByRole("button", { name: "Equalize account priorities", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Equalize account priorities", exact: true })).toBeHidden();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "update_local_account").map((call) => call.args.input)).toEqual([
+    { accountId: "account_synthetic", priority: 0 },
+    { accountId: "account_synthetic_2", priority: 0 },
+    { accountId: "account_synthetic_3", priority: 0 },
+  ]);
+});
+
+test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const header = page.locator(".relay-page-header");
+  await header.locator(".relay-action-menu summary").click();
+  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  await dialog.getByLabel("Affinity duration").selectOption("900");
+  await dialog.getByLabel("Accounts tried after an error").selectOption("4");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
+    action: { type: "set_routing_policy" },
+    payload: { maxRetryCandidates: 4, sessionAffinity: true, sessionAffinityTtlSeconds: 900 },
+  });
+});
+
 test("remote pool uses the same quota refresh controls", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
   await page.goto("/");
@@ -767,7 +832,7 @@ test("connections distinguish pool membership from Free-policy routing", async (
   const freeAccount = page.locator(".account-card").filter({ hasText: "Backup account" });
   await expect(freeAccount).toContainText("Not routed: Free policy");
   await expect(freeAccount).toContainText("95%");
-  await expect(freeAccount).toContainText("30 days");
+  await expect(freeAccount).toContainText("Monthly");
 });
 
 test("page navigation resets the shared content scroll position", async ({ page }) => {
@@ -928,7 +993,8 @@ test("pool member fields explain routing priority and traffic share", async ({ p
   await page.getByRole("button", { name: "Pool member policy: Personal Plus", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: /Pool member policy/ });
-  await expect(dialog.getByText("Routing priority", { exact: true })).toHaveAttribute("title", "Higher-priority eligible members are considered first.");
+  await expect(dialog.getByText("Routing priority", { exact: true })).toHaveAttribute("title", "Lower-priority accounts receive no new requests while a higher-priority account remains eligible.");
+  await expect(dialog).toContainText("Lower-priority accounts receive no new requests");
   await expect(dialog.getByText("Traffic share", { exact: true })).toHaveAttribute("title", "Among equally eligible members, a higher share receives more requests.");
 });
 
@@ -1080,11 +1146,22 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, exhaustedQuotaWindow: "secondary" });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.locator(".account-card").first().locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
+  await expect(page.locator(".account-card").first().locator(".quota-meter strong")).toHaveText(["0% left", "0% left"]);
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const accountCard = page.locator('.pool-member-card[data-member-label="Personal Plus"]');
-  await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
+  await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0% left", "0% left"]);
+});
+
+test("quota cards name monthly windows and make remaining percentages explicit", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const free = page.locator(".account-card").filter({ hasText: "Backup account" });
+  await expect(free.locator(".quota-meter-heading > span")).toHaveText("Monthly");
+  await expect(free.locator(".quota-meter-heading > strong")).toHaveText("95% left");
+  await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "Monthly: 95% left");
 });
 
 test("pool toggle changes state without switching Codex", async ({ page }) => {

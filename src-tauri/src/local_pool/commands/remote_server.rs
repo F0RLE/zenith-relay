@@ -68,6 +68,7 @@ pub enum RemoteServerAction {
     AssignAccountProxies,
     SetPoolMembership,
     SetQuotaPolicy,
+    SetRoutingPolicy,
     RefreshPoolQuotas,
     SetModelEnabled,
     CreateKey,
@@ -421,6 +422,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::SetPoolMembership => (Method::POST, "/pool/members".to_string(), true),
         RemoteServerAction::SetQuotaPolicy => (Method::POST, "/quota/settings".to_string(), true),
+        RemoteServerAction::SetRoutingPolicy => {
+            (Method::POST, "/routing/settings".to_string(), true)
+        }
         RemoteServerAction::RefreshPoolQuotas => {
             (Method::POST, "/pool/quota/refresh".to_string(), false)
         }

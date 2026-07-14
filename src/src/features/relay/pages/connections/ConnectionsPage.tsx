@@ -384,6 +384,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
               <strong className={revealedIdentities[account.id] ? "revealed" : undefined} title={revealedIdentities[account.id] ?? account.label}>{revealedIdentities[account.id] ?? account.label}</strong>
               <div>
                 <span className={`account-health ${accountHealthTone(account.health)}`}>{t(`health.${account.health}`, { defaultValue: account.health })}</span>
+                {account.inPool && account.priority !== 0 ? <span className="account-priority" title={t("pool.priorityHelp")}>{t("pool.priorityValue", { value: account.priority })}</span> : null}
               </div>
             </div>
             <div className="account-facts">

@@ -28,6 +28,10 @@ pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
 pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
+pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
+pub const MIN_SESSION_AFFINITY_TTL_SECONDS: u64 = 60;
+pub const MAX_SESSION_AFFINITY_TTL_SECONDS: u64 = 86_400;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -243,6 +247,63 @@ impl Store {
                 request_timeout_seconds.to_string(),
             ),
             ("use_free_accounts", use_free_accounts.to_string()),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![key, value],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
+    }
+
+    pub fn routing_policy(&self) -> Result<(u8, bool, u64), String> {
+        let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
+            Ok(DEFAULT_MAX_RETRY_CANDIDATES),
+            |value| {
+                value
+                    .parse::<u8>()
+                    .map_err(|_| "max retry candidates is invalid".to_string())
+            },
+        )?;
+        let session_affinity = self
+            .metadata("session_affinity")?
+            .is_none_or(|value| value == "true");
+        let session_affinity_ttl_seconds = self.metadata("session_affinity_ttl_seconds")?.map_or(
+            Ok(DEFAULT_SESSION_AFFINITY_TTL_SECONDS),
+            |value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| "session affinity TTL is invalid".to_string())
+            },
+        )?;
+        validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
+        Ok((
+            max_retry_candidates,
+            session_affinity,
+            session_affinity_ttl_seconds,
+        ))
+    }
+
+    pub fn set_routing_policy(
+        &self,
+        max_retry_candidates: u8,
+        session_affinity: bool,
+        session_affinity_ttl_seconds: u64,
+    ) -> Result<(), String> {
+        validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for (key, value) in [
+            ("max_retry_candidates", max_retry_candidates.to_string()),
+            ("session_affinity", session_affinity.to_string()),
+            (
+                "session_affinity_ttl_seconds",
+                session_affinity_ttl_seconds.to_string(),
+            ),
         ] {
             transaction
                 .execute(
@@ -1082,6 +1143,21 @@ fn validate_quota_policy(
     Ok(())
 }
 
+fn validate_routing_policy(
+    max_retry_candidates: u8,
+    session_affinity_ttl_seconds: u64,
+) -> Result<(), String> {
+    if !(1..=8).contains(&max_retry_candidates) {
+        return Err("max retry candidates is invalid".to_string());
+    }
+    if !(MIN_SESSION_AFFINITY_TTL_SECONDS..=MAX_SESSION_AFFINITY_TTL_SECONDS)
+        .contains(&session_affinity_ttl_seconds)
+    {
+        return Err("session affinity TTL is invalid".to_string());
+    }
+    Ok(())
+}
+
 fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
     if models.len() > 4_096 {
         return Err("model list exceeds the supported limit".to_string());
@@ -1222,6 +1298,23 @@ mod tests {
 
         let reopened = Store::open(path).unwrap();
         assert_eq!(reopened.quota_policy().unwrap(), (120, 10, true));
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn routing_policy_is_validated_and_persists() {
+        let root = test_root("routing-policy");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        assert_eq!(store.routing_policy().unwrap(), (3, true, 3_600));
+        assert!(store.set_routing_policy(0, true, 3_600).is_err());
+        assert!(store.set_routing_policy(3, true, 59).is_err());
+        store.set_routing_policy(5, false, 300).unwrap();
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(reopened.routing_policy().unwrap(), (5, false, 300));
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }

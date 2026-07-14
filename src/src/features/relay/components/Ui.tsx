@@ -235,7 +235,8 @@ export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null
   const percent = Math.round(window.availableBasisPoints / 100);
   const reset = window.resetAtMs ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(window.resetAtMs)) : t("common.unknown");
   const resetLabel = t("quota.reset", { value: reset });
-  return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{percent}%</strong></div><div className="quota-track" aria-label={`${resolvedLabel} ${percent}%`}><span style={{ width: `${percent}%` }} /></div></div>;
+  const remainingLabel = t("quota.remainingPercent", { value: percent });
+  return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
 }
 
 export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
@@ -257,6 +258,7 @@ export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
   const minutes = window?.windowMinutes;
   if (!minutes) return t(`quota.${kind}`);
+  if (minutes >= 28 * 1_440 && minutes <= 31 * 1_440) return t("quota.month");
   const weeks = Math.round(minutes / 10_080);
   if (weeks > 0 && Math.abs(minutes - weeks * 10_080) <= 1) return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
   if (minutes % 1_440 === 0) return t("quota.days", { count: minutes / 1_440 });

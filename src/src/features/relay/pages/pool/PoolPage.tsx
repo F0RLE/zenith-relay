@@ -22,9 +22,11 @@ export function PoolPage() {
   const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
   const [quotaPolicy, setQuotaPolicy] = useState(false);
+  const [routingPolicy, setRoutingPolicy] = useState(false);
   const supportsKeys = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
   const supportsModels = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("models"));
   const supportsMembers = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
+  const supportsRoutingSettings = mode !== "remote" || runtime?.gateway.maxRetryCandidates != null;
   useEffect(() => {
     if ((view === "keys" && !supportsKeys) || (view === "models" && !supportsModels)) setView("members");
   }, [view, supportsKeys, supportsModels]);
@@ -59,13 +61,19 @@ export function PoolPage() {
     {running
       ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
       : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
-    {viewMenuAction || running ? <ActionMenu label={t("common.actions")}>
+    <ActionMenu label={t("common.actions")}>
       {viewMenuAction}
+      <ActionMenuItem icon={<Settings2 aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={() => setRoutingPolicy(true)}>{t("pool.routingSettings")}</ActionMenuItem>
       {running ? <ActionMenuItem icon={<Power aria-hidden />} disabled={busy === "pool-toggle"} onClick={() => void perform("pool-toggle", relayCommands.stopGateway, "feedback.stopped")}>{t("pool.stop")}</ActionMenuItem> : null}
-    </ActionMenu> : null}
-  </> : viewAction;
+    </ActionMenu>
+  </> : <>
+    {viewAction}
+    <ActionMenu label={t("common.actions")}>
+      <ActionMenuItem icon={<Settings2 aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={() => setRoutingPolicy(true)}>{t("pool.routingSettings")}</ActionMenuItem>
+    </ActionMenu>
+  </>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
-  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
+  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
 
 function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolicy: () => void }) {
@@ -114,14 +122,14 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
           ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
-          : `${member.label} · ${formatAccountPlan(member.subscription.planType, t("common.unknown"))}`;
+          : [member.label, formatAccountPlan(member.subscription.planType, t("common.unknown")), member.priority !== 0 ? t("pool.priorityValue", { value: member.priority }) : null].filter(Boolean).join(" · ");
         const quota = memberQuota(member);
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label}>
           <div className="pool-member-card-main">
             <div className="pool-member-state"><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} /><small>{t(`pool.types.${member.kind}`)}</small></div>
             <div className="pool-member-identity"><strong title={identity}>{identity}</strong><small title={detail}>{detail}</small></div>
-            <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("common.quota")}><span>{t("common.quota")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
+            <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
             <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
           </div>
@@ -150,6 +158,34 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
   return <Dialog title={t("pool.refreshPolicyTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "quota-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="relay-field"><span>{t("pool.refreshInterval")}</span><select value={refreshIntervalSeconds} onChange={(event) => setRefreshIntervalSeconds(Number(event.target.value))}><option value={120}>{t("pool.refreshIntervals.twoMinutes")}</option><option value={300}>{t("pool.refreshIntervals.fiveMinutes")}</option><option value={600}>{t("pool.refreshIntervals.tenMinutes")}</option><option value={1800}>{t("pool.refreshIntervals.thirtyMinutes")}</option><option value={3600}>{t("pool.refreshIntervals.oneHour")}</option></select></label><label className="relay-field"><span>{t("pool.requestTimeout")}</span><select value={requestTimeoutSeconds} onChange={(event) => setRequestTimeoutSeconds(Number(event.target.value))}><option value={10}>{t("pool.requestTimeouts.tenSeconds")}</option><option value={15}>{t("pool.requestTimeouts.fifteenSeconds")}</option><option value={20}>{t("pool.requestTimeouts.twentySeconds")}</option></select></label><label className="toggle-row"><input type="checkbox" checked={useFreeAccounts} disabled={!supportsFreePolicy} title={!supportsFreePolicy ? t("remote.capabilityUnavailable") : undefined} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t("pool.useFreeAccounts")}</span></label><p className="form-note">{supportsFreePolicy ? t("pool.useFreeAccountsHint") : t("pool.useFreeAccountsLegacyHint")}</p><p className="form-note">{t("pool.refreshPolicyHint")}</p></div></Dialog>;
 }
 
+function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, runtime, perform, busy } = useRelayState();
+  const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
+  const [sessionAffinity, setSessionAffinity] = useState(runtime?.gateway.sessionAffinity ?? true);
+  const [sessionAffinityTtlSeconds, setSessionAffinityTtlSeconds] = useState(runtime?.gateway.sessionAffinityTtlSeconds ?? 3_600);
+  const poolAccounts = (runtime?.accounts ?? []).filter((account) => account.inPool);
+  const prioritiesVary = new Set(poolAccounts.map((account) => account.priority)).size > 1;
+  const save = async () => {
+    const payload = { maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds };
+    const ok = await perform("routing-policy", () => mode === "local"
+      ? relayCommands.updateRouting(maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds)
+      : relayCommands.remoteAction({ type: "set_routing_policy" }, payload), "feedback.saved");
+    if (ok) onClose();
+  };
+  const equalizePriorities = async () => {
+    const targets = poolAccounts.filter((account) => account.priority !== 0);
+    if (!targets.length || !window.confirm(t("pool.equalizePrioritiesConfirm"))) return;
+    await perform("priority-equalize", async () => {
+      for (const account of targets) {
+        if (mode === "local") await relayCommands.updateAccount({ accountId: account.id, priority: 0 });
+        else await relayCommands.remoteAction({ type: "update_account", id: account.id }, { priority: 0 });
+      }
+    }, "feedback.saved");
+  };
+  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><label className="toggle-row" title={t("pool.sessionAffinityHelp")}><input type="checkbox" checked={sessionAffinity} onChange={(event) => setSessionAffinity(event.target.checked)} /><span>{t("pool.sessionAffinity")}</span></label><label className="relay-field"><span>{t("pool.sessionAffinityTtl")}</span><select value={sessionAffinityTtlSeconds} disabled={!sessionAffinity} onChange={(event) => setSessionAffinityTtlSeconds(Number(event.target.value))}><option value={60}>{t("pool.affinityDurations.oneMinute")}</option><option value={300}>{t("pool.affinityDurations.fiveMinutes")}</option><option value={900}>{t("pool.affinityDurations.fifteenMinutes")}</option><option value={3600}>{t("pool.affinityDurations.oneHour")}</option><option value={21600}>{t("pool.affinityDurations.sixHours")}</option><option value={86400}>{t("pool.affinityDurations.oneDay")}</option></select></label><label className="relay-field"><span>{t("pool.retryCandidates")}</span><select value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(Number(event.target.value))}>{Array.from({ length: 8 }, (_, index) => index + 1).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{prioritiesVary ? <><p className="form-note routing-priority-note">{t("pool.priorityTiersWarning")}</p><Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "priority-equalize"} onClick={() => void equalizePriorities()}>{t("pool.equalizePriorities")}</Button></> : null}{!sessionAffinity ? <p className="form-note">{t("pool.affinityDisabledWarning")}</p> : null}</div></Dialog>;
+}
+
 function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
@@ -174,7 +210,7 @@ function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: 
     }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="danger" onClick={onRemove}>{t("pool.removeMember")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}><div className="relay-form"><div className="settings-row">{member.kind === "source" ? <label><span>{t("sources.poolRole")}</span><select value={sourceRole} onChange={(event) => setSourceRole(event.target.value as ApiSourceRole)}><option value="primary">{t("sources.roles.primary")}</option><option value="stabilizer">{t("sources.roles.stabilizer")}</option><option value="reserve">{t("sources.roles.reserve")}</option></select><small>{t(`sources.roleHints.${sourceRole}`)}</small></label> : <label><span title={t("pool.priorityHelp")}>{t("pool.routingPriority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /></label>}<label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><p className="form-note">{t("pool.modelListHint")}</p></div></Dialog>;
+  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="danger" onClick={onRemove}>{t("pool.removeMember")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}><div className="relay-form"><div className="settings-row">{member.kind === "source" ? <label><span>{t("sources.poolRole")}</span><select value={sourceRole} onChange={(event) => setSourceRole(event.target.value as ApiSourceRole)}><option value="primary">{t("sources.roles.primary")}</option><option value="stabilizer">{t("sources.roles.stabilizer")}</option><option value="reserve">{t("sources.roles.reserve")}</option></select><small>{t(`sources.roleHints.${sourceRole}`)}</small></label> : <label><span title={t("pool.priorityHelp")}>{t("pool.routingPriority")}</span><input type="number" value={priority} onChange={(event) => setPriority(Number(event.target.value))} /><small>{t("pool.priorityHelp")}</small></label>}<label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} placeholder="gpt-5.4, gpt-5.4-mini" /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><p className="form-note">{t("pool.modelListHint")}</p></div></Dialog>;
 }
 
 function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {

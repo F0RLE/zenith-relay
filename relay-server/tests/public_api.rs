@@ -734,6 +734,37 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
     assert_eq!(updated["gateway"]["quotaRequestTimeoutSeconds"], 10);
     assert_eq!(updated["gateway"]["useFreeAccounts"], false);
 
+    let invalid_routing = client
+        .post(format!("{}/routing/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "maxRetryCandidates": 0,
+            "sessionAffinity": true,
+            "sessionAffinityTtlSeconds": 3600
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_routing.status(), StatusCode::BAD_REQUEST);
+
+    let routing: Value = client
+        .post(format!("{}/routing/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "maxRetryCandidates": 5,
+            "sessionAffinity": false,
+            "sessionAffinityTtlSeconds": 300
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(routing["gateway"]["maxRetryCandidates"], 5);
+    assert_eq!(routing["gateway"]["sessionAffinity"], false);
+    assert_eq!(routing["gateway"]["sessionAffinityTtlSeconds"], 300);
+
     let free_enabled: Value = client
         .post(format!("{}/quota/settings", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -771,6 +802,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         120
     );
     assert_eq!(refreshed["snapshot"]["gateway"]["useFreeAccounts"], true);
+    assert_eq!(refreshed["snapshot"]["gateway"]["maxRetryCandidates"], 5);
 
     server.task.abort();
 }

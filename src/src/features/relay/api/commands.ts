@@ -76,6 +76,7 @@ export const relayCommands = {
   deleteKey: (keyId: string) => invoke("delete_local_gateway_key", { keyId }),
   setPoolMembership: (accountIds: string[], sourceIds: string[], inPool: boolean) => invoke("set_local_pool_membership", { input: { accountIds, sourceIds, inPool } }),
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
+  updateRouting: (maxRetryCandidates: number, sessionAffinity: boolean, sessionAffinityTtlSeconds: number) => invoke("update_local_routing", { input: { maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds } }),
   updateQuotaPolicy: (refreshIntervalSeconds: number, requestTimeoutSeconds: number, useFreeAccounts: boolean) => invoke("update_local_quota_policy", { input: { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts } }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),

@@ -496,6 +496,25 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/quota-windows-${viewport.width}x${viewport.height}.png` });
   });
 
+  test(`routing distribution ru dark ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    const header = page.locator(".relay-page-header");
+    await header.locator(".relay-action-menu summary").click();
+    await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
+    await dialog.getByLabel("Закреплять чат за аккаунтом").uncheck();
+    await expect(dialog.getByLabel("Срок закрепления")).toBeDisabled();
+    await expect(dialog).toContainText("может перейти на другой аккаунт");
+    await expect(dialog).toContainText("Активны разные ручные приоритеты");
+    await expect(dialog.getByRole("button", { name: "Уравнять приоритеты аккаунтов" })).toBeVisible();
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/routing-distribution-ru-dark-${viewport.width}x${viewport.height}.png` });
+  });
+
   test(`shell disclosure controls ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
     await page.setViewportSize(viewport);
