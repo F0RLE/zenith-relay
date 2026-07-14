@@ -57,9 +57,8 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
       {(Object.keys(providerDefaults) as ApiProviderKind[]).map((kind) => {
         const Icon = providerIcons[kind];
         return <button key={kind} type="button" role="radio" aria-checked={value.kind === kind} className={value.kind === kind ? "selected" : ""} onClick={() => select(kind)}>
-          <Icon aria-hidden />
-          <span><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong><small>{t(`apiProviders.descriptions.${kind}`)}</small></span>
-          {kind === "zenith" ? <em>{t("common.recommended")}</em> : null}
+          <span className="api-provider-title"><Icon aria-hidden /><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong>{kind === "zenith" ? <em>{t("common.recommended")}</em> : null}</span>
+          <small>{t(`apiProviders.descriptions.${kind}`)}</small>
         </button>;
       })}
     </div>

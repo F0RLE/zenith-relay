@@ -5758,13 +5758,11 @@ textarea {
 }
 
 .api-provider-options button {
-  position: relative;
   min-width: 0;
-  min-height: 116px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-items: start;
-  gap: 10px;
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 14px;
   border: 1px solid var(--relay-border);
   border-radius: 7px;
@@ -5774,19 +5772,23 @@ textarea {
   cursor: pointer;
 }
 
-.api-provider-options button > svg {
-  width: 26px;
-  height: 26px;
-  padding: 5px;
-  border-radius: 6px;
-  background: var(--relay-subtle);
+.api-provider-title {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.api-provider-title svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
   color: var(--relay-secondary);
 }
 
-.api-provider-options button span {
+.api-provider-title strong {
   min-width: 0;
-  display: grid;
-  gap: 5px;
 }
 
 .api-provider-options button small {
@@ -5796,9 +5798,7 @@ textarea {
 }
 
 .api-provider-options button em {
-  position: absolute;
-  right: 10px;
-  bottom: 9px;
+  margin-left: auto;
   color: var(--relay-accent-hover);
   font-size: 10px;
   font-style: normal;
@@ -6292,7 +6292,7 @@ input[type="password"] {
   }
 
   .api-provider-options button {
-    min-height: 98px;
+    min-height: 86px;
     padding: 11px;
   }
 
@@ -6302,7 +6302,7 @@ input[type="password"] {
   }
 }
 
-@media (max-height: 620px) and (min-width: 701px) {
+@media (max-height: 620px) and (min-width: 901px) {
   .api-provider-options {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
