@@ -980,6 +980,7 @@ impl GatewayRuntime {
         model: &str,
         now_ms: u64,
         output_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
         latency_ms: u64,
     ) {
         self.lock_scheduler().record_success_with_metrics(
@@ -987,6 +988,7 @@ impl GatewayRuntime {
             model,
             now_ms,
             output_tokens,
+            reasoning_tokens,
             latency_ms,
         );
     }

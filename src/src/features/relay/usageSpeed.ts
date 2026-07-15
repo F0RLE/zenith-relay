@@ -3,6 +3,7 @@ import type { LocalUsage } from "./api/types";
 export type TokenSpeedSample = {
   success: boolean;
   outputTokens: number | null;
+  reasoningTokens?: number | null;
   durationMs: number | null;
   ttftMs?: number | null;
   generationDurationMs?: number | null;
@@ -10,12 +11,14 @@ export type TokenSpeedSample = {
 
 function measurement(sample: TokenSpeedSample) {
   if (!sample.success || !sample.outputTokens || sample.outputTokens < 0) return null;
+  const visibleOutputTokens = Math.max(0, sample.outputTokens - Math.min(sample.reasoningTokens ?? 0, sample.outputTokens));
+  if (!visibleOutputTokens) return null;
   const measuredDuration = sample.generationDurationMs
     ?? (sample.ttftMs != null && sample.durationMs != null && sample.durationMs > sample.ttftMs
       ? sample.durationMs - sample.ttftMs
       : sample.durationMs);
   if (!measuredDuration || measuredDuration <= 0) return null;
-  return { outputTokens: sample.outputTokens, durationMs: measuredDuration };
+  return { outputTokens: visibleOutputTokens, durationMs: measuredDuration };
 }
 
 export function tokenSpeed(sample: TokenSpeedSample) {
@@ -39,7 +42,7 @@ export function latestLocalAccountSpeeds(events: LocalUsage[]) {
   const speeds = new Map<string, number>();
   for (const event of [...events].sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))) {
     if (!event.accountId || speeds.has(event.accountId)) continue;
-    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, durationMs: event.latencyMs, ttftMs: event.ttftMs });
+    const speed = tokenSpeed({ success: event.success, outputTokens: event.outputTokens, reasoningTokens: event.reasoningTokens, durationMs: event.latencyMs, ttftMs: event.ttftMs });
     if (speed != null) speeds.set(event.accountId, speed);
   }
   return speeds;

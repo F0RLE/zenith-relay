@@ -2216,6 +2216,9 @@ pub async fn usage(
     for event in &mut page.events {
         event.candidate_label = labels.get(&event.candidate_hint).cloned();
     }
+    for group in &mut page.pool_members {
+        group.label = labels.get(&group.key).cloned();
+    }
     Ok(Json(page))
 }
 

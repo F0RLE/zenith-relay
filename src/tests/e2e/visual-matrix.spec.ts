@@ -42,7 +42,7 @@ for (const locale of locales) {
                 const wrapRect = wrap.getBoundingClientRect();
                 return cellRect.left < wrapRect.left - 1 || cellRect.right > wrapRect.right + 1;
               }).map((cell) => cell.outerHTML.slice(0, 160)))).toEqual([]);
-              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".metric-band > div, .pool-summary > div")].every((cell) => {
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".metric-band:not(.usage-metrics) > div, .pool-summary > div")].every((cell) => {
                 const children = [...cell.children] as HTMLElement[];
                 if (!children.length) return true;
                 const cellRect = cell.getBoundingClientRect();
@@ -54,7 +54,13 @@ for (const locale of locales) {
                   && children.every((child) => {
                     const rect = child.getBoundingClientRect();
                     return Math.abs((rect.top + rect.bottom) / 2 - centerY) <= 1;
-                  });
+                });
+              }))).toBe(true);
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".usage-metrics > div")].every((cell) => {
+                const cellRect = cell.getBoundingClientRect();
+                const children = [...cell.children].map((child) => child.getBoundingClientRect());
+                return children.every((rect) => rect.left >= cellRect.left - 1 && rect.right <= cellRect.right + 1 && rect.top >= cellRect.top - 1 && rect.bottom <= cellRect.bottom + 1)
+                  && children.every((rect, index) => index === 0 || children[index - 1].bottom <= rect.top + 1);
               }))).toBe(true);
               expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".model-rules header h2")].every((heading) => heading.scrollHeight <= 21))).toBe(true);
               expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-page-header p")].every((subtitle) => {

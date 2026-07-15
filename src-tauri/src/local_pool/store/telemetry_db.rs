@@ -1,9 +1,11 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 use serde::Serialize;
 use std::{collections::HashMap, path::Path, sync::Mutex};
 use zenith_relay_core::{
-    estimate_api_equivalent, ApiEquivalentSummary, RoutingDiagnostics, UsageEvent,
+    estimate_api_equivalent,
+    protocol::{UsageGroup, UsageQuery, UsageTotals},
+    ApiEquivalentSummary, RoutingDiagnostics, UsageEvent, WireApi,
 };
 
 const MIGRATION_001: &str = r#"
@@ -119,6 +121,19 @@ pub struct UsageLog {
     pub total_tokens: Option<u64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalUsagePage {
+    pub events: Vec<UsageLog>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub total_pages: u32,
+    pub totals: UsageTotals,
+    pub models: Vec<UsageGroup>,
+    pub pool_members: Vec<UsageGroup>,
+}
+
 #[derive(Default)]
 pub struct UsageEquivalents {
     pub accounts: HashMap<String, ApiEquivalentSummary>,
@@ -206,7 +221,7 @@ impl TelemetryDb {
                     event.account_id,
                     event.requested_model,
                     event.resolved_model,
-                    format!("{:?}", event.wire_api).to_lowercase(),
+                    wire_api_name(event.wire_api),
                     event.success,
                     event.http_status,
                     event.error_category,
@@ -240,46 +255,82 @@ impl TelemetryDb {
             )
             .map_err(db_error)?;
         let logs = statement
-            .query_map([limit.clamp(1, 500)], |row| {
-                let latency_ms: i64 = row.get(14)?;
-                let ttft_ms: Option<i64> = row.get(15)?;
-                let input_tokens: Option<i64> = row.get(16)?;
-                let cached_input_tokens: Option<i64> = row.get(17)?;
-                let reasoning_tokens: Option<i64> = row.get(18)?;
-                let output_tokens: Option<i64> = row.get(19)?;
-                let total_tokens: Option<i64> = row.get(20)?;
-                let routing_json: Option<String> = row.get(21)?;
-                Ok(UsageLog {
-                    id: row.get(0)?,
-                    created_at: row.get(1)?,
-                    request_id: row.get(2)?,
-                    attempt: row.get(3)?,
-                    local_key_id: row.get(4)?,
-                    source_id: row.get(5)?,
-                    candidate_id: row.get(6)?,
-                    account_id: row.get(7)?,
-                    routing: routing_json
-                        .as_deref()
-                        .and_then(|value| serde_json::from_str(value).ok()),
-                    requested_model: row.get(8)?,
-                    resolved_model: row.get(9)?,
-                    wire_api: row.get(10)?,
-                    success: row.get(11)?,
-                    http_status: row.get(12)?,
-                    error_category: row.get(13)?,
-                    latency_ms: rust_u64(latency_ms),
-                    ttft_ms: ttft_ms.map(rust_u64),
-                    input_tokens: input_tokens.map(rust_u64),
-                    cached_input_tokens: cached_input_tokens.map(rust_u64),
-                    reasoning_tokens: reasoning_tokens.map(rust_u64),
-                    output_tokens: output_tokens.map(rust_u64),
-                    total_tokens: total_tokens.map(rust_u64),
-                })
-            })
+            .query_map([limit.clamp(1, 500)], usage_log_from_row)
             .map_err(db_error)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_error)?;
         Ok(logs)
+    }
+
+    pub fn usage_page(&self, query: &UsageQuery) -> Result<LocalUsagePage> {
+        let page = query.page.max(1);
+        let page_size = if query.page_size == 0 {
+            50
+        } else {
+            query.page_size.clamp(1, 200)
+        };
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let (where_sql, values) = usage_filter(query);
+        let mut totals = usage_totals(&connection, &where_sql, &values)?;
+        let mut models = usage_groups(
+            &connection,
+            &where_sql,
+            &values,
+            "COALESCE(resolved_model, requested_model, '')",
+        )?;
+        for group in &mut models {
+            group.totals.api_equivalent = estimate_api_equivalent(
+                (!group.key.is_empty()).then_some(group.key.as_str()),
+                Some(group.totals.input_tokens),
+                Some(group.totals.cached_input_tokens),
+                Some(group.totals.output_tokens),
+                Some(group.totals.total_tokens),
+            );
+            totals.api_equivalent.merge(group.totals.api_equivalent);
+        }
+        let pool_members = usage_groups(
+            &connection,
+            &where_sql,
+            &values,
+            "COALESCE(account_id, source_id, '')",
+        )?;
+        let total = totals.requests;
+        let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
+        let sql = format!(
+            "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
+                local_key_id, source_id, candidate_id, account_id, requested_model,
+                resolved_model, wire_api, success, http_status, error_category, latency_ms,
+                ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens,
+                total_tokens, routing_json
+             FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
+        );
+        let mut statement = connection.prepare(&sql).map_err(db_error)?;
+        let mut page_values = values;
+        page_values.push(SqlValue::Integer(i64::from(page_size)));
+        page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
+        let events = statement
+            .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
+            .map_err(db_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        let total_pages = if total == 0 {
+            0
+        } else {
+            total.div_ceil(u64::from(page_size)) as u32
+        };
+        Ok(LocalUsagePage {
+            events,
+            total,
+            page,
+            page_size,
+            total_pages,
+            totals,
+            models,
+            pool_members,
+        })
     }
 
     pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
@@ -335,6 +386,199 @@ impl TelemetryDb {
             .execute("DELETE FROM request_logs", [])
             .map(|_| ())
             .map_err(db_error)
+    }
+}
+
+const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
+    COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
+    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
+    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
+    COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+    COALESCE(SUM(total_tokens), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
+        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
+        THEN CASE WHEN ttft_ms IS NOT NULL AND latency_ms > ttft_ms THEN latency_ms - ttft_ms ELSE latency_ms END \
+        ELSE 0 END), 0)";
+
+fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    if let Some(value) = query.from_ms {
+        clauses.push("created_at >= datetime(? / 1000, 'unixepoch')");
+        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+    }
+    if let Some(value) = query.to_ms {
+        clauses.push("created_at <= datetime(? / 1000, 'unixepoch')");
+        values.push(SqlValue::Integer(value.min(i64::MAX as u64) as i64));
+    }
+    if let Some(value) = query.model_query.as_deref() {
+        clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");
+        let value = SqlValue::Text(like_pattern(value));
+        values.push(value.clone());
+        values.push(value);
+    }
+    if let Some(value) = query.source_or_account_query.as_deref() {
+        clauses.push("(source_id LIKE ? ESCAPE '\\' OR account_id LIKE ? ESCAPE '\\')");
+        let value = SqlValue::Text(like_pattern(value));
+        values.push(value.clone());
+        values.push(value);
+    }
+    if let Some(value) = query.local_key_query.as_deref() {
+        clauses.push("local_key_id LIKE ? ESCAPE '\\'");
+        values.push(SqlValue::Text(like_pattern(value)));
+    }
+    if let Some(value) = query.wire_api {
+        match value {
+            WireApi::ChatCompletions => {
+                clauses.push("wire_api IN (?, ?)");
+                values.push(SqlValue::Text("chat_completions".to_string()));
+                values.push(SqlValue::Text("chatcompletions".to_string()));
+            }
+            _ => {
+                clauses.push("wire_api = ?");
+                values.push(SqlValue::Text(wire_api_name(value).to_string()));
+            }
+        }
+    }
+    if let Some(value) = query.success {
+        clauses.push("success = ?");
+        values.push(SqlValue::Integer(i64::from(value)));
+    }
+    if let Some(value) = query.error_category.as_deref() {
+        clauses.push("error_category = ?");
+        values.push(SqlValue::Text(value.to_string()));
+    }
+    if let Some(value) = query.request_id_query.as_deref() {
+        clauses.push("request_id LIKE ? ESCAPE '\\'");
+        values.push(SqlValue::Text(like_pattern(value)));
+    }
+    let sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
+    };
+    (sql, values)
+}
+
+fn usage_totals(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+) -> Result<UsageTotals> {
+    let sql = format!("SELECT {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql}");
+    connection
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            usage_totals_from_row(row, 0)
+        })
+        .map_err(db_error)
+}
+
+fn usage_groups(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+    key_sql: &str,
+) -> Result<Vec<UsageGroup>> {
+    let sql = format!(
+        "SELECT {key_sql}, {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql} \
+         GROUP BY 1 ORDER BY COUNT(*) DESC, 1"
+    );
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            Ok(UsageGroup {
+                key: row.get(0)?,
+                label: None,
+                totals: usage_totals_from_row(row, 1)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
+fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
+    Ok(UsageTotals {
+        requests: rust_u64(row.get(offset)?),
+        successful_requests: rust_u64(row.get(offset + 1)?),
+        latency_ms: rust_u64(row.get(offset + 2)?),
+        ttft_ms: rust_u64(row.get(offset + 3)?),
+        ttft_samples: rust_u64(row.get(offset + 4)?),
+        input_tokens: rust_u64(row.get(offset + 5)?),
+        cached_input_tokens: rust_u64(row.get(offset + 6)?),
+        reasoning_tokens: rust_u64(row.get(offset + 7)?),
+        output_tokens: rust_u64(row.get(offset + 8)?),
+        total_tokens: rust_u64(row.get(offset + 9)?),
+        speed_output_tokens: rust_u64(row.get(offset + 10)?),
+        speed_duration_ms: rust_u64(row.get(offset + 11)?),
+        api_equivalent: ApiEquivalentSummary::default(),
+    })
+}
+
+fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
+    let latency_ms: i64 = row.get(14)?;
+    let ttft_ms: Option<i64> = row.get(15)?;
+    let input_tokens: Option<i64> = row.get(16)?;
+    let cached_input_tokens: Option<i64> = row.get(17)?;
+    let reasoning_tokens: Option<i64> = row.get(18)?;
+    let output_tokens: Option<i64> = row.get(19)?;
+    let total_tokens: Option<i64> = row.get(20)?;
+    let routing_json: Option<String> = row.get(21)?;
+    Ok(UsageLog {
+        id: row.get(0)?,
+        created_at: row.get(1)?,
+        request_id: row.get(2)?,
+        attempt: row.get(3)?,
+        local_key_id: row.get(4)?,
+        source_id: row.get(5)?,
+        candidate_id: row.get(6)?,
+        account_id: row.get(7)?,
+        routing: routing_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
+        requested_model: row.get(8)?,
+        resolved_model: row.get(9)?,
+        wire_api: normalize_wire_api(row.get(10)?),
+        success: row.get(11)?,
+        http_status: row.get(12)?,
+        error_category: row.get(13)?,
+        latency_ms: rust_u64(latency_ms),
+        ttft_ms: ttft_ms.map(rust_u64),
+        input_tokens: input_tokens.map(rust_u64),
+        cached_input_tokens: cached_input_tokens.map(rust_u64),
+        reasoning_tokens: reasoning_tokens.map(rust_u64),
+        output_tokens: output_tokens.map(rust_u64),
+        total_tokens: total_tokens.map(rust_u64),
+    })
+}
+
+fn like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('%');
+    for character in value.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('%');
+    escaped
+}
+
+fn wire_api_name(value: WireApi) -> &'static str {
+    match value {
+        WireApi::Responses => "responses",
+        WireApi::ChatCompletions => "chat_completions",
+        WireApi::Messages => "messages",
+    }
+}
+
+fn normalize_wire_api(value: String) -> String {
+    if value == "chatcompletions" {
+        "chat_completions".to_string()
+    } else {
+        value
     }
 }
 
@@ -412,6 +656,81 @@ mod tests {
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_page_aggregates_the_full_filtered_range_not_only_the_page() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = UsageEvent {
+            request_id: "req_page_1".into(),
+            attempt: 1,
+            local_key_id: "key_1".into(),
+            source_id: "openai-codex".into(),
+            candidate_id: Some("account_1".into()),
+            account_id: Some("account_1".into()),
+            routing: None,
+            requested_model: Some("gpt-5.4".into()),
+            resolved_model: Some("gpt-5.4".into()),
+            wire_api: WireApi::Responses,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 428,
+            ttft_ms: Some(128),
+            input_tokens: Some(20),
+            cached_input_tokens: Some(12),
+            reasoning_tokens: Some(5),
+            output_tokens: Some(8),
+            total_tokens: Some(28),
+        };
+        database.record(&event).unwrap();
+        event.request_id = "req_page_2".into();
+        event.candidate_id = Some("account_2".into());
+        event.account_id = Some("account_2".into());
+        event.wire_api = WireApi::ChatCompletions;
+        event.latency_ms = 500;
+        event.ttft_ms = Some(100);
+        event.input_tokens = Some(10);
+        event.cached_input_tokens = Some(0);
+        event.reasoning_tokens = Some(0);
+        event.output_tokens = Some(20);
+        event.total_tokens = Some(30);
+        database.record(&event).unwrap();
+
+        let page = database
+            .usage_page(&UsageQuery {
+                page: 1,
+                page_size: 1,
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.total, 2);
+        assert_eq!(page.total_pages, 2);
+        assert_eq!(page.totals.requests, 2);
+        assert_eq!(page.totals.total_tokens, 58);
+        assert_eq!(page.totals.speed_output_tokens, 23);
+        assert_eq!(page.totals.speed_duration_ms, 700);
+        assert_eq!(page.totals.api_equivalent.priced_tokens, 58);
+        assert_eq!(page.models.len(), 1);
+        assert_eq!(page.pool_members.len(), 2);
+        assert_eq!(page.events[0].wire_api, "chat_completions");
+
+        let chat = database
+            .usage_page(&UsageQuery {
+                wire_api: Some(WireApi::ChatCompletions),
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(chat.total, 1);
+        assert_eq!(chat.events[0].request_id, "req_page_2");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

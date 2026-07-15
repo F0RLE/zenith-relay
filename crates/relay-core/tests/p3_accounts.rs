@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zenith_relay_core::accounts::{
     AccountAuthState, ReauthReason, TokenAuthority, TokenPersistenceAdapter,
@@ -58,6 +59,12 @@ struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     delay: Duration,
+}
+
+#[derive(Clone, Default)]
+struct HeldStreamState {
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
+    release: Arc<Notify>,
 }
 
 #[derive(Clone, Default)]
@@ -1356,6 +1363,46 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
+async fn independent_chat_uses_a_free_account_while_an_sse_stream_is_open() {
+    let (stream_upstream, stream_state) = spawn_held_stream_upstream().await;
+    let (free_upstream, free_state) = spawn_upstream(vec![success_reply("free-response")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "stream-account", "stream-access").await;
+    register_ready(&authority, "free-account", "free-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("stream-account", "provider-stream", &stream_upstream, 10),
+            account("free-account", "provider-free", &free_upstream, 0),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let open_stream = request(&gateway, true).await;
+    assert_eq!(open_stream.status(), StatusCode::OK);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+
+    let independent = request(&gateway, false).await;
+    assert_eq!(independent.status(), StatusCode::OK);
+    assert_eq!(free_state.requests.lock().unwrap().len(), 1);
+
+    stream_state.release.notify_one();
+    let _ = open_stream.bytes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let events = events.lock().unwrap();
+    assert!(events
+        .iter()
+        .any(|event| event.account_id.as_deref() == Some("stream-account")));
+    assert!(events
+        .iter()
+        .any(|event| event.account_id.as_deref() == Some("free-account")));
+}
+
+#[tokio::test]
 async fn account_stream_never_falls_back_after_first_event() {
     let (account_upstream, account_state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"),
@@ -1591,6 +1638,14 @@ async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) 
     (spawn(app).await, state)
 }
 
+async fn spawn_held_stream_upstream() -> (TestServer, HeldStreamState) {
+    let state = HeldStreamState::default();
+    let app = Router::new()
+        .route("/v1/responses", post(held_stream_upstream))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
 async fn spawn(app: Router) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1646,6 +1701,43 @@ async fn upstream(
                 .unwrap()
         }
     }
+}
+
+async fn held_stream_upstream(
+    State(state): State<HeldStreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    state.requests.lock().unwrap().push(ObservedRequest {
+        authorization: header(&headers, AUTHORIZATION.as_str()),
+        chatgpt_account_id: header(&headers, "chatgpt-account-id"),
+        originator: header(&headers, "originator"),
+        responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+        body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+    });
+    let release = state.release.clone();
+    let chunks = stream::unfold(0_u8, move |step| {
+        let release = release.clone();
+        async move {
+            let chunk = match step {
+                0 => Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"first\"}\n\n",
+                ),
+                1 => {
+                    release.notified().await;
+                    Bytes::from_static(b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"held-response\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+                }
+                2 => Bytes::from_static(b"data: [DONE]\n\n"),
+                _ => return None,
+            };
+            Some((Ok::<_, io::Error>(chunk), step + 1))
+        }
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/event-stream")
+        .body(Body::from_stream(chunks))
+        .unwrap()
 }
 
 async fn upstream_websocket(

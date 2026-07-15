@@ -11,6 +11,7 @@ import type {
   ImportSession,
   KeySummary,
   LocalUsage,
+  LocalUsagePage,
   OpenCodeProfileState,
   OAuthFlow,
   OAuthFlowEvent,
@@ -36,6 +37,7 @@ export const relayCommands = {
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
   remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
   localUsage: (limit = 100) => invoke<LocalUsage[]>("get_local_usage", { limit }),
+  localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
   diagnoseRemoteGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_remote_gateway", { stream }),
 

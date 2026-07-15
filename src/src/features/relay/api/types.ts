@@ -214,6 +214,39 @@ export type LocalUsage = {
   totalTokens: number | null;
 };
 
+export type UsageTotals = {
+  requests: number;
+  successfulRequests: number;
+  latencyMs: number;
+  ttftMs: number;
+  ttftSamples: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  speedOutputTokens: number;
+  speedDurationMs: number;
+  apiEquivalent: ApiEquivalentSummary;
+};
+
+export type UsageGroup = {
+  key: string;
+  label?: string | null;
+  totals: UsageTotals;
+};
+
+export type LocalUsagePage = {
+  events: LocalUsage[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  totals: UsageTotals;
+  models: UsageGroup[];
+  poolMembers: UsageGroup[];
+};
+
 export type UsageExportRow = {
   time: string;
   success: boolean;
@@ -295,6 +328,9 @@ export type RemoteUsagePage = {
   page: number;
   pageSize: number;
   totalPages: number;
+  totals?: UsageTotals;
+  models?: UsageGroup[];
+  poolMembers?: UsageGroup[];
 };
 
 export type ImportSession = {

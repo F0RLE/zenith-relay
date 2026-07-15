@@ -18,7 +18,7 @@ use std::{
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     estimate_api_equivalent,
-    protocol::{UsagePage, UsageQuery, UsageSummary},
+    protocol::{UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
     ApiEquivalentSummary, DefaultServiceTier, RoutingStrategy, UsageEvent, WireApi,
 };
 
@@ -680,13 +680,30 @@ impl Store {
         };
         let connection = self.lock()?;
         let (where_sql, values) = usage_filter(query);
-        let count_sql = format!("SELECT COUNT(*) FROM usage_events{where_sql}");
-        let total = connection
-            .query_row(&count_sql, params_from_iter(values.iter()), |row| {
-                row.get::<_, i64>(0)
-            })
-            .map_err(db_error)?
-            .max(0) as u64;
+        let mut totals = usage_totals(&connection, &where_sql, &values)?;
+        let mut models = usage_groups(
+            &connection,
+            &where_sql,
+            &values,
+            "COALESCE(resolved_model, requested_model, '')",
+        )?;
+        for group in &mut models {
+            group.totals.api_equivalent = estimate_api_equivalent(
+                (!group.key.is_empty()).then_some(group.key.as_str()),
+                Some(group.totals.input_tokens),
+                Some(group.totals.cached_input_tokens),
+                Some(group.totals.output_tokens),
+                Some(group.totals.total_tokens),
+            );
+            totals.api_equivalent.merge(group.totals.api_equivalent);
+        }
+        let pool_members = usage_groups(
+            &connection,
+            &where_sql,
+            &values,
+            "COALESCE(candidate_hint, '')",
+        )?;
+        let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
             "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
@@ -739,6 +756,9 @@ impl Store {
             page,
             page_size,
             total_pages,
+            totals,
+            models,
+            pool_members,
         })
     }
 
@@ -919,6 +939,76 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
         format!(" WHERE {}", clauses.join(" AND "))
     };
     (sql, values)
+}
+
+const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
+    COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
+    COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
+    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
+    COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+    COALESCE(SUM(total_tokens), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
+        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
+        THEN CASE WHEN ttft_ms IS NOT NULL AND latency_ms > ttft_ms THEN latency_ms - ttft_ms ELSE latency_ms END \
+        ELSE 0 END), 0)";
+
+fn usage_totals(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+) -> Result<UsageTotals, String> {
+    let sql = format!("SELECT {USAGE_TOTAL_COLUMNS} FROM usage_events{where_sql}");
+    connection
+        .query_row(&sql, params_from_iter(values.iter()), |row| {
+            usage_totals_from_row(row, 0)
+        })
+        .map_err(db_error)
+}
+
+fn usage_groups(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+    key_sql: &str,
+) -> Result<Vec<UsageGroup>, String> {
+    let sql = format!(
+        "SELECT {key_sql}, {USAGE_TOTAL_COLUMNS} FROM usage_events{where_sql} \
+         GROUP BY 1 ORDER BY COUNT(*) DESC, 1"
+    );
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            Ok(UsageGroup {
+                key: row.get(0)?,
+                label: None,
+                totals: usage_totals_from_row(row, 1)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+}
+
+fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
+    Ok(UsageTotals {
+        requests: nonnegative_u64(row.get(offset)?),
+        successful_requests: nonnegative_u64(row.get(offset + 1)?),
+        latency_ms: nonnegative_u64(row.get(offset + 2)?),
+        ttft_ms: nonnegative_u64(row.get(offset + 3)?),
+        ttft_samples: nonnegative_u64(row.get(offset + 4)?),
+        input_tokens: nonnegative_u64(row.get(offset + 5)?),
+        cached_input_tokens: nonnegative_u64(row.get(offset + 6)?),
+        reasoning_tokens: nonnegative_u64(row.get(offset + 7)?),
+        output_tokens: nonnegative_u64(row.get(offset + 8)?),
+        total_tokens: nonnegative_u64(row.get(offset + 9)?),
+        speed_output_tokens: nonnegative_u64(row.get(offset + 10)?),
+        speed_duration_ms: nonnegative_u64(row.get(offset + 11)?),
+        api_equivalent: ApiEquivalentSummary::default(),
+    })
+}
+
+fn nonnegative_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or_default()
 }
 
 fn like_pattern(value: &str) -> String {
@@ -1653,6 +1743,11 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.total_pages, 1);
+        assert_eq!(page.totals.requests, 1);
+        assert_eq!(page.totals.total_tokens, 2);
+        assert_eq!(page.totals.speed_output_tokens, 0);
+        assert_eq!(page.models.len(), 1);
+        assert_eq!(page.pool_members.len(), 1);
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
         assert_eq!(

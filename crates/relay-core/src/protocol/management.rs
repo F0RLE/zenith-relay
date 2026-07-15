@@ -311,6 +311,33 @@ pub struct UsageSummary {
     pub created_at_ms: u64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub successful_requests: u64,
+    pub latency_ms: u64,
+    pub ttft_ms: u64,
+    pub ttft_samples: u64,
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub speed_output_tokens: u64,
+    pub speed_duration_ms: u64,
+    pub api_equivalent: ApiEquivalentSummary,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageGroup {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub totals: UsageTotals,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
@@ -319,6 +346,12 @@ pub struct UsagePage {
     pub page: u32,
     pub page_size: u32,
     pub total_pages: u32,
+    #[serde(default)]
+    pub totals: UsageTotals,
+    #[serde(default)]
+    pub models: Vec<UsageGroup>,
+    #[serde(default)]
+    pub pool_members: Vec<UsageGroup>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -936,6 +936,7 @@ fn finish_terminal(
             &in_flight.route.source_model,
             now_ms(),
             in_flight.event.output_tokens,
+            in_flight.event.reasoning_tokens,
             in_flight.event.latency_ms,
         );
         runtime.bind_affinity(

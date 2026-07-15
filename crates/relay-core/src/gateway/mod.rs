@@ -713,6 +713,7 @@ async fn execute_request(
                 &source_model,
                 now_ms(),
                 event.output_tokens,
+                event.reasoning_tokens,
                 event.latency_ms,
             );
             emit_usage(&runtime, event);
@@ -755,6 +756,7 @@ async fn execute_request(
                             &completion_model,
                             now_ms(),
                             event.output_tokens,
+                            event.reasoning_tokens,
                             event.latency_ms,
                         );
                         event.consecutive_failures = Some(0);

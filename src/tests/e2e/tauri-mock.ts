@@ -218,6 +218,19 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, effectiveWeight: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", candidateLabel: account.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
+    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
+      return events.reduce((totals, item) => {
+        const visible = Math.max(0, (item.outputTokens ?? 0) - Math.min(item.reasoningTokens ?? 0, item.outputTokens ?? 0));
+        const duration = item.ttftMs != null && item.latencyMs > item.ttftMs ? item.latencyMs - item.ttftMs : item.latencyMs;
+        totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
+        if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
+        totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0;
+        totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
+        if (item.success && visible && duration) { totals.speedOutputTokens += visible; totals.speedDurationMs += duration; }
+        totals.apiEquivalent.microUsd += 148; totals.apiEquivalent.pricedTokens += item.totalTokens ?? 0;
+        return totals;
+      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, inputTokens: 0, cachedInputTokens: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
+    }
     let readyKey = "zrk_synthetic_ready_key";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
@@ -255,10 +268,17 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_local_runtime_state": return structuredClone(localRuntime);
           case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
           case "get_local_usage": return structuredClone(localUsage);
+          case "get_local_usage_page": {
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            const totals = usageTotals(events);
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: account.id, label: account.label, totals }] : [] };
+          }
           case "get_remote_server_usage": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
             const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.candidateHint.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0 };
+            const totals = usageTotals(events);
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: "a1b2c3d4e5f6", label: account.label, totals }] : [] };
           }
           case "create_local_source": {
             const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);

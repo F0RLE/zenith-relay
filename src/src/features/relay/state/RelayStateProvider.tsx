@@ -2,7 +2,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { useTranslation } from "react-i18next";
 import { getSavedKeyStats, getSavedKeyUsageHistory, getState, KeyStats, UiState, UsageLogEntry } from "../../../tauri";
 import { relayCommands } from "../api/commands";
-import type { HistoryRepairPreview, LocalUsage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import type { HistoryRepairPreview, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 import { Button, Dialog, StatusBadge } from "../components/Ui";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
@@ -19,6 +19,8 @@ type RelayContextValue = {
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
   localUsage: LocalUsage[];
+  localUsagePage: LocalUsagePage | null;
+  loadLocalUsage: (query: RemoteUsageQuery) => Promise<void>;
   remoteUsage: RemoteUsage[];
   remoteUsagePage: RemoteUsagePage | null;
   loadRemoteUsage: (query: RemoteUsageQuery) => Promise<void>;
@@ -54,6 +56,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [page, setPage] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [localUsage, setLocalUsage] = useState<LocalUsage[]>([]);
+  const [localUsagePage, setLocalUsagePage] = useState<LocalUsagePage | null>(null);
   const [remoteUsage, setRemoteUsage] = useState<RemoteUsage[]>([]);
   const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const [readyState, setReadyState] = useState<UiState | null>(null);
@@ -68,6 +71,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
   const [snapshotBeforeSwitch, setSnapshotBeforeSwitchState] = useState(() => stored("relay.snapshotBeforeSwitch", "1") === "1");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
+  const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -89,6 +93,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       ]);
       setRuntime(snapshot);
       setLocalUsage([]);
+      setLocalUsagePage(null);
       setRemoteUsage(usage?.events ?? []);
       setRemoteUsagePage(usage);
       return;
@@ -96,6 +101,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     const state = await getState();
     setReadyState(state);
     setRuntime(null);
+    setLocalUsagePage(null);
     setRemoteUsage([]);
     setRemoteUsagePage(null);
     if (state.hasSavedApiKey) {
@@ -110,6 +116,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       setReadyUsage([]);
     }
   }, [mode]);
+
+  const loadLocalUsage = useCallback(async (query: RemoteUsageQuery) => {
+    const request = ++localUsageRequest.current;
+    const usage = await relayCommands.localUsagePage(query);
+    if (request !== localUsageRequest.current) return;
+    setLocalUsagePage(usage);
+  }, []);
 
   const loadRemoteUsage = useCallback(async (query: RemoteUsageQuery) => {
     const request = ++remoteUsageRequest.current;
@@ -296,6 +309,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setPage,
     runtime,
     localUsage,
+    localUsagePage,
+    loadLocalUsage,
     remoteUsage,
     remoteUsagePage,
     loadRemoteUsage,
@@ -321,7 +336,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setSnapshotBeforeSwitch,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, runtime, localUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, runtime, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

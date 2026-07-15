@@ -396,7 +396,7 @@ impl PoolScheduler {
     }
 
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
-        self.record_success_with_metrics(candidate_id, model, now_ms, None, 0)
+        self.record_success_with_metrics(candidate_id, model, now_ms, None, None, 0)
     }
 
     pub fn record_success_with_metrics(
@@ -405,6 +405,7 @@ impl PoolScheduler {
         model: &str,
         now_ms: u64,
         output_tokens: Option<u64>,
+        reasoning_tokens: Option<u64>,
         latency_ms: u64,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
@@ -416,8 +417,10 @@ impl PoolScheduler {
         candidate.health = CandidateHealth::Healthy;
         candidate.last_used_at = Some(now_ms);
         candidate.consecutive_failures = 0;
-        if let (Some(output_tokens @ 1..), 1..) = (output_tokens, latency_ms) {
-            let measured = (u128::from(output_tokens) * 1_000_000 / u128::from(latency_ms))
+        let visible_output_tokens = output_tokens
+            .map(|output| output.saturating_sub(reasoning_tokens.unwrap_or_default().min(output)));
+        if let (Some(visible_output_tokens @ 1..), 1..) = (visible_output_tokens, latency_ms) {
+            let measured = (u128::from(visible_output_tokens) * 1_000_000 / u128::from(latency_ms))
                 .clamp(1, u128::from(MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND))
                 as u64;
             let previous = self
@@ -1213,8 +1216,8 @@ mod tests {
             account.quota = CandidateQuota::Available(quota);
             scheduler.upsert(account);
         }
-        assert!(scheduler.record_success_with_metrics("fast", "gpt-5", 1, Some(100), 1_000));
-        assert!(scheduler.record_success_with_metrics("slow", "gpt-5", 1, Some(25), 1_000));
+        assert!(scheduler.record_success_with_metrics("fast", "gpt-5", 1, Some(100), None, 1_000));
+        assert!(scheduler.record_success_with_metrics("slow", "gpt-5", 1, Some(25), None, 1_000));
 
         let mut counts = BTreeMap::new();
         for _ in 0..100 {
@@ -1269,22 +1272,43 @@ mod tests {
     fn throughput_ewma_ignores_invalid_samples_and_is_bounded() {
         let mut scheduler = PoolScheduler::new(1, 100);
         scheduler.upsert(oauth_candidate("account"));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, 1_000));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), 0));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), 1_000));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, None, 1_000));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), None, 0));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), None, 1_000));
         assert!(scheduler.throughput_milli_tokens_per_second.is_empty());
 
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 4, Some(10), 1_000));
+        assert!(scheduler.record_success_with_metrics(
+            "account",
+            "gpt-5",
+            4,
+            Some(100),
+            Some(90),
+            1_000
+        ));
         assert_eq!(
             scheduler.throughput_milli_tokens_per_second["account"],
             10_000
         );
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 5, Some(20), 1_000));
+        assert!(scheduler.record_success_with_metrics(
+            "account",
+            "gpt-5",
+            5,
+            Some(20),
+            None,
+            1_000
+        ));
         assert_eq!(
             scheduler.throughput_milli_tokens_per_second["account"],
             12_500
         );
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 6, Some(u64::MAX), 1,));
+        assert!(scheduler.record_success_with_metrics(
+            "account",
+            "gpt-5",
+            6,
+            Some(u64::MAX),
+            None,
+            1,
+        ));
         assert!(
             scheduler.throughput_milli_tokens_per_second["account"]
                 <= MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND
