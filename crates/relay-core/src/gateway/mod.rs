@@ -1,5 +1,5 @@
 use crate::accounts::CODEX_MODELS_CLIENT_VERSION;
-use crate::runtime::{AuthenticatedKey, ExecutorPrepareError, ExecutorRoute};
+use crate::runtime::{AuthenticatedKey, DefaultServiceTier, ExecutorPrepareError, ExecutorRoute};
 use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -11,7 +11,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{stream, Stream, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -208,6 +208,26 @@ fn valid_codex_client_version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
 
+pub(super) fn normalize_service_tier(
+    object: &mut Map<String, Value>,
+    default_service_tier: DefaultServiceTier,
+) {
+    if let Some(Value::String(value)) = object.get_mut("service_tier") {
+        match value.to_ascii_lowercase().as_str() {
+            "fast" => *value = "priority".to_string(),
+            "standard" => *value = "default".to_string(),
+            _ => {}
+        }
+        return;
+    }
+    if object.contains_key("service_tier") {
+        return;
+    }
+    if let Some(value) = default_service_tier.upstream_value() {
+        object.insert("service_tier".to_string(), Value::String(value.to_string()));
+    }
+}
+
 async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
@@ -246,7 +266,7 @@ async fn execute_client_request(
         }
     };
 
-    let request: Value = match serde_json::from_slice(&body) {
+    let mut request: Value = match serde_json::from_slice(&body) {
         Ok(Value::Object(request)) => Value::Object(request),
         _ => {
             return api_error(
@@ -256,6 +276,9 @@ async fn execute_client_request(
             )
         }
     };
+    if let Some(object) = request.as_object_mut() {
+        normalize_service_tier(object, runtime.default_service_tier());
+    }
     let Some(requested_model) = request
         .get("model")
         .and_then(Value::as_str)

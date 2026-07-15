@@ -15,8 +15,8 @@ pub use catalog::{ModelRegistry, ModelRules};
 pub use error::{Error, Result};
 pub use proxy::{normalize_proxy_url, ProxyConfig};
 pub use runtime::{
-    discover_source_models, GatewayRuntime, GatewayRuntimeOptions, RuntimeAccount,
-    RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    discover_source_models, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    RuntimeAccount, RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
 };
 pub use scheduler::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, PoolScheduler,

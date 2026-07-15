@@ -12,6 +12,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -156,6 +157,23 @@ impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultServiceTier {
+    #[default]
+    Standard,
+    Fast,
+}
+
+impl DefaultServiceTier {
+    pub(crate) fn upstream_value(self) -> Option<&'static str> {
+        match self {
+            Self::Standard => None,
+            Self::Fast => Some("priority"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
@@ -163,6 +181,7 @@ pub struct GatewayRuntimeOptions {
     pub session_affinity_ttl: Option<Duration>,
     pub max_affinity_entries: usize,
     pub hidden_models: Vec<String>,
+    pub default_service_tier: DefaultServiceTier,
 }
 
 impl Default for GatewayRuntimeOptions {
@@ -173,6 +192,7 @@ impl Default for GatewayRuntimeOptions {
             session_affinity_ttl: None,
             max_affinity_entries: 4_096,
             hidden_models: Vec::new(),
+            default_service_tier: DefaultServiceTier::Standard,
         }
     }
 }
@@ -190,6 +210,7 @@ pub struct GatewayRuntime {
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
     max_retry_candidates: usize,
     affinity_enabled: bool,
+    default_service_tier: DefaultServiceTier,
     pub(crate) usage: UsageCallback,
 }
 
@@ -557,6 +578,7 @@ impl GatewayRuntime {
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             max_retry_candidates: options.max_retry_candidates,
             affinity_enabled: options.session_affinity_ttl.is_some(),
+            default_service_tier: options.default_service_tier,
             usage,
         })
     }
@@ -894,6 +916,10 @@ impl GatewayRuntime {
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
         self.max_retry_candidates
+    }
+
+    pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
+        self.default_service_tier
     }
 
     pub(crate) fn affinity_key(

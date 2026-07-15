@@ -713,6 +713,12 @@ const relayRu = {
     noQuotaMembers: "Сначала добавьте в пул включённую OAuth-учётную запись.",
     routingSettings: "Настройки распределения",
     routingSettingsTitle: "Распределение запросов",
+    serviceTier: "Скорость ответа",
+    serviceTiers: {
+      standard: "Стандартная",
+      fast: "Быстрая (1,5x)",
+    },
+    serviceTierHint: "Быстрые запросы используют приоритетный режим, если выбранные модель и аккаунт его поддерживают.",
     routingStrategy: "Режим распределения",
     routingStrategies: {
       adaptive: "Автоматически",

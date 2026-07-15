@@ -74,6 +74,7 @@ impl AppState {
             session_affinity,
             session_affinity_ttl_seconds,
             routing_strategy,
+            default_service_tier,
         ) = self.store.routing_policy()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
@@ -173,6 +174,7 @@ impl AppState {
                 session_affinity_ttl: session_affinity
                     .then(|| Duration::from_secs(session_affinity_ttl_seconds)),
                 hidden_models,
+                default_service_tier,
                 ..GatewayRuntimeOptions::default()
             },
             usage,
@@ -231,6 +233,7 @@ impl AppState {
             session_affinity,
             session_affinity_ttl_seconds,
             routing_strategy,
+            default_service_tier,
         ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
@@ -340,6 +343,7 @@ impl AppState {
                 session_affinity: Some(session_affinity),
                 session_affinity_ttl_seconds: Some(session_affinity_ttl_seconds),
                 routing_strategy: Some(routing_strategy),
+                default_service_tier: Some(default_service_tier),
                 models,
                 common_proxy_configured,
                 common_proxy_available,

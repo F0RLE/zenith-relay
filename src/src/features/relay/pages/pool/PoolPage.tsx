@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRightLeft, ArrowUpDown, CheckCheck, KeyRound, LayoutGrid, List, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Rows3, Settings2, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
+import type { AccountSummary, DefaultServiceTier, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -172,19 +172,30 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const supportsRoutingStrategy = mode !== "remote" || runtime?.gateway.routingStrategy != null;
+  const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
   const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(runtime?.gateway.routingStrategy ?? "adaptive");
+  const [defaultServiceTier, setDefaultServiceTier] = useState<DefaultServiceTier>(runtime?.gateway.defaultServiceTier ?? "standard");
   const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
   const [sessionAffinity, setSessionAffinity] = useState(runtime?.gateway.sessionAffinity ?? false);
   const [sessionAffinityTtlSeconds, setSessionAffinityTtlSeconds] = useState(runtime?.gateway.sessionAffinityTtlSeconds ?? 3_600);
   const save = async () => {
     const basePayload = { maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds };
-    const payload = supportsRoutingStrategy ? { ...basePayload, routingStrategy } : basePayload;
-    const ok = await perform("routing-policy", () => mode === "local"
-      ? relayCommands.updateRouting(routingStrategy, maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds)
-      : relayCommands.remoteAction({ type: "set_routing_policy" }, payload), "feedback.saved");
+    const payload = {
+      ...basePayload,
+      ...(supportsRoutingStrategy ? { routingStrategy } : {}),
+      ...(supportsServiceTier ? { defaultServiceTier } : {}),
+    };
+    const ok = await perform("routing-policy", async () => {
+      if (mode === "local") {
+        return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, sessionAffinity, sessionAffinityTtlSeconds, defaultServiceTier);
+      }
+      const snapshot = await relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
+      if (supportsServiceTier) await relayCommands.syncCodexDefaultServiceTier(defaultServiceTier);
+      return snapshot;
+    }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><div className="relay-field"><span>{t("pool.routingStrategy")}</span><OptionMenu className="field-option-menu" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} /><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div><label className="toggle-row" title={t("pool.sessionAffinityHelp")}><input type="checkbox" checked={sessionAffinity} onChange={(event) => setSessionAffinity(event.target.checked)} /><span>{t("pool.sessionAffinity")}</span></label><div className="relay-field"><span>{t("pool.sessionAffinityTtl")}</span><OptionMenu className="field-option-menu" label={t("pool.sessionAffinityTtl")} value={String(sessionAffinityTtlSeconds)} disabled={!sessionAffinity} onChange={(value) => setSessionAffinityTtlSeconds(Number(value))} options={[{ value: "60", label: t("pool.affinityDurations.oneMinute") }, { value: "300", label: t("pool.affinityDurations.fiveMinutes") }, { value: "900", label: t("pool.affinityDurations.fifteenMinutes") }, { value: "3600", label: t("pool.affinityDurations.oneHour") }, { value: "21600", label: t("pool.affinityDurations.sixHours") }, { value: "86400", label: t("pool.affinityDurations.oneDay") }]} /></div><div className="relay-field"><span>{t("pool.retryCandidates")}</span><OptionMenu className="field-option-menu" label={t("pool.retryCandidates")} value={String(maxRetryCandidates)} onChange={(value) => setMaxRetryCandidates(Number(value))} options={Array.from({ length: 8 }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))} /></div>{!sessionAffinity ? <p className="form-note">{t(routingStrategy === "adaptive" ? "pool.affinityDisabledWarning" : "pool.oldestAffinityDisabledWarning")}</p> : null}</div></Dialog>;
+  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><div className="relay-field"><span>{t("pool.serviceTier")}</span><div className="segmented" role="group" aria-label={t("pool.serviceTier")}><button type="button" className={defaultServiceTier === "standard" ? "active" : ""} aria-pressed={defaultServiceTier === "standard"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("standard")}>{t("pool.serviceTiers.standard")}</button><button type="button" className={defaultServiceTier === "fast" ? "active" : ""} aria-pressed={defaultServiceTier === "fast"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("fast")}>{t("pool.serviceTiers.fast")}</button></div><small>{supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}</small></div><div className="relay-field"><span>{t("pool.routingStrategy")}</span><OptionMenu className="field-option-menu" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} /><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div><label className="toggle-row" title={t("pool.sessionAffinityHelp")}><input type="checkbox" checked={sessionAffinity} onChange={(event) => setSessionAffinity(event.target.checked)} /><span>{t("pool.sessionAffinity")}</span></label><div className="relay-field"><span>{t("pool.sessionAffinityTtl")}</span><OptionMenu className="field-option-menu" label={t("pool.sessionAffinityTtl")} value={String(sessionAffinityTtlSeconds)} disabled={!sessionAffinity} onChange={(value) => setSessionAffinityTtlSeconds(Number(value))} options={[{ value: "60", label: t("pool.affinityDurations.oneMinute") }, { value: "300", label: t("pool.affinityDurations.fiveMinutes") }, { value: "900", label: t("pool.affinityDurations.fifteenMinutes") }, { value: "3600", label: t("pool.affinityDurations.oneHour") }, { value: "21600", label: t("pool.affinityDurations.sixHours") }, { value: "86400", label: t("pool.affinityDurations.oneDay") }]} /></div><div className="relay-field"><span>{t("pool.retryCandidates")}</span><OptionMenu className="field-option-menu" label={t("pool.retryCandidates")} value={String(maxRetryCandidates)} onChange={(value) => setMaxRetryCandidates(Number(value))} options={Array.from({ length: 8 }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))} /></div>{!sessionAffinity ? <p className="form-note">{t(routingStrategy === "adaptive" ? "pool.affinityDisabledWarning" : "pool.oldestAffinityDisabledWarning")}</p> : null}</div></Dialog>;
 }
 
 function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {

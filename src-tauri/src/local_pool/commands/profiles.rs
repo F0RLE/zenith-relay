@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
+use zenith_relay_core::DefaultServiceTier;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +233,16 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
     let result =
         codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into);
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+}
+
+#[tauri::command]
+pub async fn sync_codex_default_service_tier(
+    default_service_tier: DefaultServiceTier,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    codex::sync_default_service_tier(&default_codex_home(), default_service_tier)
+        .map_err(Into::into)
 }
 
 #[tauri::command]

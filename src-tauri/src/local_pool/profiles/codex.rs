@@ -14,11 +14,15 @@ use std::{
     path::{Path, PathBuf},
 };
 use toml_edit::{value, DocumentMut, Item, Table};
-use zenith_relay_core::accounts::TokenSet;
+use zenith_relay_core::{accounts::TokenSet, DefaultServiceTier};
 
 const PROVIDER_ID: &str = "zenith_relay_local";
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
+const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
+const DESKTOP_DEFAULT_SERVICE_TIER_KEY: &str = "default-service-tier";
+const PERSISTED_ATOM_STATE_KEY: &str = "electron-persisted-atom-state";
+const SERVICE_TIER_CHANGED_KEY: &str = "has-user-changed-service-tier";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
 const ACCOUNT_BACKUP_PREFIX: &str = "codex-account-";
 const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
@@ -144,6 +148,120 @@ pub fn restore(codex_home: &Path, backup_root: &Path) -> Result<()> {
         return Ok(());
     }
     restore_local_locked(codex_home, backup_root, &OsSecretBackend)
+}
+
+pub fn sync_default_service_tier(
+    codex_home: &Path,
+    default_service_tier: DefaultServiceTier,
+) -> Result<()> {
+    let _profile_guard = lock_codex_profile();
+    fs::create_dir_all(codex_home).map_err(io_error)?;
+    let config_path = codex_home.join(CONFIG_FILE);
+    let state_path = codex_home.join(GLOBAL_STATE_FILE);
+    let original_config = read_optional_bytes(&config_path)?;
+    let original_state = read_optional_bytes(&state_path)?;
+
+    let mut document =
+        parse_config(snapshot_text(&original_config, &config_path)?.unwrap_or_default())?;
+    match default_service_tier {
+        DefaultServiceTier::Standard => {
+            if let Some(desktop) = document.get_mut("desktop") {
+                desktop
+                    .as_table_mut()
+                    .ok_or_else(|| {
+                        LocalPoolError::new(
+                            ErrorCode::InvalidState,
+                            "Codex desktop settings must be a table",
+                        )
+                    })?
+                    .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
+            }
+        }
+        DefaultServiceTier::Fast => {
+            if document.get("desktop").is_none() {
+                document["desktop"] = Item::Table(Table::new());
+            }
+            let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
+                LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "Codex desktop settings must be a table",
+                )
+            })?;
+            desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
+        }
+    }
+    let next_config = document.to_string();
+
+    let mut state = match snapshot_text(&original_state, &state_path)? {
+        Some(content) => serde_json::from_str::<serde_json::Value>(content).map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("Codex global state is not valid JSON: {error}"),
+            )
+        })?,
+        None => serde_json::Value::Object(Default::default()),
+    };
+    let state = state.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "Codex global state must be a JSON object",
+        )
+    })?;
+    let tier = match default_service_tier {
+        DefaultServiceTier::Standard => serde_json::Value::Null,
+        DefaultServiceTier::Fast => serde_json::Value::String("priority".to_string()),
+    };
+    set_service_tier_state(state, tier.clone());
+    let persisted = state
+        .entry(PERSISTED_ATOM_STATE_KEY.to_string())
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if !persisted.is_object() {
+        *persisted = serde_json::Value::Object(Default::default());
+    }
+    set_service_tier_state(
+        persisted
+            .as_object_mut()
+            .expect("persisted atom state was normalized to an object"),
+        tier,
+    );
+    let next_state = serde_json::to_string(&state).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::Io,
+            format!("Codex global state could not be serialized: {error}"),
+        )
+    })?;
+
+    let config_changed = original_config
+        .as_deref()
+        .map_or(!next_config.is_empty(), |current| {
+            current != next_config.as_bytes()
+        });
+    if config_changed {
+        replace_if_unchanged(&config_path, &original_config, &next_config)?;
+    }
+    if original_state.as_deref() != Some(next_state.as_bytes()) {
+        if let Err(error) = replace_if_unchanged(&state_path, &original_state, &next_state) {
+            if config_changed {
+                return Err(with_rollback(
+                    error,
+                    rollback_file(&config_path, &next_config, &original_config),
+                ));
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn set_service_tier_state(
+    state: &mut serde_json::Map<String, serde_json::Value>,
+    tier: serde_json::Value,
+) {
+    state.insert(DESKTOP_DEFAULT_SERVICE_TIER_KEY.to_string(), tier);
+    state.insert(
+        SERVICE_TIER_CHANGED_KEY.to_string(),
+        serde_json::Value::Bool(true),
+    );
 }
 
 pub fn attach_account(
@@ -3200,6 +3318,73 @@ mod tests {
             remaining[0].profile_dir,
             canonical_profile_dir(&second).unwrap().to_string_lossy()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_tier_sync_updates_official_and_compatible_codex_state() {
+        let (root, home, _) = profile_dirs("service-tier");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"custom\"\n\n[desktop]\nappearanceTheme = \"dark\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(GLOBAL_STATE_FILE),
+            r#"{"other":1,"electron-persisted-atom-state":{"theme":"dark"}}"#,
+        )
+        .unwrap();
+
+        sync_default_service_tier(&home, DefaultServiceTier::Fast).unwrap();
+        let config = fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert_eq!(
+            config["desktop"][DESKTOP_DEFAULT_SERVICE_TIER_KEY].as_str(),
+            Some("priority")
+        );
+        assert_eq!(config["desktop"]["appearanceTheme"].as_str(), Some("dark"));
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(state["other"], 1);
+        assert_eq!(state[DESKTOP_DEFAULT_SERVICE_TIER_KEY], "priority");
+        assert_eq!(state[SERVICE_TIER_CHANGED_KEY], true);
+        assert_eq!(
+            state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY],
+            "priority"
+        );
+
+        sync_default_service_tier(&home, DefaultServiceTier::Standard).unwrap();
+        let config = fs::read_to_string(home.join(CONFIG_FILE))
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert!(config["desktop"]
+            .as_table()
+            .unwrap()
+            .get(DESKTOP_DEFAULT_SERVICE_TIER_KEY)
+            .is_none());
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap())
+                .unwrap();
+        assert!(state[DESKTOP_DEFAULT_SERVICE_TIER_KEY].is_null());
+        assert!(state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY].is_null());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_service_tier_does_not_create_an_empty_codex_config() {
+        let (root, home, _) = profile_dirs("standard-service-tier");
+
+        sync_default_service_tier(&home, DefaultServiceTier::Standard).unwrap();
+
+        assert!(!home.join(CONFIG_FILE).exists());
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(GLOBAL_STATE_FILE)).unwrap())
+                .unwrap();
+        assert!(state[PERSISTED_ATOM_STATE_KEY][DESKTOP_DEFAULT_SERVICE_TIER_KEY].is_null());
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -161,6 +161,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
                 .then(|| Duration::from_secs(settings.session_affinity_ttl_seconds)),
             max_affinity_entries: 4_096,
             hidden_models: settings.hidden_models,
+            default_service_tier: settings.default_service_tier,
         },
         state.usage_callback(),
     )

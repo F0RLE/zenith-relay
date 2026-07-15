@@ -5,15 +5,17 @@ use super::{
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
+    profiles::codex,
     state::DesktopState,
     store::secret_store,
 };
+use crate::platform::default_codex_home;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
-use zenith_relay_core::RoutingStrategy;
+use zenith_relay_core::{DefaultServiceTier, RoutingStrategy};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -43,6 +45,8 @@ pub struct UpdateGatewayKeyInput {
 pub struct UpdateRoutingInput {
     max_retry_candidates: u8,
     routing_strategy: RoutingStrategy,
+    #[serde(default)]
+    default_service_tier: DefaultServiceTier,
     session_affinity: bool,
     session_affinity_ttl_seconds: u64,
 }
@@ -394,13 +398,28 @@ pub async fn update_local_routing(
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = input.max_retry_candidates;
     gateway.routing_strategy = input.routing_strategy;
+    gateway.default_service_tier = input.default_service_tier;
     gateway.session_affinity = input.session_affinity;
     gateway.session_affinity_ttl_seconds = input.session_affinity_ttl_seconds;
     if gateway == old_gateway {
+        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);
     }
-    state.store()?.replace_gateway(gateway)?;
-    sync_gateway_or_rollback(&state, old_gateway).await?;
+    state.store()?.replace_gateway(gateway.clone())?;
+    sync_gateway_or_rollback(&state, old_gateway.clone()).await?;
+    if let Err(error) =
+        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)
+    {
+        state.store()?.replace_gateway(old_gateway)?;
+        if let Err(restore) = sync_gateway_or_rollback(&state, gateway).await {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!("{error}; failed to restore previous gateway speed: {restore}"),
+            )
+            .into());
+        }
+        return Err(error.into());
+    }
     state.snapshot().await.map_err(Into::into)
 }
 

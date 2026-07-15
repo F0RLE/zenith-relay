@@ -713,6 +713,12 @@ const relayEn = {
     noQuotaMembers: "Add an enabled OAuth account to the pool first.",
     routingSettings: "Distribution settings",
     routingSettingsTitle: "Request distribution",
+    serviceTier: "Response speed",
+    serviceTiers: {
+      standard: "Standard",
+      fast: "Fast (1.5x)",
+    },
+    serviceTierHint: "Fast requests use the priority service tier when the selected model and account support it.",
     routingStrategy: "Distribution mode",
     routingStrategies: {
       adaptive: "Automatic",

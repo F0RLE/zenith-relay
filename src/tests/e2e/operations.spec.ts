@@ -835,6 +835,7 @@ test("local pool rotates requests by default and can explicitly enable chat affi
   await expect(affinity).not.toBeChecked();
   await expect(duration).toBeDisabled();
   await expect(dialog).toContainText("Request rotation is on");
+  await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "Distribution mode", "oldest_account");
   await expect(dialog).toContainText("The account added earlier gets priority.");
@@ -845,7 +846,7 @@ test("local pool rotates requests by default and can explicitly enable chat affi
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 5, sessionAffinity: true, sessionAffinityTtlSeconds: 300 } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 5, sessionAffinity: true, sessionAffinityTtlSeconds: 300, defaultServiceTier: "fast" } });
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
@@ -856,6 +857,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await header.locator(".relay-action-menu summary").click();
   await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await chooseOption(page, dialog, "Distribution mode", "oldest_account");
   await dialog.getByLabel("Keep one chat on one account").check();
   await chooseOption(page, dialog, "Affinity duration", "900");
@@ -865,8 +867,9 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 4, sessionAffinity: true, sessionAffinityTtlSeconds: 900, routingStrategy: "oldest_account" },
+    payload: { maxRetryCandidates: 4, sessionAffinity: true, sessionAffinityTtlSeconds: 900, routingStrategy: "oldest_account", defaultServiceTier: "fast" },
   });
+  expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
 
 test("legacy remote pool keeps the new distribution mode read-only", async ({ page }) => {
@@ -878,6 +881,8 @@ test("legacy remote pool keeps the new distribution mode read-only", async ({ pa
   await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Standard", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Fast (1.5x)", exact: true })).toBeDisabled();
   await expect(dialog).toContainText("The connected server does not support this action.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 

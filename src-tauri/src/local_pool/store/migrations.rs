@@ -53,6 +53,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 8 => migrate_v8_to_v9(root)?,
                 9 => migrate_v9_to_v10(root, &gateway_path)?,
                 10 => migrate_v10_to_v11(root, &gateway_path)?,
+                11 => migrate_v11_to_v12(root, &gateway_path)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -72,6 +73,22 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn migrate_v11_to_v12(root: &Path, gateway_path: &Path) -> Result<()> {
+    let mut gateway = load_json_or_quarantine::<Value>(root, gateway_path)?.ok_or_else(|| {
+        LocalPoolError::new(ErrorCode::InvalidState, "gateway settings are missing")
+    })?;
+    let gateway = gateway.as_object_mut().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "gateway settings must be an object",
+        )
+    })?;
+    gateway
+        .entry("defaultServiceTier")
+        .or_insert_with(|| Value::String("standard".to_string()));
+    save_json(gateway_path, gateway)
 }
 
 fn migrate_v10_to_v11(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -748,6 +765,32 @@ mod tests {
         );
         let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
         assert_eq!(gateway["routingStrategy"], "adaptive");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v11_to_standard_service_tier_by_default() {
+        let root = temp_root();
+        let gateway_path = root.join("settings").join("gateway.json");
+        let mut gateway =
+            serde_json::to_value(crate::local_pool::models::GatewaySettings::default()).unwrap();
+        gateway
+            .as_object_mut()
+            .unwrap()
+            .remove("defaultServiceTier");
+        save_json(&gateway_path, &gateway).unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 11 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            migrate(&root).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        assert_eq!(gateway["defaultServiceTier"], "standard");
         fs::remove_dir_all(root).unwrap();
     }
 

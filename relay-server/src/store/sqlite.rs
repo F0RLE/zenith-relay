@@ -19,7 +19,7 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     estimate_api_equivalent,
     protocol::{UsagePage, UsageQuery, UsageSummary},
-    ApiEquivalentSummary, RoutingStrategy, UsageEvent, WireApi,
+    ApiEquivalentSummary, DefaultServiceTier, RoutingStrategy, UsageEvent, WireApi,
 };
 
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -98,6 +98,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 13,
         name: "013_routing_strategy",
         sql: include_str!("../../migrations/013_routing_strategy.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "014_default_service_tier",
+        sql: include_str!("../../migrations/014_default_service_tier.sql"),
     },
 ];
 
@@ -273,7 +278,9 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn routing_policy(&self) -> Result<(u8, bool, u64, RoutingStrategy), String> {
+    pub fn routing_policy(
+        &self,
+    ) -> Result<(u8, bool, u64, RoutingStrategy, DefaultServiceTier), String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
@@ -298,12 +305,18 @@ impl Store {
             Some("oldest_account") => RoutingStrategy::OldestAccount,
             Some(_) => return Err("routing strategy is invalid".to_string()),
         };
+        let default_service_tier = match self.metadata("default_service_tier")?.as_deref() {
+            None | Some("standard") => DefaultServiceTier::Standard,
+            Some("fast") => DefaultServiceTier::Fast,
+            Some(_) => return Err("default service tier is invalid".to_string()),
+        };
         validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
         Ok((
             max_retry_candidates,
             session_affinity,
             session_affinity_ttl_seconds,
             routing_strategy,
+            default_service_tier,
         ))
     }
 
@@ -313,6 +326,7 @@ impl Store {
         session_affinity: bool,
         session_affinity_ttl_seconds: u64,
         routing_strategy: RoutingStrategy,
+        default_service_tier: DefaultServiceTier,
     ) -> Result<(), String> {
         validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
         let mut connection = self.lock()?;
@@ -331,6 +345,13 @@ impl Store {
                 match routing_strategy {
                     RoutingStrategy::Adaptive => "adaptive".to_string(),
                     RoutingStrategy::OldestAccount => "oldest_account".to_string(),
+                },
+            ),
+            (
+                "default_service_tier",
+                match default_service_tier {
+                    DefaultServiceTier::Standard => "standard".to_string(),
+                    DefaultServiceTier::Fast => "fast".to_string(),
                 },
             ),
         ] {
@@ -1345,23 +1366,53 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(
             store.routing_policy().unwrap(),
-            (3, false, 3_600, RoutingStrategy::Adaptive)
+            (
+                3,
+                false,
+                3_600,
+                RoutingStrategy::Adaptive,
+                DefaultServiceTier::Standard,
+            )
         );
         assert!(store
-            .set_routing_policy(0, true, 3_600, RoutingStrategy::Adaptive)
+            .set_routing_policy(
+                0,
+                true,
+                3_600,
+                RoutingStrategy::Adaptive,
+                DefaultServiceTier::Standard,
+            )
             .is_err());
         assert!(store
-            .set_routing_policy(3, true, 59, RoutingStrategy::Adaptive)
+            .set_routing_policy(
+                3,
+                true,
+                59,
+                RoutingStrategy::Adaptive,
+                DefaultServiceTier::Standard,
+            )
             .is_err());
         store
-            .set_routing_policy(5, false, 300, RoutingStrategy::OldestAccount)
+            .set_routing_policy(
+                5,
+                false,
+                300,
+                RoutingStrategy::OldestAccount,
+                DefaultServiceTier::Fast,
+            )
             .unwrap();
         drop(store);
 
         let reopened = Store::open(path).unwrap();
         assert_eq!(
             reopened.routing_policy().unwrap(),
-            (5, false, 300, RoutingStrategy::OldestAccount)
+            (
+                5,
+                false,
+                300,
+                RoutingStrategy::OldestAccount,
+                DefaultServiceTier::Fast,
+            )
         );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
@@ -1450,7 +1501,8 @@ mod tests {
                 (10, "010_reset_legacy_cooldowns".to_string()),
                 (11, "011_request_rotation_default".to_string()),
                 (12, "012_routing_diagnostics".to_string()),
-                (13, "013_routing_strategy".to_string())
+                (13, "013_routing_strategy".to_string()),
+                (14, "014_default_service_tier".to_string())
             ]
         );
         drop(store);

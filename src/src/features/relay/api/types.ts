@@ -1,5 +1,6 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings";
+export type DefaultServiceTier = "standard" | "fast";
 
 export type QuotaWindow = {
   kind: "primary" | "secondary";
@@ -138,6 +139,7 @@ export type RuntimeSnapshot = {
     sessionAffinity?: boolean | null;
     sessionAffinityTtlSeconds?: number | null;
     routingStrategy?: RoutingStrategy | null;
+    defaultServiceTier?: DefaultServiceTier | null;
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;

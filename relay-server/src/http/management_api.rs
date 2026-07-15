@@ -37,7 +37,7 @@ use zenith_relay_core::{
         UsageRange,
     },
     quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
-    source_points_to_gateway, ProviderSource, RoutingStrategy, WireApi,
+    source_points_to_gateway, DefaultServiceTier, ProviderSource, RoutingStrategy, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -2063,6 +2063,8 @@ pub struct RoutingPolicyInput {
     max_retry_candidates: u8,
     #[serde(default)]
     routing_strategy: RoutingStrategy,
+    #[serde(default)]
+    default_service_tier: Option<DefaultServiceTier>,
     session_affinity: bool,
     session_affinity_ttl_seconds: u64,
 }
@@ -2087,6 +2089,7 @@ pub async fn set_routing_policy(
         ));
     }
     let previous = state.store.routing_policy().map_err(store_error)?;
+    let default_service_tier = input.default_service_tier.unwrap_or(previous.4);
     state
         .store
         .set_routing_policy(
@@ -2094,12 +2097,13 @@ pub async fn set_routing_policy(
             input.session_affinity,
             input.session_affinity_ttl_seconds,
             input.routing_strategy,
+            default_service_tier,
         )
         .map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
         state
             .store
-            .set_routing_policy(previous.0, previous.1, previous.2, previous.3)
+            .set_routing_policy(previous.0, previous.1, previous.2, previous.3, previous.4)
             .map_err(store_error)?;
         if let Err(restore) = state.rebuild_runtime().await {
             return Err(store_error(format!(

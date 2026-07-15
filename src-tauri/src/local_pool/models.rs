@@ -4,10 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    RoutingStrategy, WireApi,
+    DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
@@ -54,6 +54,8 @@ pub struct GatewaySettings {
     pub session_affinity_ttl_seconds: u64,
     #[serde(default)]
     pub routing_strategy: RoutingStrategy,
+    #[serde(default)]
+    pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
     pub common_proxy_configured: bool,
     #[serde(default)]
@@ -176,6 +178,7 @@ impl Default for GatewaySettings {
             session_affinity: false,
             session_affinity_ttl_seconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
             routing_strategy: RoutingStrategy::Adaptive,
+            default_service_tier: DefaultServiceTier::Standard,
             common_proxy_configured: false,
             account_proxy_required: false,
             quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,

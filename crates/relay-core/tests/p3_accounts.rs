@@ -24,9 +24,9 @@ use zenith_relay_core::accounts::{
 };
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
-    CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey,
-    ProviderSource, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
-    UsageEvent, WireApi,
+    CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, ProviderSource, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey,
+    RuntimeSource, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -404,13 +404,17 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let (upstream, state) = spawn_websocket_upstream().await;
     let authority = ready_authority("relay-account", "account-access").await;
-    let (gateway, events, _, _) = spawn_mixed_gateway(
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![account("relay-account", "provider-account", &upstream, 10)],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            default_service_tier: DefaultServiceTier::Fast,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -438,16 +442,17 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let mut socket = upgraded.into_websocket().await.unwrap();
 
     for index in 0..2 {
+        let mut request = json!({
+            "type": "response.create",
+            "model": MODEL,
+            "input": format!("hello {index}"),
+            "parallel_tool_calls": true
+        });
+        if index == 1 {
+            request["service_tier"] = Value::String("flex".to_string());
+        }
         socket
-            .send(ClientWsMessage::Text(
-                json!({
-                    "type": "response.create",
-                    "model": MODEL,
-                    "input": format!("hello {index}"),
-                    "parallel_tool_calls": true
-                })
-                .to_string(),
-            ))
+            .send(ClientWsMessage::Text(request.to_string()))
             .await
             .unwrap();
         let completed = receive_websocket_completion(&mut socket).await;
@@ -487,6 +492,8 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], false);
+    assert_eq!(requests[0]["service_tier"], "priority");
+    assert_eq!(requests[1]["service_tier"], "flex");
     assert!(requests[0]["input"].is_array());
     drop(requests);
 
@@ -1492,6 +1499,32 @@ async fn spawn_mixed_gateway(
     Arc<RefreshAdapter>,
     Arc<PersistenceAdapter>,
 ) {
+    spawn_mixed_gateway_with_options(
+        sources,
+        accounts,
+        keys,
+        authority,
+        refresh,
+        persistence,
+        GatewayRuntimeOptions::default(),
+    )
+    .await
+}
+
+async fn spawn_mixed_gateway_with_options(
+    sources: Vec<RuntimeSource>,
+    accounts: Vec<RuntimeAccount>,
+    keys: Vec<RuntimeMixedLocalKey>,
+    authority: Arc<TokenAuthority>,
+    refresh: Arc<RefreshAdapter>,
+    persistence: Arc<PersistenceAdapter>,
+    options: GatewayRuntimeOptions,
+) -> (
+    TestServer,
+    Arc<Mutex<Vec<UsageEvent>>>,
+    Arc<RefreshAdapter>,
+    Arc<PersistenceAdapter>,
+) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
     let runtime = GatewayRuntime::from_mixed_pool(
@@ -1504,13 +1537,7 @@ async fn spawn_mixed_gateway(
             persistence_adapter: persistence.clone(),
             refresh_skew_ms: 0,
         },
-        GatewayRuntimeOptions {
-            max_retry_candidates: 3,
-            routing_strategy: Default::default(),
-            session_affinity_ttl: None,
-            max_affinity_entries: 0,
-            hidden_models: Vec::new(),
-        },
+        options,
         Arc::new(move |event| captured.lock().unwrap().push(event)),
     )
     .unwrap();

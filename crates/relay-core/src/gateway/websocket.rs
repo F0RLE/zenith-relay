@@ -156,11 +156,12 @@ impl ClientRequest {
                 "WebSocket request is too large",
             ));
         }
-        let value: Value = serde_json::from_slice(payload)
+        let mut value: Value = serde_json::from_slice(payload)
             .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
         let object = value
-            .as_object()
+            .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
+        super::normalize_service_tier(object, runtime.default_service_tier());
         if object
             .get("type")
             .and_then(Value::as_str)

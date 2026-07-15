@@ -14,8 +14,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
-    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
-    RuntimeSource, UsageEvent, WireApi,
+    DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+    RuntimeLocalKey, RuntimeSource, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p2-local-key";
@@ -104,6 +104,60 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
     assert!(models(&gateway, "empty-key").await.is_empty());
     assert!(state_a.requests.lock().unwrap().is_empty());
     assert!(state_b.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fast_default_normalizes_service_tier_without_overwriting_explicit_values() {
+    let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
+    let (gateway, _) = spawn_gateway_with_options(
+        vec![source("source", &upstream, "source-key", &[MODEL], 0)],
+        vec![local_key("key", LOCAL_KEY, None)],
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            default_service_tier: DefaultServiceTier::Fast,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    for tier in [
+        None,
+        Some("fast"),
+        Some("standard"),
+        Some("flex"),
+        Some("default"),
+        Some("priority"),
+    ] {
+        let mut body = json!({"model": MODEL, "input": "hello"});
+        if let Some(tier) = tier {
+            body["service_tier"] = Value::String(tier.to_string());
+        }
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let requests = state.requests.lock().unwrap();
+    let tiers = requests
+        .iter()
+        .map(|request| request.body["service_tier"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tiers,
+        [
+            Some("priority"),
+            Some("priority"),
+            Some("default"),
+            Some("flex"),
+            Some("default"),
+            Some("priority"),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -753,6 +807,7 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
             session_affinity_ttl: Some(Duration::from_millis(500)),
             max_affinity_entries: 16,
             hidden_models: Vec::new(),
+            default_service_tier: Default::default(),
         },
     )
     .await;
@@ -843,6 +898,7 @@ async fn spawn_gateway(
             session_affinity_ttl: None,
             max_affinity_entries: 0,
             hidden_models: Vec::new(),
+            default_service_tier: Default::default(),
         },
     )
     .await
