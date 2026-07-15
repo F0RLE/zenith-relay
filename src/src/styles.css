@@ -4304,8 +4304,178 @@ textarea {
   border-top: 1px solid var(--relay-border);
 }
 
-.history-repair > .inline-actions {
-  margin-top: 10px;
+.history-repair {
+  max-width: 920px;
+}
+
+.history-repair-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.history-repair-intro > span {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.history-repair-intro svg {
+  width: 17px;
+  height: 17px;
+}
+
+.history-repair-intro h2 {
+  margin: 0 0 3px;
+}
+
+.history-repair-intro p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.history-repair-form {
+  overflow: hidden;
+  padding: 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-surface);
+}
+
+.history-repair-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(240px, 0.65fr);
+  align-items: end;
+  gap: 16px;
+}
+
+.history-repair fieldset {
+  padding: 0;
+  border: 0;
+}
+
+.history-repair fieldset legend,
+.history-repair-default strong {
+  display: block;
+  margin: 0 0 6px;
+  padding: 0;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.history-repair .scope-grid {
+  min-height: 36px;
+  grid-template-columns: 1fr;
+  padding: 8px 10px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.history-repair .scope-grid label {
+  min-width: 0;
+}
+
+.history-repair .scope-grid label > span {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.history-repair .relay-field {
+  margin: 0;
+}
+
+.history-repair .field-option-menu {
+  width: 100%;
+}
+
+.history-repair-default {
+  min-width: 0;
+}
+
+.history-repair-default > span {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.history-repair-result {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.history-repair-result > dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 10px 0 0;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.history-repair-result > dl > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+}
+
+.history-repair-result > dl > div + div {
+  border-left: 1px solid var(--relay-border);
+}
+
+.history-repair-result dt {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.history-repair-result dd {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.history-repair-complete {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.history-repair-complete > div {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.history-repair-complete code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-repair-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--relay-border);
 }
 
 .toggle-row,
@@ -6907,6 +7077,11 @@ input[type="password"] {
 }
 
 @media (max-width: 900px) {
+  .history-repair-controls {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
   .settings-groups {
     grid-template-columns: 1fr;
   }
@@ -6928,6 +7103,24 @@ input[type="password"] {
 }
 
 @media (max-width: 700px) {
+  .history-repair-form {
+    padding: 12px;
+  }
+
+  .history-repair-result > dl {
+    grid-template-columns: 1fr;
+  }
+
+  .history-repair-result > dl > div + div {
+    border-top: 1px solid var(--relay-border);
+    border-left: 0;
+  }
+
+  .history-repair-complete {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .profile-snapshot-create {
     align-items: stretch;
     flex-direction: column;

@@ -814,6 +814,37 @@ for (const viewport of viewports) {
 }
 
 for (const viewport of viewports) {
+  test(`profile history repair ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Профили", exact: true }).click();
+    await page.getByRole("tab", { name: "Исправление" }).click();
+
+    const repair = page.locator(".history-repair");
+    const instances = repair.locator("fieldset");
+    const provider = repair.locator(".history-repair-controls > .relay-field");
+    expect(await repair.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+    const [instancesBox, providerBox] = await Promise.all([instances.boundingBox(), provider.boundingBox()]);
+    expect(instancesBox).not.toBeNull();
+    expect(providerBox).not.toBeNull();
+    if (viewport.width > 900) {
+      expect(Math.abs(instancesBox!.y - providerBox!.y)).toBeLessThanOrEqual(4);
+    } else {
+      expect(providerBox!.y).toBeGreaterThanOrEqual(instancesBox!.y + instancesBox!.height + 12);
+    }
+
+    await repair.getByRole("button", { name: "Проверить изменения" }).click();
+    const result = repair.locator(".history-repair-result");
+    await expect(result.locator("dd")).toHaveText(["2", "2", "1"]);
+    expect(await result.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
+    const [resultBox, actionsBox] = await Promise.all([result.boundingBox(), repair.locator(".history-repair-actions").boundingBox()]);
+    expect(actionsBox!.y).toBeGreaterThanOrEqual(resultBox!.y + resultBox!.height);
+    await page.screenshot({ path: `output/playwright/profile-history-repair-ru-light-${viewport.width}x${viewport.height}.png` });
+  });
+}
+
+for (const viewport of viewports) {
   test(`single ChatGPT profile action ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, codexBindings: false });
     await page.setViewportSize(viewport);
