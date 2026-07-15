@@ -219,7 +219,7 @@ pub async fn export_remote_accounts(
         })
         .await
         .map_err(remote_error)?;
-    finish_account_export(document, input.destination, &app, &state)
+    finish_account_export(document, input.destination, &app)
 }
 
 #[tauri::command]

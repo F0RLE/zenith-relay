@@ -22,18 +22,24 @@ module.
 | Public product | `Zenith Relay` | Used in UI and public documentation |
 | Repository | `zenith-relay` | Local folder and GitHub slug |
 | Desktop package/binary | `zenith-relay` | Cargo, Bun, and release artifact base name |
-| Tauri bundle identifier | `com.zenith.codex` | Kept for in-place upgrades of existing installations |
+| Tauri bundle identifier | `com.zenith.codex` | Kept for installer and updater compatibility only |
 | React product feature | `relay` | Lives under `src/src/features/relay` |
 | Desktop personal-pool adapter | `local_pool` | Existing Rust module under `src-tauri/src/local_pool` |
 | Shared runtime crate | `zenith-relay-core` | Directory `crates/relay-core` |
 | Self-host server package/binary | `zenith-relay-server` | Directory `relay-server` |
-| Stable desktop data folder | `local-pool` | Do not rename without a data migration |
+| Desktop data folder | `Zenith Relay` | Branded platform-local root; old paths migrate in place |
+| Windows current-user install folder | `%LOCALAPPDATA%\\Programs\\Zenith Relay` | Keeps binaries and uninstall state outside the desktop data folder |
 
-The repository, package, executable, updater URL, and public labels use the new
-name. The existing Tauri bundle identifier and `local-pool` data directory stay
-stable so current installations and local state continue to upgrade in place.
-The keyring adapter reads the old service namespace once, migrates the secret
-to `Zenith Relay`, and then removes the old entry.
+The repository, package, executable, updater URL, public labels, and desktop
+data directory use the product name. The Tauri bundle identifier stays stable
+for installed-app upgrades, but appears on disk only below `cache/` for WebView
+compatibility. The keyring adapter reads the old service namespace once,
+migrates the secret to `Zenith Relay`, and then removes the old entry.
+
+The Windows NSIS hook relocates the default current-user install directory to
+`%LOCALAPPDATA%\\Programs\\Zenith Relay`. This prevents installer binaries from
+sharing `%LOCALAPPDATA%\\Zenith Relay` with durable user data. Existing custom
+install locations remain unchanged.
 
 ## Ownership Boundaries
 
@@ -567,61 +573,57 @@ verified. `src-tauri` and `relay-server` keep their own lockfiles and depend on
 
 ## Desktop Runtime Data Tree
 
-The desktop keeps the existing stable `local-pool` directory under Tauri's
-platform-local app-data directory. On Windows this resolves to
-`%LOCALAPPDATA%\\com.zenith.codex\\local-pool`; macOS and Linux use the
-equivalent Tauri local-data location. The bundle identifier remains unchanged
-so existing installations continue to update in place.
+The desktop uses one branded platform-local root. On Windows this is
+`%LOCALAPPDATA%\\Zenith Relay`; macOS uses
+`~/Library/Application Support/Zenith Relay`; Linux uses
+`$XDG_DATA_HOME/Zenith Relay`. Existing `com.zenith.codex/local-pool` data is
+moved into this layout before the WebView or local gateway starts.
 
 ```text
-<app_local_data_dir>/local-pool/
-  metadata.json                     schema version and migration state
-
-  settings/
-    gateway.json
-    remote_targets.json
-
-  records/
-    sources.json
-    accounts.json
-    keys.json
+Zenith Relay/
+  data/                              required to restore Relay state
+    metadata.json                    schema version and migration state
+    settings.json                    non-secret local gateway settings
+    remote-target.json               active user-managed server connection
+    connections.json                 non-secret provider/source records
+    accounts.json                    non-secret account and quota records
+    pool-keys.json                   local key policy and secret references
     automations.json
-
-  telemetry/
-    usage.sqlite                    no prompt or response bodies
-
-  backups/
-    migrations/
-    profiles/                       reversible client profiles and snapshots
-    history-repair/                 explicit ChatGPT history repair backups
-    ready-api/                      redacted Ready API config backups
-
-  vault/                            encrypted values; master key stays in OS storage
-    secrets.enc
+    usage.sqlite                     no prompt or response bodies
+    secrets.enc                      encrypted values; master key stays in OS storage
     secrets.enc.bak
 
-  transient/
-    imports/                        short-lived import sessions
-    oauth_pending/                  resumable OAuth flow metadata
-    repair_previews/                expiring history-repair previews
-    locks/                          cross-process token refresh locks
+  recovery/                          durable rollback material
+    migrations/
+    profiles/                        reversible client profiles and user snapshots
+    history-repair/                  one current automatic ChatGPT history rollback
+    client-config/                   redacted Ready API/config rollback files
+    exports/                         exports made by older Relay versions only
+    quarantine/                      invalid store files preserved for recovery
+    legacy/                          unrecognized legacy files preserved during migration
 
-  output/
-    exports/                        user-requested account/usage/support exports
-    deployments/                    generated self-host deployment files
+  cache/                             safe to clear while Relay is stopped
+    com.zenith.codex/
+      EBWebView/                     Tauri/WebView compatibility cache
+    imports/                         short-lived import sessions
+    oauth_pending/                   resumable OAuth flow metadata
+    repair_previews/                 expiring history-repair previews
+    locks/                           cross-process token refresh locks
+    deployments/                     regenerable self-host deployment files
 
-  quarantine/                       invalid store files preserved for recovery
+  logs/                              redacted bounded logs when file logging is enabled
 ```
 
-Tauri's platform WebView data remains next to `local-pool` in the same local
-application directory. On Windows WebView2 names this cache `EBWebView`; it is
-rebuildable interface data and is not part of backups or account state.
+Account, usage, and support exports use the native save dialog and are written
+only to the path selected by the user. They are not silently retained in app
+data. WebView data is rebuildable interface state and is never part of backups
+or account state.
 
 The ChatGPT client profile remains external at `<user_home>/.codex`. Zenith
 Relay edits `config.toml`, `auth.json`, and compatible desktop state only for
 explicit attach, restore, or service-tier actions. It does not move ChatGPT
 sessions or databases. Legacy Zenith config backups from `.codex` and
-`.codex/zenith-backups` are migrated into `backups/ready-api`.
+`.codex/zenith-backups` are migrated into `recovery/client-config`.
 
 Storage rules:
 
@@ -635,10 +637,11 @@ Storage rules:
 6. Durable record migrations create a backup first and quarantine corrupt
    input instead of deleting it. Directory-layout migrations use same-volume
    renames, are restart-safe, and never overwrite a name that already exists.
-7. Temporary state, generated output, profile backups, and durable records stay
+7. Temporary state, generated output, recovery files, and durable records stay
    in separate directories so clearing one category cannot remove another.
-8. Keep `local-pool` as the directory name and `com.zenith.codex` as the bundle
-   identifier for upgrade compatibility; branding alone is not a migration.
+8. Keep `com.zenith.codex` as the bundle identifier for upgrade compatibility,
+   but keep its filesystem state below `cache/` rather than using it as the
+   product data root.
 
 ## Server Runtime Data Tree
 

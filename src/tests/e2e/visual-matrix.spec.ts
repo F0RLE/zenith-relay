@@ -126,8 +126,8 @@ for (const viewport of [{ width: 1344, height: 900 }, { width: 840, height: 560 
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Настройки", exact: true }).click();
-    await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\com.zenith.codex\\local-pool", { exact: true })).toBeVisible();
-    await expect(page.locator(".settings-path-grid dt")).toHaveText(["Резервные копии", "Экспорты", "Кэш интерфейса", "Профиль ChatGPT"]);
+    await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay", { exact: true })).toBeVisible();
+    await expect(page.locator(".settings-path-grid dt")).toHaveText(["Рабочие данные", "Восстановление и снимки", "Временные файлы и кэш", "Журналы", "Профиль ChatGPT"]);
 
     const groups = page.locator(".settings-group");
     await expect(groups).toHaveCount(6);

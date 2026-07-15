@@ -10,15 +10,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn migrate(root: &Path) -> Result<StoreMetadata> {
+pub fn migrate(root: &Path, recovery_root: &Path) -> Result<StoreMetadata> {
     let metadata_path = root.join("metadata.json");
     let gateway_path = root.join("settings").join("gateway.json");
     let mut metadata = match load_json_or_quarantine::<StoreMetadata>(root, &metadata_path)? {
         Some(metadata) => metadata,
         None if gateway_path.exists() => StoreMetadata { schema_version: 0 },
+        None if directory_has_entries(root)? => {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "local data exist but metadata.json is missing",
+            ))
+        }
         None => {
-            migrate_v1_to_v2(root)?;
-            migrate_v3_to_v4(root)?;
             let metadata = StoreMetadata::default();
             save_json(&metadata_path, &metadata)?;
             return Ok(metadata);
@@ -36,7 +40,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
     }
 
     let backup = (metadata.schema_version < CURRENT_SCHEMA_VERSION)
-        .then(|| backup_settings(root, metadata.schema_version))
+        .then(|| backup_settings(root, recovery_root, metadata.schema_version))
         .transpose()?;
 
     let result = (|| {
@@ -54,6 +58,7 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
                 9 => migrate_v9_to_v10(root, &gateway_path)?,
                 10 => migrate_v10_to_v11(root, &gateway_path)?,
                 11 => migrate_v11_to_v12(root, &gateway_path)?,
+                12 => migrate_v12_to_v13(root)?,
                 version => {
                     return Err(LocalPoolError::new(
                         ErrorCode::UnsupportedSchema,
@@ -73,6 +78,79 @@ pub fn migrate(root: &Path) -> Result<StoreMetadata> {
         }
     }
     result
+}
+
+fn directory_has_entries(path: &Path) -> Result<bool> {
+    fs::read_dir(path)
+        .map_err(io_error)?
+        .next()
+        .transpose()
+        .map(|entry| entry.is_some())
+        .map_err(io_error)
+}
+
+fn migrate_v12_to_v13(root: &Path) -> Result<()> {
+    let moves = [
+        ("settings/gateway.json", "settings.json"),
+        ("settings/remote_targets.json", "remote-target.json"),
+        ("records/sources.json", "connections.json"),
+        ("records/accounts.json", "accounts.json"),
+        ("records/keys.json", "pool-keys.json"),
+        ("records/automations.json", "automations.json"),
+        ("telemetry/usage.sqlite", "usage.sqlite"),
+        ("telemetry/usage.sqlite-wal", "usage.sqlite-wal"),
+        ("telemetry/usage.sqlite-shm", "usage.sqlite-shm"),
+        ("vault/secrets.enc", "secrets.enc"),
+        ("vault/secrets.enc.bak", "secrets.enc.bak"),
+    ];
+    let mut moved = Vec::new();
+    for (legacy, current) in moves {
+        let legacy = root.join(legacy);
+        let current = root.join(current);
+        if !legacy.exists() {
+            continue;
+        }
+        if current.exists() {
+            rollback_moves(&moved)?;
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                format!(
+                    "both legacy and current data files exist: {} and {}",
+                    legacy.display(),
+                    current.display()
+                ),
+            ));
+        }
+        if let Err(error) = fs::rename(&legacy, &current) {
+            rollback_moves(&moved)?;
+            return Err(io_error(error));
+        }
+        moved.push((legacy, current));
+    }
+    for directory in ["settings", "records", "telemetry", "vault"] {
+        match fs::remove_dir(root.join(directory)) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => return Err(io_error(error)),
+        }
+    }
+    Ok(())
+}
+
+fn rollback_moves(moves: &[(PathBuf, PathBuf)]) -> Result<()> {
+    for (legacy, current) in moves.iter().rev() {
+        if current.exists() && !legacy.exists() {
+            if let Some(parent) = legacy.parent() {
+                fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            fs::rename(current, legacy).map_err(io_error)?;
+        }
+    }
+    Ok(())
 }
 
 fn migrate_v11_to_v12(root: &Path, gateway_path: &Path) -> Result<()> {
@@ -360,7 +438,11 @@ fn load_json_or_quarantine<T: serde::de::DeserializeOwned>(
     match load_json(path) {
         Ok(value) => Ok(value),
         Err(error) if path.exists() => {
-            let quarantined = super::quarantine::move_file(root, path)?;
+            let recovery_root = root
+                .parent()
+                .map(|parent| parent.join("recovery"))
+                .unwrap_or_else(|| root.join("recovery"));
+            let quarantined = super::quarantine::move_file(&recovery_root, path)?;
             Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!(
@@ -373,8 +455,8 @@ fn load_json_or_quarantine<T: serde::de::DeserializeOwned>(
     }
 }
 
-fn backup_settings(root: &Path, schema_version: u32) -> Result<PathBuf> {
-    let target = root.join("backups").join("migrations").join(format!(
+fn backup_settings(root: &Path, recovery_root: &Path, schema_version: u32) -> Result<PathBuf> {
+    let target = recovery_root.join("migrations").join(format!(
         "v{}-{}",
         schema_version,
         Utc::now().format("%Y%m%d%H%M%S%3f")
@@ -389,6 +471,10 @@ fn backup_settings(root: &Path, schema_version: u32) -> Result<PathBuf> {
         (
             root.join("records").join("automations.json"),
             "automations.json",
+        ),
+        (
+            root.join("settings").join("remote_targets.json"),
+            "remote_targets.json",
         ),
     ] {
         backup_file(
@@ -410,6 +496,10 @@ fn restore_settings(root: &Path, backup: &Path) -> Result<()> {
         (
             root.join("records").join("automations.json"),
             "automations.json",
+        ),
+        (
+            root.join("settings").join("remote_targets.json"),
+            "remote_targets.json",
         ),
     ] {
         restore_file(
@@ -485,20 +575,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&root.join("settings").join("gateway.json"))
-            .unwrap()
-            .unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["clientHost"], "127.0.0.1");
-        assert!(root.join("records").join("sources.json").exists());
+        assert!(root.join("connections.json").exists());
         assert!(root
-            .join("backups")
+            .join("recovery")
             .join("migrations")
             .read_dir()
             .unwrap()
@@ -517,8 +609,25 @@ mod tests {
             },
         )
         .unwrap();
-        let error = migrate(&root).unwrap_err();
+        let error = migrate(&root, &root.join("recovery")).unwrap_err();
         assert!(matches!(error.code, ErrorCode::UnsupportedSchema));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_metadata_never_reinitializes_existing_encrypted_data() {
+        let root = temp_root();
+        fs::create_dir_all(root.join("vault")).unwrap();
+        fs::write(root.join("vault/secrets.enc"), "encrypted").unwrap();
+
+        let error = migrate(&root, &root.join("recovery")).unwrap_err();
+
+        assert!(matches!(error.code, ErrorCode::RecoveryRequired));
+        assert_eq!(
+            fs::read_to_string(root.join("vault/secrets.enc")).unwrap(),
+            "encrypted"
+        );
+        assert!(!root.join("metadata.json").exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -536,7 +645,7 @@ mod tests {
         .unwrap();
         fs::write(root.join("records"), "blocks records directory").unwrap();
 
-        assert!(migrate(&root).is_err());
+        assert!(migrate(&root, &root.join("recovery")).is_err());
         assert!(!root.join("metadata.json").exists());
         let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
         assert!(gateway.get("clientHost").is_none());
@@ -549,28 +658,24 @@ mod tests {
         write_v2_store(&root);
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&root.join("settings").join("gateway.json"))
-            .unwrap()
-            .unwrap();
-        let sources: Value = load_json(&root.join("records").join("sources.json"))
-            .unwrap()
-            .unwrap();
-        let keys: Value = load_json(&root.join("records").join("keys.json"))
-            .unwrap()
-            .unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
+        let sources: Value = load_json(&root.join("connections.json")).unwrap().unwrap();
+        let keys: Value = load_json(&root.join("pool-keys.json")).unwrap().unwrap();
         assert_eq!(gateway["maxRetryCandidates"], 3);
         assert_eq!(sources[0]["weight"], 1);
         assert_eq!(sources[0]["draining"], false);
         assert!(sources[0]["lastUsedAt"].is_null());
         assert!(keys[0]["sourceIds"].is_null());
         assert!(keys[0]["accountIds"].is_null());
-        assert!(root.join("records").join("accounts.json").exists());
-        assert!(root.join("records").join("automations.json").exists());
+        assert!(root.join("accounts.json").exists());
+        assert!(root.join("automations.json").exists());
         assert!(root
-            .join("backups")
+            .join("recovery")
             .join("migrations")
             .read_dir()
             .unwrap()
@@ -585,18 +690,16 @@ mod tests {
         write_v3_store(&root);
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let keys: Value = load_json(&root.join("records").join("keys.json"))
-            .unwrap()
-            .unwrap();
+        let keys: Value = load_json(&root.join("pool-keys.json")).unwrap().unwrap();
         let automations: AutomationRecords =
-            load_json(&root.join("records").join("automations.json"))
-                .unwrap()
-                .unwrap();
+            load_json(&root.join("automations.json")).unwrap().unwrap();
         assert!(keys[0]["accountIds"].is_null());
-        assert!(root.join("records").join("accounts.json").exists());
+        assert!(root.join("accounts.json").exists());
         assert!(automations.tasks.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
@@ -613,12 +716,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&root.join("settings").join("gateway.json"))
-            .unwrap()
-            .unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["commonProxyConfigured"], false);
         fs::remove_dir_all(root).unwrap();
     }
@@ -642,19 +745,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let sources: Value = load_json(&root.join("records").join("sources.json"))
-            .unwrap()
-            .unwrap();
-        let accounts: Value = load_json(&root.join("records").join("accounts.json"))
-            .unwrap()
-            .unwrap();
+        let sources: Value = load_json(&root.join("connections.json")).unwrap().unwrap();
+        let accounts: Value = load_json(&root.join("accounts.json")).unwrap().unwrap();
         assert_eq!(sources[0]["inPool"], false);
         assert_eq!(accounts[0]["account"]["inPool"], false);
         assert_eq!(accounts[0]["account"]["label"], "Preserved");
-        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["hiddenModels"], Value::Array(Vec::new()));
         fs::remove_dir_all(root).unwrap();
     }
@@ -678,10 +779,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["useFreeAccounts"], false);
         fs::remove_dir_all(root).unwrap();
     }
@@ -712,10 +815,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let accounts: Value = load_json(&records.join("accounts.json")).unwrap().unwrap();
+        let accounts: Value = load_json(&root.join("accounts.json")).unwrap().unwrap();
         assert_eq!(accounts[0]["cooldowns"], serde_json::json!({}));
         assert_eq!(accounts[0]["consecutiveFailures"], 0);
         assert_eq!(accounts[0]["account"]["id"], "account_1");
@@ -737,10 +842,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["sessionAffinity"], false);
         fs::remove_dir_all(root).unwrap();
     }
@@ -760,10 +867,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["routingStrategy"], "adaptive");
         fs::remove_dir_all(root).unwrap();
     }
@@ -786,11 +895,108 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            migrate(&root).unwrap().schema_version,
+            migrate(&root, &root.join("recovery"))
+                .unwrap()
+                .schema_version,
             CURRENT_SCHEMA_VERSION
         );
-        let gateway: Value = load_json(&gateway_path).unwrap().unwrap();
+        let gateway: Value = load_json(&root.join("settings.json")).unwrap().unwrap();
         assert_eq!(gateway["defaultServiceTier"], "standard");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn migrates_v12_into_the_flat_data_layout() {
+        let root = temp_root();
+        save_json(
+            &root.join("settings/gateway.json"),
+            &crate::local_pool::models::GatewaySettings::default(),
+        )
+        .unwrap();
+        fs::write(root.join("settings/remote_targets.json"), "{}").unwrap();
+        fs::create_dir_all(root.join("records")).unwrap();
+        for name in ["sources.json", "accounts.json", "keys.json"] {
+            save_json(&root.join("records").join(name), &Vec::<Value>::new()).unwrap();
+        }
+        save_json(
+            &root.join("records/automations.json"),
+            &AutomationRecords::default(),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("telemetry")).unwrap();
+        fs::write(root.join("telemetry/usage.sqlite"), "usage").unwrap();
+        fs::create_dir_all(root.join("vault")).unwrap();
+        fs::write(root.join("vault/secrets.enc"), "encrypted").unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 12 },
+        )
+        .unwrap();
+
+        let recovery = root.join("recovery");
+        assert_eq!(
+            migrate(&root, &recovery).unwrap().schema_version,
+            CURRENT_SCHEMA_VERSION
+        );
+        for name in [
+            "settings.json",
+            "remote-target.json",
+            "connections.json",
+            "accounts.json",
+            "pool-keys.json",
+            "automations.json",
+            "usage.sqlite",
+            "secrets.enc",
+        ] {
+            assert!(root.join(name).is_file(), "{name} was not migrated");
+        }
+        for name in ["settings", "records", "telemetry", "vault"] {
+            assert!(!root.join(name).exists(), "{name} was not removed");
+        }
+        assert!(recovery
+            .join("migrations")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v12_layout_conflict_rolls_every_move_back() {
+        let root = temp_root();
+        save_json(
+            &root.join("settings/gateway.json"),
+            &crate::local_pool::models::GatewaySettings::default(),
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("records")).unwrap();
+        save_json(&root.join("records/sources.json"), &Vec::<Value>::new()).unwrap();
+        save_json(
+            &root.join("records/accounts.json"),
+            &vec![Value::String("legacy".into())],
+        )
+        .unwrap();
+        save_json(
+            &root.join("accounts.json"),
+            &vec![Value::String("current".into())],
+        )
+        .unwrap();
+        save_json(
+            &root.join("metadata.json"),
+            &StoreMetadata { schema_version: 12 },
+        )
+        .unwrap();
+
+        assert!(migrate(&root, &root.join("recovery")).is_err());
+        assert!(root.join("settings/gateway.json").is_file());
+        assert!(root.join("records/sources.json").is_file());
+        assert!(!root.join("settings.json").exists());
+        assert!(!root.join("connections.json").exists());
+        let current: Value = load_json(&root.join("accounts.json")).unwrap().unwrap();
+        assert_eq!(current[0], "current");
+        let metadata: StoreMetadata = load_json(&root.join("metadata.json")).unwrap().unwrap();
+        assert_eq!(metadata.schema_version, 12);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -811,7 +1017,7 @@ mod tests {
             .unwrap();
         fs::create_dir(root.join("records").join("automations.tmp")).unwrap();
 
-        assert!(migrate(&root).is_err());
+        assert!(migrate(&root, &root.join("recovery")).is_err());
         for (path, expected) in paths.iter().zip(before) {
             assert_eq!(
                 fs::read(path).unwrap(),
@@ -842,7 +1048,7 @@ mod tests {
             .unwrap();
         fs::create_dir(root.join("records").join("keys.tmp")).unwrap();
 
-        assert!(migrate(&root).is_err());
+        assert!(migrate(&root, &root.join("recovery")).is_err());
         for (path, expected) in paths.iter().zip(before) {
             assert_eq!(
                 fs::read(path).unwrap(),

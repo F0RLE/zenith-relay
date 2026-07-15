@@ -66,13 +66,13 @@ pub struct DesktopState {
 
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
-        let repair_previews = root.join("transient").join("repair_previews");
+        let repair_previews = root.join("cache").join("repair_previews");
         if repair_previews.exists() {
             let repair_state_root = root.clone();
             let _ = std::thread::Builder::new()
                 .name("history-repair-cleanup".to_string())
                 .spawn(move || {
-                    let _ = repair::cleanup_expired_previews(&repair_state_root.join("transient"));
+                    let _ = repair::cleanup_expired_previews(&repair_state_root.join("cache"));
                 });
         }
         let mut store = LocalPoolStore::open(root.clone())?;
@@ -90,9 +90,7 @@ impl DesktopState {
             automations.state = wake.state().clone();
             store.replace_automations(automations)?;
         }
-        let telemetry = Arc::new(TelemetryDb::open(
-            &root.join("telemetry").join("usage.sqlite"),
-        )?);
+        let telemetry = Arc::new(TelemetryDb::open(&root.join("data").join("usage.sqlite"))?);
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
@@ -100,7 +98,7 @@ impl DesktopState {
         );
         let oauth_events = DesktopOAuthEvents::default();
         let oauth_flow = OAuthFlowManager::new(
-            root.join("transient"),
+            root.join("cache"),
             NativeSecretBackend,
             oauth_events.clone(),
         );
@@ -557,27 +555,43 @@ impl DesktopState {
     }
 
     pub fn profile_backup_root(&self) -> PathBuf {
-        self.backup_root().join("profiles")
+        self.recovery_root().join("profiles")
     }
 
     pub fn history_repair_backup_root(&self) -> PathBuf {
-        self.backup_root().join("history-repair")
+        self.recovery_root().join("history-repair")
     }
 
     pub fn ready_api_backup_root(&self) -> PathBuf {
-        self.backup_root().join("ready-api")
+        self.recovery_root().join("client-config")
     }
 
     pub fn backup_root(&self) -> PathBuf {
-        self.root.join("backups")
+        self.recovery_root()
+    }
+
+    pub fn data_root(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    pub fn recovery_root(&self) -> PathBuf {
+        self.root.join("recovery")
     }
 
     pub fn transient_root(&self) -> PathBuf {
-        self.root.join("transient")
+        self.root.join("cache")
     }
 
     pub fn output_root(&self) -> PathBuf {
-        self.root.join("output")
+        self.cache_root()
+    }
+
+    pub fn cache_root(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    pub fn logs_root(&self) -> PathBuf {
+        self.root.join("logs")
     }
 
     #[allow(dead_code)]
@@ -900,7 +914,7 @@ mod tests {
             "zenith-relay-repair-backup-preservation-{}",
             uuid::Uuid::new_v4()
         ));
-        let backup_root = root.join("backups").join("history-repair");
+        let backup_root = root.join("recovery/history-repair");
         let ids = [
             format!("history_repair_{}", uuid::Uuid::new_v4().simple()),
             format!("history_repair_{}", uuid::Uuid::new_v4().simple()),

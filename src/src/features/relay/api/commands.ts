@@ -118,8 +118,8 @@ export const relayCommands = {
   storageInfo: () => invoke<RelayStorageInfo>("get_relay_storage_info"),
   openFolder: (folder: "data" | "profile_backups") => invoke("open_relay_folder", { folder }),
   resetLocalData: () => invoke("reset_local_pool_data"),
-  exportUsage: (rows: UsageExportRow[]) => invoke<string>("export_usage", { rows }),
-  exportSupportBundle: (context: SupportExportContext) => invoke<string>("export_support_bundle", { context }),
+  exportUsage: (rows: UsageExportRow[]) => invoke<string | null>("export_usage", { rows }),
+  exportSupportBundle: (context: SupportExportContext) => invoke<string | null>("export_support_bundle", { context }),
   previewSupportBundle: (context: SupportExportContext) => invoke<SupportBundlePreview>("preview_support_bundle", { context }),
 
   connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),

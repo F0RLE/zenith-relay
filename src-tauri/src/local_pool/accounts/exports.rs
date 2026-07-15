@@ -1,7 +1,6 @@
 use crate::local_pool::{
     commands::recovery::write_account_export,
     error::{CommandError, ErrorCode, LocalPoolError},
-    state::DesktopState,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -41,16 +40,13 @@ pub fn finish_account_export(
     document: AccountExportDocument,
     destination: AccountExportDestination,
     app: &AppHandle,
-    state: &DesktopState,
 ) -> Result<AccountExportResult, CommandError> {
     document
         .validate()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
     let (content, path) = match destination {
         AccountExportDestination::Copy => (Some(document.content.clone()), None),
-        AccountExportDestination::Download => {
-            (None, Some(write_account_export(&document, app, state)?))
-        }
+        AccountExportDestination::Download => (None, write_account_export(&document, app)?),
     };
     Ok(AccountExportResult {
         format: document.format,

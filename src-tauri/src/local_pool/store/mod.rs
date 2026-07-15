@@ -32,15 +32,17 @@ pub struct LocalPoolStore {
 }
 
 impl LocalPoolStore {
-    pub fn open(root: PathBuf) -> Result<Self> {
-        fs::create_dir_all(root.join("settings")).map_err(|err| {
+    pub fn open(app_root: PathBuf) -> Result<Self> {
+        let root = app_root.join("data");
+        fs::create_dir_all(&root).map_err(|err| {
             LocalPoolError::new(
                 ErrorCode::Io,
                 format!("failed to create local pool store: {err}"),
             )
         })?;
-        let metadata = migrate(&root)?;
-        let gateway_path = root.join("settings").join("gateway.json");
+        let recovery_root = app_root.join("recovery");
+        let metadata = migrate(&root, &recovery_root)?;
+        let gateway_path = root.join("settings.json");
         let gateway = match load_json(&gateway_path) {
             Ok(Some(gateway)) => gateway,
             Ok(None) => {
@@ -49,7 +51,7 @@ impl LocalPoolStore {
                 gateway
             }
             Err(error) => {
-                let quarantined = quarantine::move_file(&root, &gateway_path)?;
+                let quarantined = quarantine::move_file(&recovery_root, &gateway_path)?;
                 return Err(LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
                     format!(
@@ -63,7 +65,7 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        let sources = load_record_file(&root, "sources.json")?;
+        let sources = load_record_file(&root, "connections.json")?;
         let accounts = load_record_file(&root, "accounts.json")?;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
@@ -71,7 +73,7 @@ impl LocalPoolStore {
                 format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
             ));
         }
-        let keys = load_record_file(&root, "keys.json")?;
+        let keys = load_record_file(&root, "pool-keys.json")?;
         let automations = load_value_file(&root, "automations.json")?;
         Ok(Self {
             root,
@@ -231,11 +233,10 @@ impl LocalPoolStore {
             return Ok(());
         }
 
-        let records = self.root.join("records");
-        let sources_path = records.join("sources.json");
-        let accounts_path = records.join("accounts.json");
-        let keys_path = records.join("keys.json");
-        let automations_path = records.join("automations.json");
+        let sources_path = self.root.join("connections.json");
+        let accounts_path = self.root.join("accounts.json");
+        let keys_path = self.root.join("pool-keys.json");
+        let automations_path = self.root.join("automations.json");
 
         let write_result = (|| {
             if changed.sources {
@@ -270,18 +271,17 @@ impl LocalPoolStore {
     }
 
     fn restore_record_files(&self, changed: &RecordChanges) -> Result<()> {
-        let records = self.root.join("records");
         if changed.sources {
-            save_json(&records.join("sources.json"), &self.sources)?;
+            save_json(&self.root.join("connections.json"), &self.sources)?;
         }
         if changed.accounts {
-            save_json(&records.join("accounts.json"), &self.accounts)?;
+            save_json(&self.root.join("accounts.json"), &self.accounts)?;
         }
         if changed.keys {
-            save_json(&records.join("keys.json"), &self.keys)?;
+            save_json(&self.root.join("pool-keys.json"), &self.keys)?;
         }
         if changed.automations {
-            save_json(&records.join("automations.json"), &self.automations)?;
+            save_json(&self.root.join("automations.json"), &self.automations)?;
         }
         Ok(())
     }
@@ -294,7 +294,7 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        save_json(&self.root.join("settings").join("gateway.json"), &gateway)?;
+        save_json(&self.root.join("settings.json"), &gateway)?;
         self.gateway = gateway;
         Ok(())
     }
@@ -371,7 +371,7 @@ fn load_record_file<T: serde::de::DeserializeOwned + serde::Serialize>(
     root: &Path,
     name: &str,
 ) -> Result<Vec<T>> {
-    let path = root.join("records").join(name);
+    let path = root.join(name);
     match load_json(&path) {
         Ok(Some(records)) => Ok(records),
         Ok(None) => {
@@ -380,7 +380,7 @@ fn load_record_file<T: serde::de::DeserializeOwned + serde::Serialize>(
             Ok(records)
         }
         Err(error) => {
-            let quarantined = quarantine::move_file(root, &path)?;
+            let quarantined = quarantine::move_file(&recovery_root(root), &path)?;
             Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!(
@@ -396,7 +396,7 @@ fn load_value_file<T>(root: &Path, name: &str) -> Result<T>
 where
     T: Default + serde::de::DeserializeOwned + serde::Serialize,
 {
-    let path = root.join("records").join(name);
+    let path = root.join(name);
     match load_json(&path) {
         Ok(Some(value)) => Ok(value),
         Ok(None) => {
@@ -405,7 +405,7 @@ where
             Ok(value)
         }
         Err(error) => {
-            let quarantined = quarantine::move_file(root, &path)?;
+            let quarantined = quarantine::move_file(&recovery_root(root), &path)?;
             Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!(
@@ -415,6 +415,13 @@ where
             ))
         }
     }
+}
+
+fn recovery_root(data_root: &Path) -> PathBuf {
+    data_root
+        .parent()
+        .map(|root| root.join("recovery"))
+        .unwrap_or_else(|| data_root.join("recovery"))
 }
 
 #[cfg(test)]
@@ -488,11 +495,17 @@ mod tests {
     #[test]
     fn corrupt_settings_are_quarantined() {
         let root = temp_root();
-        fs::create_dir_all(root.join("settings")).unwrap();
-        fs::write(root.join("settings").join("gateway.json"), "not-json").unwrap();
+        fs::create_dir_all(root.join("data")).unwrap();
+        save_json(&root.join("data/metadata.json"), &StoreMetadata::default()).unwrap();
+        fs::write(root.join("data/settings.json"), "not-json").unwrap();
         let error = LocalPoolStore::open(root.clone()).err().unwrap();
         assert!(matches!(error.code, ErrorCode::RecoveryRequired));
-        assert!(root.join("quarantine").read_dir().unwrap().next().is_some());
+        assert!(root
+            .join("recovery/quarantine")
+            .read_dir()
+            .unwrap()
+            .next()
+            .is_some());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -541,7 +554,7 @@ mod tests {
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(reopened.sources()[0].models, ["gpt-test"]);
         assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
-        let records = fs::read_to_string(root.join("records").join("sources.json")).unwrap();
+        let records = fs::read_to_string(root.join("data/connections.json")).unwrap();
         assert!(!records.contains("upstream-secret"));
         fs::remove_dir_all(root).unwrap();
     }
@@ -637,7 +650,7 @@ mod tests {
         store
             .replace_records(vec![source.clone()], vec![key.clone()])
             .unwrap();
-        fs::create_dir(root.join("records").join("keys.tmp")).unwrap();
+        fs::create_dir(root.join("data/pool-keys.tmp")).unwrap();
         let mut changed_source = source;
         changed_source.name = "After".into();
         let mut changed_key = key;
@@ -647,10 +660,9 @@ mod tests {
             .replace_records(vec![changed_source], vec![changed_key])
             .is_err());
         assert_eq!(store.sources()[0].name, "Before");
-        let persisted: Vec<ProviderSourceRecord> =
-            load_json(&root.join("records").join("sources.json"))
-                .unwrap()
-                .unwrap();
+        let persisted: Vec<ProviderSourceRecord> = load_json(&root.join("data/connections.json"))
+            .unwrap()
+            .unwrap();
         assert_eq!(persisted[0].name, "Before");
         fs::remove_dir_all(root).unwrap();
     }
@@ -688,7 +700,7 @@ mod tests {
         store
             .replace_accounts_and_keys(vec![account_record("account-reset")], Vec::new())
             .unwrap();
-        let backup = root.join("backups").join("profiles").join("config.toml");
+        let backup = root.join("recovery/profiles/config.toml");
         fs::create_dir_all(backup.parent().unwrap()).unwrap();
         fs::write(&backup, "preserved").unwrap();
 

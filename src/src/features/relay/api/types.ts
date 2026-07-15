@@ -454,10 +454,11 @@ export type SupportBundlePreview = {
 };
 
 export type RelayStorageInfo = {
+  rootPath: string;
   dataPath: string;
-  backupsPath: string;
-  exportsPath: string;
-  cachePath: string | null;
+  recoveryPath: string;
+  cachePath: string;
+  logsPath: string;
   chatgptProfilePath: string;
   legacyDataPath: string | null;
 };

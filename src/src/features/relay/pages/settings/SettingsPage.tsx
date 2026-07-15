@@ -43,14 +43,14 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       <SettingsGroup icon={<Database aria-hidden />} title={t("settings.storage")}>
-        <div className="settings-control-row"><div><strong>{t("settings.dataPath")}</strong><small><code title={storageInfo?.dataPath}>{storageInfo?.dataPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+        <div className="settings-control-row"><div><strong>{t("settings.storageRoot")}</strong><small><code title={storageInfo?.rootPath}>{storageInfo?.rootPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
         <div className="settings-control-row settings-storage-locations"><div><strong>{t("settings.storageLocations")}</strong><dl className="settings-path-grid">
-          <StoragePath label={t("settings.backupsPath")} path={storageInfo?.backupsPath} />
-          <StoragePath label={t("settings.exportsPath")} path={storageInfo?.exportsPath} />
+          <StoragePath label={t("settings.dataPath")} path={storageInfo?.dataPath} />
+          <StoragePath label={t("settings.recoveryPath")} path={storageInfo?.recoveryPath} />
           <StoragePath label={t("settings.cachePath")} path={storageInfo?.cachePath} />
+          <StoragePath label={t("settings.logsPath")} path={storageInfo?.logsPath} />
           <StoragePath label={t("settings.chatgptProfilePath")} path={storageInfo?.chatgptProfilePath} />
         </dl></div></div>
-        <div className="settings-control-row"><div><strong>{t("settings.retention")}</strong></div><span className="settings-value">30 {t("settings.days")}</span></div>
         {storageInfo?.legacyDataPath && <p className="settings-note settings-warning-note"><strong>{t("settings.legacyDataFound")}</strong><code>{storageInfo.legacyDataPath}</code><span>{t("settings.legacyDataHint")}</span></p>}
       </SettingsGroup>
 

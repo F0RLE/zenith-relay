@@ -12,7 +12,7 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeSet, env, time::Duration};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
@@ -1224,6 +1224,20 @@ fn main() {
             let relay_state = local_pool::initialize(&handle)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(relay_state);
+            let window_config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|window| window.label == "main")
+                .cloned()
+                .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
+            let webview_cache =
+                platform::webview_cache_dir(&handle).map_err(std::io::Error::other)?;
+            std::fs::create_dir_all(&webview_cache)?;
+            WebviewWindowBuilder::from_config(app, &window_config)?
+                .data_directory(webview_cache)
+                .build()?;
             local_pool::background::start(handle.clone());
             let startup_handle = handle.clone();
             tauri::async_runtime::spawn(async move {

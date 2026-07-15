@@ -8,7 +8,8 @@ use crate::local_pool::{
 use crate::platform;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use zenith_relay_core::accounts::AccountExportDocument;
 
@@ -90,10 +91,11 @@ pub struct SupportBundlePreview {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayStorageInfo {
+    root_path: String,
     data_path: String,
-    backups_path: String,
-    exports_path: String,
-    cache_path: Option<String>,
+    recovery_path: String,
+    cache_path: String,
+    logs_path: String,
     chatgpt_profile_path: String,
     legacy_data_path: Option<String>,
 }
@@ -104,27 +106,18 @@ pub fn get_relay_storage_info(
     state: State<'_, DesktopState>,
 ) -> Result<RelayStorageInfo, CommandError> {
     let root = state.root();
-    let legacy = platform::legacy_local_pool_dir(&app).map_err(io_error)?;
-    let legacy_data_path = (legacy != root && fs::symlink_metadata(&legacy).is_ok())
-        .then(|| legacy.to_string_lossy().into_owned());
-    let cache_path = if cfg!(target_os = "windows") {
-        app.path()
-            .app_local_data_dir()
-            .ok()
-            .map(|path| path.join("EBWebView"))
-    } else {
-        app.path().app_cache_dir().ok()
-    }
-    .map(|path| path.to_string_lossy().into_owned());
+    let local_legacy = platform::legacy_local_pool_dir(&app).map_err(io_error)?;
+    let roaming_legacy = platform::legacy_roaming_local_pool_dir(&app).map_err(io_error)?;
+    let legacy_data_path = [local_legacy, roaming_legacy]
+        .into_iter()
+        .find(|legacy| legacy != root && fs::symlink_metadata(legacy).is_ok())
+        .map(|legacy| legacy.to_string_lossy().into_owned());
     Ok(RelayStorageInfo {
-        data_path: root.to_string_lossy().into_owned(),
-        backups_path: state.backup_root().to_string_lossy().into_owned(),
-        exports_path: state
-            .output_root()
-            .join("exports")
-            .to_string_lossy()
-            .into_owned(),
-        cache_path,
+        root_path: root.to_string_lossy().into_owned(),
+        data_path: state.data_root().to_string_lossy().into_owned(),
+        recovery_path: state.recovery_root().to_string_lossy().into_owned(),
+        cache_path: state.cache_root().to_string_lossy().into_owned(),
+        logs_path: state.logs_root().to_string_lossy().into_owned(),
         chatgpt_profile_path: platform::default_codex_home()
             .to_string_lossy()
             .into_owned(),
@@ -201,22 +194,20 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
 pub fn export_usage(
     rows: Vec<UsageExportRow>,
     app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<String, CommandError> {
+) -> Result<Option<String>, CommandError> {
     if rows.len() > MAX_EXPORT_ROWS || rows.iter().any(invalid_export_row) {
         return Err(LocalPoolError::new(ErrorCode::InvalidState, "usage export is invalid").into());
     }
-    write_export("usage", &rows, &app, &state)
+    write_export("usage", &rows, &app)
 }
 
 #[tauri::command]
 pub fn export_support_bundle(
     context: SupportContext,
     app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<String, CommandError> {
+) -> Result<Option<String>, CommandError> {
     let bundle = support_bundle(context);
-    write_export("support", &bundle, &app, &state)
+    write_export("support", &bundle, &app)
 }
 
 #[tauri::command]
@@ -254,32 +245,34 @@ fn write_export(
     prefix: &str,
     value: &impl Serialize,
     app: &AppHandle,
-    state: &DesktopState,
-) -> Result<String, CommandError> {
-    let directory = state.output_root().join("exports");
-    fs::create_dir_all(&directory).map_err(io_error)?;
+) -> Result<Option<String>, CommandError> {
     let filename = format!(
         "{prefix}-{}.json",
         chrono::Utc::now().format("%Y%m%d-%H%M%S")
     );
-    let path = directory.join(filename);
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(filename)
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
+    })?;
     save_json(&path, value)?;
-    app.opener()
-        .reveal_item_in_dir(&path)
-        .map_err(|error| io_error(error.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 pub(crate) fn write_account_export(
     document: &AccountExportDocument,
     app: &AppHandle,
-    state: &DesktopState,
-) -> Result<String, CommandError> {
+) -> Result<Option<String>, CommandError> {
     document
         .validate()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    let directory = state.output_root().join("exports");
-    fs::create_dir_all(&directory).map_err(io_error)?;
     let filename = format!(
         "{}-{}-{}.json",
         if document.account_count == 1 {
@@ -290,17 +283,25 @@ pub(crate) fn write_account_export(
         document.format.slug(),
         chrono::Utc::now().format("%Y%m%d-%H%M%S-%f")
     );
-    let path = directory.join(filename);
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .set_file_name(filename)
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
+    })?;
     atomic_write(&path, &document.content).map_err(io_error)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(io_error)?;
     }
-    app.opener()
-        .reveal_item_in_dir(&path)
-        .map_err(|error| io_error(error.to_string()))?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(Some(path.to_string_lossy().into_owned()))
 }
 
 fn invalid_export_row(row: &UsageExportRow) -> bool {

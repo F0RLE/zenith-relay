@@ -41,9 +41,8 @@ pub fn initialize(root: &Path) -> Result<()> {
         };
     }
 
-    let vault_root = root.join("vault");
-    let key = load_or_create_vault_key(&vault_root)?;
-    let vault = Vault::open(&vault_root, key).map_err(|message| {
+    let key = load_or_create_vault_key(&root)?;
+    let vault = Vault::open(&root, key).map_err(|message| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!("failed to open encrypted secret vault: {message}"),

@@ -3,6 +3,11 @@
 !define LEGACY_PRODUCT_KEY "Software\${MANUFACTURER}\${LEGACY_PRODUCT_NAME}"
 
 !macro NSIS_HOOK_PREINSTALL
+  ${If} $INSTDIR == "$LOCALAPPDATA\${PRODUCTNAME}"
+    StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${PRODUCTNAME}"
+    SetOutPath "$INSTDIR"
+  ${EndIf}
+
   ReadRegStr $R0 HKCU "${LEGACY_UNINSTALL_KEY}" "UninstallString"
   ${If} $R0 != ""
     ReadRegStr $R1 HKCU "${LEGACY_PRODUCT_KEY}" ""

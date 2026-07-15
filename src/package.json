@@ -12,7 +12,7 @@
     "clean": "bun ../.github/tools/clean.mjs",
     "clean:all": "bun ../.github/tools/clean.mjs --all",
     "verify": "bun run check && bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "app:dev": "bun ../.github/tools/tauri-dev.mjs",
     "app:build": "bun ../.github/tools/tauri-build.mjs",

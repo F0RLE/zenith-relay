@@ -339,8 +339,7 @@ test("connection search and request ID filters change visible rows", async ({ pa
   await expect(page.getByText("req_synthetic_local")).toBeVisible();
 });
 
-test("account export supports bulk copy and per-account download", async ({ page, context }) => {
-  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
+test("account export supports bulk copy and per-account download", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();

@@ -9,7 +9,7 @@ use crate::local_pool::{
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-const TARGETS_FILE: &str = "remote_targets.json";
+const TARGET_FILE: &str = "remote-target.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,13 +31,13 @@ struct RemoteTargets {
 }
 
 pub fn load_active(root: &Path) -> Result<Option<RemoteTargetRecord>> {
-    let path = root.join("settings").join(TARGETS_FILE);
+    let path = root.join("data").join(TARGET_FILE);
     Ok(settings_store::load_json::<RemoteTargets>(&path)?.and_then(|value| value.active))
 }
 
 pub fn save_active(root: &Path, target: Option<RemoteTargetRecord>) -> Result<()> {
     settings_store::save_json(
-        &root.join("settings").join(TARGETS_FILE),
+        &root.join("data").join(TARGET_FILE),
         &RemoteTargets { active: target },
     )
 }

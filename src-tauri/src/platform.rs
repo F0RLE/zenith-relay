@@ -6,6 +6,9 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+const RELAY_DIRECTORY: &str = "Zenith Relay";
+const LEGACY_WEBVIEW_DIRECTORY: &str = "com.zenith.codex";
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformCapabilities {
@@ -73,15 +76,37 @@ fn local_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|err| format!("failed to resolve local app data directory: {err}"))
 }
 
-pub fn legacy_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn legacy_roaming_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(roaming_app_data_dir(app)?.join("local-pool"))
 }
 
-pub fn local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let target = local_app_data_dir(app)?.join("local-pool");
-    let legacy = legacy_local_pool_dir(app)?;
-    migrate_directory(&legacy, &target)?;
-    Ok(target)
+pub fn legacy_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(local_app_data_dir(app)?.join("local-pool"))
+}
+
+pub fn legacy_app_local_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    local_app_data_dir(app)
+}
+
+pub fn relay_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    relay_dir_from_local(&local_app_data_dir(app)?)
+}
+
+fn relay_dir_from_local(local_app_data: &Path) -> Result<PathBuf, String> {
+    local_app_data
+        .parent()
+        .map(|parent| parent.join(RELAY_DIRECTORY))
+        .ok_or_else(|| "local app data directory has no parent".to_string())
+}
+
+pub fn webview_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(webview_cache_dir_from_root(&relay_dir(app)?))
+}
+
+fn webview_cache_dir_from_root(root: &Path) -> PathBuf {
+    root.join("cache")
+        .join(LEGACY_WEBVIEW_DIRECTORY)
+        .join("EBWebView")
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,6 +194,17 @@ pub fn capabilities() -> PlatformCapabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn branded_data_root_owns_the_legacy_named_webview_cache() {
+        let legacy = PathBuf::from("local").join("com.zenith.codex");
+        let root = relay_dir_from_local(&legacy).unwrap();
+        assert_eq!(root, PathBuf::from("local").join("Zenith Relay"));
+        assert_eq!(
+            webview_cache_dir_from_root(&root),
+            root.join("cache/com.zenith.codex/EBWebView")
+        );
+    }
 
     #[test]
     fn migration_leaves_missing_legacy_storage_uncreated() {

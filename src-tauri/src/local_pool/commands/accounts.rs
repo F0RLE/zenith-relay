@@ -237,7 +237,7 @@ pub fn export_local_accounts(
         .collect::<LocalResult<Vec<_>>>()?;
     let document = build_account_export(input.format, &accounts, current_time_ms())
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    finish_account_export(document, input.destination, &app, &state)
+    finish_account_export(document, input.destination, &app)
 }
 
 #[derive(Clone, Debug, Serialize)]
