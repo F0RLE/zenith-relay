@@ -27,7 +27,7 @@ pub fn new_account_record(
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex credentials do not contain a ChatGPT account id",
+            "ChatGPT credentials do not contain an account id",
         )
     })?;
     let identity_hash = identity_hash(
@@ -54,7 +54,7 @@ pub fn new_account_record(
     let label = snapshot
         .identity
         .clone()
-        .unwrap_or_else(|| "Codex account".to_string());
+        .unwrap_or_else(|| "ChatGPT account".to_string());
     let auth_state = if credentials.refresh_token().is_some() {
         AccountAuthState::Active
     } else {

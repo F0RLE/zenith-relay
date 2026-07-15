@@ -1,4 +1,3 @@
-use super::runtime_from_store;
 use crate::{
     launcher::{launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
@@ -7,15 +6,14 @@ use crate::{
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::LocalGatewayKeyRecord,
-        profiles::{codex, opencode, repair, snapshots},
+        profiles::{codex, repair, snapshots},
         state::DesktopState,
         store::secret_store,
     },
-    platform::{default_codex_home, default_opencode_auth, default_opencode_config},
+    platform::default_codex_home,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::DefaultServiceTier;
 
@@ -259,73 +257,8 @@ pub async fn launch_managed_codex_profile(
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     launch_codex_with_profile().map_err(|error| {
-        LocalPoolError::new(ErrorCode::Io, format!("failed to launch Codex: {error}")).into()
+        LocalPoolError::new(ErrorCode::Io, format!("failed to launch ChatGPT: {error}")).into()
     })
-}
-
-#[tauri::command]
-pub async fn attach_opencode_to_local_gateway(
-    key_id: String,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    let (key, port) = {
-        let store = state.store()?;
-        let key = store
-            .key(&key_id)
-            .cloned()
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key not found"))?;
-        (key, store.gateway().port)
-    };
-    if !key.enabled || !super::pool::has_usable_source(&state, &key)? {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "local key is not available for any enabled candidate",
-        )
-        .into());
-    }
-    let secret = secret_store::load(&key.secret_ref)?
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key secret is missing"))?;
-    let models = runtime_from_store(&state).await?.visible_models_for_secret(
-        &secret,
-        &[
-            zenith_relay_core::WireApi::Responses,
-            zenith_relay_core::WireApi::ChatCompletions,
-        ],
-        now_ms(),
-    );
-    opencode::attach(
-        &default_opencode_config(),
-        &default_opencode_auth(),
-        &state.profile_backup_root(),
-        &format!("http://127.0.0.1:{port}/v1"),
-        &secret,
-        &models,
-    )
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn restore_opencode_profile(state: State<'_, DesktopState>) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    opencode::restore(
-        &default_opencode_config(),
-        &default_opencode_auth(),
-        &state.profile_backup_root(),
-    )
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub fn get_opencode_profile_state(
-    state: State<'_, DesktopState>,
-) -> Result<opencode::ProfileState, CommandError> {
-    opencode::state(
-        &default_opencode_config(),
-        &default_opencode_auth(),
-        &state.profile_backup_root(),
-    )
-    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -501,7 +434,7 @@ fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
     stop_codex_and_wait().map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,
-            format!("failed to stop Codex before changing its profile: {error}"),
+            format!("failed to stop ChatGPT before changing its profile: {error}"),
         )
         .into()
     })
@@ -537,8 +470,10 @@ fn restart_codex_after_failed_change<T>(
     match result {
         Err(mut error) if stopped => {
             if let Err(launch_error) = launch() {
-                error.message =
-                    format!("{}; failed to restart Codex: {launch_error}", error.message);
+                error.message = format!(
+                    "{}; failed to restart ChatGPT: {launch_error}",
+                    error.message
+                );
             }
             Err(error)
         }
@@ -584,20 +519,11 @@ fn ensure_codex_stopped() -> Result<(), CommandError> {
     if crate::launcher::is_codex_running() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "close all Codex instances before changing history",
+            "close all ChatGPT instances before changing history",
         )
         .into());
     }
     Ok(())
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]

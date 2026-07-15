@@ -1296,7 +1296,7 @@ pub(crate) async fn sync_managed_account_profile(
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "managed Codex profile token belongs to another account",
+            "managed ChatGPT profile token belongs to another account",
         ));
     }
     let tokens = TokenSet::new(
@@ -1310,7 +1310,7 @@ pub(crate) async fn sync_managed_account_profile(
     .map_err(|_| {
         LocalPoolError::new(
             ErrorCode::InvalidState,
-            "managed Codex profile tokens are invalid",
+            "managed ChatGPT profile tokens are invalid",
         )
     })?;
     persistence
@@ -1319,7 +1319,7 @@ pub(crate) async fn sync_managed_account_profile(
         .map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::Io,
-                format!("failed to persist managed Codex tokens: {}", error.code),
+                format!("failed to persist managed ChatGPT tokens: {}", error.code),
             )
         })?;
     persistence
@@ -1328,7 +1328,10 @@ pub(crate) async fn sync_managed_account_profile(
         .map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::Io,
-                format!("failed to restore managed Codex auth state: {}", error.code),
+                format!(
+                    "failed to restore managed ChatGPT auth state: {}",
+                    error.code
+                ),
             )
         })?;
     state
@@ -1338,7 +1341,7 @@ pub(crate) async fn sync_managed_account_profile(
         .map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::InvalidState,
-                format!("failed to register managed Codex tokens: {error}"),
+                format!("failed to register managed ChatGPT tokens: {error}"),
             )
         })?;
     codex::sync_account_bindings(
@@ -1721,7 +1724,7 @@ async fn prepare_import_preview(
             row.default_selected = false;
             row.error = Some(ImportIssue {
                 code: ImportIssueCode::InvalidCredentials,
-                message: "Codex account identity is missing".into(),
+                message: "ChatGPT account identity is missing".into(),
             });
             continue;
         };
@@ -2303,7 +2306,7 @@ async fn import_account_item(
     let provider_account_id = material.provider_account_id.as_deref().ok_or_else(|| {
         ImportItemError::new(
             "provider_account_id_missing",
-            "Codex account id is missing from imported credentials",
+            "ChatGPT account id is missing from imported credentials",
         )
     })?;
     let existing_account = find_existing_account(
@@ -2346,7 +2349,7 @@ async fn import_account_item(
     let provider_account_id = credentials.provider_account_id().ok_or_else(|| {
         ImportItemError::new(
             "provider_account_id_missing",
-            "Codex account id is missing from imported credentials",
+            "ChatGPT account id is missing from imported credentials",
         )
     })?;
     let models = if discover_models {
@@ -2362,7 +2365,7 @@ async fn import_account_item(
         if models.is_empty() {
             return Err(ImportItemError::new(
                 "models_empty",
-                "Codex account did not expose any supported models",
+                "ChatGPT account did not expose any supported models",
             ));
         }
         models
@@ -2469,7 +2472,7 @@ async fn build_import_credential_material(
     let refresh_token = original_refresh.ok_or_else(|| {
         ImportItemError::new(
             "access_token_missing",
-            "Codex account import requires an access or refresh token",
+            "ChatGPT account import requires an access or refresh token",
         )
     })?;
     let oauth = CodexOAuthClient::new_with_proxy(proxy).map_err(|_| {
@@ -3256,7 +3259,7 @@ fn find_existing_account(
         .collect::<Vec<_>>();
     if direct.len() > 1 {
         return Err(ImportItemError::recovery(
-            "multiple local accounts have the same Codex identity",
+            "multiple local accounts have the same ChatGPT identity",
         ));
     }
     if let Some(account) = direct.into_iter().next() {
@@ -3287,7 +3290,7 @@ fn find_existing_account(
     }
     if matching.len() > 1 {
         return Err(ImportItemError::recovery(
-            "multiple local accounts have the same Codex identity",
+            "multiple local accounts have the same ChatGPT identity",
         ));
     }
     Ok(matching.pop())

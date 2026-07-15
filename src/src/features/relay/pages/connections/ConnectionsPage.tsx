@@ -44,7 +44,7 @@ const accountExportFormats: Array<{ value: AccountExportFormat; label: string }>
   { value: "cpa", label: "CPA" },
   { value: "cockpit", label: "Cockpit" },
   { value: "9router", label: "9router" },
-  { value: "codex", label: "Codex" },
+  { value: "codex", label: "ChatGPT" },
   { value: "axon_hub", label: "AxonHub" },
   { value: "codex_manager", label: "Codex-Manager" },
 ];

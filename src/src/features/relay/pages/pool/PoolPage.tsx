@@ -65,7 +65,7 @@ export function PoolPage() {
       {running ? <ActionMenuItem icon={<Power aria-hidden />} disabled={busy === "pool-toggle"} onClick={() => void perform("pool-toggle", relayCommands.stopGateway, "feedback.stopped")}>{t("pool.stop")}</ActionMenuItem> : null}
     </ActionMenu>
     {running
-      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
+      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPT")}</Button>
       : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
   </div> : <div className="pool-header-actions">
     <ActionMenu label={t("common.actions")}>
@@ -371,7 +371,7 @@ function ModelsView() {
 function CreateKeyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, perform, busy } = useRelayState();
-  const [label, setLabel] = useState("Codex");
+  const [label, setLabel] = useState("ChatGPT");
   const [secret, setSecret] = useState("");
   useEffect(() => () => setSecret(""), []);
   const create = async () => { const result: { current: { secret: string } | null } = { current: null }; const ok = await perform("key-create", async () => { result.current = mode === "local" ? await relayCommands.createKey(label) : await relayCommands.remoteAction({ type: "create_key" }, { label, sourceIds: null, accountIds: null, allowedModels: [], excludedModels: [], modelPrefix: null }) as { secret: string }; }, "feedback.keyCreated"); if (ok && result.current) setSecret(result.current.secret); };

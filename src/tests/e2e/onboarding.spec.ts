@@ -17,7 +17,7 @@ test("quick setup covers all three runtime choices", async ({ page }) => {
   await page.screenshot({ path: "output/playwright/onboarding-server-1160x760.png" });
 });
 
-test("local quick setup verifies runtime and applies Codex only after explicit choices", async ({ page }) => {
+test("local quick setup verifies runtime and applies ChatGPT only after explicit choices", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
@@ -29,9 +29,10 @@ test("local quick setup verifies runtime and applies Codex only after explicit c
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".check-stages strong")).toHaveText(["Ready", "Ready", "Ready", "Ready"]);
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByRole("button", { name: "Codex" }).click();
+  await page.getByRole("button", { name: "ChatGPT" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
-  await expect(page.getByText("http://127.0.0.1:14998/v1")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
+  await expect(page.getByText("http://127.0.0.1:14998/v1")).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["complete_codex_oauth", "set_local_pool_membership", "get_local_runtime_state", "attach_codex_to_local_gateway"]));
   expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: ["account_synthetic"], sourceIds: [], inPool: true } });

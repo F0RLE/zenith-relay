@@ -171,7 +171,7 @@ pub fn sync_default_service_tier(
                     .ok_or_else(|| {
                         LocalPoolError::new(
                             ErrorCode::InvalidState,
-                            "Codex desktop settings must be a table",
+                            "ChatGPT desktop settings must be a table",
                         )
                     })?
                     .remove(DESKTOP_DEFAULT_SERVICE_TIER_KEY);
@@ -184,7 +184,7 @@ pub fn sync_default_service_tier(
             let desktop = document["desktop"].as_table_mut().ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
-                    "Codex desktop settings must be a table",
+                    "ChatGPT desktop settings must be a table",
                 )
             })?;
             desktop[DESKTOP_DEFAULT_SERVICE_TIER_KEY] = value("priority");
@@ -196,7 +196,7 @@ pub fn sync_default_service_tier(
         Some(content) => serde_json::from_str::<serde_json::Value>(content).map_err(|error| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                format!("Codex global state is not valid JSON: {error}"),
+                format!("ChatGPT global state is not valid JSON: {error}"),
             )
         })?,
         None => serde_json::Value::Object(Default::default()),
@@ -204,7 +204,7 @@ pub fn sync_default_service_tier(
     let state = state.as_object_mut().ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex global state must be a JSON object",
+            "ChatGPT global state must be a JSON object",
         )
     })?;
     let tier = match default_service_tier {
@@ -227,7 +227,7 @@ pub fn sync_default_service_tier(
     let next_state = serde_json::to_string(&state).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::Io,
-            format!("Codex global state could not be serialized: {error}"),
+            format!("ChatGPT global state could not be serialized: {error}"),
         )
     })?;
 
@@ -316,7 +316,7 @@ fn snapshot_user_profile_with(
         let backup = parse_account_backup_snapshot(&backup_bytes, &path)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                "Codex account profile backup disappeared while creating a snapshot",
+                "ChatGPT account profile backup disappeared while creating a snapshot",
             )
         })?;
         if account_managed_config_matches(&document) {
@@ -609,7 +609,7 @@ fn merge_managed_token_update(
     }) {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "managed Codex profiles contain conflicting token generations",
+            "managed ChatGPT profiles contain conflicting token generations",
         ));
     }
     *current = Some(next);
@@ -712,7 +712,7 @@ fn switch_to_local_with(
             let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
-                    "Codex account profile backup disappeared during the switch",
+                    "ChatGPT account profile backup disappeared during the switch",
                 )
             })?;
             remove_if_unchanged(&path, &bytes)?;
@@ -752,7 +752,7 @@ fn switch_to_local_with(
     let backup = local_backup(backup_root)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex local gateway profile backup is missing after attach",
+            "ChatGPT local gateway profile backup is missing after attach",
         )
     })?;
     Ok(ProfileBinding {
@@ -842,7 +842,7 @@ fn attach_local_locked(
     if account_backup_for_profile(codex_home, backup_root)?.is_some() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "Codex profile is already attached to an OAuth account",
+            "ChatGPT profile is already attached to an OAuth account",
         ));
     }
     let existing_backup = parse_backup_snapshot(&original_backup_bytes, &backup_path)?;
@@ -850,7 +850,7 @@ fn attach_local_locked(
     if existing_backup.is_none() && document_has_provider(&document) {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "managed Codex provider exists without a profile backup",
+            "managed ChatGPT provider exists without a profile backup",
         ));
     }
     let external_takeover = existing_backup
@@ -1046,7 +1046,7 @@ fn restore_local_locked(
         Some(secret_ref) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                "Codex profile backup secret is missing",
+                "ChatGPT profile backup secret is missing",
             )
         })?),
         None => None,
@@ -1262,7 +1262,7 @@ fn restore_account_locked(
     if backup.profile_dir != profile_dir.to_string_lossy() {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex account profile backup points to another profile",
+            "ChatGPT account profile backup points to another profile",
         ));
     }
     let config_path = profile_dir.join(CONFIG_FILE);
@@ -1284,7 +1284,7 @@ fn restore_account_locked(
         Some(secret_ref) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                "Codex account profile backup secret is missing",
+                "ChatGPT account profile backup secret is missing",
             )
         })?),
         None => None,
@@ -1466,7 +1466,7 @@ fn ensure_single_profile_backup(codex_home: &Path, backup_root: &Path) -> Result
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex profile has conflicting local gateway and account backups",
+            "ChatGPT profile has conflicting local gateway and account backups",
         ));
     }
     Ok(())
@@ -1537,7 +1537,7 @@ fn canonical_profile_dir(path: &Path) -> Result<PathBuf> {
     if !canonical.is_dir() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex profile path is not a directory",
+            "ChatGPT profile path is not a directory",
         ));
     }
     Ok(canonical)
@@ -1558,7 +1558,7 @@ fn parse_account_backup(content: &str, path: &Path) -> Result<AccountProfileBack
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             format!(
-                "Codex account profile backup is invalid at {}: {error}",
+                "ChatGPT account profile backup is invalid at {}: {error}",
                 path.display()
             ),
         )
@@ -1570,7 +1570,7 @@ fn parse_account_backup(content: &str, path: &Path) -> Result<AccountProfileBack
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex account profile backup has invalid metadata",
+            "ChatGPT account profile backup has invalid metadata",
         ));
     }
     Ok(backup)
@@ -1621,7 +1621,7 @@ fn parse_config(content: &str) -> Result<DocumentMut> {
     content.parse::<DocumentMut>().map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            format!("Codex config is not valid TOML: {error}"),
+            format!("ChatGPT config is not valid TOML: {error}"),
         )
     })
 }
@@ -1635,7 +1635,7 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex model_provider must be a string",
+            "ChatGPT model_provider must be a string",
         ));
     }
     if document.get("model_providers").is_some()
@@ -1646,7 +1646,7 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex model_providers must be a table",
+            "ChatGPT model_providers must be a table",
         ));
     }
     Ok(())
@@ -1834,7 +1834,7 @@ fn local_backup(root: &Path) -> Result<Option<ProfileBackup>> {
     }) {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex local gateway profile backup has invalid metadata",
+            "ChatGPT local gateway profile backup has invalid metadata",
         ));
     }
     Ok(backup)
@@ -1847,7 +1847,7 @@ fn parse_backup_snapshot(snapshot: &Option<Vec<u8>>, path: &Path) -> Result<Opti
     serde_json::from_str(content).map(Some).map_err(|error| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            format!("Codex profile backup is invalid: {error}"),
+            format!("ChatGPT profile backup is invalid: {error}"),
         )
     })
 }
@@ -1973,7 +1973,7 @@ fn previous_auth_snapshot(
             secrets.load(secret_ref)?.ok_or_else(|| {
                 LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
-                    "Codex profile backup secret is missing",
+                    "ChatGPT profile backup secret is missing",
                 )
             })
         })
@@ -1990,7 +1990,7 @@ fn discard_managed_binding_locked(
         let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
             LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
-                "Codex account profile backup disappeared during snapshot restore",
+                "ChatGPT account profile backup disappeared during snapshot restore",
             )
         })?;
         return discard_backup(
@@ -2059,7 +2059,7 @@ fn with_rollback(error: LocalPoolError, rollback: Result<()>) -> LocalPoolError 
 fn profile_restore_blocked() -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::ProfileRestoreBlocked,
-        "Codex profile changed after attach; restore was not applied",
+        "ChatGPT profile changed after attach; restore was not applied",
     )
 }
 
@@ -2067,7 +2067,7 @@ fn profile_changed_at(path: &Path) -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::ProfileRestoreBlocked,
         format!(
-            "Codex changed {} while Zenith Relay was updating the profile; no replacement was applied",
+            "ChatGPT changed {} while Zenith Relay was updating the profile; no replacement was applied",
             path.display()
         ),
     )

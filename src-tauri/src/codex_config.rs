@@ -155,7 +155,7 @@ fn config_uses_local_pool_provider(content: &str) -> bool {
 fn ensure_ready_api_profile_is_inactive(content: &str) -> Result<(), String> {
     if config_uses_local_pool_provider(content) {
         return Err(
-            "Codex подключен к Local Pool. Сначала восстановите профиль Local Pool.".to_string(),
+            "ChatGPT подключён к Local Pool. Сначала восстановите профиль Local Pool.".to_string(),
         );
     }
     Ok(())
@@ -233,7 +233,7 @@ fn with_cleanup(error: String, cleanup: Result<(), String>) -> String {
 
 fn profile_changed_error(path: &Path) -> String {
     format!(
-        "Codex изменил {} во время обновления; изменения Zenith Relay не применены.",
+        "ChatGPT изменил {} во время обновления; изменения Zenith Relay не применены.",
         path.display()
     )
 }

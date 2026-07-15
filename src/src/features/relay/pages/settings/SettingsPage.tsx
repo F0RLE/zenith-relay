@@ -1,30 +1,60 @@
-import { useState } from "react";
+import type { ReactNode } from "react";
 import { Database, FolderOpen, History, Palette, RefreshCw, RotateCcw, Settings2, ShieldCheck, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { restartApplication, updateAndRelaunch } from "../../../../tauri";
+import { APP_VERSION, restartApplication } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
 import { Button, OptionMenu, PageHeader, StatusBadge } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
-const sections = [
-  { id: "general", icon: Settings2 },
-  { id: "appearance", icon: Palette },
-  { id: "storage", icon: Database },
-  { id: "updates", icon: RefreshCw },
-  { id: "security", icon: ShieldCheck },
-  { id: "recovery", icon: History },
-] as const;
+type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
-export function SettingsPage() {
-  const { t, i18n } = useTranslation(); const { theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, mode, resetOnboarding, perform, busy } = useRelayState(); const [section, setSection] = useState<(typeof sections)[number]["id"]>("general");
+export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
+  const { t, i18n } = useTranslation();
+  const { theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, resetOnboarding, perform, busy } = useRelayState();
   const restore = () => { if (window.confirm(t("profiles.restoreConfirm"))) void perform("recovery-restore", relayCommands.restoreCodex, "feedback.restored"); };
   const reset = () => { if (window.confirm(t("settings.resetDataConfirm"))) void perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
-  return <section className="relay-page"><PageHeader title={t("nav.settings")} subtitle={t("settings.subtitle")} /><div className="settings-layout"><nav aria-label={t("settings.sections")}>{sections.map(({ id, icon: Icon }) => <button key={id} className={section === id ? "active" : ""} aria-current={section === id ? "page" : undefined} type="button" onClick={() => setSection(id)}><Icon aria-hidden /><span>{t(`settings.${id}`)}</span></button>)}</nav><div className="settings-content">
-    {section === "general" ? <><h2>{t("settings.general")}</h2><div className="relay-field"><span>{t("settings.language")}</span><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div><label className="relay-field"><span>{t("settings.defaultMode")}</span><input value={t(`modes.${mode}`)} readOnly /></label><label className="toggle-row settings-toggle"><input type="checkbox" checked={snapshotBeforeSwitch} onChange={(event) => setSnapshotBeforeSwitch(event.target.checked)} /><span><strong>{t("settings.snapshotBeforeSwitch")}</strong><small>{t("settings.snapshotBeforeSwitchHint")}</small></span></label><Button variant="secondary" icon={<RotateCcw aria-hidden />} onClick={resetOnboarding}>{t("settings.restartSetup")}</Button></> : null}
-    {section === "appearance" ? <><h2>{t("settings.appearance")}</h2><fieldset className="appearance-theme"><legend>{t("settings.theme")}</legend><div className="segmented">{(["system","light","dark"] as const).map((value) => <button key={value} type="button" className={theme === value ? "active" : ""} onClick={() => setTheme(value)}>{t(`settings.themes.${value}`)}</button>)}</div></fieldset><label className="toggle-row"><input type="checkbox" checked={compact} onChange={(event) => setCompact(event.target.checked)} /><span>{t("settings.compact")}</span></label></> : null}
-    {section === "storage" ? <><h2>{t("settings.storage")}</h2><dl className="detail-list"><div><dt>{t("settings.dataPath")}</dt><dd><code>{t("settings.platformDataPath")}</code></dd></div><div><dt>{t("settings.retention")}</dt><dd>30 {t("settings.days")}</dd></div></dl><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></> : null}
-    {section === "updates" ? <><h2>{t("settings.updates")}</h2><div className="settings-status"><StatusBadge status="ready" label={t("settings.currentVersion")} /><code>1.0.5</code></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "update-check"} onClick={() => perform("update-check", updateAndRelaunch, "feedback.upToDate")}>{t("settings.checkUpdates")}</Button></> : null}
-    {section === "security" ? <><h2>{t("settings.security")}</h2><div className="settings-status"><ShieldCheck aria-hidden /><div><strong>{t("settings.secretStore")}</strong><span>{t("settings.secretStoreHint")}</span></div><StatusBadge status="ready" label={t("common.available")} /></div><p className="warning-box">{t("settings.insecureWarning")}</p></> : null}
-    {section === "recovery" ? <><h2>{t("settings.recovery")}</h2><p>{t("settings.recoveryHint")}</p><Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "recovery-restore"} onClick={restore}>{t("settings.restoreBackup")}</Button><div className="danger-zone"><h3>{t("settings.resetData")}</h3><p>{t("settings.resetDataHint")}</p><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("settings.resetData")}</Button></div></> : null}
-  </div></div></section>;
+  const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
+    : updateCheckState === "error" ? { status: "error" as const, label: t("updates.checkFailed") }
+      : updateCheckState === "skipped" ? { status: "warning" as const, label: t("updates.skipped") }
+        : { status: "ready" as const, label: t("updates.current") };
+
+  return <section className="relay-page settings-page">
+    <PageHeader title={t("nav.settings")} subtitle={t("settings.subtitle")} />
+    <div className="settings-groups">
+      <SettingsGroup icon={<Settings2 aria-hidden />} title={t("settings.general")}>
+        <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>
+        <label className="settings-control-row settings-switch-row"><span><strong>{t("settings.snapshotBeforeSwitch")}</strong><small>{t("settings.snapshotBeforeSwitchHint")}</small></span><input type="checkbox" checked={snapshotBeforeSwitch} onChange={(event) => setSnapshotBeforeSwitch(event.target.checked)} /></label>
+        <div className="settings-control-row"><div><strong>{t("settings.restartSetup")}</strong></div><Button variant="secondary" icon={<RotateCcw aria-hidden />} onClick={resetOnboarding}>{t("common.restart")}</Button></div>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
+        <div className="settings-control-row"><div><strong>{t("settings.theme")}</strong></div><div className="segmented settings-theme-control">{(["system", "light", "dark"] as const).map((value) => <button key={value} type="button" className={theme === value ? "active" : ""} onClick={() => setTheme(value)}>{t(`settings.themes.${value}`)}</button>)}</div></div>
+        <label className="settings-control-row settings-switch-row"><span><strong>{t("settings.compact")}</strong></span><input type="checkbox" checked={compact} onChange={(event) => setCompact(event.target.checked)} /></label>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<Database aria-hidden />} title={t("settings.storage")}>
+        <div className="settings-control-row"><div><strong>{t("settings.dataPath")}</strong><small><code>{t("settings.platformDataPath")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+        <div className="settings-control-row"><div><strong>{t("settings.retention")}</strong></div><span className="settings-value">30 {t("settings.days")}</span></div>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<ShieldCheck aria-hidden />} title={t("settings.security")}>
+        <div className="settings-control-row"><div><strong>{t("settings.secretStore")}</strong><small>{t("settings.secretStoreHint")}</small></div><StatusBadge status="ready" label={t("common.available")} /></div>
+        <p className="settings-note">{t("settings.insecureWarning")}</p>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.updates")}>
+        <div className="settings-control-row"><div><strong>{t("settings.currentVersion")}</strong><small>v{APP_VERSION}</small></div><StatusBadge status={updateStatus.status} label={updateStatus.label} /></div>
+        <div className="settings-control-row"><div><strong>{t("settings.checkUpdates")}</strong></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={updateCheckState === "checking"} onClick={() => void onCheckUpdates()}>{t("common.check")}</Button></div>
+      </SettingsGroup>
+
+      <SettingsGroup icon={<History aria-hidden />} title={t("settings.recovery")}>
+        <div className="settings-control-row"><div><strong>{t("settings.restoreBackup")}</strong><small>{t("settings.recoveryHint")}</small></div><Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "recovery-restore"} onClick={restore}>{t("common.restore")}</Button></div>
+        <div className="settings-control-row settings-danger-row"><div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button></div>
+      </SettingsGroup>
+    </div>
+  </section>;
+}
+
+function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+  return <section className="settings-group"><header>{icon}<h2>{title}</h2></header><div className="settings-group-body">{children}</div></section>;
 }

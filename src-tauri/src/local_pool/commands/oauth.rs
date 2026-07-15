@@ -316,7 +316,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             None,
             LocalPoolError::new(
                 ErrorCode::InvalidState,
-                "Codex token authority rejected the account",
+                "ChatGPT token authority rejected the account",
             ),
         )
         .await);
@@ -729,7 +729,7 @@ fn find_existing_account<'a>(
     if direct.len() > 1 {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "multiple local accounts have the same Codex identity",
+            "multiple local accounts have the same ChatGPT identity",
         ));
     }
     if let Some(account) = direct.into_iter().next() {
@@ -761,7 +761,7 @@ fn find_existing_account<'a>(
     if matches.len() > 1 {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "multiple local accounts have the same Codex identity",
+            "multiple local accounts have the same ChatGPT identity",
         ));
     }
     Ok(matches.pop())

@@ -5,6 +5,7 @@ export type MockOptions = {
   onboarding?: boolean;
   mode?: "local" | "remote" | "zenith";
   theme?: "system" | "light" | "dark";
+  compact?: boolean;
   populated?: boolean;
   accountCount?: number;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
@@ -28,6 +29,9 @@ export type MockOptions = {
   remoteFeatures?: string[];
   legacyRemoteRouting?: boolean;
   oauthCallbackBeforeStartReturns?: boolean;
+  updateVersion?: string;
+  updateBody?: string;
+  updateDate?: string;
 };
 
 export async function emitTauriEvent(page: Page, event: string, payload: unknown) {
@@ -44,6 +48,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
     localStorage.setItem("relay.theme", input.theme ?? "light");
+    localStorage.setItem("relay.compact", input.compact ? "1" : "0");
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
     const exhaustedQuotaWindow = input.exhaustedQuotaWindow ?? "primary";
@@ -136,7 +141,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     });
     const key = {
       id: "key_synthetic",
-      label: "Codex",
+      label: "ChatGPT",
       enabled: true,
       sourceIds: null,
       accountIds: null,
@@ -251,7 +256,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       unregisterCallback(id: number) { callbacks.delete(id); },
       convertFileSrc(path: string) { return path; },
       async invoke(command: string, args: Record<string, unknown> = {}) {
-        invocations.push({ command, args: structuredClone(args) });
+        const recordedArgs = command === "plugin:updater|download_and_install"
+          ? JSON.parse(JSON.stringify(args)) as Record<string, unknown>
+          : structuredClone(args);
+        invocations.push({ command, args: recordedArgs });
         switch (command) {
           case "get_system_locale": return locale;
           case "get_platform": return "windows";
@@ -453,11 +461,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "delete_quota_wake_automation": localRuntime.automations = []; return structuredClone(localRuntime);
           case "run_due_quota_wake_confirmations": return 1;
           case "test_quota_wake_automation": return { taskId: String(args.taskId), status: "ready", eligibleAccounts: 1 };
-          case "attach_opencode_to_local_gateway":
           case "launch_managed_codex_profile":
           case "launch_saved_codex":
           case "restore_codex_profile":
-          case "restore_opencode_profile":
           case "restore_codex_account_profile": return null;
           case "list_codex_profile_snapshots": return structuredClone(profileSnapshots);
           case "create_codex_profile_snapshot": {
@@ -475,7 +481,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
           case "attach_codex_to_account":
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
-          case "get_opencode_profile_state": return { attached: true, backupAvailable: true, changed: false, configPath: "C:\\Users\\Test\\.config\\opencode\\opencode.json" };
           case "preview_codex_history_repair": { if (input.historyRepairError) throw { code: "recovery_required", message: "Synthetic history preview failure" }; const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: false, expiresAtMs: Date.now() + 60_000 }; }
           case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };
           case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
@@ -497,8 +502,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return eventId;
           }
           case "plugin:event|unlisten": eventListeners.delete(Number(args.eventId)); return null;
-          case "plugin:updater|check":
-          case "plugin:process|relaunch":
+          case "plugin:updater|check": return input.updateVersion ? { rid: 901, currentVersion: "1.0.5", version: input.updateVersion, date: input.updateDate ?? "2026-07-15T12:00:00Z", body: input.updateBody ?? "Faster routing\nImproved settings", rawJson: {} } : null;
+          case "plugin:updater|download_and_install":
+          case "plugin:resources|close":
+          case "plugin:process|restart":
           case "close_window":
           case "minimize_window":
           case "toggle_maximize_window": return null;

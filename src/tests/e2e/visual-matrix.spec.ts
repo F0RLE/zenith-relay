@@ -28,7 +28,7 @@ for (const locale of locales) {
               if (await stateControls.count()) await stateControls.nth(state).click();
               await expect(page.locator(".relay-page-header h1")).toBeVisible();
               expect(await page.locator(".relay-page-actions .relay-button.primary").count()).toBeLessThanOrEqual(1);
-              await expect(page.locator("body")).not.toContainText(/(?:common|nav|overview|connections|pool|gateway|usage|profiles|settings)\.[a-z]/);
+              await expect(page.locator("body")).not.toContainText(/(?:common|nav|overview|connections|pool|gateway|usage|profiles|settings|updates)\.[a-z]/);
               expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
               expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-page button, .relay-page input, .relay-page select")].filter((element) => {
                 const rect = element.getBoundingClientRect();
@@ -118,6 +118,32 @@ for (const theme of themes) {
       await page.screenshot({ path: `output/playwright/account-import-preview-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
+}
+
+for (const viewport of [{ width: 1344, height: 900 }, { width: 840, height: 560 }] as const) {
+  test(`settings layout ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Настройки", exact: true }).click();
+
+    const groups = page.locator(".settings-group");
+    await expect(groups).toHaveCount(6);
+    const boxes = await groups.evaluateAll((items) => items.map((item) => {
+      const rect = item.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
+    }));
+    expect(boxes.every((box) => box.overflow === 0)).toBe(true);
+    if (viewport.width > 900) {
+      expect(boxes[0].width).toBeGreaterThan(boxes[1].width * 1.9);
+      expect(Math.abs(boxes[1].top - boxes[2].top)).toBeLessThanOrEqual(1);
+      expect(Math.abs(boxes[3].top - boxes[4].top)).toBeLessThanOrEqual(1);
+      expect(boxes[5].width).toBeCloseTo(boxes[0].width, 0);
+    } else {
+      expect(Math.max(...boxes.map((box) => box.width)) - Math.min(...boxes.map((box) => box.width))).toBeLessThanOrEqual(1);
+    }
+    await page.screenshot({ path: `output/playwright/settings-ru-light-${viewport.width}x${viewport.height}.png` });
+  });
 }
 
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
@@ -669,6 +695,35 @@ for (const viewport of viewports) {
 }
 
 for (const theme of themes) {
+  test(`manual update dialog ${theme}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, updateVersion: "1.1.0", updateBody: "Ускорена параллельная маршрутизация\nОбновлён экран настроек" });
+    await page.setViewportSize({ width: 840, height: 560 });
+    await page.goto("/");
+    const updateButton = page.getByRole("button", { name: "Открыть обновление 1.1.0" });
+    await expect(updateButton).toBeVisible();
+    await updateButton.click();
+    const dialog = page.getByRole("dialog", { name: "Обновление 1.1.0" });
+    await expect(dialog).toContainText("Ускорена параллельная маршрутизация");
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/update-dialog-ru-${theme}-840x560.png` });
+  });
+}
+
+test("Windows titlebar controls stay visible in the light theme", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  const maximize = page.getByRole("button", { name: "Развернуть" });
+  await maximize.hover();
+  expect(await maximize.evaluate((element) => getComputedStyle(element).color)).not.toBe("rgb(255, 255, 255)");
+  await expect(maximize.locator("svg")).toBeVisible();
+  await page.screenshot({ path: "output/playwright/titlebar-controls-ru-light-hover.png" });
+});
+
+for (const theme of themes) {
   for (const viewport of viewports) {
     test(`app context menu ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
@@ -745,9 +800,9 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Подключения", exact: true }).click();
-    await page.getByRole("button", { name: "Запустить в Codex" }).click();
+    await page.getByRole("button", { name: "Запустить в ChatGPT" }).click();
 
-    const dialog = page.getByRole("dialog", { name: "Сохранить видимость чатов Codex" });
+    const dialog = page.getByRole("dialog", { name: "Сохранить видимость чатов ChatGPT" });
     await expect(dialog.locator("dd")).toHaveText(["2", "2", "1"]);
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -759,39 +814,29 @@ for (const viewport of viewports) {
 }
 
 for (const viewport of viewports) {
-  test(`OpenCode-only profile actions ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`single ChatGPT profile action ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, codexBindings: false });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Профили", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Добавить профиль" })).toBeEnabled();
-    await expect(page.getByRole("row").filter({ hasText: "OpenCode" })).toBeVisible();
-    await page.screenshot({ path: `output/playwright/opencode-profile-${viewport.width}x${viewport.height}.png` });
-
-    await page.getByRole("button", { name: "Добавить профиль" }).click();
-    const dialog = page.getByRole("dialog", { name: "Добавить профиль" });
-    await expect(dialog.getByRole("button", { name: /Codex/ })).toBeVisible();
-    await expect(dialog.getByRole("button", { name: /OpenCode/ })).toBeVisible();
-    expect(await dialog.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-    })).toBe(true);
-    await page.screenshot({ path: `output/playwright/add-profile-dialog-${viewport.width}x${viewport.height}.png` });
+    await expect(page.getByRole("button", { name: "Подключить ChatGPT" })).toBeEnabled();
+    await expect(page.getByText("OpenCode")).toHaveCount(0);
+    await page.screenshot({ path: `output/playwright/chatgpt-profile-${viewport.width}x${viewport.height}.png` });
   });
 }
 
 for (const theme of themes) {
   for (const viewport of viewports) {
-    test(`Codex pool account setup ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    test(`ChatGPT pool account setup ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
       await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Адрес API", exact: true }).click();
-      await page.getByRole("tab", { name: "Настройка Codex" }).click();
+      await page.getByRole("tab", { name: "Настройка ChatGPT" }).click();
 
       const setup = page.locator(".client-oauth-binding");
-      await expect(setup.getByRole("heading", { name: "Codex в режиме пула" })).toBeVisible();
-      await expect(page.getByRole("button", { name: /^Аккаунт интерфейса Codex:/ })).toHaveAttribute("data-value", "auto");
+      await expect(setup.getByRole("heading", { name: "ChatGPT в режиме пула" })).toBeVisible();
+      await expect(page.getByRole("button", { name: /^Аккаунт интерфейса ChatGPT:/ })).toHaveAttribute("data-value", "auto");
       await expect(setup).not.toContainText("Выбран");
       await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
       await expect(page.locator(".client-setup button")).toHaveCount(1);

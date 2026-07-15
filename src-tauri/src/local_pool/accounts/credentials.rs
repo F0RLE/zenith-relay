@@ -194,7 +194,7 @@ impl StoredCodexCredentials {
         .map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "stored Codex token set is invalid",
+                "stored ChatGPT token set is invalid",
             )
         })
     }
@@ -209,7 +209,7 @@ impl StoredCodexCredentials {
         .map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "stored Codex token refresh is invalid",
+                "stored ChatGPT token refresh is invalid",
             )
         })
     }
@@ -284,13 +284,13 @@ impl StoredCodexCredentials {
         let value = serde_json::to_string(&wire).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "failed to encode stored Codex credentials",
+                "failed to encode stored ChatGPT credentials",
             )
         })?;
         if value.len() > MAX_SECRET_JSON_BYTES {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "stored Codex credentials exceed the size limit",
+                "stored ChatGPT credentials exceed the size limit",
             ));
         }
         Ok(value)
@@ -300,19 +300,19 @@ impl StoredCodexCredentials {
         if value.is_empty() || value.len() > MAX_SECRET_JSON_BYTES {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "stored Codex credentials are invalid",
+                "stored ChatGPT credentials are invalid",
             ));
         }
         let wire: CredentialWire = serde_json::from_str(value).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::InvalidSecret,
-                "stored Codex credentials are invalid",
+                "stored ChatGPT credentials are invalid",
             )
         })?;
         if wire.version != CREDENTIAL_VERSION {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidVersion,
-                "stored Codex credential version is unsupported",
+                "stored ChatGPT credential version is unsupported",
             ));
         }
         Self::new(
@@ -459,7 +459,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         self.backend.save(&secret_ref, &value).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::SecretStoreUnavailable,
-                "failed to save Codex credentials",
+                "failed to save ChatGPT credentials",
             )
         })
     }
@@ -472,7 +472,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         let Some(value) = self.backend.load(&secret_ref).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::SecretStoreUnavailable,
-                "failed to load Codex credentials",
+                "failed to load ChatGPT credentials",
             )
         })?
         else {
@@ -482,7 +482,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         if credentials.local_account_id() != local_account_id {
             return Err(CredentialError::new(
                 CredentialErrorCode::InvalidIdentity,
-                "stored Codex credential identity does not match",
+                "stored ChatGPT credential identity does not match",
             ));
         }
         Ok(Some(credentials))
@@ -495,7 +495,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         self.load(local_account_id)?.ok_or_else(|| {
             CredentialError::new(
                 CredentialErrorCode::SecretMissing,
-                "stored Codex credentials are missing",
+                "stored ChatGPT credentials are missing",
             )
         })
     }
@@ -505,7 +505,7 @@ impl<B: SecretBackend> CredentialStore<B> {
         self.backend.delete(&secret_ref).map_err(|_| {
             CredentialError::new(
                 CredentialErrorCode::SecretStoreUnavailable,
-                "failed to delete Codex credentials",
+                "failed to delete ChatGPT credentials",
             )
         })
     }
@@ -582,7 +582,7 @@ fn validate_token(value: &str) -> Result<(), CredentialError> {
     {
         Err(CredentialError::new(
             CredentialErrorCode::InvalidSecret,
-            "stored Codex token is invalid",
+            "stored ChatGPT token is invalid",
         ))
     } else {
         Ok(())
@@ -597,7 +597,7 @@ fn validate_optional(value: Option<&str>, max_bytes: usize) -> Result<(), Creden
     }) {
         Err(CredentialError::new(
             CredentialErrorCode::InvalidSecret,
-            "stored Codex credential metadata is invalid",
+            "stored ChatGPT credential metadata is invalid",
         ))
     } else {
         Ok(())

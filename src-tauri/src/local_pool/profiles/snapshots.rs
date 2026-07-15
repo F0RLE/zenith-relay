@@ -156,7 +156,7 @@ fn restore_with(
     if record.profile_dir != profile_dir.to_string_lossy() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "Codex snapshot belongs to another profile",
+            "ChatGPT snapshot belongs to another profile",
         ));
     }
     let payload = load_payload(&record, secrets)?;
@@ -178,7 +178,7 @@ fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> 
     let content = std::str::from_utf8(&bytes).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex snapshot metadata is not UTF-8",
+            "ChatGPT snapshot metadata is not UTF-8",
         )
     })?;
     let record: SnapshotRecord = serde_json::from_str(content).map_err(invalid_data)?;
@@ -201,14 +201,14 @@ fn load_payload(
     let content = secrets.load(&record.payload_secret_ref)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex snapshot payload is missing",
+            "ChatGPT snapshot payload is missing",
         )
     })?;
     let payload: SnapshotPayload = serde_json::from_str(&content).map_err(invalid_data)?;
     if payload.version != PAYLOAD_VERSION {
         return Err(LocalPoolError::new(
             ErrorCode::UnsupportedSchema,
-            "Codex snapshot payload uses an unsupported version",
+            "ChatGPT snapshot payload uses an unsupported version",
         ));
     }
     validate_profile_content(&UserProfileSnapshot {
@@ -223,7 +223,7 @@ fn read_record(path: &Path) -> Result<SnapshotRecord> {
     let content = std::str::from_utf8(&bytes).map_err(|_| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex snapshot metadata is not UTF-8",
+            "ChatGPT snapshot metadata is not UTF-8",
         )
     })?;
     serde_json::from_str(content).map_err(invalid_data)
@@ -242,7 +242,7 @@ fn validate_record(record: &SnapshotRecord, expected_id: &str) -> Result<()> {
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex snapshot metadata is invalid",
+            "ChatGPT snapshot metadata is invalid",
         ));
     }
     Ok(())
@@ -260,7 +260,7 @@ fn validate_profile_content(snapshot: &UserProfileSnapshot) -> Result<()> {
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex profile snapshot is too large",
+            "ChatGPT profile snapshot is too large",
         ));
     }
     Ok(())
@@ -274,7 +274,7 @@ fn normalize_name(value: &str) -> Result<String> {
     {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex snapshot name is invalid",
+            "ChatGPT snapshot name is invalid",
         ));
     }
     Ok(value.to_string())
@@ -302,13 +302,13 @@ fn metadata_path(backup_root: &Path, id: &str) -> Result<PathBuf> {
 
 fn parse_id(id: &str) -> Result<String> {
     let parsed = Uuid::parse_str(id.trim()).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "Codex snapshot ID is invalid")
+        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT snapshot ID is invalid")
     })?;
     let normalized = parsed.to_string();
     if normalized != id {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "Codex snapshot ID is invalid",
+            "ChatGPT snapshot ID is invalid",
         ));
     }
     Ok(normalized)
@@ -323,7 +323,7 @@ fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > max_bytes {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "Codex snapshot metadata is invalid",
+            "ChatGPT snapshot metadata is invalid",
         ));
     }
     fs::read(path).map_err(io_error)
@@ -342,12 +342,15 @@ fn invalid_data(error: impl std::fmt::Display) -> LocalPoolError {
     let _ = error;
     LocalPoolError::new(
         ErrorCode::RecoveryRequired,
-        "Codex snapshot data is invalid",
+        "ChatGPT snapshot data is invalid",
     )
 }
 
 fn io_error(error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, format!("Codex snapshot I/O failed: {error}"))
+    LocalPoolError::new(
+        ErrorCode::Io,
+        format!("ChatGPT snapshot I/O failed: {error}"),
+    )
 }
 
 fn io_error_message(error: String) -> LocalPoolError {
@@ -357,7 +360,7 @@ fn io_error_message(error: String) -> LocalPoolError {
 fn snapshot_changed() -> LocalPoolError {
     LocalPoolError::new(
         ErrorCode::ProfileRestoreBlocked,
-        "Codex snapshot changed while Relay was updating it",
+        "ChatGPT snapshot changed while Relay was updating it",
     )
 }
 

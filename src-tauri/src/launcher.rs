@@ -34,8 +34,8 @@ const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn launch_codex() -> String {
     launch_codex_checked(true)
-        .map(|_| "Codex запущен.".to_string())
-        .unwrap_or_else(|error| format!("Ключ сохранен, но Codex не запустился: {error}"))
+        .map(|_| "ChatGPT запущен.".to_string())
+        .unwrap_or_else(|error| format!("Ключ сохранен, но ChatGPT не запустился: {error}"))
 }
 
 pub fn launch_codex_with_profile() -> Result<(), String> {
@@ -48,7 +48,7 @@ pub fn restart_codex_if_running() -> Option<String> {
     }
 
     if stop_codex_and_wait().is_err() {
-        return Some("Codex не удалось остановить.".to_string());
+        return Some("ChatGPT не удалось остановить.".to_string());
     }
     let _ = launch_codex();
     Some("Ключ сохранен.".to_string())
@@ -74,7 +74,7 @@ pub fn stop_codex_and_wait() -> Result<bool, String> {
     if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT) {
         Ok(true)
     } else {
-        Err("Codex did not exit before the profile switch timeout".to_string())
+        Err("ChatGPT did not exit before the profile switch timeout".to_string())
     }
 }
 
@@ -223,11 +223,11 @@ fn launch_codex_desktop() -> Result<(), String> {
     for target in windows_chatgpt_launch_targets() {
         match windows_hidden_command("explorer.exe").arg(&target).spawn() {
             Ok(_) if wait_for_codex_state(true, CODEX_START_TIMEOUT) => return Ok(()),
-            Ok(_) => last_error = Some(format!("Codex did not start via {target}")),
+            Ok(_) => last_error = Some(format!("ChatGPT did not start via {target}")),
             Err(error) => last_error = Some(error.to_string()),
         }
     }
-    Err(last_error.unwrap_or_else(|| "Codex desktop process did not start".to_string()))
+    Err(last_error.unwrap_or_else(|| "ChatGPT desktop process did not start".to_string()))
 }
 
 #[cfg(target_os = "windows")]

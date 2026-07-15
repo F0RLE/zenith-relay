@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Cloud, Copy, Laptop, Layers3, Loader2, LogIn, Server, ShieldCheck, SkipForward, Upload } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, Cloud, Laptop, Layers3, Loader2, LogIn, Server, ShieldCheck, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getSavedKeyModels, getSavedKeyStats, saveKey } from "../../../tauri";
 import { relayCommands } from "../api/commands";
 import type { RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
-import { Button, OptionMenu, SecretField, copyText } from "../components/Ui";
+import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { ImportDialog } from "../pages/connections/ConnectionsPage";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -27,7 +27,6 @@ export function QuickSetupWizard() {
   const [connectionReady, setConnectionReady] = useState(false);
   const [checkStages, setCheckStages] = useState<Record<string, CheckStatus>>(() => pendingChecks());
   const [checkError, setCheckError] = useState(false);
-  const [checkedEndpoint, setCheckedEndpoint] = useState("");
   const [localKeyId, setLocalKeyId] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
 
@@ -58,7 +57,8 @@ export function QuickSetupWizard() {
         setLocalKeyId(key.id);
         if (!snapshot.gateway.running) await relayCommands.startGateway();
         snapshot = await relayCommands.localState();
-        setCheckedEndpoint(snapshot.gateway.baseUrl); mark(active, "success"); active = "models"; mark(active, "running");
+        if (!snapshot.gateway.baseUrl) throw new Error("local endpoint is missing");
+        mark(active, "success"); active = "models"; mark(active, "running");
         if (!snapshot.gateway.visibleModelIds.length) throw new Error("no visible models");
         mark(active, "success"); active = "capacity"; mark(active, "running");
         if (!snapshot.gateway.candidateCount) throw new Error("no eligible pool members");
@@ -67,14 +67,14 @@ export function QuickSetupWizard() {
         if (!snapshot?.runtimeTarget.connected) throw new Error("remote server is not connected");
         mark(active, "success"); active = "endpoint"; mark(active, "running");
         if (!snapshot.gateway.baseUrl) throw new Error("remote endpoint is missing");
-        setCheckedEndpoint(snapshot.gateway.baseUrl); mark(active, "success"); active = "models"; mark(active, "running");
+        mark(active, "success"); active = "models"; mark(active, "running");
         if (!snapshot.gateway.visibleModelIds.length) throw new Error("no visible models");
         mark(active, "success"); active = "capacity"; mark(active, "running");
         if (!snapshot.gateway.candidateCount) throw new Error("no eligible pool members");
       } else {
         await getSavedKeyStats();
         mark(active, "success"); active = "endpoint"; mark(active, "running");
-        setCheckedEndpoint("https://api.zenithmarket.dev/v1"); mark(active, "success"); active = "models"; mark(active, "running");
+        mark(active, "success"); active = "models"; mark(active, "running");
         await getSavedKeyModels();
         mark(active, "success"); active = "capacity"; mark(active, "running");
       }
@@ -91,7 +91,6 @@ export function QuickSetupWizard() {
     setMode(value);
     setConnectionReady(false);
     setCheckError(false);
-    setCheckedEndpoint("");
   };
 
   if (intro) {
@@ -145,11 +144,6 @@ export function QuickSetupWizard() {
       const ok = await activateCodexProfile("onboarding-client", () => relayCommands.attachCodexGateway(localKeyId, null));
       if (!ok) return;
     }
-    if (step === 4 && client === "opencode" && mode === "local") {
-      if (!localKeyId) return;
-      const ok = await perform("onboarding-client", () => relayCommands.attachOpenCodeGateway(localKeyId), "feedback.profileAttached");
-      if (!ok) return;
-    }
     if (step === 5) finishOnboarding(mode);
     else setStep((value) => value + 1);
   };
@@ -162,8 +156,8 @@ export function QuickSetupWizard() {
       {step === 2 ? <ConnectionStep mode={mode} provider={provider} onProviderChange={(value) => { setProvider(value); setConnectionReady(false); }} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} connectionReady={connectionReady} onConnected={() => setConnectionReady(true)} onImport={() => setShowImport(true)} /> : null}
       {step === 2 && mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}
       {step === 3 ? <><div className="setup-heading"><h1>{t("onboarding.checkTitle")}</h1><p>{t("onboarding.checkHint")}</p></div><ul className="check-stages">{checkNames.map((value) => { const status = checkStages[value]; return <li key={value}>{status === "running" ? <Loader2 className="spin" aria-hidden /> : status === "error" ? <CircleAlert aria-hidden /> : <Check aria-hidden />}<span>{t(`onboarding.checks.${value}`)}</span><strong>{t(`onboarding.checkStates.${status}`)}</strong></li>; })}</ul>{checkError ? <div className="check-retry"><p role="alert">{t("onboarding.checkFailedHint")}</p><Button variant="secondary" onClick={runCheck}>{t("common.retry")}</Button></div> : null}</> : null}
-      {step === 4 ? <><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "opencode", "other", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></> : null}
-      {step === 5 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p><div className="endpoint-line"><code>{checkedEndpoint}</code><Button variant="secondary" icon={<Copy aria-hidden />} onClick={() => copyText(checkedEndpoint)}>{t("common.copy")}</Button></div></div> : null}
+      {step === 4 ? <><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "other", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></> : null}
+      {step === 5 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
     </section>
     <footer className="setup-footer"><div><Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={step === 1} onClick={() => setStep((value) => Math.max(1, value - 1))}>{t("common.back")}</Button>{step < 5 ? <Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skipStep")}</Button> : null}</div><Button variant="primary" busy={busy?.startsWith("onboarding") ?? false} disabled={!canContinue} onClick={next}>{step === 5 ? t("onboarding.openApp") : t("common.continue")}</Button></footer>
     {showImport ? <ImportDialog modeOverride="local" defaultAddToPool onImported={() => setConnectionReady(true)} onClose={() => setShowImport(false)} /> : null}

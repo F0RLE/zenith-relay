@@ -417,13 +417,6 @@ export type ProfileSnapshot = {
   authAvailable: boolean;
 };
 
-export type OpenCodeProfileState = {
-  attached: boolean;
-  backupAvailable: boolean;
-  changed: boolean;
-  configPath: string;
-};
-
 export type HistoryRepairPreview = {
   sessionId: string;
   targetProvider: "openai" | "zenith_relay_local";

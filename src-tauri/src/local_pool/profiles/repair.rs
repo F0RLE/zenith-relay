@@ -199,13 +199,13 @@ pub fn apply(
     for expected in &snapshot.rollout_files {
         let current = scan_rollout(Path::new(&expected.path), &snapshot.target_provider)?;
         if current.hash != expected.hash || current.records != expected.records {
-            return Err("Codex rollout files changed after repair preview".to_string());
+            return Err("ChatGPT rollout files changed after repair preview".to_string());
         }
     }
     for expected in &snapshot.databases {
         let current = scan_database(Path::new(&expected.path), &snapshot.target_provider)?;
         if current.hash != expected.hash || current.rows != expected.rows {
-            return Err("Codex history database changed after repair preview".to_string());
+            return Err("ChatGPT history database changed after repair preview".to_string());
         }
     }
 
@@ -403,7 +403,7 @@ fn collect_rollouts(
         return Ok(());
     }
     if depth > 8 {
-        return Err("Codex session directory is too deeply nested".to_string());
+        return Err("ChatGPT session directory is too deeply nested".to_string());
     }
     for entry in fs::read_dir(directory).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
@@ -430,7 +430,7 @@ fn collect_rollouts(
             return Err("repair rollout file limit exceeded".to_string());
         }
         if metadata.len() > MAX_ROLLOUT_BYTES {
-            return Err("Codex rollout file is too large".to_string());
+            return Err("ChatGPT rollout file is too large".to_string());
         }
         *total_bytes = total_bytes.saturating_add(metadata.len());
         if *total_bytes > MAX_TOTAL_ROLLOUT_BYTES {
@@ -451,7 +451,7 @@ fn collect_rollouts(
 fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     let file = File::open(path).map_err(io_error)?;
     if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
-        return Err("Codex rollout file is too large".to_string());
+        return Err("ChatGPT rollout file is too large".to_string());
     }
     let mut reader = BufReader::new(file);
     let mut first_line = Vec::new();
@@ -459,7 +459,7 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
         .read_until(b'\n', &mut first_line)
         .map_err(io_error)?;
     if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
-        return Err("Codex rollout session metadata is too large".to_string());
+        return Err("ChatGPT rollout session metadata is too large".to_string());
     }
     let records = usize::from(
         rollout_provider(&first_line)
@@ -666,7 +666,7 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
             )
             .map_err(db_error)?;
         if changed != item.rows {
-            return Err("Codex history database changed during repair".to_string());
+            return Err("ChatGPT history database changed during repair".to_string());
         }
         transaction.commit().map_err(db_error)?;
     }
@@ -676,7 +676,7 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
 fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), String> {
     let file = File::open(path).map_err(io_error)?;
     if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
-        return Err("Codex rollout file is too large".to_string());
+        return Err("ChatGPT rollout file is too large".to_string());
     }
     let mut reader = BufReader::new(file);
     let mut first_line = Vec::new();
@@ -684,7 +684,7 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
         .read_until(b'\n', &mut first_line)
         .map_err(io_error)?;
     if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
-        return Err("Codex rollout session metadata is too large".to_string());
+        return Err("ChatGPT rollout session metadata is too large".to_string());
     }
     let separator: &[u8] = if first_line.ends_with(b"\r\n") {
         b"\r\n"
@@ -696,7 +696,7 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
     let line = first_line.strip_suffix(b"\n").unwrap_or(&first_line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let mut value: Value = serde_json::from_slice(line)
-        .map_err(|_| "Codex rollout session metadata is malformed".to_string())?;
+        .map_err(|_| "ChatGPT rollout session metadata is malformed".to_string())?;
     let provider = value
         .get("payload")
         .and_then(|payload| payload.get("model_provider"))
@@ -706,18 +706,18 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
             && provider != Some(target),
     );
     if changed != expected || changed != 1 {
-        return Err("Codex rollout changed during repair".to_string());
+        return Err("ChatGPT rollout changed during repair".to_string());
     }
     let payload = value
         .get_mut("payload")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| "Codex session metadata is invalid".to_string())?;
+        .ok_or_else(|| "ChatGPT session metadata is invalid".to_string())?;
     payload.insert(
         "model_provider".to_string(),
         Value::String(target.to_string()),
     );
-    let updated =
-        serde_json::to_vec(&value).map_err(|_| "Codex session serialization failed".to_string())?;
+    let updated = serde_json::to_vec(&value)
+        .map_err(|_| "ChatGPT session serialization failed".to_string())?;
     replace_file_with(path, false, move |output| {
         output.write_all(&updated).map_err(io_error)?;
         output.write_all(separator).map_err(io_error)?;
@@ -882,11 +882,11 @@ fn now_ms() -> u64 {
 }
 
 fn db_error(error: rusqlite::Error) -> String {
-    format!("Codex history database operation failed: {error}")
+    format!("ChatGPT history database operation failed: {error}")
 }
 
 fn io_error(error: std::io::Error) -> String {
-    format!("Codex history repair I/O failed: {error}")
+    format!("ChatGPT history repair I/O failed: {error}")
 }
 
 #[cfg(test)]

@@ -3,6 +3,16 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
+import packageJson from "../package.json";
+
+export const APP_VERSION = packageJson.version;
+
+export type AppUpdate = {
+  currentVersion: string;
+  version: string;
+  date?: string;
+  body?: string;
+};
 
 export type Platform = "windows" | "macos" | "linux";
 export type PersistedSourceWireApi = "responses" | "chat_completions" | "messages";
@@ -385,25 +395,44 @@ export function getKeyUsageVersion(apiKey: string) {
   return invoke<UsageVersion>("get_key_usage_version", { apiKey });
 }
 
-export async function updateAndRelaunch(onProgress?: (downloaded: number, total?: number) => void) {
+export async function checkForUpdate(): Promise<AppUpdate | null> {
   const update = await check();
-  if (!update) {
-    return "none" as const;
+  if (!update) return null;
+  const metadata = {
+    currentVersion: update.currentVersion,
+    version: update.version,
+    date: update.date,
+    body: update.body,
+  };
+  await update.close();
+  return metadata;
+}
+
+export async function installUpdate(expectedVersion: string, onProgress?: (downloaded: number, total?: number) => void) {
+  const update = await check();
+  if (!update || update.version !== expectedVersion) {
+    await update?.close();
+    return "unavailable" as const;
   }
 
   let downloaded = 0;
   let total: number | undefined;
-  await update.downloadAndInstall((event) => {
-    if (event.event === "Started") {
-      total = event.data.contentLength ?? undefined;
-      downloaded = 0;
-      onProgress?.(downloaded, total);
-    }
-    if (event.event === "Progress") {
-      downloaded += event.data.chunkLength;
-      onProgress?.(downloaded, total);
-    }
-  });
+  try {
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? undefined;
+        downloaded = 0;
+        onProgress?.(downloaded, total);
+      }
+      if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        onProgress?.(downloaded, total);
+      }
+    });
+  } catch (error) {
+    await update.close().catch(() => undefined);
+    throw error;
+  }
   await relaunch();
   return "installed" as const;
 }

@@ -89,13 +89,14 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(page.getByText("zlr_synthetic_rotated_key")).toBeVisible();
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
-  await page.getByRole("button", { name: "Restart endpoint" }).click();
+  await page.getByRole("button", { name: "Restart API" }).click();
   await page.getByRole("spinbutton", { name: "Port" }).fill("15001");
   await page.getByRole("button", { name: "Apply and restart" }).click();
-  await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
-  await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await expect(page.getByRole("button", { name: /^Codex interface account:/ })).toHaveAttribute("data-value", "auto");
-  await expect(page.getByRole("heading", { name: "Codex in pool mode" })).toBeVisible();
+  await expect(page.getByRole("spinbutton", { name: "Port" })).toHaveValue("15001");
+  await expect(page.getByText("http://127.0.0.1:15001/v1")).toHaveCount(0);
+  await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
+  await expect(page.getByRole("button", { name: /^ChatGPT interface account:/ })).toHaveAttribute("data-value", "auto");
+  await expect(page.getByRole("heading", { name: "ChatGPT in pool mode" })).toBeVisible();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
   await expect(page.getByText(/gpt-5.4-mini completed in 321 ms/)).toBeVisible();
@@ -297,7 +298,6 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   await page.getByRole("button", { name: "Export", exact: true }).click();
 
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await expect(page.getByRole("row").filter({ hasText: "OpenCode" })).toBeVisible();
   await page.getByRole("tab", { name: "Backups" }).click();
   await page.getByRole("button", { name: "Open folder" }).click();
   await page.getByRole("tab", { name: "Repair" }).click();
@@ -310,11 +310,9 @@ test("recovery and export controls call the Rust-owned operations", async ({ pag
   await page.getByRole("button", { name: "Roll back repair" }).click();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Storage", exact: true }).click();
   await page.getByRole("button", { name: "Open data folder" }).click();
-  await page.getByRole("button", { name: "Recovery", exact: true }).click();
   page.once("dialog", (dialog) => dialog.dismiss());
-  await page.getByRole("button", { name: "Reset local pool data" }).click();
+  await page.locator(".settings-group").filter({ hasText: "Recovery" }).getByRole("button", { name: "Reset" }).click();
 
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
   expect(commands).toEqual(expect.arrayContaining(["export_usage", "preview_support_bundle", "export_support_bundle", "open_relay_folder", "preview_codex_history_repair", "apply_codex_history_repair", "rollback_codex_history_repair"]));
@@ -352,7 +350,7 @@ test("account export supports bulk copy and per-account download", async ({ page
   let dialog = page.getByRole("dialog", { name: "Export accounts" });
   await expect(dialog.getByRole("radio")).toHaveCount(7);
   await expect(dialog.getByRole("button", { name: "Copy JSON" })).toBeDisabled();
-  await dialog.getByRole("radio", { name: "Codex", exact: true }).click();
+  await dialog.getByRole("radio", { name: "ChatGPT", exact: true }).click();
   await dialog.getByLabel(/I understand that anyone/).check();
   await dialog.getByRole("button", { name: "Copy JSON" }).click();
   await expect(page.getByText("Account export copied.")).toBeVisible();
@@ -382,7 +380,7 @@ test("frequent account actions stay in the row and secondary actions stay in the
     "Actions",
     "Show full identity",
     "Refresh quota",
-    "Launch in Codex",
+    "Launch in ChatGPT",
   ]);
   await page.locator(".account-card .account-row-menu summary").click();
   const menu = page.getByRole("menu");
@@ -718,7 +716,7 @@ for (const mode of ["local", "remote"] as const) {
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("tab", { name: "Client Access" }).click();
-    await page.getByRole("row").filter({ hasText: "Codex" }).getByRole("button", { name: "Configure access" }).click();
+    await page.getByRole("row").filter({ hasText: "ChatGPT" }).getByRole("button", { name: "Configure access" }).click();
     const dialog = page.getByRole("dialog", { name: "Configure access" });
     await expect(dialog).toContainText("It is not an upstream API source");
     page.once("dialog", (confirmation) => confirmation.accept());
@@ -1005,13 +1003,13 @@ test("empty connection views keep the page header as the single action area", as
   await expect(page.getByPlaceholder("Search")).toHaveCount(0);
 });
 
-test("Codex client setup offers no account, automatic, and manual pool identity modes", async ({ page }) => {
+test("ChatGPT client setup offers no account, automatic, and manual pool identity modes", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, gatewayRunning: true, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
-  await page.getByRole("tab", { name: "Codex Setup" }).click();
+  await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
   const setup = page.locator(".client-setup");
-  const account = setup.getByRole("button", { name: /^Codex interface account:/ });
+  const account = setup.getByRole("button", { name: /^ChatGPT interface account:/ });
   await expect(account).toHaveAttribute("data-value", "auto");
   await account.click();
   await expect(page.getByRole("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business", "Personal Plus · Plus"]);
@@ -1031,33 +1029,33 @@ test("Codex client setup offers no account, automatic, and manual pool identity 
   });
   expect(selectionMatchesTheme).toBe(true);
 
-  await chooseOption(page, setup, "Codex interface account", "none");
+  await chooseOption(page, setup, "ChatGPT interface account", "none");
   await expect(setup).toContainText("No OAuth account will be applied");
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("none");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_local_gateway").length)).toBe(1);
   let call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
   expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null, disableOauthBinding: true });
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
-  await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await chooseOption(page, page, "Codex interface account", "account_synthetic");
+  await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
+  await chooseOption(page, page, "ChatGPT interface account", "account_synthetic");
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("account_synthetic");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_local_gateway").length)).toBe(2);
   call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
   expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
 });
 
-test("Codex pool identity migrates the previous stored account selection", async ({ page }) => {
+test("ChatGPT pool identity migrates the previous stored account selection", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.addInitScript(() => localStorage.setItem("relay.codexPoolOauthAccountId", "account_synthetic"));
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
-  await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await expect(page.getByRole("button", { name: /^Codex interface account:/ })).toHaveAttribute("data-value", "account_synthetic");
+  await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
+  await expect(page.getByRole("button", { name: /^ChatGPT interface account:/ })).toHaveAttribute("data-value", "account_synthetic");
   expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic", legacy: null });
 });
 
@@ -1162,6 +1160,33 @@ test("Help reopens the reversible quick setup", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
 });
 
+test("updates are checked without downloading and require an explicit action", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, updateVersion: "1.1.0", updateBody: "Faster parallel routing\nUpdated settings" });
+  await page.goto("/");
+
+  const updateButton = page.getByRole("button", { name: "Open update 1.1.0" });
+  await expect(updateButton).toBeVisible();
+  let commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands).toContain("plugin:updater|check");
+  expect(commands).not.toContain("plugin:updater|download_and_install");
+
+  await updateButton.click();
+  let dialog = page.getByRole("dialog", { name: "Update 1.1.0" });
+  await expect(dialog).toContainText("Faster parallel routing");
+  await dialog.getByRole("button", { name: "Skip this version" }).click();
+  await expect(updateButton).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.skippedUpdate"))).toBe("1.1.0");
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.locator(".settings-group").filter({ hasText: "Updates" }).getByRole("button", { name: "Check" }).click();
+  dialog = page.getByRole("dialog", { name: "Update 1.1.0" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Update", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command))).toEqual(expect.arrayContaining(["plugin:updater|download_and_install", "plugin:process|restart"]));
+  commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
+  expect(commands.filter((command) => command === "plugin:updater|download_and_install")).toHaveLength(1);
+});
+
 test("OAuth keeps recovery fields behind an explicit disclosure", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
@@ -1178,7 +1203,7 @@ test("key and OAuth timestamps follow the active locale", async ({ page }) => {
 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await page.getByRole("tab", { name: "Ключи доступа" }).click();
-  await expect(page.getByRole("row").filter({ hasText: "Codex" })).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
+  await expect(page.getByRole("row").filter({ hasText: "ChatGPT" })).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
 
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("button", { name: "Войти", exact: true }).first().click();
@@ -1187,29 +1212,27 @@ test("key and OAuth timestamps follow the active locale", async ({ page }) => {
   await expect(dialog).not.toContainText(/\b(?:AM|PM)\b/);
 });
 
-test("profile header follows the available managed client", async ({ page }) => {
+test("profile header offers the single supported ChatGPT client", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await expect(page.getByRole("row").filter({ hasText: "OpenCode" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Add profile" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Attach Codex" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Add profile" }).click();
-  const dialog = page.getByRole("dialog", { name: "Add profile" });
-  await expect(dialog.getByRole("button", { name: /Codex/ })).toBeVisible();
-  await expect(dialog.getByRole("button", { name: /OpenCode/ })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Attach ChatGPT" })).toBeVisible();
+  await expect(page.getByText("OpenCode")).toHaveCount(0);
+  await page.getByRole("button", { name: "Attach ChatGPT" }).click();
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway" || item.command === "attach_codex_to_account"));
+  expect(call).toBeTruthy();
 });
 
-test("managed Codex profiles use the local profile launcher", async ({ page }) => {
+test("managed ChatGPT profiles use the local profile launcher", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
-  await page.getByRole("button", { name: "Launch Codex" }).click();
+  await page.getByRole("button", { name: "Launch ChatGPT" }).click();
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "launch_managed_codex_profile"));
   expect(call).toBeTruthy();
 });
 
-test("named Codex snapshots can be created, restored with a safety copy, and deleted", async ({ page }) => {
+test("named ChatGPT snapshots can be created, restored with a safety copy, and deleted", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Profiles", exact: true }).click();
@@ -1281,14 +1304,14 @@ test("quota cards name monthly windows and make remaining percentages explicit",
   await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "Monthly: 95% left");
 });
 
-test("pool toggle changes state without switching Codex", async ({ page }) => {
+test("pool toggle changes state without switching ChatGPT", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false, poolKeyPresent: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Start pool", exact: true }).click();
   await expect(page.getByText("Endpoint started.")).toBeVisible();
   const header = page.locator(".relay-page-header");
-  await expect(header.getByRole("button", { name: "Switch Codex to pool", exact: true })).toBeVisible();
+  await expect(header.getByRole("button", { name: "Switch ChatGPT to pool", exact: true })).toBeVisible();
   await expect(header.locator(".pool-header-actions > *")).toHaveCount(2);
   await header.locator(".relay-action-menu summary").click();
   await header.getByRole("menuitem", { name: "Stop pool", exact: true }).click();
@@ -1299,11 +1322,11 @@ test("pool toggle changes state without switching Codex", async ({ page }) => {
   expect(workflow.map((call) => call.command)).toEqual(["start_local_gateway", "stop_local_gateway"]);
 });
 
-test("switch Codex creates a pool key, attaches it, and relaunches Codex without starting the gateway", async ({ page }) => {
+test("switch ChatGPT creates a pool key, attaches it, and relaunches ChatGPT without starting the gateway", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: false, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
   const feedbackBox = await feedback.boundingBox();
@@ -1314,12 +1337,12 @@ test("switch Codex creates a pool key, attaches it, and relaunches Codex without
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["create_local_gateway_key", "attach_codex_to_local_gateway", "preview_codex_history_repair", "launch_managed_codex_profile"]);
-  expect(workflow[0].args).toEqual({ label: "Codex pool" });
+  expect(workflow[0].args).toEqual({ label: "ChatGPT pool" });
   expect(workflow[1].args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: null });
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
-test("a Codex account or pool switch offers a protected profile snapshot", async ({ page }) => {
+test("a ChatGPT account or pool switch offers a protected profile snapshot", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, historyRepairChanges: false, profileSnapshotsEmpty: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -1327,7 +1350,7 @@ test("a Codex account or pool switch offers a protected profile snapshot", async
     expect(dialog.message()).toContain("protected snapshot");
     await dialog.accept();
   });
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   await expect(page.getByText("Client launched.")).toBeVisible();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
@@ -1335,7 +1358,7 @@ test("a Codex account or pool switch offers a protected profile snapshot", async
   expect(workflow.map((call) => call.command)).toEqual(["create_codex_profile_snapshot", "attach_codex_to_local_gateway"]);
 });
 
-test("profile snapshot prompts can be disabled without blocking Codex switching", async ({ page }) => {
+test("profile snapshot prompts can be disabled without blocking ChatGPT switching", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, historyRepairChanges: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -1346,7 +1369,7 @@ test("profile snapshot prompts can be disabled without blocking Codex switching"
   let dialogs = 0;
   page.on("dialog", async (dialog) => { dialogs += 1; await dialog.dismiss(); });
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   await expect(page.getByText("Client launched.")).toBeVisible();
   expect(dialogs).toBe(0);
 
@@ -1358,7 +1381,7 @@ test("profile switch errors remain readable and then dismiss automatically", asy
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
   await expect(feedback).toContainText("The profile changed during the operation.");
@@ -1382,17 +1405,16 @@ test("row launch previews session repair and all reported quota windows stay vis
   await expect(page.getByRole("button", { name: "Launch selected" })).toHaveCount(0);
   await expect(page.locator(".quota-display-menu")).toHaveCount(0);
   await expect(page.locator(".account-list .quota-meter")).toHaveCount(2);
-  const launch = page.getByRole("button", { name: "Launch in Codex" });
+  const launch = page.getByRole("button", { name: "Launch in ChatGPT" });
   await expect(launch).toBeEnabled();
   await launch.click();
-  const repair = page.getByRole("dialog", { name: "Keep Codex sessions visible" });
+  const repair = page.getByRole("dialog", { name: "Keep ChatGPT sessions visible" });
   await expect(repair).toBeVisible();
   await expect(repair.locator("dd")).toHaveText(["2", "2", "1"]);
   await repair.getByRole("button", { name: "Launch without repair" }).click();
   await expect(page.getByText("Client launched.")).toBeVisible();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Appearance", exact: true }).click();
   await expect(page.getByText("Visible quota windows")).toHaveCount(0);
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "launch_codex_account"));
@@ -1401,13 +1423,13 @@ test("row launch previews session repair and all reported quota windows stay vis
   expect(profileCommands).toEqual(["launch_codex_account", "preview_codex_history_repair", "launch_managed_codex_profile"]);
 });
 
-test("repair and launch applies the reviewed session changes before starting Codex", async ({ page }) => {
+test("repair and launch applies the reviewed session changes before starting ChatGPT", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByRole("button", { name: "Launch in Codex" }).click();
+  await page.getByRole("button", { name: "Launch in ChatGPT" }).click();
 
-  const repair = page.getByRole("dialog", { name: "Keep Codex sessions visible" });
+  const repair = page.getByRole("dialog", { name: "Keep ChatGPT sessions visible" });
   await repair.getByRole("button", { name: "Repair and launch" }).click();
   await expect(page.getByText("Client launched.")).toBeVisible();
 
@@ -1415,14 +1437,14 @@ test("repair and launch applies the reviewed session changes before starting Cod
   expect(commands).toEqual(["launch_codex_account", "preview_codex_history_repair", "apply_codex_history_repair", "launch_managed_codex_profile"]);
 });
 
-test("row launch still starts Codex when optional history preview fails", async ({ page }) => {
+test("row launch still starts ChatGPT when optional history preview fails", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, historyRepairError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByRole("button", { name: "Launch in Codex" }).click();
+  await page.getByRole("button", { name: "Launch in ChatGPT" }).click();
 
   await expect(page.getByText("Client launched.")).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "Keep Codex sessions visible" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Keep ChatGPT sessions visible" })).toHaveCount(0);
   const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((item) => item.command).filter((command) => ["launch_codex_account", "preview_codex_history_repair", "launch_managed_codex_profile"].includes(command)));
   expect(commands).toEqual(["launch_codex_account", "preview_codex_history_repair", "launch_managed_codex_profile"]);
 });
@@ -1590,7 +1612,9 @@ test("remote diagnostics, server-side usage filters, and clear logs use managed 
   expect(diagnosticCalls).toEqual([false, true]);
 
   await page.reload();
-  await expect(page.getByText("https://relay.example.invalid/v1").first()).toBeVisible();
+  await page.getByRole("button", { name: "Gateway", exact: true }).click();
+  await expect(page.locator(".gateway-runtime-panel")).toContainText("API is running");
+  await expect(page.getByText("https://relay.example.invalid/v1")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("textbox", { name: "Model" }).fill("gpt-5.4");
@@ -1626,7 +1650,7 @@ test("remote capability omissions disable or hide unsupported operations", async
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await expect(page.locator(".proxy-settings")).toContainText("Unsupported");
   await expect(page.locator(".proxy-settings").getByRole("button", { name: "Save" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Restart endpoint" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Restart API" })).toBeDisabled();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await expect(page.locator(".diagnostics-list > section").filter({ hasText: "Streaming test" }).getByRole("button", { name: "Run" })).toBeDisabled();
 
