@@ -141,6 +141,7 @@ struct ClientRequest {
     resolved_model: String,
     responses_lite: bool,
     affinity_key: Option<String>,
+    session_affinity_key: Option<String>,
 }
 
 impl ClientRequest {
@@ -190,18 +191,22 @@ impl ClientRequest {
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
             || runtime.codex_model_uses_responses_lite(&resolved_model);
         let session = websocket_affinity_session(headers, &value);
-        let affinity_key = runtime.affinity_key(
+        let session_affinity_key = runtime.affinity_key(
             &key.id,
             WireApi::Responses,
             &resolved_model,
             session.as_deref(),
         );
+        let affinity_key = runtime
+            .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str))
+            .or_else(|| session_affinity_key.clone());
         Ok(Self {
             value,
             requested_model,
             resolved_model,
             responses_lite,
             affinity_key,
+            session_affinity_key,
         })
     }
 
@@ -224,10 +229,18 @@ impl ClientRequest {
         serde_json::to_string(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
+
+    fn has_previous_response_id(&self) -> bool {
+        self.value
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    }
 }
 
 struct Connected {
     upstream: UpstreamWebSocket,
+    first_message: UpstreamMessage,
     candidate_id: String,
     route: ExecutorRoute,
     request: ClientRequest,
@@ -342,8 +355,47 @@ async fn connect_upstream(
             last_failure = Some(failure);
             continue;
         }
+        let first_message = match first_application_message(&mut upstream).await {
+            Ok(message) => message,
+            Err(failure) => {
+                let response_headers = HeaderMap::new();
+                record_connect_failure(
+                    runtime,
+                    key,
+                    &route,
+                    &request,
+                    attempt,
+                    started,
+                    &failure,
+                    Some(&response_headers),
+                );
+                last_failure = Some(failure);
+                continue;
+            }
+        };
+        if let Some(terminal) = first_message_terminal(&first_message) {
+            if terminal.outcome == Some(false) {
+                let status = terminal.status.unwrap_or(StatusCode::BAD_GATEWAY);
+                if super::retryable_status(status, request.has_previous_response_id()) {
+                    let failure = GatewayFailure::upstream_status(status);
+                    record_connect_failure(
+                        runtime,
+                        key,
+                        &route,
+                        &request,
+                        attempt,
+                        started,
+                        &failure,
+                        Some(&terminal.headers),
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
+            }
+        }
         return Ok(Connected {
             upstream,
+            first_message,
             candidate_id: route.candidate_id.clone(),
             route,
             request,
@@ -363,6 +415,56 @@ async fn connect_upstream(
         return Err(GatewayFailure::cooldown(retry_at_ms));
     }
     Err(last_failure.unwrap_or_else(GatewayFailure::unavailable))
+}
+
+async fn first_application_message(
+    upstream: &mut UpstreamWebSocket,
+) -> Result<UpstreamMessage, GatewayFailure> {
+    let deadline = TokioInstant::now() + WEBSOCKET_IDLE_TIMEOUT;
+    let mut heartbeat = interval_at(
+        TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
+        WEBSOCKET_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout()),
+            _ = heartbeat.tick() => {
+                upstream
+                    .send(UpstreamMessage::Ping(Default::default()))
+                    .await
+                    .map_err(|_| GatewayFailure::transport())?;
+            }
+            message = upstream.next() => {
+                match message {
+                    Some(Ok(message @ (UpstreamMessage::Text(_) | UpstreamMessage::Binary(_)))) => {
+                        return Ok(message);
+                    }
+                    Some(Ok(UpstreamMessage::Ping(payload))) => {
+                        upstream
+                            .send(UpstreamMessage::Pong(payload))
+                            .await
+                            .map_err(|_| GatewayFailure::transport())?;
+                    }
+                    Some(Ok(UpstreamMessage::Pong(_))) => {}
+                    Some(Ok(UpstreamMessage::Close { .. })) | None => {
+                        return Err(GatewayFailure::closed());
+                    }
+                    Some(Err(_)) => return Err(GatewayFailure::transport()),
+                }
+            }
+        }
+    }
+}
+
+fn first_message_terminal(message: &UpstreamMessage) -> Option<EventTerminal> {
+    let payload = match message {
+        UpstreamMessage::Text(text) => text.as_bytes(),
+        UpstreamMessage::Binary(bytes) => bytes.as_ref(),
+        _ => return None,
+    };
+    let value = serde_json::from_slice::<Value>(payload).ok()?;
+    Some(event_terminal(&value))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -462,6 +564,7 @@ struct InFlight {
     event: UsageEvent,
     started: Instant,
     affinity_key: Option<String>,
+    response_id: Option<String>,
 }
 
 struct BridgeState {
@@ -496,9 +599,20 @@ async fn bridge(
             route: connected.route,
             event: initial_event,
             started: connected.started,
-            affinity_key: connected.request.affinity_key,
+            affinity_key: connected.request.session_affinity_key,
+            response_id: None,
         }),
     };
+    if !handle_upstream_message(
+        &mut downstream,
+        &runtime,
+        &mut state,
+        connected.first_message,
+    )
+    .await
+    {
+        return;
+    }
     let mut last_activity = TokioInstant::now();
     let mut heartbeat = interval_at(
         TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
@@ -581,10 +695,20 @@ async fn handle_downstream_message(
 ) -> Result<bool, GatewayFailure> {
     match message {
         Message::Text(text) => {
-            start_next_request(upstream, runtime, key, headers, state, text.as_bytes()).await?;
+            return start_next_request(
+                downstream,
+                upstream,
+                runtime,
+                key,
+                headers,
+                state,
+                text.as_bytes(),
+            )
+            .await;
         }
         Message::Binary(bytes) => {
-            start_next_request(upstream, runtime, key, headers, state, &bytes).await?;
+            return start_next_request(downstream, upstream, runtime, key, headers, state, &bytes)
+                .await;
         }
         Message::Ping(payload) => {
             upstream
@@ -617,19 +741,62 @@ async fn handle_downstream_message(
 }
 
 async fn start_next_request(
+    downstream: &mut WebSocket,
     upstream: &mut UpstreamWebSocket,
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     headers: &HeaderMap,
     state: &mut BridgeState,
     payload: &[u8],
-) -> Result<(), GatewayFailure> {
+) -> Result<bool, GatewayFailure> {
     if state.in_flight.is_some() {
         return Err(GatewayFailure::invalid_request(
             "a response is already in progress",
         ));
     }
     let request = ClientRequest::parse(runtime, key, headers, payload)?;
+    if !request.has_previous_response_id() {
+        let connected = connect_upstream(runtime, key, headers, request).await?;
+        let Connected {
+            upstream: next_upstream,
+            first_message,
+            candidate_id,
+            route,
+            request,
+            lease,
+            attempt,
+            started,
+        } = connected;
+        let event = usage_event(
+            &super::request_id(),
+            attempt,
+            &key.id,
+            &route,
+            &request.requested_model,
+            true,
+            StatusCode::OK.as_u16(),
+            None,
+            0,
+        );
+        let _ = upstream
+            .send(UpstreamMessage::Close {
+                code: UpstreamCloseCode::Normal,
+                reason: String::new(),
+            })
+            .await;
+        *upstream = next_upstream;
+        state.candidate_id = candidate_id;
+        state.lease = Some(lease);
+        state.in_flight = Some(InFlight {
+            route,
+            event,
+            started,
+            affinity_key: request.session_affinity_key,
+            response_id: None,
+        });
+        return Ok(handle_upstream_message(downstream, runtime, state, first_message).await);
+    }
+
     let route = runtime
         .executor_route(&state.candidate_id, &request.resolved_model)
         .filter(|route| route.wire_api == WireApi::Responses)
@@ -655,9 +822,10 @@ async fn start_next_request(
         ),
         route,
         started,
-        affinity_key: request.affinity_key,
+        affinity_key: request.session_affinity_key,
+        response_id: None,
     });
-    Ok(())
+    Ok(true)
 }
 
 async fn handle_upstream_message(
@@ -725,16 +893,23 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
         if let Some(usage) = super::find_usage(&value) {
             apply_usage(&mut in_flight.event, usage);
         }
+        if let Some(response_id) = super::response_id(&value) {
+            in_flight.response_id = Some(response_id.to_string());
+        }
     }
-    let outcome = match event_type {
+    event_terminal(&value)
+}
+
+fn event_terminal(value: &Value) -> EventTerminal {
+    let outcome = match value.get("type").and_then(Value::as_str) {
         Some("response.completed" | "response.done") => Some(true),
         Some("response.failed" | "response.incomplete" | "error") => Some(false),
         _ => None,
     };
     EventTerminal {
         outcome,
-        status: websocket_status(&value),
-        headers: websocket_retry_headers(&value),
+        status: websocket_status(value),
+        headers: websocket_retry_headers(value),
     }
 }
 
@@ -759,6 +934,11 @@ fn finish_terminal(
         );
         runtime.bind_affinity(
             in_flight.affinity_key.as_deref(),
+            &in_flight.route.candidate_id,
+            now_ms(),
+        );
+        runtime.bind_response_affinity(
+            in_flight.response_id.as_deref(),
             &in_flight.route.candidate_id,
             now_ms(),
         );
@@ -978,6 +1158,26 @@ impl GatewayFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_transport",
             message: "upstream WebSocket connection failed",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            retry_at_ms: None,
+        }
+    }
+
+    fn closed() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            category: "upstream_websocket_closed",
+            message: "upstream WebSocket closed before the first event",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            retry_at_ms: None,
+        }
+    }
+
+    fn idle_timeout() -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            category: "websocket_idle_timeout",
+            message: "upstream WebSocket produced no event before the idle timeout",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }

@@ -602,15 +602,16 @@ test("icon actions explain themselves and scrollbars follow the active theme", a
   expect(light.scrollbar).not.toBe(dark.scrollbar);
 });
 
-test("pool summary keeps healthy and limited members mutually exclusive", async ({ page }) => {
+test("pool summary keeps routing states mutually exclusive", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const summary = page.locator(".pool-summary");
-  await expect(summary.locator("div")).toHaveCount(3);
-  await expect(summary.locator("div").nth(0)).toHaveText("Healthy2");
-  await expect(summary.locator("div").nth(1)).toHaveText("Limited2");
-  await expect(summary.locator("div").nth(2)).toHaveText("Disabled0");
+  await expect(summary.locator("div")).toHaveCount(4);
+  await expect(summary.locator("div").nth(0)).toHaveText("In rotation2");
+  await expect(summary.locator("div").nth(1)).toHaveText("Waiting for quota2");
+  await expect(summary.locator("div").nth(2)).toHaveText("Unavailable0");
+  await expect(summary.locator("div").nth(3)).toHaveText("Disabled0");
 });
 
 test("connections stay outside the pool until the user adds selected members", async ({ page }) => {
@@ -730,7 +731,7 @@ test("pool display order follows availability and quota without exposing raw pri
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const order = page.getByLabel("Display order");
-  await expect(order.locator("option")).toHaveText(["Routing order", "Minimum quota reserve", "Name"]);
+  await expect(order.locator("option")).toHaveText(["State and quota", "Minimum quota reserve", "Name"]);
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
   expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
@@ -793,7 +794,7 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   const freeMember = page.locator('[data-member-label="Backup account"]');
-  await expect(freeMember).toContainText("Excluded by Free policy");
+  await expect(freeMember).toContainText("Waiting for quota");
 
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await expect(page.getByText("Updated.", { exact: true })).toBeVisible();
@@ -803,7 +804,7 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   await dialog.getByLabel("Request timeout").selectOption("10");
   await dialog.getByLabel("Use Free accounts").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
-  await expect(freeMember).toContainText("Ready");
+  await expect(freeMember).toContainText("In rotation");
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "refresh_local_pool_account_quotas")).toBe(true);
@@ -1034,7 +1035,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await page.getByRole("tab", { name: "Connections" }).click();
+  await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
   await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cached12Reason5Out8", "28", "128 / 428 ms"]);

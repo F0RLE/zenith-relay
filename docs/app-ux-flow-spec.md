@@ -100,7 +100,7 @@ Nested views:
 Connections -> Sources | Accounts | Automations | Remote Server
 Pool        -> Members | Keys | Model Rules
 Gateway     -> Endpoint | Client Setup | Diagnostics
-Usage       -> Requests | Models | Connections | Errors
+Usage       -> Requests | Models | Pool Members | Errors
 Profiles    -> Profiles | Backups | Repair
 Settings    -> General | Appearance | Storage | Updates | Security | Recovery
 ```
@@ -749,7 +749,7 @@ Layout:
 + Header --------------------------------------------------- [Add member]   +
 + Toolbar -------- [Display order v] [Refresh quotas] [Refresh settings]  +
 + Summary -----------------------------------------------------------------+
-| Healthy | Cooling | Limited | Disabled | Visible models                  |
+| In rotation | Waiting for quota | Unavailable | Disabled                      |
 + Table -------------------------------------------------------------------+
 | enabled | type | name | health | quota reserve | last used | menu       |
 + Selected editor ----------------------------------------------------------+
@@ -771,20 +771,22 @@ There is no MVP strategy selector. Runtime order is fixed:
 
 ```text
 hard filters
-valid session affinity
+previous-response binding or valid session affinity
 API source role tier
-active requests normalized by traffic share
+active requests normalized by traffic share and available quota
 OAuth preference inside the stabilizer tier
 greatest minimum known quota reserve
 least recently used
-manual priority and weight tie-breaks
+committed dispatch balance, manual priority, weight, and stable id
 ```
 
 The scheduler makes this choice for every request. `API first` sources run before
 OAuth accounts, `Stabilizer` sources absorb concurrent load and retryable account
 failures, and `Last resort` sources wait behind other eligible members. Traffic
 share affects concurrent distribution inside the same role tier. Sorting the
-visible member list never changes runtime order.
+visible member list never changes runtime order. Rows use `In rotation`,
+`Waiting for quota`, `Unavailable`, and `Disabled`; a manually chosen OAuth
+account is labelled `Codex interface` and is not a pinned pool route.
 
 Creating or importing a connection does not add it to the pool. The empty
 Members view asks the user to choose existing connections, and only confirmed
@@ -950,10 +952,10 @@ Layout:
 + Metrics -----------------------------------------------------------------+
 | Requests | Success | Total tokens | Latency                              |
 + Filters ------------------------------------------------------------------+
-| Range | Model | Connection | Key | Status | Request ID                   |
+| Range | Model | Pool member | Key | Status | Request ID                 |
 + Table --------------------------------------------------------------------+
-| time | status | model | connection | latency | total tokens | request id   |
-+ Models / Connections aggregate ------------------------------------------+
+| time | status | model | pool member | latency | total tokens | request id |
++ Models / Pool Members aggregate -----------------------------------------+
 | requests | success | input tokens | output tokens | total tokens | latency |
 + Request dialog -----------------------------------------------------------+
 | timing | input/output/total usage | selected member | redacted error       |

@@ -64,6 +64,15 @@ struct UpstreamState {
 struct WebSocketUpstreamState {
     headers: Arc<Mutex<Vec<HeaderMap>>>,
     requests: Arc<Mutex<Vec<Value>>>,
+    behavior: WebSocketBehavior,
+}
+
+#[derive(Clone, Default)]
+enum WebSocketBehavior {
+    #[default]
+    Success,
+    Events(Arc<Vec<Value>>),
+    Close,
 }
 
 struct TestServer {
@@ -329,6 +338,69 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 }
 
 #[tokio::test]
+async fn previous_response_id_keeps_http_continuations_on_the_creating_account() {
+    let (first_upstream, first_state) = spawn_upstream(vec![
+        success_reply("first-response"),
+        success_reply("first-continuation"),
+    ])
+    .await;
+    let (second_upstream, second_state) = spawn_upstream(vec![
+        success_reply("second-response"),
+        success_reply("second-continuation"),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "start"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let response_id = first["id"].as_str().unwrap();
+    let continued = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "continue",
+            "previous_response_id": response_id
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(continued.status(), StatusCode::OK);
+
+    let counts = [
+        first_state.requests.lock().unwrap().len(),
+        second_state.requests.lock().unwrap().len(),
+    ];
+    assert!(counts == [2, 0] || counts == [0, 2]);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
 async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let (upstream, state) = spawn_websocket_upstream().await;
     let authority = ready_authority("relay-account", "account-access").await;
@@ -383,31 +455,30 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     }
 
     let headers = state.headers.lock().unwrap();
-    assert_eq!(headers.len(), 1);
-    assert_eq!(
-        header(&headers[0], AUTHORIZATION.as_str()).as_deref(),
-        Some("Bearer account-access")
-    );
-    assert_eq!(
-        header(&headers[0], "chatgpt-account-id").as_deref(),
-        Some("provider-account")
-    );
-    assert_eq!(
-        header(&headers[0], "originator").as_deref(),
-        Some("codex_test")
-    );
-    assert_eq!(
-        header(&headers[0], "x-openai-internal-codex-responses-lite").as_deref(),
-        Some("true")
-    );
-    let beta = headers[0]
-        .get_all("openai-beta")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .collect::<Vec<_>>()
-        .join(",");
-    assert!(beta.contains("existing_feature=1"));
-    assert!(beta.contains("responses_websockets=2026-02-06"));
+    assert_eq!(headers.len(), 2);
+    for headers in headers.iter() {
+        assert_eq!(
+            header(headers, AUTHORIZATION.as_str()).as_deref(),
+            Some("Bearer account-access")
+        );
+        assert_eq!(
+            header(headers, "chatgpt-account-id").as_deref(),
+            Some("provider-account")
+        );
+        assert_eq!(header(headers, "originator").as_deref(), Some("codex_test"));
+        assert_eq!(
+            header(headers, "x-openai-internal-codex-responses-lite").as_deref(),
+            Some("true")
+        );
+        let beta = headers
+            .get_all("openai-beta")
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(beta.contains("existing_feature=1"));
+        assert!(beta.contains("responses_websockets=2026-02-06"));
+    }
     drop(headers);
 
     let requests = state.requests.lock().unwrap();
@@ -430,6 +501,334 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert!(events.iter().all(|event| event.reasoning_tokens == Some(2)));
     assert!(events.iter().all(|event| event.total_tokens == Some(16)));
     assert!(events.iter().all(|event| event.ttft_ms.is_some()));
+}
+
+#[tokio::test]
+async fn account_websocket_retries_retryable_first_event_and_early_close() {
+    let (status_upstream, status_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
+            "type": "error",
+            "status": 502,
+            "error": {"message": "synthetic upstream failure"}
+        })])))
+        .await;
+    let (closed_upstream, closed_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Close).await;
+    let (success_upstream, success_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "status-account", "status-access").await;
+    register_ready(&authority, "closed-account", "closed-access").await;
+    register_ready(&authority, "success-account", "success-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("status-account", "provider-status", &status_upstream, 300),
+            account("closed-account", "provider-closed", &closed_upstream, 200),
+            account(
+                "success-account",
+                "provider-success",
+                &success_upstream,
+                100,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "retry me"}).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let first = receive_websocket_json(&mut socket).await;
+    assert_eq!(first["type"], "response.output_text.delta");
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["type"],
+        "response.completed"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(status_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(closed_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(success_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_websocket")
+    );
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("upstream_websocket_closed")
+    );
+    assert!(events[2].success);
+}
+
+#[tokio::test]
+async fn account_websocket_does_not_retry_after_output_begins() {
+    let (failing_upstream, failing_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+            json!({"type": "response.output_text.delta", "delta": "partial"}),
+            json!({
+                "type": "error",
+                "status": 502,
+                "error": {"message": "synthetic late failure"}
+            }),
+        ])))
+        .await;
+    let (reserve_upstream, reserve_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "failing-account", "failing-access").await;
+    register_ready(&authority, "reserve-account", "reserve-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account(
+                "failing-account",
+                "provider-failing",
+                &failing_upstream,
+                200,
+            ),
+            account(
+                "reserve-account",
+                "provider-reserve",
+                &reserve_upstream,
+                100,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "do not replay"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.output_text.delta"
+    );
+    assert_eq!(receive_websocket_json(&mut socket).await["type"], "error");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(failing_state.requests.lock().unwrap().len(), 1);
+    assert!(reserve_state.requests.lock().unwrap().is_empty());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
+}
+
+#[tokio::test]
+async fn account_websocket_reselects_for_each_independent_request() {
+    let (first_upstream, first_state) = spawn_websocket_upstream().await;
+    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    for input in ["first independent request", "second independent request"] {
+        socket
+            .send(ClientWsMessage::Text(
+                json!({"type": "response.create", "model": MODEL, "input": input}).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive_websocket_json(&mut socket).await["type"],
+            "response.output_text.delta"
+        );
+        assert_eq!(
+            receive_websocket_completion(&mut socket).await["type"],
+            "response.completed"
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_ne!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
+async fn account_websocket_keeps_previous_response_on_its_current_account() {
+    let (first_upstream, first_state) = spawn_websocket_upstream().await;
+    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    for request in [
+        json!({"type": "response.create", "model": MODEL, "input": "start"}),
+        json!({
+            "type": "response.create",
+            "model": MODEL,
+            "input": "continue",
+            "previous_response_id": "resp_previous"
+        }),
+    ] {
+        socket
+            .send(ClientWsMessage::Text(request.to_string()))
+            .await
+            .unwrap();
+        let _ = receive_websocket_json(&mut socket).await;
+        let _ = receive_websocket_completion(&mut socket).await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let counts = [
+        first_state.requests.lock().unwrap().len(),
+        second_state.requests.lock().unwrap().len(),
+    ];
+    assert!(counts == [2, 0] || counts == [0, 2]);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
+async fn account_websocket_restores_previous_response_affinity_after_reconnect() {
+    let (first_upstream, first_state) = spawn_websocket_upstream().await;
+    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let upgraded = client
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "start"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let completed = receive_websocket_completion(&mut socket).await;
+    let response_id = completed["response"]["id"].as_str().unwrap().to_string();
+    drop(socket);
+
+    let upgraded = client
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue after reconnect",
+                "previous_response_id": response_id
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let _ = receive_websocket_completion(&mut socket).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let counts = [
+        first_state.requests.lock().unwrap().len(),
+        second_state.requests.lock().unwrap().len(),
+    ];
+    assert!(counts == [2, 0] || counts == [0, 2]);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].candidate_id, events[1].candidate_id);
 }
 
 #[tokio::test]
@@ -1135,7 +1534,16 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
 }
 
 async fn spawn_websocket_upstream() -> (TestServer, WebSocketUpstreamState) {
-    let state = WebSocketUpstreamState::default();
+    spawn_websocket_upstream_with_behavior(WebSocketBehavior::Success).await
+}
+
+async fn spawn_websocket_upstream_with_behavior(
+    behavior: WebSocketBehavior,
+) -> (TestServer, WebSocketUpstreamState) {
+    let state = WebSocketUpstreamState {
+        behavior,
+        ..WebSocketUpstreamState::default()
+    };
     let app = Router::new()
         .route("/v1/responses", get(upstream_websocket))
         .with_state(state.clone());
@@ -1235,20 +1643,9 @@ async fn upstream_websocket(
                 break;
             };
             state.requests.lock().unwrap().push(request);
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            if socket
-                .send(AxumWsMessage::Text(
-                    json!({"type": "response.output_text.delta", "delta": "hello"})
-                        .to_string()
-                        .into(),
-                ))
-                .await
-                .is_err()
-            {
-                break;
-            }
-            if socket
-                .send(AxumWsMessage::Text(
+            let events = match &state.behavior {
+                WebSocketBehavior::Success => vec![
+                    json!({"type": "response.output_text.delta", "delta": "hello"}),
                     json!({
                         "type": "response.completed",
                         "response": {
@@ -1261,20 +1658,29 @@ async fn upstream_websocket(
                                 "total_tokens": 16
                             }
                         }
-                    })
-                    .to_string()
-                    .into(),
-                ))
-                .await
-                .is_err()
-            {
-                break;
+                    }),
+                ],
+                WebSocketBehavior::Events(events) => events.as_ref().clone(),
+                WebSocketBehavior::Close => {
+                    let _ = socket.send(AxumWsMessage::Close(None)).await;
+                    return;
+                }
+            };
+            for event in events {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                if socket
+                    .send(AxumWsMessage::Text(event.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
         }
     })
 }
 
-async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {
+async fn receive_websocket_json(socket: &mut reqwest_websocket::WebSocket) -> Value {
     loop {
         let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
             .await
@@ -1282,10 +1688,16 @@ async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket)
             .unwrap()
             .unwrap();
         if let ClientWsMessage::Text(text) = message {
-            let value: Value = serde_json::from_str(&text).unwrap();
-            if value["type"] == "response.completed" {
-                return value;
-            }
+            return serde_json::from_str(&text).unwrap();
+        }
+    }
+}
+
+async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    loop {
+        let value = receive_websocket_json(socket).await;
+        if value["type"] == "response.completed" {
+            return value;
         }
     }
 }

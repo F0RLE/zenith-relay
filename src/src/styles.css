@@ -3448,7 +3448,7 @@ textarea {
 }
 
 .pool-summary {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin: 14px 0;
 }
 
@@ -6140,7 +6140,7 @@ input[type="password"] {
   .relay-page-actions .relay-button[data-action="pool-toggle"] span { display: none; }
   .overview-status-band { grid-template-columns: auto minmax(0, 1fr) auto minmax(120px, auto); }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  .pool-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .pool-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .overview-split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .runtime-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .settings-layout { grid-template-columns: 156px minmax(0, 1fr); }

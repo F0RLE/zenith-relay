@@ -552,8 +552,10 @@ Core scheduler state:
 ```text
 PoolScheduler
   candidates: candidate_id -> RuntimeCandidate
-  affinity: bounded session key -> candidate id
+  session_affinity: bounded optional session key -> candidate id
+  response_affinity: bounded response id -> creating candidate id (24h TTL)
   in_flight: candidate_id -> active request count
+  dispatches: candidate_id -> committed request count
 
 RuntimeCandidate
   kind: OAuth account or API source
@@ -578,14 +580,17 @@ Selection contract:
 1. Normalize source/account scope from local key policy.
 2. Apply hard gates.
 3. Promote expired cooldown entries.
-4. If session affinity points to a valid ready candidate, use it.
-5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request load normalized by traffic share.
-7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then the greatest known minimum quota reserve, least recently used, manual
-   tie-break priority, weight, and stable id.
-8. Exclude candidates already tried for this request.
-9. If all candidates are cooling down, return a local cooldown diagnostic with
+4. If a previous-response binding exists, require its creating candidate; a
+   cooldown or failed preparation does not authorize cross-account replay.
+5. Otherwise, if session affinity points to a valid ready candidate, use it.
+6. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+7. Prefer the lowest active-request load normalized by `weight * available
+   quota reserve`; this gives parallel requests proportional capacity.
+8. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
+   then committed dispatch balance, least recently used, manual tie-break
+   priority, weight, and stable id.
+9. Exclude candidates already tried for this request.
+10. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
 
 Single-source and mixed-source paths should share the same candidate state
@@ -866,7 +871,7 @@ key.account_ids set   -> key.account_ids
 Then it applies:
 
 1. model, health, cooldown, quota, and Free-policy hard filters;
-2. valid session affinity or previous response id pinning;
+2. mandatory previous-response binding, or valid session affinity;
 3. API-source role tier;
 4. active load normalized by traffic share;
 5. OAuth preference, minimum quota reserve, LRU, and final manual tie-breaks;
@@ -892,7 +897,8 @@ Each request should run through an attempt loop:
 5. Execute canonical model or model pool entry.
 6. Mark result with success/failure, status, retry-after, and model id.
 7. If request shape is invalid, stop immediately.
-8. If failure is retryable and no payload bytes were sent, try next candidate.
+8. If failure is retryable and no application event was sent, try next
+   candidate. Once a stream event is forwarded, replay is forbidden.
 9. Stop when `max_retry_candidates` is reached.
 
 `tried` and `attempted` should be separate:

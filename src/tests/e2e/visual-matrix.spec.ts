@@ -191,7 +191,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     const members = page.locator(".pool-member-list");
     await expect(members.locator(".pool-member-card")).toHaveCount(5);
-    await expect(page.locator(".pool-summary > div")).toHaveCount(3);
+    await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members).toHaveAttribute("data-layout", "list");
     await expect(members).toContainText("Pro account · Pro");
     await expect(members).toContainText("API-экв.");

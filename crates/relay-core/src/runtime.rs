@@ -880,7 +880,20 @@ impl GatewayRuntime {
         }
         Some(format!(
             "{:x}",
-            Sha256::digest(format!("{wire_api:?}\0{model}\0{key_id}\0{session}").as_bytes())
+            Sha256::digest(
+                format!("session\0{wire_api:?}\0{model}\0{key_id}\0{session}").as_bytes()
+            )
+        ))
+    }
+
+    pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
+        let response_id = response_id?.trim();
+        if response_id.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{:x}",
+            Sha256::digest(format!("response\0{response_id}").as_bytes())
         ))
     }
 
@@ -888,6 +901,18 @@ impl GatewayRuntime {
         if let Some(key) = key {
             self.lock_scheduler()
                 .bind_affinity(key, candidate_id, now_ms);
+        }
+    }
+
+    pub(crate) fn bind_response_affinity(
+        &self,
+        response_id: Option<&str>,
+        candidate_id: &str,
+        now_ms: u64,
+    ) {
+        if let Some(key) = self.response_affinity_key(response_id) {
+            self.lock_scheduler()
+                .bind_response_affinity(key, candidate_id, now_ms);
         }
     }
 

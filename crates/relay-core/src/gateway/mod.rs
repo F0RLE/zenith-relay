@@ -30,7 +30,7 @@ const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lit
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
-type CompletionCallback = Arc<dyn Fn(&mut UsageEvent) + Send + Sync>;
+type CompletionCallback = Arc<dyn Fn(&mut UsageEvent, Option<&str>) + Send + Sync>;
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
@@ -306,7 +306,11 @@ async fn execute_client_request(
                 .codex_model_uses_responses_lite(&resolved_model)
                 .then(|| HeaderValue::from_static("true"))
         });
-    let affinity_key = runtime.affinity_key(&key.id, wire_api, &resolved_model, session.as_deref());
+    let session_affinity_key =
+        runtime.affinity_key(&key.id, wire_api, &resolved_model, session.as_deref());
+    let affinity_key = runtime
+        .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
+        .or_else(|| session_affinity_key.clone());
     execute_request(
         runtime,
         key,
@@ -316,6 +320,7 @@ async fn execute_client_request(
         stream,
         request_id(),
         affinity_key,
+        session_affinity_key,
         wire_api,
         responses_lite,
     )
@@ -332,6 +337,7 @@ async fn execute_request(
     stream: bool,
     request_id: String,
     affinity_key: Option<String>,
+    session_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
 ) -> Response<Body> {
@@ -679,7 +685,17 @@ async fn execute_request(
             event.consecutive_failures = Some(0);
             populate_tokens(&mut event, &bytes);
             emit_usage(&runtime, event);
-            runtime.bind_affinity(affinity_key.as_deref(), &route.candidate_id, now_ms());
+            runtime.bind_affinity(
+                session_affinity_key.as_deref(),
+                &route.candidate_id,
+                now_ms(),
+            );
+            let completed_response_id = response_id_from_bytes(&bytes);
+            runtime.bind_response_affinity(
+                completed_response_id.as_deref(),
+                &route.candidate_id,
+                now_ms(),
+            );
             if stream {
                 let body = match wire_api {
                     WireApi::Responses => completed_sse(&bytes),
@@ -699,8 +715,8 @@ async fn execute_request(
                 let completion_runtime = runtime.clone();
                 let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
-                let completion_affinity = affinity_key.clone();
-                let completion: CompletionCallback = Arc::new(move |event| {
+                let completion_affinity = session_affinity_key.clone();
+                let completion: CompletionCallback = Arc::new(move |event, response_id| {
                     lease.release();
                     if event.success {
                         completion_runtime.record_success(
@@ -711,6 +727,11 @@ async fn execute_request(
                         event.consecutive_failures = Some(0);
                         completion_runtime.bind_affinity(
                             completion_affinity.as_deref(),
+                            &completion_source,
+                            now_ms(),
+                        );
+                        completion_runtime.bind_response_affinity(
+                            response_id,
                             &completion_source,
                             now_ms(),
                         );
@@ -1622,14 +1643,9 @@ fn exponential_backoff_ms(consecutive_failures: u32) -> u64 {
 
 fn affinity_session(headers: &HeaderMap, request: &Value) -> Option<String> {
     request
-        .get("previous_response_id")
+        .get("metadata")
+        .and_then(|metadata| metadata.get("user_id"))
         .and_then(Value::as_str)
-        .or_else(|| {
-            request
-                .get("metadata")
-                .and_then(|metadata| metadata.get("user_id"))
-                .and_then(Value::as_str)
-        })
         .or_else(|| header_value(headers, "x-session-id"))
         .or_else(|| header_value(headers, "session_id"))
         .or_else(|| header_value(headers, "x-amp-thread-id"))
@@ -1834,6 +1850,7 @@ struct UsageStream<S> {
     callback: crate::UsageCallback,
     completion: CompletionCallback,
     event: Option<UsageEvent>,
+    response_id: Option<String>,
     started: Instant,
     sse_pending: Vec<u8>,
     output_pending: VecDeque<Bytes>,
@@ -1853,6 +1870,7 @@ impl<S> UsageStream<S> {
             callback,
             completion,
             event: Some(event),
+            response_id: None,
             started,
             sse_pending: Vec::new(),
             output_pending: VecDeque::new(),
@@ -1871,7 +1889,7 @@ impl<S> UsageStream<S> {
             event.error_category = Some(category.to_string());
         }
         event.latency_ms = self.started.elapsed().as_millis() as u64;
-        (self.completion)(&mut event);
+        (self.completion)(&mut event, self.response_id.as_deref());
         emit_callback(&self.callback, event);
     }
 
@@ -1915,6 +1933,9 @@ impl<S> UsageStream<S> {
                 if let Some(current) = self.event.as_mut() {
                     apply_usage(current, &usage);
                 }
+            }
+            if terminal.response_id.is_some() {
+                self.response_id = terminal.response_id;
             }
             self.output_pending.push_back(Bytes::from(event));
             match terminal.outcome {
@@ -1984,6 +2005,7 @@ struct TerminalEvent {
     has_output_delta: bool,
     outcome: Option<TerminalOutcome>,
     usage: Option<Value>,
+    response_id: Option<String>,
     response: Option<Value>,
     output_item: Option<Value>,
 }
@@ -2029,6 +2051,7 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             has_output_delta: false,
             outcome: Some(TerminalOutcome::Success),
             usage: None,
+            response_id: None,
             response: None,
             output_item: None,
         };
@@ -2049,6 +2072,7 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
     };
     let has_output_delta = has_output_delta(&value, event_type);
     let usage = find_usage(&value).cloned();
+    let response_id = response_id(&value).map(str::to_string);
     let response = value.get("response").cloned();
     let output_item = (value.get("type").and_then(Value::as_str)
         == Some("response.output_item.done"))
@@ -2060,6 +2084,7 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         has_output_delta,
         outcome,
         usage,
+        response_id,
         response,
         output_item,
     }
@@ -2229,6 +2254,22 @@ fn find_usage(value: &Value) -> Option<&Value> {
     })
 }
 
+fn response_id(value: &Value) -> Option<&str> {
+    value
+        .pointer("/response/response/id")
+        .or_else(|| value.pointer("/response/id"))
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn response_id_from_bytes(body: &[u8]) -> Option<String> {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| response_id(&value).map(str::to_string))
+}
+
 impl<S> Drop for UsageStream<S> {
     fn drop(&mut self) {
         self.finish(Some(false), Some("client_cancelled"));
@@ -2272,7 +2313,7 @@ mod tests {
                 total_tokens: None,
             },
             Instant::now(),
-            Arc::new(|_| {}),
+            Arc::new(|_, _| {}),
         );
         stream.ingest_sse(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
         assert!(stream.terminated);
@@ -2313,7 +2354,7 @@ mod tests {
             Arc::new(move |event| captured.lock().unwrap().push(event)),
             test_usage_event(),
             Instant::now(),
-            Arc::new(|_| {}),
+            Arc::new(|_, _| {}),
         );
         stream.ingest_sse(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",

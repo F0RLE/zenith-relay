@@ -3,6 +3,7 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 struct Binding {
     candidate_id: String,
+    ttl_ms: u64,
     expires_at: u64,
     last_touched_at: u64,
 }
@@ -35,13 +36,23 @@ impl AffinityCache {
         let Some(binding) = self.bindings.get_mut(key) else {
             return false;
         };
-        binding.expires_at = now_ms.saturating_add(self.ttl_ms);
+        binding.expires_at = now_ms.saturating_add(binding.ttl_ms);
         binding.last_touched_at = now_ms;
         true
     }
 
     pub fn bind(&mut self, key: impl Into<String>, candidate_id: impl Into<String>, now_ms: u64) {
-        if self.max_entries == 0 || self.ttl_ms == 0 {
+        self.bind_for(key, candidate_id, now_ms, self.ttl_ms);
+    }
+
+    pub fn bind_for(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: impl Into<String>,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) {
+        if self.max_entries == 0 || ttl_ms == 0 {
             return;
         }
         self.prune(now_ms);
@@ -53,7 +64,8 @@ impl AffinityCache {
             key,
             Binding {
                 candidate_id: candidate_id.into(),
-                expires_at: now_ms.saturating_add(self.ttl_ms),
+                ttl_ms,
+                expires_at: now_ms.saturating_add(ttl_ms),
                 last_touched_at: now_ms,
             },
         );
@@ -122,5 +134,10 @@ mod tests {
         assert!(!cache.refresh("new", 13));
         assert_eq!(cache.get("new", 13), None);
         assert!(cache.is_empty());
+
+        let mut disabled_default = AffinityCache::new(1, 0);
+        disabled_default.bind_for("response", "a", 20, 5);
+        assert_eq!(disabled_default.get("response", 24), Some("a"));
+        assert_eq!(disabled_default.get("response", 25), None);
     }
 }

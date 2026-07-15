@@ -78,7 +78,7 @@ export function PoolPage() {
 
 function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolicy: () => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
+  const { mode, runtime, perform, busy, codexPoolOauthSelection } = useRelayState();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -104,22 +104,28 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
     ? relayCommands.refreshPoolAccountQuotas()
     : relayCommands.remoteAction({ type: "refresh_pool_quotas" }), "feedback.refreshed");
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
-  const counts = { healthy: members.filter(poolMemberReady).length, limited: members.filter((item) => item.enabled && !poolMemberReady(item)).length, disabled: members.filter((item) => !item.enabled).length };
+  const statuses = members.map(poolMemberStatus);
+  const counts = {
+    rotation: statuses.filter((status) => status === "rotation").length,
+    quotaWait: statuses.filter((status) => status === "quotaWait").length,
+    unavailable: statuses.filter((status) => status === "unavailable").length,
+    disabled: statuses.filter((status) => status === "disabled").length,
+  };
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
         <label className="account-sort-select" title={t("pool.routingOrderHint")}><ArrowUpDown aria-hidden /><span>{t("pool.sortLabel")}</span><select aria-label={t("pool.sortLabel")} value={sortBy} onChange={(event) => setSortBy(event.target.value as MemberSort)}><option value="routing">{t("pool.sort.routing")}</option><option value="quota">{t("pool.sort.quota")}</option><option value="name">{t("pool.sort.name")}</option></select></label>
         <div className="inline-actions pool-quota-actions"><div className="view-layout-switcher" role="group" aria-label={t("pool.layout.label")}><IconButton label={t("pool.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")} icon={<Rows3 aria-hidden />} /><IconButton label={t("pool.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")} icon={<List aria-hidden />} /><IconButton label={t("pool.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")} icon={<LayoutGrid aria-hidden />} /></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button><IconButton label={t("pool.refreshPolicy")} icon={<Settings2 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} /></div>
       </div>
-      <div className="pool-summary"><div><span>{t("pool.healthy")}</span><strong>{counts.healthy}</strong></div><div><span>{t("pool.limited")}</span><strong>{counts.limited}</strong></div><div><span>{t("common.disabled")}</span><strong>{counts.disabled}</strong></div></div>
+      <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><strong>{counts.quotaWait}</strong></div><div><span>{t("pool.memberStatus.unavailable")}</span><strong>{counts.unavailable}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><strong>{counts.disabled}</strong></div></div>
     </div>
     <div className="pool-member-list" role="list" aria-label={t("pool.members")} data-layout={layout}>
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
-        const ready = poolMemberReady(member);
         const excludedByFreePolicy = member.kind === "account" && member.routingExclusion === "free_plan_policy";
-        const statusKey = !member.enabled ? "disabled" : excludedByFreePolicy ? "freePolicy" : ready ? "ready" : "limited";
-        const statusTone = !member.enabled ? "disabled" : ready ? "ready" : "warning";
+        const statusKey = poolMemberStatus(member);
+        const statusTone = statusKey === "rotation" ? "ready" : statusKey === "disabled" ? "disabled" : statusKey === "quotaWait" ? "warning" : "error";
+        const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
           ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
@@ -128,7 +134,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label}>
           <div className="pool-member-card-main">
-            <div className="pool-member-state"><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} /><small>{t(`pool.types.${member.kind}`)}</small></div>
+            <div className="pool-member-state" title={excludedByFreePolicy ? t("pool.freePolicyHint") : undefined}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} /><small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small></div>
             <div className="pool-member-identity"><strong title={identity}>{identity}</strong><small title={detail}>{detail}</small></div>
             <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
@@ -396,8 +402,6 @@ function comparePoolMembers(left: Member, right: Member, sortBy: MemberSort) {
     || Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right))
     || memberRoutingTier(right) - memberRoutingTier(left)
     || comparePoolQuota(right, left)
-    || right.priority - left.priority
-    || right.weight - left.weight
     || memberName(left).localeCompare(memberName(right));
 }
 function comparePoolQuota(left: Member, right: Member) {
@@ -422,6 +426,11 @@ function memberRoutingTier(member: Member) {
   return role === "primary" ? 1 : role === "reserve" ? -1 : 0;
 }
 function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
+function poolMemberStatus(member: Member): "rotation" | "quotaWait" | "unavailable" | "disabled" {
+  if (!member.enabled) return "disabled";
+  if (member.kind === "account" && (memberRoutingExcluded(member) || [member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0))) return "quotaWait";
+  return poolMemberReady(member) ? "rotation" : "unavailable";
+}
 function poolMemberReady(member: Member) {
   if (!member.enabled || member.draining || !["unknown", "healthy", "degraded"].includes(member.health) || !member.secretAvailable || memberRoutingExcluded(member)) return false;
   return member.kind === "source" || (member.proxyAvailable !== false && ![member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0));

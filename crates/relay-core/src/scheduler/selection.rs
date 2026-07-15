@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, HashSet};
 
 const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
+const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
+const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 
 pub struct SelectionRequest<'a> {
     pub model: &'a str,
@@ -25,16 +27,23 @@ pub struct Selection {
 #[derive(Clone, Debug)]
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
-    affinity: AffinityCache,
+    session_affinity: AffinityCache,
+    response_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
+    dispatches: BTreeMap<String, u64>,
 }
 
 impl PoolScheduler {
     pub fn new(max_affinity_entries: usize, affinity_ttl_ms: u64) -> Self {
         Self {
             candidates: BTreeMap::new(),
-            affinity: AffinityCache::new(max_affinity_entries, affinity_ttl_ms),
+            session_affinity: AffinityCache::new(max_affinity_entries, affinity_ttl_ms),
+            response_affinity: AffinityCache::new(
+                RESPONSE_AFFINITY_MAX_ENTRIES,
+                RESPONSE_AFFINITY_TTL_MS,
+            ),
             in_flight: BTreeMap::new(),
+            dispatches: BTreeMap::new(),
         }
     }
 
@@ -43,8 +52,10 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
-        self.affinity.invalidate_candidate(candidate_id);
+        self.session_affinity.invalidate_candidate(candidate_id);
+        self.response_affinity.invalidate_candidate(candidate_id);
         self.in_flight.remove(candidate_id);
+        self.dispatches.remove(candidate_id);
         self.candidates.remove(candidate_id)
     }
 
@@ -57,11 +68,37 @@ impl PoolScheduler {
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
+        if let Some(key) = request.affinity_key {
+            if let Some(candidate_id) = self
+                .response_affinity
+                .get(key, request.now_ms)
+                .map(str::to_string)
+            {
+                let eligible = self.candidates.get(&candidate_id).is_some_and(|candidate| {
+                    !request.tried.contains(&candidate_id)
+                        && candidate.is_eligible(
+                            request.model,
+                            request.allowed_protocols,
+                            request.scope,
+                            request.now_ms,
+                        )
+                });
+                if eligible {
+                    self.response_affinity.refresh(key, request.now_ms);
+                    return Some(Selection {
+                        candidate_id,
+                        affinity_hit: true,
+                    });
+                }
+                return None;
+            }
+        }
+
         if let (Some(key), Some(candidate_id)) = (
             request.affinity_key,
             request
                 .affinity_key
-                .and_then(|key| self.affinity.get(key, request.now_ms))
+                .and_then(|key| self.session_affinity.get(key, request.now_ms))
                 .map(str::to_string),
         ) {
             match self.candidates.get(&candidate_id) {
@@ -74,7 +111,7 @@ impl PoolScheduler {
                             request.now_ms,
                         ) =>
                 {
-                    self.affinity.refresh(key, request.now_ms);
+                    self.session_affinity.refresh(key, request.now_ms);
                     return Some(Selection {
                         candidate_id,
                         affinity_hit: true,
@@ -88,7 +125,7 @@ impl PoolScheduler {
                         request.now_ms,
                     ) => {}
                 _ => {
-                    self.affinity.invalidate(key);
+                    self.session_affinity.invalidate(key);
                 }
             }
         }
@@ -110,6 +147,8 @@ impl PoolScheduler {
                     right,
                     self.in_flight.get(&left.id).copied().unwrap_or_default(),
                     self.in_flight.get(&right.id).copied().unwrap_or_default(),
+                    self.dispatches.get(&left.id).copied().unwrap_or_default(),
+                    self.dispatches.get(&right.id).copied().unwrap_or_default(),
                 )
             })
             .map(|candidate| Selection {
@@ -142,20 +181,35 @@ impl PoolScheduler {
         if !self.candidates.contains_key(candidate_id) {
             return false;
         }
-        self.affinity.bind(key, candidate_id, now_ms);
+        self.session_affinity.bind(key, candidate_id, now_ms);
+        true
+    }
+
+    pub fn bind_response_affinity(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        self.response_affinity.bind(key, candidate_id, now_ms);
         true
     }
 
     pub fn invalidate_affinity(&mut self, key: &str) -> bool {
-        self.affinity.invalidate(key)
+        self.session_affinity.invalidate(key) || self.response_affinity.invalidate(key)
     }
 
     pub fn invalidate_candidate_affinity(&mut self, candidate_id: &str) -> usize {
-        self.affinity.invalidate_candidate(candidate_id)
+        self.session_affinity.invalidate_candidate(candidate_id)
+            + self.response_affinity.invalidate_candidate(candidate_id)
     }
 
     pub fn clear_affinity(&mut self) {
-        self.affinity.clear();
+        self.session_affinity.clear();
+        self.response_affinity.clear();
     }
 
     pub(crate) fn reserve(&mut self, candidate_id: &str) -> bool {
@@ -164,6 +218,8 @@ impl PoolScheduler {
         }
         let in_flight = self.in_flight.entry(candidate_id.to_string()).or_default();
         *in_flight = in_flight.saturating_add(1);
+        let dispatches = self.dispatches.entry(candidate_id.to_string()).or_default();
+        *dispatches = dispatches.saturating_add(1);
         true
     }
 
@@ -224,11 +280,14 @@ fn compare_preference(
     right: &RuntimeCandidate,
     left_in_flight: u32,
     right_in_flight: u32,
+    left_dispatches: u64,
+    right_dispatches: u64,
 ) -> Ordering {
     routing_tier(left)
         .cmp(&routing_tier(right))
         .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
         .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
+        .then_with(|| compare_weighted_dispatches(left, right, left_dispatches, right_dispatches))
         .then_with(|| left.quota.compare_preference(right.quota))
         .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.priority.cmp(&right.priority))
@@ -255,8 +314,22 @@ fn compare_weighted_load(
     left_in_flight: u32,
     right_in_flight: u32,
 ) -> Ordering {
-    (u128::from(right_in_flight) * u128::from(left.weight))
-        .cmp(&(u128::from(left_in_flight) * u128::from(right.weight)))
+    (u128::from(right_in_flight) * effective_weight(left))
+        .cmp(&(u128::from(left_in_flight) * effective_weight(right)))
+}
+
+fn compare_weighted_dispatches(
+    left: &RuntimeCandidate,
+    right: &RuntimeCandidate,
+    left_dispatches: u64,
+    right_dispatches: u64,
+) -> Ordering {
+    (u128::from(right_dispatches) * effective_weight(left))
+        .cmp(&(u128::from(left_dispatches) * effective_weight(right)))
+}
+
+fn effective_weight(candidate: &RuntimeCandidate) -> u128 {
+    u128::from(candidate.weight.max(1)) * u128::from(candidate.quota.routing_weight_factor())
 }
 
 fn compare_lru(left: Option<u64>, right: Option<u64>) -> Ordering {
@@ -574,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn active_requests_spread_before_quota_and_release_restores_preference() {
+    fn active_requests_spread_and_committed_dispatches_remain_fair_after_release() {
         let mut scheduler = PoolScheduler::new(1, 100);
         let mut full = candidate("full");
         full.quota = CandidateQuota::Available(100);
@@ -597,8 +670,59 @@ mod tests {
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
+            "low"
+        );
+        assert!(scheduler.reserve("low"));
+        assert!(scheduler.release("low"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
             "full"
         );
+    }
+
+    #[test]
+    fn sequential_requests_follow_configured_weight_and_available_quota() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+
+        let mut counts = BTreeMap::new();
+        for _ in 0..70 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selected.candidate_id));
+            *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
+            assert!(scheduler.release(&selected.candidate_id));
+        }
+
+        assert_eq!(counts.get("full"), Some(&40));
+        assert_eq!(counts.get("half"), Some(&20));
+        assert_eq!(counts.get("quarter"), Some(&10));
+    }
+
+    #[test]
+    fn concurrent_requests_follow_available_quota_headroom() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+
+        let mut counts = BTreeMap::new();
+        for _ in 0..7 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selected.candidate_id));
+            *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
+        }
+
+        assert_eq!(counts.get("full"), Some(&4));
+        assert_eq!(counts.get("half"), Some(&2));
+        assert_eq!(counts.get("quarter"), Some(&1));
     }
 
     #[test]
@@ -656,6 +780,47 @@ mod tests {
                 .unwrap()
                 .candidate_id,
             "preferred"
+        );
+    }
+
+    #[test]
+    fn response_affinity_is_mandatory_when_session_affinity_is_disabled() {
+        let mut scheduler = PoolScheduler::new(0, 0);
+        scheduler.upsert(candidate("creator"));
+        let mut fallback = candidate("fallback");
+        fallback.priority = 10;
+        scheduler.upsert(fallback);
+        assert!(scheduler.bind_response_affinity("response", "creator", 0));
+
+        let scope = CandidateScope::default();
+        let empty = HashSet::new();
+        assert_eq!(
+            scheduler.select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &empty,
+                affinity_key: Some("response"),
+                now_ms: 1,
+            }),
+            Some(Selection {
+                candidate_id: "creator".to_string(),
+                affinity_hit: true,
+            })
+        );
+
+        scheduler.set_cooldown("creator", "gpt-5", 10);
+        assert_eq!(
+            scheduler.select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &empty,
+                affinity_key: Some("response"),
+                now_ms: 1,
+            }),
+            None,
+            "a continuation cannot move to a candidate that did not create the response"
         );
     }
 

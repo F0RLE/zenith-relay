@@ -633,21 +633,27 @@ Selection:
 
 1. Use local key source/account scope.
 2. Apply hard gates.
-3. If session binding still points to healthy capable candidate, use it.
-4. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-5. Prefer the lowest active-request load normalized by traffic share.
-6. Within the tier, prefer OAuth when otherwise equal, then the greatest known
-   minimum quota reserve, least recently used, manual tie-break priority,
-   weight, and stable id.
-7. Exclude already tried candidates for this request.
-8. If all candidates are cooling down, return cooldown diagnostic.
+3. If `previous_response_id` resolves to a response binding, require the
+   creating candidate; never replay that continuation through another account.
+4. Otherwise, use a valid session binding when it still points to a healthy
+   capable candidate.
+5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+6. Prefer the lowest active-request load normalized by traffic share.
+7. Within the tier, prefer OAuth when otherwise equal, then the greatest known
+   minimum quota reserve, least recently used, committed dispatch balance,
+   manual tie-break priority, weight, and stable id.
+8. Exclude already tried candidates for this request.
+9. If all candidates are cooling down, return cooldown diagnostic.
 
 `tried` and `attempted` stay separate. A candidate can be tried but not
 attempted when it fails mapping/preparation before executor call.
 
 ## Stream Retry Contract
 
-Streaming retry is allowed only before payload reaches client.
+Streaming retry is allowed only before the first application event reaches the
+client. A WebSocket bootstrap error, early close, or transport failure may pick
+the next candidate; after the first event, the gateway forwards the terminal
+failure and never transparently replays the request.
 
 Flow:
 

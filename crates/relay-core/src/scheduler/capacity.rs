@@ -24,4 +24,12 @@ impl CandidateQuota {
             _ => Ordering::Equal,
         }
     }
+
+    pub(crate) fn routing_weight_factor(self) -> u64 {
+        match self {
+            Self::Available(remaining) => remaining,
+            Self::Unknown => 10_000,
+            Self::Exhausted | Self::Stale => 0,
+        }
+    }
 }
