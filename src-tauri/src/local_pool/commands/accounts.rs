@@ -1,5 +1,6 @@
 use super::{
     current_time_ms, restart_or_rollback, sync_accounts_or_rollback, sync_records_or_rollback,
+    sync_refreshed_account_or_rollback,
 };
 use crate::local_pool::{
     accounts::{
@@ -40,7 +41,7 @@ use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -1532,6 +1533,7 @@ pub(crate) async fn refresh_account_quota_once(
         .account(account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    let previous_models = account.models.iter().cloned().collect::<BTreeSet<_>>();
     if account.account.subscription.active_until_ms.is_none()
         && subscription.active_until_ms.is_some()
     {
@@ -1549,8 +1551,10 @@ pub(crate) async fn refresh_account_quota_once(
         }
     };
     apply_model_discovery(&mut account, discovered_models);
+    let models_changed = account.models.iter().cloned().collect::<BTreeSet<_>>() != previous_models;
     state.store()?.upsert_account(account.clone())?;
-    sync_accounts_or_rollback(state, old_accounts, old_keys).await?;
+    sync_refreshed_account_or_rollback(state, account_id, models_changed, old_accounts, old_keys)
+        .await?;
     Ok(AccountQuotaRefreshResponse {
         account,
         quota: outcome,

@@ -714,6 +714,17 @@ impl GatewayRuntime {
         )
     }
 
+    pub fn update_candidate_availability(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota: CandidateQuota,
+    ) -> bool {
+        self.lock_scheduler()
+            .update_candidate_availability(candidate_id, enabled, health, quota)
+    }
+
     pub(crate) fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,

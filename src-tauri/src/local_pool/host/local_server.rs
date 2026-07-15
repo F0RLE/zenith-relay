@@ -14,6 +14,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
 struct RunningGateway {
     address: SocketAddr,
+    runtime: Arc<GatewayRuntime>,
     shutdown: oneshot::Sender<()>,
     task: tauri::async_runtime::JoinHandle<()>,
 }
@@ -41,8 +42,9 @@ impl GatewayManager {
             LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string())
         })?;
         let (shutdown, receiver) = oneshot::channel();
+        let server_runtime = runtime.clone();
         let task = tauri::async_runtime::spawn(async move {
-            let _ = axum::serve(listener, zenith_relay_core::gateway::router(runtime))
+            let _ = axum::serve(listener, zenith_relay_core::gateway::router(server_runtime))
                 .with_graceful_shutdown(async move {
                     let _ = receiver.await;
                 })
@@ -50,6 +52,7 @@ impl GatewayManager {
         });
         *running = Some(RunningGateway {
             address,
+            runtime,
             shutdown,
             task,
         });
@@ -75,6 +78,14 @@ impl GatewayManager {
             .as_ref()
             .map(|running| running.address)
     }
+
+    pub async fn runtime(&self) -> Option<Arc<GatewayRuntime>> {
+        self.running
+            .lock()
+            .await
+            .as_ref()
+            .map(|running| running.runtime.clone())
+    }
 }
 
 #[cfg(test)]
@@ -83,7 +94,9 @@ mod tests {
     use reqwest::StatusCode;
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
-    use zenith_relay_core::{LocalGatewayKey, ProviderSource, WireApi};
+    use zenith_relay_core::{
+        CandidateHealth, CandidateQuota, LocalGatewayKey, ProviderSource, WireApi,
+    };
 
     #[tokio::test]
     async fn stop_waits_until_the_same_port_can_be_rebound() {
@@ -172,6 +185,46 @@ mod tests {
             .unwrap();
         assert!(second_models.contains("model-two"));
         assert!(!second_models.contains("model-one"));
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn candidate_availability_updates_without_rebinding_the_listener() {
+        let manager = GatewayManager::default();
+        let runtime = test_runtime("source", "model", "key");
+        let address = manager.start(runtime.clone(), 0).await.unwrap();
+        let models_url = format!("http://{address}/v1/models");
+        let client = reqwest::Client::new();
+        assert!(client
+            .get(&models_url)
+            .bearer_auth("key")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .contains("model"));
+
+        let running_runtime = manager.runtime().await.unwrap();
+        assert!(Arc::ptr_eq(&running_runtime, &runtime));
+        assert!(running_runtime.update_candidate_availability(
+            "source",
+            false,
+            CandidateHealth::Healthy,
+            CandidateQuota::Exhausted,
+        ));
+        assert_eq!(manager.address().await, Some(address));
+        assert!(!client
+            .get(&models_url)
+            .bearer_auth("key")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .contains("model"));
         manager.stop().await;
     }
 

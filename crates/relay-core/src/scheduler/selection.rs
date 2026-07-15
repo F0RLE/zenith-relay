@@ -1,5 +1,6 @@
 use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
+use super::capacity::CandidateQuota;
 use crate::WireApi;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
@@ -65,6 +66,22 @@ impl PoolScheduler {
 
     pub fn candidates(&self) -> impl Iterator<Item = &RuntimeCandidate> {
         self.candidates.values()
+    }
+
+    pub fn update_candidate_availability(
+        &mut self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota: CandidateQuota,
+    ) -> bool {
+        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        candidate.enabled = enabled;
+        candidate.health = health;
+        candidate.quota = quota;
+        true
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
@@ -387,6 +404,42 @@ mod tests {
             affinity_key: None,
             now_ms: 100,
         })
+    }
+
+    #[test]
+    fn availability_updates_take_effect_while_candidate_is_in_flight() {
+        let mut scheduler = PoolScheduler::new(8, 60_000);
+        let first = oauth_candidate("first");
+        let second = oauth_candidate("second");
+        scheduler.upsert(first);
+        scheduler.upsert(second);
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "first"
+        );
+        assert!(scheduler.reserve("first"));
+
+        assert!(scheduler.update_candidate_availability(
+            "first",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Exhausted,
+        ));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "second"
+        );
+        assert!(scheduler.release("first"));
+        assert!(!scheduler.update_candidate_availability(
+            "missing",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Unknown,
+        ));
     }
 
     #[test]

@@ -213,6 +213,38 @@ async fn sync_accounts_or_rollback(
     .await
 }
 
+async fn sync_refreshed_account_or_rollback(
+    state: &DesktopState,
+    account_id: &str,
+    models_changed: bool,
+    old_accounts: Vec<super::models::LocalAccountRecord>,
+    old_keys: Vec<LocalGatewayKeyRecord>,
+) -> Result<()> {
+    if models_changed {
+        return sync_accounts_or_rollback(state, old_accounts, old_keys).await;
+    }
+    let Some(runtime) = state.gateway.runtime().await else {
+        return Ok(());
+    };
+    let (enabled, health, quota) = {
+        let store = state.store()?;
+        let account = store
+            .account(account_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+        (
+            account.account.enabled
+                && account.account.in_pool
+                && account_routing_allowed(store.gateway(), &account.account.subscription),
+            candidate_health(&account.account),
+            candidate_quota(&account.account.quota, current_time_ms()),
+        )
+    };
+    if runtime.update_candidate_availability(account_id, enabled, health, quota) {
+        return Ok(());
+    }
+    sync_accounts_or_rollback(state, old_accounts, old_keys).await
+}
+
 async fn sync_gateway_or_rollback(
     state: &DesktopState,
     old_gateway: GatewaySettings,
