@@ -4212,6 +4212,49 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.settings-storage-locations > div:first-child {
+  width: 100%;
+}
+
+.settings-path-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 14px;
+  margin: 6px 0 0;
+}
+
+.settings-path-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.settings-path-grid dt {
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.settings-path-grid dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--relay-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.settings-warning-note {
+  display: grid;
+  gap: 3px;
+  background: color-mix(in srgb, var(--relay-warning) 8%, var(--relay-surface));
+}
+
+.settings-warning-note code {
+  overflow-wrap: anywhere;
+}
+
 .settings-control-row .field-option-menu {
   width: min(220px, 46%);
   flex: 0 0 auto;

@@ -452,3 +452,12 @@ export type SupportBundlePreview = {
   };
   excluded: string[];
 };
+
+export type RelayStorageInfo = {
+  dataPath: string;
+  backupsPath: string;
+  exportsPath: string;
+  cachePath: string | null;
+  chatgptProfilePath: string;
+  legacyDataPath: string | null;
+};

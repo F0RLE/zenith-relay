@@ -1,8 +1,9 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Database, FolderOpen, History, Palette, RefreshCw, RotateCcw, Settings2, ShieldCheck, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION, restartApplication } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
+import type { RelayStorageInfo } from "../../api/types";
 import { Button, OptionMenu, PageHeader, StatusBadge } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
@@ -11,6 +12,15 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, resetOnboarding, perform, busy } = useRelayState();
+  const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
+  const [storageUnavailable, setStorageUnavailable] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void relayCommands.storageInfo()
+      .then((info) => { if (active) setStorageInfo(info); })
+      .catch(() => { if (active) setStorageUnavailable(true); });
+    return () => { active = false; };
+  }, []);
   const restore = () => { if (window.confirm(t("profiles.restoreConfirm"))) void perform("recovery-restore", relayCommands.restoreCodex, "feedback.restored"); };
   const reset = () => { if (window.confirm(t("settings.resetDataConfirm"))) void perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
   const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
@@ -33,8 +43,15 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       <SettingsGroup icon={<Database aria-hidden />} title={t("settings.storage")}>
-        <div className="settings-control-row"><div><strong>{t("settings.dataPath")}</strong><small><code>{t("settings.platformDataPath")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+        <div className="settings-control-row"><div><strong>{t("settings.dataPath")}</strong><small><code title={storageInfo?.dataPath}>{storageInfo?.dataPath ?? t(storageUnavailable ? "settings.pathUnavailable" : "settings.pathLoading")}</code></small></div><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "open-data"} onClick={() => perform("open-data", () => relayCommands.openFolder("data"), "feedback.opened")}>{t("settings.openData")}</Button></div>
+        <div className="settings-control-row settings-storage-locations"><div><strong>{t("settings.storageLocations")}</strong><dl className="settings-path-grid">
+          <StoragePath label={t("settings.backupsPath")} path={storageInfo?.backupsPath} />
+          <StoragePath label={t("settings.exportsPath")} path={storageInfo?.exportsPath} />
+          <StoragePath label={t("settings.cachePath")} path={storageInfo?.cachePath} />
+          <StoragePath label={t("settings.chatgptProfilePath")} path={storageInfo?.chatgptProfilePath} />
+        </dl></div></div>
         <div className="settings-control-row"><div><strong>{t("settings.retention")}</strong></div><span className="settings-value">30 {t("settings.days")}</span></div>
+        {storageInfo?.legacyDataPath && <p className="settings-note settings-warning-note"><strong>{t("settings.legacyDataFound")}</strong><code>{storageInfo.legacyDataPath}</code><span>{t("settings.legacyDataHint")}</span></p>}
       </SettingsGroup>
 
       <SettingsGroup icon={<ShieldCheck aria-hidden />} title={t("settings.security")}>
@@ -53,6 +70,11 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
     </div>
   </section>;
+}
+
+function StoragePath({ label, path }: { label: string; path: string | null | undefined }) {
+  const { t } = useTranslation();
+  return <div><dt>{label}</dt><dd><code title={path ?? undefined}>{path ?? t("settings.pathLoading")}</code></dd></div>;
 }
 
 function SettingsGroup({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {

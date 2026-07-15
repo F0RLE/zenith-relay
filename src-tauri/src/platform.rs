@@ -1,5 +1,9 @@
 use serde::Serialize;
-use std::{env, path::PathBuf};
+use std::{
+    env, fs,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Manager};
 
 #[derive(Clone, Debug, Serialize)]
@@ -57,14 +61,98 @@ fn user_home() -> PathBuf {
     }
 }
 
-pub fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+fn roaming_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
         .map_err(|err| format!("failed to resolve app data directory: {err}"))
 }
 
+fn local_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|err| format!("failed to resolve local app data directory: {err}"))
+}
+
+pub fn legacy_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(roaming_app_data_dir(app)?.join("local-pool"))
+}
+
 pub fn local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data_dir(app)?.join("local-pool"))
+    let target = local_app_data_dir(app)?.join("local-pool");
+    let legacy = legacy_local_pool_dir(app)?;
+    migrate_local_pool_dir(&legacy, &target)?;
+    Ok(target)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageMigration {
+    Current,
+    Moved,
+    Conflict,
+}
+
+fn migrate_local_pool_dir(legacy: &Path, target: &Path) -> Result<StorageMigration, String> {
+    if legacy == target {
+        validate_storage_directory(target)?;
+        return Ok(StorageMigration::Current);
+    }
+
+    let legacy_exists = validate_storage_directory(legacy)?;
+    let target_exists = validate_storage_directory(target)?;
+    if target_exists {
+        return Ok(if legacy_exists {
+            StorageMigration::Conflict
+        } else {
+            StorageMigration::Current
+        });
+    }
+    if !legacy_exists {
+        return Ok(StorageMigration::Current);
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("local app data path has no parent: {}", target.display()))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create local app data directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    fs::rename(legacy, target).map_err(|error| {
+        format!(
+            "failed to move local data from {} to {}: {error}",
+            legacy.display(),
+            target.display()
+        )
+    })?;
+    Ok(StorageMigration::Moved)
+}
+
+fn validate_storage_directory(path: &Path) -> Result<bool, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to inspect local data path {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "local data path must not be a symbolic link: {}",
+            path.display()
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "local data path is not a directory: {}",
+            path.display()
+        ));
+    }
+    Ok(true)
 }
 
 pub fn capabilities() -> PlatformCapabilities {
@@ -75,5 +163,109 @@ pub fn capabilities() -> PlatformCapabilities {
         folder_open: true,
         autostart: false,
         background_runtime: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_leaves_missing_legacy_storage_uncreated() {
+        let root = temp_root("missing");
+        let legacy = root.join("roaming/local-pool");
+        let target = root.join("local/local-pool");
+
+        assert_eq!(
+            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            StorageMigration::Current
+        );
+        assert!(!legacy.exists());
+        assert!(!target.exists());
+        cleanup(root);
+    }
+
+    #[test]
+    fn migration_moves_legacy_storage_without_copying() {
+        let root = temp_root("move");
+        let legacy = root.join("roaming/local-pool");
+        let target = root.join("local/local-pool");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("metadata.json"), "legacy").unwrap();
+
+        assert_eq!(
+            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            StorageMigration::Moved
+        );
+        assert!(!legacy.exists());
+        assert_eq!(
+            fs::read_to_string(target.join("metadata.json")).unwrap(),
+            "legacy"
+        );
+        cleanup(root);
+    }
+
+    #[test]
+    fn migration_does_not_merge_conflicting_stores() {
+        let root = temp_root("conflict");
+        let legacy = root.join("roaming/local-pool");
+        let target = root.join("local/local-pool");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(legacy.join("origin"), "legacy").unwrap();
+        fs::write(target.join("origin"), "current").unwrap();
+
+        assert_eq!(
+            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            StorageMigration::Conflict
+        );
+        assert_eq!(fs::read_to_string(legacy.join("origin")).unwrap(), "legacy");
+        assert_eq!(
+            fs::read_to_string(target.join("origin")).unwrap(),
+            "current"
+        );
+        cleanup(root);
+    }
+
+    #[test]
+    fn migration_rejects_symbolic_link_storage() {
+        let root = temp_root("symlink");
+        let real = root.join("real");
+        let legacy = root.join("roaming/local-pool");
+        let target = root.join("local/local-pool");
+        fs::create_dir_all(&real).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        if create_directory_symlink(&real, &legacy).is_err() {
+            cleanup(root);
+            return;
+        }
+
+        let error = migrate_local_pool_dir(&legacy, &target).unwrap_err();
+        assert!(error.contains("symbolic link"));
+        assert!(!target.exists());
+        cleanup(root);
+    }
+
+    fn temp_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "zenith-relay-storage-{name}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    fn cleanup(root: PathBuf) {
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_directory_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(original, link)
+    }
+
+    #[cfg(windows)]
+    fn create_directory_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_dir(original, link)
     }
 }

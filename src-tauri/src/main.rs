@@ -1326,6 +1326,7 @@ fn main() {
             local_pool::commands::profiles::create_codex_profile_snapshot,
             local_pool::commands::profiles::restore_codex_profile_snapshot,
             local_pool::commands::profiles::delete_codex_profile_snapshot,
+            local_pool::commands::recovery::get_relay_storage_info,
             local_pool::commands::recovery::open_relay_folder,
             local_pool::commands::recovery::reset_local_pool_data,
             local_pool::commands::recovery::export_usage,

@@ -5,9 +5,10 @@ use crate::local_pool::{
     state::DesktopState,
     store::{secret_store, settings_store::save_json},
 };
+use crate::platform;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use zenith_relay_core::accounts::AccountExportDocument;
 
@@ -84,6 +85,47 @@ pub struct SupportContext {
 pub struct SupportBundlePreview {
     bundle: SupportBundle,
     excluded: [&'static str; 5],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayStorageInfo {
+    data_path: String,
+    backups_path: String,
+    exports_path: String,
+    cache_path: Option<String>,
+    chatgpt_profile_path: String,
+    legacy_data_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_relay_storage_info(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<RelayStorageInfo, CommandError> {
+    let root = state.root();
+    let legacy = platform::legacy_local_pool_dir(&app).map_err(io_error)?;
+    let legacy_data_path = (legacy != root && fs::symlink_metadata(&legacy).is_ok())
+        .then(|| legacy.to_string_lossy().into_owned());
+    let cache_path = if cfg!(target_os = "windows") {
+        app.path()
+            .app_local_data_dir()
+            .ok()
+            .map(|path| path.join("EBWebView"))
+    } else {
+        app.path().app_cache_dir().ok()
+    }
+    .map(|path| path.to_string_lossy().into_owned());
+    Ok(RelayStorageInfo {
+        data_path: root.to_string_lossy().into_owned(),
+        backups_path: root.join("backups").to_string_lossy().into_owned(),
+        exports_path: root.join("exports").to_string_lossy().into_owned(),
+        cache_path,
+        chatgpt_profile_path: platform::default_codex_home()
+            .to_string_lossy()
+            .into_owned(),
+        legacy_data_path,
+    })
 }
 
 #[tauri::command]
