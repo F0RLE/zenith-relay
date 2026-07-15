@@ -10,10 +10,6 @@ const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
-const SPEED_FACTOR_SCALE: u64 = 1_000;
-const MIN_SPEED_FACTOR: u64 = 250;
-const MAX_SPEED_FACTOR: u64 = 4_000;
-const NEUTRAL_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 10_000;
 const MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 1_000_000;
 
 pub struct SelectionRequest<'a> {
@@ -21,14 +17,14 @@ pub struct SelectionRequest<'a> {
     pub allowed_protocols: &'a [WireApi],
     pub scope: &'a CandidateScope,
     pub tried: &'a HashSet<String>,
-    pub affinity_key: Option<&'a str>,
+    pub response_affinity_key: Option<&'a str>,
     pub now_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection {
     pub candidate_id: String,
-    pub affinity_hit: bool,
+    pub response_affinity_hit: bool,
     pub diagnostics: RoutingDiagnostics,
 }
 
@@ -74,21 +70,24 @@ pub struct RoutingDiagnostics {
 #[derive(Clone, Debug)]
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
-    session_affinity: AffinityCache,
     response_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
     dispatches: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
     created_at_ms: BTreeMap<String, u64>,
     throughput_milli_tokens_per_second: BTreeMap<String, u64>,
-    throughput_total: u64,
+}
+
+impl Default for PoolScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PoolScheduler {
-    pub fn new(max_affinity_entries: usize, affinity_ttl_ms: u64) -> Self {
+    pub fn new() -> Self {
         Self {
             candidates: BTreeMap::new(),
-            session_affinity: AffinityCache::new(max_affinity_entries, affinity_ttl_ms),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
                 RESPONSE_AFFINITY_TTL_MS,
@@ -98,7 +97,6 @@ impl PoolScheduler {
             routing_strategy: RoutingStrategy::Adaptive,
             created_at_ms: BTreeMap::new(),
             throughput_milli_tokens_per_second: BTreeMap::new(),
-            throughput_total: 0,
         }
     }
 
@@ -127,14 +125,11 @@ impl PoolScheduler {
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
-        self.session_affinity.invalidate_candidate(candidate_id);
         self.response_affinity.invalidate_candidate(candidate_id);
         self.in_flight.remove(candidate_id);
         self.dispatches.remove(candidate_id);
         self.created_at_ms.remove(candidate_id);
-        if let Some(throughput) = self.throughput_milli_tokens_per_second.remove(candidate_id) {
-            self.throughput_total = self.throughput_total.saturating_sub(throughput);
-        }
+        self.throughput_milli_tokens_per_second.remove(candidate_id);
         self.candidates.remove(candidate_id)
     }
 
@@ -168,7 +163,7 @@ impl PoolScheduler {
     }
 
     pub fn select(&mut self, request: SelectionRequest<'_>) -> Option<Selection> {
-        if let Some(key) = request.affinity_key {
+        if let Some(key) = request.response_affinity_key {
             if let Some(candidate_id) = self
                 .response_affinity
                 .get(key, request.now_ms)
@@ -192,53 +187,11 @@ impl PoolScheduler {
                     )?;
                     return Some(Selection {
                         candidate_id,
-                        affinity_hit: true,
+                        response_affinity_hit: true,
                         diagnostics,
                     });
                 }
                 return None;
-            }
-        }
-
-        if let (Some(key), Some(candidate_id)) = (
-            request.affinity_key,
-            request
-                .affinity_key
-                .and_then(|key| self.session_affinity.get(key, request.now_ms))
-                .map(str::to_string),
-        ) {
-            match self.candidates.get(&candidate_id) {
-                Some(candidate)
-                    if !request.tried.contains(&candidate_id)
-                        && candidate.is_eligible(
-                            request.model,
-                            request.allowed_protocols,
-                            request.scope,
-                            request.now_ms,
-                        ) =>
-                {
-                    self.session_affinity.refresh(key, request.now_ms);
-                    let diagnostics = self.diagnostics(
-                        &candidate_id,
-                        SelectionReason::SessionAffinity,
-                        self.eligible_count(&request),
-                    )?;
-                    return Some(Selection {
-                        candidate_id,
-                        affinity_hit: true,
-                        diagnostics,
-                    });
-                }
-                Some(candidate)
-                    if candidate.is_eligible(
-                        request.model,
-                        request.allowed_protocols,
-                        request.scope,
-                        request.now_ms,
-                    ) => {}
-                _ => {
-                    self.session_affinity.invalidate(key);
-                }
             }
         }
 
@@ -269,7 +222,7 @@ impl PoolScheduler {
         });
         Some(Selection {
             candidate_id: selected.id.clone(),
-            affinity_hit: false,
+            response_affinity_hit: false,
             diagnostics: self.diagnostics(&selected.id, reason, eligible.len())?,
         })
     }
@@ -332,19 +285,6 @@ impl PoolScheduler {
             .min()
     }
 
-    pub fn bind_affinity(
-        &mut self,
-        key: impl Into<String>,
-        candidate_id: &str,
-        now_ms: u64,
-    ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
-            return false;
-        }
-        self.session_affinity.bind(key, candidate_id, now_ms);
-        true
-    }
-
     pub fn bind_response_affinity(
         &mut self,
         key: impl Into<String>,
@@ -356,20 +296,6 @@ impl PoolScheduler {
         }
         self.response_affinity.bind(key, candidate_id, now_ms);
         true
-    }
-
-    pub fn invalidate_affinity(&mut self, key: &str) -> bool {
-        self.session_affinity.invalidate(key) || self.response_affinity.invalidate(key)
-    }
-
-    pub fn invalidate_candidate_affinity(&mut self, candidate_id: &str) -> usize {
-        self.session_affinity.invalidate_candidate(candidate_id)
-            + self.response_affinity.invalidate_candidate(candidate_id)
-    }
-
-    pub fn clear_affinity(&mut self) {
-        self.session_affinity.clear();
-        self.response_affinity.clear();
     }
 
     pub(crate) fn reserve(&mut self, candidate_id: &str) -> bool {
@@ -430,10 +356,6 @@ impl PoolScheduler {
             let smoothed = previous.map_or(measured, |previous| {
                 (previous.saturating_mul(3).saturating_add(measured)) / 4
             });
-            self.throughput_total = self
-                .throughput_total
-                .saturating_sub(previous.unwrap_or_default())
-                .saturating_add(smoothed);
             self.throughput_milli_tokens_per_second
                 .insert(candidate_id.to_string(), smoothed);
         }
@@ -484,6 +406,7 @@ impl PoolScheduler {
                 .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
                 .then_with(|| left.priority.cmp(&right.priority))
                 .then_with(|| left.weight.cmp(&right.weight))
+                .then_with(|| self.compare_measured_speed(left, right))
                 .then_with(|| right.id.cmp(&left.id)),
             RoutingStrategy::OldestAccount => common
                 .then_with(|| self.compare_account_age(left, right))
@@ -565,6 +488,10 @@ impl PoolScheduler {
             SelectionReason::ManualPriority
         } else if selected.weight != runner_up.weight {
             SelectionReason::ManualWeight
+        } else if self.routing_strategy == RoutingStrategy::Adaptive
+            && self.compare_measured_speed(selected, runner_up) != Ordering::Equal
+        {
+            SelectionReason::AdaptiveBalance
         } else {
             SelectionReason::StableTieBreak
         }
@@ -614,30 +541,21 @@ impl PoolScheduler {
     }
 
     fn effective_weight(&self, candidate: &RuntimeCandidate) -> u128 {
-        let base = u128::from(candidate.weight.max(1))
-            * u128::from(candidate.quota.routing_weight_factor());
-        if self.routing_strategy != RoutingStrategy::Adaptive {
-            return base;
-        }
-        (base * u128::from(self.speed_factor(&candidate.id)) / u128::from(SPEED_FACTOR_SCALE))
-            .max(1)
+        u128::from(candidate.weight.max(1)) * u128::from(candidate.quota.routing_weight_factor())
     }
 
-    fn speed_factor(&self, candidate_id: &str) -> u64 {
-        let baseline = if self.throughput_milli_tokens_per_second.is_empty() {
-            NEUTRAL_THROUGHPUT_MILLI_TOKENS_PER_SECOND
-        } else {
-            (self.throughput_total
-                / u64::try_from(self.throughput_milli_tokens_per_second.len()).unwrap_or(1))
-            .max(1)
-        };
-        let measured = self
-            .throughput_milli_tokens_per_second
-            .get(candidate_id)
-            .copied()
-            .unwrap_or(baseline);
-        (measured.saturating_mul(SPEED_FACTOR_SCALE) / baseline)
-            .clamp(MIN_SPEED_FACTOR, MAX_SPEED_FACTOR)
+    fn compare_measured_speed(
+        &self,
+        left: &RuntimeCandidate,
+        right: &RuntimeCandidate,
+    ) -> Ordering {
+        match (
+            self.throughput_milli_tokens_per_second.get(&left.id),
+            self.throughput_milli_tokens_per_second.get(&right.id),
+        ) {
+            (Some(left), Some(right)) => left.cmp(right),
+            _ => Ordering::Equal,
+        }
     }
 
     fn compare_account_age(&self, left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
@@ -730,14 +648,14 @@ mod tests {
             allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
             scope: &CandidateScope::default(),
             tried,
-            affinity_key: None,
+            response_affinity_key: None,
             now_ms: 100,
         })
     }
 
     #[test]
     fn availability_updates_take_effect_while_candidate_is_in_flight() {
-        let mut scheduler = PoolScheduler::new(8, 60_000);
+        let mut scheduler = PoolScheduler::new();
         let first = oauth_candidate("first");
         let second = oauth_candidate("second");
         scheduler.upsert(first);
@@ -820,7 +738,7 @@ mod tests {
         wrong_protocol.protocol = WireApi::Messages;
         candidates.push(wrong_protocol);
 
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for candidate in candidates {
             scheduler.upsert(candidate);
         }
@@ -843,7 +761,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 100,
             }),
             None
@@ -862,7 +780,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 100,
             })
             .is_none());
@@ -870,7 +788,7 @@ mod tests {
 
     #[test]
     fn selection_orders_equal_quota_by_lru_priority_weight_then_id() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut low_priority = candidate("priority-low");
         low_priority.priority = 1;
         low_priority.quota = CandidateQuota::Available(100);
@@ -886,7 +804,7 @@ mod tests {
             "priority-high"
         );
 
-        scheduler = PoolScheduler::new(1, 100);
+        scheduler = PoolScheduler::new();
         let mut unknown = candidate("unknown");
         unknown.quota = CandidateQuota::Unknown;
         scheduler.upsert(unknown);
@@ -903,7 +821,7 @@ mod tests {
             "known-high"
         );
 
-        scheduler = PoolScheduler::new(1, 100);
+        scheduler = PoolScheduler::new();
         let mut old = candidate("old");
         old.last_used_at = Some(1);
         scheduler.upsert(old);
@@ -918,7 +836,7 @@ mod tests {
             "never"
         );
 
-        scheduler = PoolScheduler::new(1, 100);
+        scheduler = PoolScheduler::new();
         let mut light = candidate("light");
         light.weight = 1;
         scheduler.upsert(light);
@@ -932,7 +850,7 @@ mod tests {
             "heavy"
         );
 
-        scheduler = PoolScheduler::new(1, 100);
+        scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("b"));
         scheduler.upsert(candidate("a"));
         assert_eq!(
@@ -945,7 +863,7 @@ mod tests {
 
     #[test]
     fn quota_reserve_beats_lru_and_manual_priority() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut low_quota = oauth_candidate("low-quota");
         low_quota.quota = CandidateQuota::Available(1);
         low_quota.priority = 100;
@@ -967,7 +885,7 @@ mod tests {
 
     #[test]
     fn oauth_requests_rotate_before_manual_priority() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut high_priority = oauth_candidate("high-priority");
         high_priority.priority = 100;
         high_priority.last_used_at = Some(20);
@@ -999,28 +917,28 @@ mod tests {
                     allowed_protocols: &[WireApi::Responses],
                     scope: &scope,
                     tried: &tried,
-                    affinity_key: None,
+                    response_affinity_key: None,
                     now_ms: 100,
                 })
                 .unwrap()
                 .candidate_id
         };
 
-        let mut primary = PoolScheduler::new(1, 100);
+        let mut primary = PoolScheduler::new();
         let mut source = candidate("primary-source");
         source.priority = API_SOURCE_PRIMARY_PRIORITY;
         primary.upsert(source);
         primary.upsert(oauth_candidate("account"));
         assert_eq!(request(&mut primary), "primary-source");
 
-        let mut reserve = PoolScheduler::new(1, 100);
+        let mut reserve = PoolScheduler::new();
         let mut source = candidate("reserve-source");
         source.priority = API_SOURCE_RESERVE_PRIORITY;
         reserve.upsert(source);
         reserve.upsert(oauth_candidate("account"));
         assert_eq!(request(&mut reserve), "account");
 
-        let mut stabilizer = PoolScheduler::new(1, 100);
+        let mut stabilizer = PoolScheduler::new();
         stabilizer.upsert(candidate("stabilizer-source"));
         stabilizer.upsert(oauth_candidate("account"));
         assert_eq!(request(&mut stabilizer), "account");
@@ -1030,7 +948,7 @@ mod tests {
 
     #[test]
     fn active_and_sequential_requests_spread_by_available_quota() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut full = candidate("full");
         full.quota = CandidateQuota::Available(100);
         scheduler.upsert(full);
@@ -1066,7 +984,7 @@ mod tests {
 
     #[test]
     fn equal_quota_sequential_requests_follow_configured_weight() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for (id, weight) in [("full", 4), ("half", 2), ("quarter", 1)] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(5_000);
@@ -1089,7 +1007,7 @@ mod tests {
 
     #[test]
     fn sequential_requests_rotate_proportionally_to_quota_headroom() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(quota);
@@ -1120,7 +1038,7 @@ mod tests {
 
     #[test]
     fn quota_refresh_rebases_historical_rotation_debt() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("first", 10_000), ("second", 1_000)] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(quota);
@@ -1153,7 +1071,7 @@ mod tests {
 
     #[test]
     fn concurrent_requests_follow_available_quota_headroom() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(quota);
@@ -1174,7 +1092,7 @@ mod tests {
 
     #[test]
     fn two_hundred_concurrent_requests_use_every_eligible_account() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         for (id, quota) in [
             ("sixty-three", 6_300),
             ("fifty-four", 5_400),
@@ -1209,15 +1127,21 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_routing_combines_quota_and_measured_speed_without_starvation() {
-        let mut scheduler = PoolScheduler::new(1, 100);
-        for (id, quota) in [("fast", 10_000), ("slow", 5_000), ("unknown", 10_000)] {
+    fn adaptive_routing_uses_speed_only_to_break_equal_quota_ties() {
+        let mut scheduler = PoolScheduler::new();
+        for id in ["fast", "slow"] {
             let mut account = oauth_candidate(id);
-            account.quota = CandidateQuota::Available(quota);
+            account.quota = CandidateQuota::Available(5_000);
             scheduler.upsert(account);
         }
         assert!(scheduler.record_success_with_metrics("fast", "gpt-5", 1, Some(100), None, 1_000));
         assert!(scheduler.record_success_with_metrics("slow", "gpt-5", 1, Some(25), None, 1_000));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "fast"
+        );
 
         let mut counts = BTreeMap::new();
         for _ in 0..100 {
@@ -1227,14 +1151,13 @@ mod tests {
             assert!(scheduler.release(&selected.candidate_id));
         }
 
-        assert!(counts["fast"] > counts["unknown"]);
-        assert!(counts["unknown"] > counts["slow"]);
-        assert!(counts.values().all(|count| *count > 0));
+        assert_eq!(counts["fast"], 50);
+        assert_eq!(counts["slow"], 50);
     }
 
     #[test]
     fn oldest_account_routing_prefers_age_but_never_a_busy_or_ineligible_account() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(RoutingStrategy::OldestAccount);
         for (id, created_at, quota) in [
             ("oldest", 10, CandidateQuota::Available(100)),
@@ -1270,7 +1193,7 @@ mod tests {
 
     #[test]
     fn throughput_ewma_ignores_invalid_samples_and_is_bounded() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         scheduler.upsert(oauth_candidate("account"));
         assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, None, 1_000));
         assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), None, 0));
@@ -1316,69 +1239,8 @@ mod tests {
     }
 
     #[test]
-    fn affinity_wins_but_never_bypasses_filters_or_tried_exclusion() {
-        let mut scheduler = PoolScheduler::new(4, 100);
-        let mut preferred = candidate("preferred");
-        preferred.priority = 10;
-        scheduler.upsert(preferred);
-        scheduler.upsert(candidate("affinity"));
-        assert!(scheduler.bind_affinity("session", "affinity", 0));
-
-        let scope = CandidateScope::default();
-        let empty = HashSet::new();
-        let selection = scheduler
-            .select(SelectionRequest {
-                model: "gpt-5",
-                allowed_protocols: &[WireApi::Responses],
-                scope: &scope,
-                tried: &empty,
-                affinity_key: Some("session"),
-                now_ms: 1,
-            })
-            .unwrap();
-        assert_eq!(selection.candidate_id, "affinity");
-        assert!(selection.affinity_hit);
-        assert_eq!(
-            selection.diagnostics.reason,
-            SelectionReason::SessionAffinity
-        );
-        assert_eq!(selection.diagnostics.eligible_candidates, 2);
-
-        let tried: HashSet<String> = ["affinity".to_string()].into();
-        assert_eq!(
-            scheduler
-                .select(SelectionRequest {
-                    model: "gpt-5",
-                    allowed_protocols: &[WireApi::Responses],
-                    scope: &scope,
-                    tried: &tried,
-                    affinity_key: Some("session"),
-                    now_ms: 1,
-                })
-                .unwrap()
-                .candidate_id,
-            "preferred"
-        );
-        scheduler.set_cooldown("affinity", "gpt-5", 10);
-        assert_eq!(
-            scheduler
-                .select(SelectionRequest {
-                    model: "gpt-5",
-                    allowed_protocols: &[WireApi::Responses],
-                    scope: &scope,
-                    tried: &empty,
-                    affinity_key: Some("session"),
-                    now_ms: 1,
-                })
-                .unwrap()
-                .candidate_id,
-            "preferred"
-        );
-    }
-
-    #[test]
-    fn response_affinity_is_mandatory_when_session_affinity_is_disabled() {
-        let mut scheduler = PoolScheduler::new(0, 0);
+    fn response_affinity_is_mandatory() {
+        let mut scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("creator"));
         let mut fallback = candidate("fallback");
         fallback.priority = 10;
@@ -1393,12 +1255,12 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &empty,
-                affinity_key: Some("response"),
+                response_affinity_key: Some("response"),
                 now_ms: 1,
             })
             .unwrap();
         assert_eq!(selection.candidate_id, "creator");
-        assert!(selection.affinity_hit);
+        assert!(selection.response_affinity_hit);
         assert_eq!(
             selection.diagnostics.reason,
             SelectionReason::ResponseAffinity
@@ -1411,7 +1273,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &empty,
-                affinity_key: Some("response"),
+                response_affinity_key: Some("response"),
                 now_ms: 1,
             }),
             None,
@@ -1421,7 +1283,7 @@ mod tests {
 
     #[test]
     fn cooldown_expires_and_success_clears_it_and_updates_lru() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut candidate = candidate("candidate");
         candidate.cooldowns.insert("gpt-5".to_string(), 101);
         candidate.cooldowns.insert("*".to_string(), 101);
@@ -1447,7 +1309,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 101,
             })
             .is_some());
@@ -1465,7 +1327,7 @@ mod tests {
 
     #[test]
     fn earliest_retry_ignores_candidates_blocked_for_non_cooldown_reasons() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut later = candidate("later");
         later.cooldowns.insert("gpt-5".to_string(), 300);
         scheduler.upsert(later);
@@ -1483,7 +1345,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 100,
             }),
             Some(200)
@@ -1492,7 +1354,7 @@ mod tests {
 
     #[test]
     fn account_scope_allows_oauth_ready_candidate_shape() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut account = candidate("candidate-account");
         account.kind = CandidateKind::OAuthAccount;
         account.source_id = "openai".to_string();
@@ -1509,7 +1371,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 0,
             })
             .is_some());
@@ -1517,7 +1379,7 @@ mod tests {
 
     #[test]
     fn translated_protocols_share_the_same_scheduler() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut candidate = candidate("chat-source");
         candidate.protocol = WireApi::ChatCompletions;
         scheduler.upsert(candidate);
@@ -1528,7 +1390,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses, WireApi::ChatCompletions],
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 0,
             })
             .is_some());
@@ -1536,7 +1398,7 @@ mod tests {
 
     #[test]
     fn explicit_empty_scope_selects_no_candidates() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("source"));
         let scope = CandidateScope {
             source_ids: Some(BTreeSet::new()),
@@ -1549,7 +1411,7 @@ mod tests {
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &HashSet::new(),
-                affinity_key: None,
+                response_affinity_key: None,
                 now_ms: 0,
             })
             .is_none());

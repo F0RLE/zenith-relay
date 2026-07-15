@@ -107,8 +107,6 @@ export type LocalPoolState = {
     maxRetryCandidates: number;
     routingStrategy: "adaptive" | "oldest_account";
     defaultServiceTier: "standard" | "fast";
-    sessionAffinity: boolean;
-    sessionAffinityTtlSeconds: number;
   };
   platform: Platform;
   capabilities: {
@@ -294,8 +292,6 @@ export function updateLocalRouting(input: {
   maxRetryCandidates: number;
   routingStrategy: "adaptive" | "oldest_account";
   defaultServiceTier: "standard" | "fast";
-  sessionAffinity: boolean;
-  sessionAffinityTtlSeconds: number;
 }) {
   return invoke<LocalPoolState>("update_local_routing", { input });
 }

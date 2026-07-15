@@ -1,7 +1,7 @@
 use super::{
-    affinity_session, apply_cooldown, apply_failure_state, apply_status_cooldown, apply_usage,
-    emit_usage, has_output_delta, invalid_host, now_ms, unauthorized, usage_event,
-    CODEX_RESPONSES_LITE_HEADER, TRANSIENT_COOLDOWN_MS,
+    apply_cooldown, apply_failure_state, apply_status_cooldown, apply_usage, emit_usage,
+    has_output_delta, invalid_host, now_ms, unauthorized, usage_event, CODEX_RESPONSES_LITE_HEADER,
+    TRANSIENT_COOLDOWN_MS,
 };
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
 use crate::{GatewayRuntime, UsageEvent, WireApi};
@@ -140,8 +140,7 @@ struct ClientRequest {
     requested_model: String,
     resolved_model: String,
     responses_lite: bool,
-    affinity_key: Option<String>,
-    session_affinity_key: Option<String>,
+    response_affinity_key: Option<String>,
 }
 
 impl ClientRequest {
@@ -191,23 +190,14 @@ impl ClientRequest {
         let responses_lite = headers.contains_key(CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
             || runtime.codex_model_uses_responses_lite(&resolved_model);
-        let session = websocket_affinity_session(headers, &value);
-        let session_affinity_key = runtime.affinity_key(
-            &key.id,
-            WireApi::Responses,
-            &resolved_model,
-            session.as_deref(),
-        );
-        let affinity_key = runtime
-            .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str))
-            .or_else(|| session_affinity_key.clone());
+        let response_affinity_key = runtime
+            .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
         Ok(Self {
             value,
             requested_model,
             resolved_model,
             responses_lite,
-            affinity_key,
-            session_affinity_key,
+            response_affinity_key,
         })
     }
 
@@ -266,7 +256,7 @@ async fn connect_upstream(
             &request.resolved_model,
             WEBSOCKET_PROTOCOLS,
             &tried,
-            request.affinity_key.as_deref(),
+            request.response_affinity_key.as_deref(),
             now_ms(),
         );
         let Some((selected, lease)) = selected else {
@@ -566,7 +556,6 @@ struct InFlight {
     route: ExecutorRoute,
     event: UsageEvent,
     started: Instant,
-    affinity_key: Option<String>,
     response_id: Option<String>,
 }
 
@@ -602,7 +591,6 @@ async fn bridge(
             route: connected.route,
             event: initial_event,
             started: connected.started,
-            affinity_key: connected.request.session_affinity_key,
             response_id: None,
         }),
     };
@@ -794,7 +782,6 @@ async fn start_next_request(
             route,
             event,
             started,
-            affinity_key: request.session_affinity_key,
             response_id: None,
         });
         return Ok(handle_upstream_message(downstream, runtime, state, first_message).await);
@@ -826,7 +813,6 @@ async fn start_next_request(
         ),
         route,
         started,
-        affinity_key: request.session_affinity_key,
         response_id: None,
     });
     Ok(true)
@@ -938,11 +924,6 @@ fn finish_terminal(
             in_flight.event.output_tokens,
             in_flight.event.reasoning_tokens,
             in_flight.event.latency_ms,
-        );
-        runtime.bind_affinity(
-            in_flight.affinity_key.as_deref(),
-            &in_flight.route.candidate_id,
-            now_ms(),
         );
         runtime.bind_response_affinity(
             in_flight.response_id.as_deref(),
@@ -1059,19 +1040,6 @@ fn metadata_flag(value: &Value, key: &str) -> bool {
             Value::String(value) => value.eq_ignore_ascii_case("true"),
             _ => false,
         })
-}
-
-fn websocket_affinity_session(headers: &HeaderMap, request: &Value) -> Option<String> {
-    request
-        .get("client_metadata")
-        .and_then(Value::as_object)
-        .and_then(|metadata| {
-            ["session_id", "thread_id", "turn_id"]
-                .into_iter()
-                .find_map(|key| metadata.get(key).and_then(Value::as_str))
-        })
-        .map(str::to_string)
-        .or_else(|| affinity_session(headers, request))
 }
 
 async fn send_gateway_error(downstream: &mut WebSocket, failure: &GatewayFailure) {

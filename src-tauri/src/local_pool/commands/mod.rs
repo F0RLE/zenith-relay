@@ -23,7 +23,7 @@ use super::{
     state::DesktopState,
     store::secret_store,
 };
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use zenith_relay_core::{
     quota::Subscription, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
     RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
@@ -155,10 +155,6 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         GatewayRuntimeOptions {
             max_retry_candidates: usize::from(settings.max_retry_candidates),
             routing_strategy: settings.routing_strategy,
-            session_affinity_ttl: settings
-                .session_affinity
-                .then(|| Duration::from_secs(settings.session_affinity_ttl_seconds)),
-            max_affinity_entries: 4_096,
             hidden_models: settings.hidden_models,
             default_service_tier: settings.default_service_tier,
         },

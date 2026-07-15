@@ -29,9 +29,6 @@ pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
-pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
-pub const MIN_SESSION_AFFINITY_TTL_SECONDS: u64 = 60;
-pub const MAX_SESSION_AFFINITY_TTL_SECONDS: u64 = 86_400;
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -278,26 +275,13 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn routing_policy(
-        &self,
-    ) -> Result<(u8, bool, u64, RoutingStrategy, DefaultServiceTier), String> {
+    pub fn routing_policy(&self) -> Result<(u8, RoutingStrategy, DefaultServiceTier), String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
                 value
                     .parse::<u8>()
                     .map_err(|_| "max retry candidates is invalid".to_string())
-            },
-        )?;
-        let session_affinity = self
-            .metadata("session_affinity")?
-            .is_some_and(|value| value == "true");
-        let session_affinity_ttl_seconds = self.metadata("session_affinity_ttl_seconds")?.map_or(
-            Ok(DEFAULT_SESSION_AFFINITY_TTL_SECONDS),
-            |value| {
-                value
-                    .parse::<u64>()
-                    .map_err(|_| "session affinity TTL is invalid".to_string())
             },
         )?;
         let routing_strategy = match self.metadata("routing_strategy")?.as_deref() {
@@ -310,36 +294,23 @@ impl Store {
             Some("fast") => DefaultServiceTier::Fast,
             Some(_) => return Err("default service tier is invalid".to_string()),
         };
-        validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
-        Ok((
-            max_retry_candidates,
-            session_affinity,
-            session_affinity_ttl_seconds,
-            routing_strategy,
-            default_service_tier,
-        ))
+        validate_routing_policy(max_retry_candidates)?;
+        Ok((max_retry_candidates, routing_strategy, default_service_tier))
     }
 
     pub fn set_routing_policy(
         &self,
         max_retry_candidates: u8,
-        session_affinity: bool,
-        session_affinity_ttl_seconds: u64,
         routing_strategy: RoutingStrategy,
         default_service_tier: DefaultServiceTier,
     ) -> Result<(), String> {
-        validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
+        validate_routing_policy(max_retry_candidates)?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         for (key, value) in [
             ("max_retry_candidates", max_retry_candidates.to_string()),
-            ("session_affinity", session_affinity.to_string()),
-            (
-                "session_affinity_ttl_seconds",
-                session_affinity_ttl_seconds.to_string(),
-            ),
             (
                 "routing_strategy",
                 match routing_strategy {
@@ -1289,17 +1260,9 @@ fn validate_quota_policy(
     Ok(())
 }
 
-fn validate_routing_policy(
-    max_retry_candidates: u8,
-    session_affinity_ttl_seconds: u64,
-) -> Result<(), String> {
+fn validate_routing_policy(max_retry_candidates: u8) -> Result<(), String> {
     if !(1..=8).contains(&max_retry_candidates) {
         return Err("max retry candidates is invalid".to_string());
-    }
-    if !(MIN_SESSION_AFFINITY_TTL_SECONDS..=MAX_SESSION_AFFINITY_TTL_SECONDS)
-        .contains(&session_affinity_ttl_seconds)
-    {
-        return Err("session affinity TTL is invalid".to_string());
     }
     Ok(())
 }
@@ -1456,53 +1419,20 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(
             store.routing_policy().unwrap(),
-            (
-                3,
-                false,
-                3_600,
-                RoutingStrategy::Adaptive,
-                DefaultServiceTier::Standard,
-            )
+            (3, RoutingStrategy::Adaptive, DefaultServiceTier::Standard)
         );
         assert!(store
-            .set_routing_policy(
-                0,
-                true,
-                3_600,
-                RoutingStrategy::Adaptive,
-                DefaultServiceTier::Standard,
-            )
-            .is_err());
-        assert!(store
-            .set_routing_policy(
-                3,
-                true,
-                59,
-                RoutingStrategy::Adaptive,
-                DefaultServiceTier::Standard,
-            )
+            .set_routing_policy(0, RoutingStrategy::Adaptive, DefaultServiceTier::Standard,)
             .is_err());
         store
-            .set_routing_policy(
-                5,
-                false,
-                300,
-                RoutingStrategy::OldestAccount,
-                DefaultServiceTier::Fast,
-            )
+            .set_routing_policy(5, RoutingStrategy::OldestAccount, DefaultServiceTier::Fast)
             .unwrap();
         drop(store);
 
         let reopened = Store::open(path).unwrap();
         assert_eq!(
             reopened.routing_policy().unwrap(),
-            (
-                5,
-                false,
-                300,
-                RoutingStrategy::OldestAccount,
-                DefaultServiceTier::Fast,
-            )
+            (5, RoutingStrategy::OldestAccount, DefaultServiceTier::Fast)
         );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();

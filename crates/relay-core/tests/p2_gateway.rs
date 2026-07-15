@@ -778,23 +778,16 @@ async fn responses_only_source_executes_through_chat_completions_adapter() {
 }
 
 #[tokio::test]
-async fn affinity_reuses_bound_source_until_ttl_expires() {
+async fn repeated_session_id_does_not_pin_requests_to_one_source() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![
             status_reply(StatusCode::TOO_MANY_REQUESTS, "a-limited", Some("0")),
-            response_reply("a-after-ttl", "a-ready"),
+            response_reply("a-rotated", "a-ready"),
         ],
     )
     .await;
-    let (source_b, state_b) = spawn_upstream(
-        "b-key",
-        vec![
-            response_reply("b-bound", "b"),
-            response_reply("b-affinity", "b"),
-        ],
-    )
-    .await;
+    let (source_b, state_b) = spawn_upstream("b-key", vec![response_reply("b-first", "b")]).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![
             source("a", &source_a, "a-key", &[MODEL], 10),
@@ -804,8 +797,6 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
             routing_strategy: Default::default(),
-            session_affinity_ttl: Some(Duration::from_millis(500)),
-            max_affinity_entries: 16,
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
         },
@@ -818,7 +809,7 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
             .json::<Value>()
             .await
             .unwrap()["id"],
-        "b-bound"
+        "b-first"
     );
     assert_eq!(
         request_with_session(&gateway, "session-1")
@@ -826,22 +817,10 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
             .json::<Value>()
             .await
             .unwrap()["id"],
-        "b-affinity"
-    );
-    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 2);
-
-    tokio::time::sleep(Duration::from_millis(600)).await;
-    assert_eq!(
-        request_with_session(&gateway, "session-1")
-            .await
-            .json::<Value>()
-            .await
-            .unwrap()["id"],
-        "a-after-ttl"
+        "a-rotated"
     );
     assert_eq!(state_a.requests.lock().unwrap().len(), 2);
-    assert_eq!(state_b.requests.lock().unwrap().len(), 2);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
 }
 
 fn source(
@@ -895,8 +874,6 @@ async fn spawn_gateway(
         GatewayRuntimeOptions {
             max_retry_candidates,
             routing_strategy: Default::default(),
-            session_affinity_ttl: None,
-            max_affinity_entries: 0,
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
         },

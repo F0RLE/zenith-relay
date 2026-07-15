@@ -42,10 +42,6 @@ pub struct GatewaySummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_retry_candidates: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_affinity: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_affinity_ttl_seconds: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_strategy: Option<RoutingStrategy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_service_tier: Option<DefaultServiceTier>,
@@ -472,8 +468,6 @@ mod tests {
         .unwrap();
         assert!(gateway.use_free_accounts);
         assert_eq!(gateway.max_retry_candidates, None);
-        assert_eq!(gateway.session_affinity, None);
-        assert_eq!(gateway.session_affinity_ttl_seconds, None);
 
         let account = AccountSummary {
             id: "account_1".into(),

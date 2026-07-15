@@ -738,9 +738,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .post(format!("{}/routing/settings", server.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
-            "maxRetryCandidates": 0,
-            "sessionAffinity": true,
-            "sessionAffinityTtlSeconds": 3600
+            "maxRetryCandidates": 0
         }))
         .send()
         .await
@@ -752,9 +750,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
             "maxRetryCandidates": 5,
-            "routingStrategy": "oldest_account",
-            "sessionAffinity": false,
-            "sessionAffinityTtlSeconds": 300
+            "routingStrategy": "oldest_account"
         }))
         .send()
         .await
@@ -763,8 +759,10 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .await
         .unwrap();
     assert_eq!(routing["gateway"]["maxRetryCandidates"], 5);
-    assert_eq!(routing["gateway"]["sessionAffinity"], false);
-    assert_eq!(routing["gateway"]["sessionAffinityTtlSeconds"], 300);
+    assert!(routing["gateway"].get("sessionAffinity").is_none());
+    assert!(routing["gateway"]
+        .get("sessionAffinityTtlSeconds")
+        .is_none());
     assert_eq!(routing["gateway"]["routingStrategy"], "oldest_account");
 
     let free_enabled: Value = client

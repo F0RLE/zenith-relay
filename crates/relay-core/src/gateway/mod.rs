@@ -320,7 +320,6 @@ async fn execute_client_request(
             "model_not_found",
         );
     };
-    let session = affinity_session(&headers, &request);
     let responses_lite = headers
         .get(CODEX_RESPONSES_LITE_HEADER)
         .cloned()
@@ -329,11 +328,8 @@ async fn execute_client_request(
                 .codex_model_uses_responses_lite(&resolved_model)
                 .then(|| HeaderValue::from_static("true"))
         });
-    let session_affinity_key =
-        runtime.affinity_key(&key.id, wire_api, &resolved_model, session.as_deref());
-    let affinity_key = runtime
-        .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
-        .or_else(|| session_affinity_key.clone());
+    let response_affinity_key =
+        runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
     execute_request(
         runtime,
         key,
@@ -342,8 +338,7 @@ async fn execute_client_request(
         resolved_model,
         stream,
         request_id(),
-        affinity_key,
-        session_affinity_key,
+        response_affinity_key,
         wire_api,
         responses_lite,
     )
@@ -359,8 +354,7 @@ async fn execute_request(
     resolved_model: String,
     stream: bool,
     request_id: String,
-    affinity_key: Option<String>,
-    session_affinity_key: Option<String>,
+    response_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
 ) -> Response<Body> {
@@ -378,7 +372,7 @@ async fn execute_request(
             &resolved_model,
             candidate_protocols(wire_api),
             &tried,
-            affinity_key.as_deref(),
+            response_affinity_key.as_deref(),
             now_ms(),
         );
         let Some((selected, lease)) = selected else {
@@ -717,11 +711,6 @@ async fn execute_request(
                 event.latency_ms,
             );
             emit_usage(&runtime, event);
-            runtime.bind_affinity(
-                session_affinity_key.as_deref(),
-                &route.candidate_id,
-                now_ms(),
-            );
             let completed_response_id = response_id_from_bytes(&bytes);
             runtime.bind_response_affinity(
                 completed_response_id.as_deref(),
@@ -747,7 +736,6 @@ async fn execute_request(
                 let completion_runtime = runtime.clone();
                 let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
-                let completion_affinity = session_affinity_key.clone();
                 let completion: CompletionCallback = Arc::new(move |event, response_id| {
                     lease.release();
                     if event.success {
@@ -760,11 +748,6 @@ async fn execute_request(
                             event.latency_ms,
                         );
                         event.consecutive_failures = Some(0);
-                        completion_runtime.bind_affinity(
-                            completion_affinity.as_deref(),
-                            &completion_source,
-                            now_ms(),
-                        );
                         completion_runtime.bind_response_affinity(
                             response_id,
                             &completion_source,
@@ -1674,26 +1657,6 @@ fn exponential_backoff_ms(consecutive_failures: u32) -> u64 {
     1_000_u64
         .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
         .min(MAX_RATE_LIMIT_COOLDOWN_MS)
-}
-
-fn affinity_session(headers: &HeaderMap, request: &Value) -> Option<String> {
-    request
-        .get("metadata")
-        .and_then(|metadata| metadata.get("user_id"))
-        .and_then(Value::as_str)
-        .or_else(|| header_value(headers, "x-session-id"))
-        .or_else(|| header_value(headers, "session_id"))
-        .or_else(|| header_value(headers, "x-amp-thread-id"))
-        .or_else(|| header_value(headers, "x-client-request-id"))
-        .or_else(|| request.get("conversation_id").and_then(Value::as_str))
-        .map(str::to_string)
-}
-
-fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
 }
 
 fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {

@@ -118,14 +118,18 @@ Hard filters always win:
 Runtime ordering is intentionally small:
 
 1. mandatory `previous_response_id` binding to the account that created it;
-2. valid optional session affinity when the candidate still passes hard filters;
-3. explicit API-source role: primary first, stabilizer with OAuth accounts,
+2. explicit API-source role: primary first, stabilizer with OAuth accounts,
    reserve last;
-4. lowest active-request load normalized by traffic share and available quota;
-5. OAuth preference within an otherwise equal stabilizer comparison;
-6. committed dispatch balance normalized by traffic share and available quota,
+3. lowest active-request load normalized by traffic share and available quota;
+4. OAuth preference within an otherwise equal stabilizer comparison;
+5. committed dispatch balance normalized by traffic share and available quota,
    then greatest known quota reserve and least recently used;
-7. manual priority, weight, and stable id as final tie-breakers.
+6. manual priority, weight, measured speed, and stable id as final tie-breakers.
+
+Chats are never optionally pinned to accounts. Only a continuation carrying
+`previous_response_id` stays with the account that created that response, and
+an active WebSocket keeps ownership for the lifetime of its current upstream
+connection.
 
 Source role is explicit and editable. Subscription plan names and expiry dates
 must not create a hidden routing rule.

@@ -47,8 +47,6 @@ pub struct UpdateRoutingInput {
     routing_strategy: RoutingStrategy,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
-    session_affinity: bool,
-    session_affinity_ttl_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -399,8 +397,6 @@ pub async fn update_local_routing(
     gateway.max_retry_candidates = input.max_retry_candidates;
     gateway.routing_strategy = input.routing_strategy;
     gateway.default_service_tier = input.default_service_tier;
-    gateway.session_affinity = input.session_affinity;
-    gateway.session_affinity_ttl_seconds = input.session_affinity_ttl_seconds;
     if gateway == old_gateway {
         codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);

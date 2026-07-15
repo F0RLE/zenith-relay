@@ -136,8 +136,6 @@ export type RuntimeSnapshot = {
     candidateCount: number;
     visibleModelIds: string[];
     maxRetryCandidates?: number | null;
-    sessionAffinity?: boolean | null;
-    sessionAffinityTtlSeconds?: number | null;
     routingStrategy?: RoutingStrategy | null;
     defaultServiceTier?: DefaultServiceTier | null;
     models?: ModelSummary[];

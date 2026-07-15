@@ -178,8 +178,6 @@ impl DefaultServiceTier {
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
     pub routing_strategy: RoutingStrategy,
-    pub session_affinity_ttl: Option<Duration>,
-    pub max_affinity_entries: usize,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
 }
@@ -189,8 +187,6 @@ impl Default for GatewayRuntimeOptions {
         Self {
             max_retry_candidates: 3,
             routing_strategy: RoutingStrategy::Adaptive,
-            session_affinity_ttl: None,
-            max_affinity_entries: 4_096,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
         }
@@ -209,7 +205,6 @@ pub struct GatewayRuntime {
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
     max_retry_candidates: usize,
-    affinity_enabled: bool,
     default_service_tier: DefaultServiceTier,
     pub(crate) usage: UsageCallback,
 }
@@ -369,11 +364,7 @@ impl GatewayRuntime {
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
-        let affinity_ttl_ms = options
-            .session_affinity_ttl
-            .map(|ttl| ttl.as_millis().min(u128::from(u64::MAX)) as u64)
-            .unwrap_or_default();
-        let mut scheduler = PoolScheduler::new(options.max_affinity_entries, affinity_ttl_ms);
+        let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(options.routing_strategy);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
@@ -577,7 +568,6 @@ impl GatewayRuntime {
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             max_retry_candidates: options.max_retry_candidates,
-            affinity_enabled: options.session_affinity_ttl.is_some(),
             default_service_tier: options.default_service_tier,
             usage,
         })
@@ -762,7 +752,7 @@ impl GatewayRuntime {
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
-        affinity_key: Option<&str>,
+        response_affinity_key: Option<&str>,
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let mut scheduler = self.lock_scheduler();
@@ -771,7 +761,7 @@ impl GatewayRuntime {
             allowed_protocols,
             scope: &key.scope,
             tried,
-            affinity_key,
+            response_affinity_key,
             now_ms,
         })?;
         scheduler.reserve(&selection.candidate_id).then(|| {
@@ -797,7 +787,7 @@ impl GatewayRuntime {
             allowed_protocols,
             scope: &key.scope,
             tried,
-            affinity_key: None,
+            response_affinity_key: None,
             now_ms,
         })
     }
@@ -922,28 +912,6 @@ impl GatewayRuntime {
         self.default_service_tier
     }
 
-    pub(crate) fn affinity_key(
-        &self,
-        key_id: &str,
-        wire_api: WireApi,
-        model: &str,
-        session: Option<&str>,
-    ) -> Option<String> {
-        if !self.affinity_enabled {
-            return None;
-        }
-        let session = session?.trim();
-        if session.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "{:x}",
-            Sha256::digest(
-                format!("session\0{wire_api:?}\0{model}\0{key_id}\0{session}").as_bytes()
-            )
-        ))
-    }
-
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
         let response_id = response_id?.trim();
         if response_id.is_empty() {
@@ -953,13 +921,6 @@ impl GatewayRuntime {
             "{:x}",
             Sha256::digest(format!("response\0{response_id}").as_bytes())
         ))
-    }
-
-    pub(crate) fn bind_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
-        if let Some(key) = key {
-            self.lock_scheduler()
-                .bind_affinity(key, candidate_id, now_ms);
-        }
     }
 
     pub(crate) fn bind_response_affinity(
@@ -1076,7 +1037,6 @@ impl fmt::Debug for GatewayRuntime {
             )
             .field("local_key_count", &self.keys.len())
             .field("max_retry_candidates", &self.max_retry_candidates)
-            .field("affinity_enabled", &self.affinity_enabled)
             .finish()
     }
 }

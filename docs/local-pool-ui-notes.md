@@ -58,7 +58,7 @@ Client keys:
 Pool:
 
 - account/source health and request totals belong beside routing settings;
-- routing should include strategy, session affinity, retry attempts, retry wait,
+- routing should include strategy, retry attempts, retry wait, quota behavior,
   and cooldown behavior;
 - account member management and model blocks should be separated from routing
   controls.
@@ -383,22 +383,18 @@ Required pool layout:
 Routing controls:
 
 - strategy dropdown;
-- session affinity toggle;
-- affinity TTL;
 - retry credential count;
 - retry wait;
 - disable cooldown.
 
 Strategy values:
 
-- auto recommended;
-- single account;
-- high quota first;
-- low quota first;
-- high plan first;
-- low plan first;
-- expiry soon first;
-- custom.
+- automatic quota-aware distribution (recommended);
+- older-account priority.
+
+There is no chat-affinity control. New requests are routed independently;
+`previous_response_id` continuation ownership is mandatory and not user
+configurable.
 
 Zenith layout:
 
@@ -490,8 +486,8 @@ Empty? -> add source/account wizard
 - `Keys` must be separate because key scope/policy is its own object.
 - `Usage` must be separate because request logs need table density.
 - Advanced route strategy should not be in setup wizard; default `Auto` first.
-- Session affinity should be on by default for Codex-like clients, but labeled
-  as conversation consistency/prompt-cache stability, not internal routing.
+- Chat affinity is not a user setting. New requests rotate independently while
+  `previous_response_id` and active WebSocket ownership remain mandatory.
 
 ## Instances And Client Profiles
 

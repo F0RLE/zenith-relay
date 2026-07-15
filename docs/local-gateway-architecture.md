@@ -252,7 +252,7 @@ Required command groups:
   update bind scope, update client host, and update advanced timeouts;
 - `keys`: create, update label, enable/disable, rotate, delete, and update
   scope/model policy;
-- `routing`: update tie-break priority, weight, session affinity, retry limits,
+- `routing`: update tie-break priority, weight, retry limits,
   and cooldown policy;
 - `models`: update aliases, hidden/excluded models, per-source/account model
   blocks, and local pricing used only for estimates;
@@ -417,8 +417,6 @@ GatewaySettings
   port
   client_host: localhost | 127.0.0.1
   routing_strategy
-  session_affinity
-  session_affinity_ttl_ms
   max_retry_candidates
   timeouts
 ```
@@ -529,7 +527,6 @@ Core scheduler state:
 ```text
 PoolScheduler
   candidates: candidate_id -> RuntimeCandidate
-  session_affinity: bounded optional session key -> candidate id
   response_affinity: bounded response id -> creating candidate id (24h TTL)
   in_flight: candidate_id -> active request count
   dispatches: candidate_id -> committed request count
@@ -559,18 +556,18 @@ Selection contract:
 3. Promote expired cooldown entries.
 4. If a previous-response binding exists, require its creating candidate; a
    cooldown or failed preparation does not authorize cross-account replay.
-5. Otherwise, if session affinity points to a valid ready candidate, use it.
-6. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-7. Prefer the lowest active-request load normalized by `weight * available
+5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+6. Prefer the lowest active-request load normalized by `weight * available
    quota reserve`; this gives parallel requests proportional capacity.
-8. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
+7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
    then committed dispatch balance normalized by `weight * available quota
    reserve`. Use the greatest current quota reserve only when dispatch balances
    are equal, followed by least recently used, manual tie-break priority,
-   weight, and stable id. Quota or health changes clear historical dispatch
-   debt so stale weights cannot delay the new order.
-9. Exclude candidates already tried for this request.
-10. If all candidates are cooling down, return a local cooldown diagnostic with
+   weight, measured speed, and stable id. Measured speed never multiplies quota
+   share; it resolves only an otherwise equal choice. Quota or health changes
+   clear historical dispatch debt so stale weights cannot delay the new order.
+8. Exclude candidates already tried for this request.
+9. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
 
 Every emitted usage attempt may carry a bounded redacted routing diagnostic:
@@ -647,7 +644,7 @@ A monolithic `collection` shape combines:
 - service state: enabled, port, bind scope, client host, gateway mode, proxy;
 - key records: default key plus named keys;
 - account membership: collection account ids and per-key account ids;
-- routing: automatic tie-break policy, session affinity, and retry limits;
+- routing: automatic tie-break policy and retry limits;
 - model rules: aliases, hidden/excluded models, per-account excluded models;
 - timeouts, debug flag, stats, and health snapshots.
 
@@ -857,7 +854,7 @@ key.account_ids set   -> key.account_ids
 Then it applies:
 
 1. model, health, cooldown, quota, and Free-policy hard filters;
-2. mandatory previous-response binding, or valid session affinity;
+2. mandatory previous-response binding;
 3. API-source role tier;
 4. active load normalized by traffic share;
 5. OAuth preference, minimum quota reserve, LRU, and final manual tie-breaks;
@@ -866,11 +863,12 @@ Then it applies:
 Zenith should use the same logical order, but with source/account terminology:
 
 ```text
-scope -> hard gates -> affinity candidate -> routing order -> executor
+scope -> hard gates -> response owner -> routing order -> executor
 ```
 
-Hard gates must always run before affinity or ranking. Affinity may pin only a
-currently healthy, model-capable candidate.
+Hard gates always run before response ownership or ranking. A continuation may
+use only the healthy, model-capable candidate that created its response; it is
+never replayed through another account.
 
 ### Execution Attempt Loop
 
@@ -975,62 +973,24 @@ Subscription plan names and expiry dates do not determine runtime priority.
 Manual priority remains an advanced final tie-breaker rather than a routing
 group that starves otherwise eligible accounts.
 
-### Session Affinity
+### Response Continuity And WebSocket Ownership
 
-Useful affinity mechanisms:
+Zenith does not infer or persist chat-to-account bindings. Every new request is
+scheduled independently from headers, metadata, `conversation_id`, or client
+thread identifiers.
 
-- bind `response_id` and extracted session key to account id;
-- extract session id from multiple places:
-  `metadata.user_id`, `X-Session-ID`, `Session_id`, `X-Amp-Thread-Id`,
-  `X-Client-Request-Id`, `conversation_id`, then a stable hash from early
-  messages.
+Two protocol constraints remain mandatory:
 
-This matters for prompt cache and conversation continuity. Zenith should keep a
-session-affinity cache keyed by:
+- `previous_response_id` maps to the account that created the response. If that
+  account is unavailable, the continuation fails instead of replaying through a
+  different account;
+- an active WebSocket owns its current upstream account for continuation
+  messages on that connection. A new independent request may open a newly
+  scheduled upstream connection.
 
-```text
-wire_api + model + source/account pool scope + session id
-```
-
-Do not use one global session key across unrelated providers or models.
-
-Affinity extraction priority:
-
-```text
-metadata.user_id with *_session_<uuid>
-metadata.user_id JSON with session_id
-X-Session-ID
-Session_id
-X-Amp-Thread-Id
-X-Client-Request-Id
-metadata.user_id fallback
-conversation_id
-stable hash from early messages/system prompt
-```
-
-Cache key must include:
-
-```text
-source/protocol + model + pool scope + session id
-```
-
-Use two affinity paths:
-
-- `previous_response_id` -> account binding for Responses API continuity;
-- `session:<id>` -> account binding for clients without response ids.
-
-When cached account is unhealthy, cooling down, or no longer supports the model,
-fall back to scheduler and overwrite the binding. Keep TTL and maximum binding
-count, then prune old entries.
-
-TTL policy:
-
-- `Get` should not always refresh TTL; use this for passive inspection;
-- request-time `GetAndRefresh` can extend active conversation bindings;
-- invalidate one session when user clears a conversation binding;
-- invalidate all sessions for an account/source when it becomes disabled,
-  deleted, unavailable, or requires reauth;
-- cleanup loop should run at a fraction of TTL and stop with gateway shutdown.
+Response ownership uses a bounded 24-hour cache and is invalidated when its
+candidate is removed. This cache is protocol correctness, not an optional
+routing preference.
 
 ### Cooldown And Health
 
@@ -1570,7 +1530,7 @@ If a sidecar runtime is added later, these contracts are useful:
 - auth directory with one file per OAuth account;
 - API-key source records with base URL/key;
 - account manifest with plan rank, remaining quota, subscription expiry;
-- routing strategy and session affinity settings;
+- routing strategy and retry settings;
 - max retry credentials and retry interval;
 - global and per-account excluded model rules.
 

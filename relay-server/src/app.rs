@@ -69,13 +69,8 @@ impl AppState {
         let key_records = self.store.keys()?;
         let hidden_models = self.store.hidden_models()?;
         let use_free_accounts = self.store.quota_policy()?.2;
-        let (
-            max_retry_candidates,
-            session_affinity,
-            session_affinity_ttl_seconds,
-            routing_strategy,
-            default_service_tier,
-        ) = self.store.routing_policy()?;
+        let (max_retry_candidates, routing_strategy, default_service_tier) =
+            self.store.routing_policy()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -171,11 +166,8 @@ impl AppState {
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
                 routing_strategy,
-                session_affinity_ttl: session_affinity
-                    .then(|| Duration::from_secs(session_affinity_ttl_seconds)),
                 hidden_models,
                 default_service_tier,
-                ..GatewayRuntimeOptions::default()
             },
             usage,
         )
@@ -228,13 +220,8 @@ impl AppState {
         let account_proxy_required = self.store.account_proxy_required()?;
         let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
             self.store.quota_policy()?;
-        let (
-            max_retry_candidates,
-            session_affinity,
-            session_affinity_ttl_seconds,
-            routing_strategy,
-            default_service_tier,
-        ) = self.store.routing_policy()?;
+        let (max_retry_candidates, routing_strategy, default_service_tier) =
+            self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
         let mut warnings = Vec::new();
@@ -340,8 +327,6 @@ impl AppState {
                         .count(),
                 visible_model_ids,
                 max_retry_candidates: Some(max_retry_candidates),
-                session_affinity: Some(session_affinity),
-                session_affinity_ttl_seconds: Some(session_affinity_ttl_seconds),
                 routing_strategy: Some(routing_strategy),
                 default_service_tier: Some(default_service_tier),
                 models,

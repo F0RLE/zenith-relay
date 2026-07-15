@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn model_visibility_ignores_cooldown_but_respects_scope_and_protocol() {
-        let mut scheduler = PoolScheduler::new(4, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut cooled = candidate("cooled", "source-a");
         cooled.cooldowns.insert("gpt-5".to_string(), 200);
         scheduler.upsert(cooled);
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn empty_snapshot_unregisters_candidate_models() {
-        let mut scheduler = PoolScheduler::new(1, 100);
+        let mut scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("ready", "source-a"));
         let mut registry = ModelRegistry::default();
         registry.replace("ready", ["gpt-5"]);
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn exhausted_quota_keeps_catalog_visible_but_unhealthy_accounts_do_not() {
-        let mut scheduler = PoolScheduler::new(2, 100);
+        let mut scheduler = PoolScheduler::new();
         let mut exhausted = candidate("exhausted", "source-a");
         exhausted.quota = CandidateQuota::Exhausted;
         scheduler.upsert(exhausted);

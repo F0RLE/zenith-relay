@@ -179,9 +179,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       updatedAtMs: Date.now() - 60_000,
     };
     const localRuntime = {
-      schemaVersion: 12,
+      schemaVersion: 14,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "oldest_account", defaultServiceTier: "standard" as "standard" | "fast", sessionAffinity: false, sessionAffinityTtlSeconds: 3_600, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "oldest_account", defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
       platform: "windows",
       capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy"] },
       sources: populated ? [source] : [],
@@ -193,7 +193,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     };
     refreshGatewayModels(localRuntime);
     const remoteRuntime = structuredClone(localRuntime);
-    remoteRuntime.schemaVersion = 14;
+    remoteRuntime.schemaVersion = 15;
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     if (input.legacyRemoteRouting) {
@@ -361,12 +361,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "update_local_routing": {
-            const request = args.input as { maxRetryCandidates: number; routingStrategy: "adaptive" | "oldest_account"; defaultServiceTier: "standard" | "fast"; sessionAffinity: boolean; sessionAffinityTtlSeconds: number };
+            const request = args.input as { maxRetryCandidates: number; routingStrategy: "adaptive" | "oldest_account"; defaultServiceTier: "standard" | "fast" };
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
             localRuntime.gateway.routingStrategy = request.routingStrategy;
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
-            localRuntime.gateway.sessionAffinity = request.sessionAffinity;
-            localRuntime.gateway.sessionAffinityTtlSeconds = request.sessionAffinityTtlSeconds;
             return structuredClone(localRuntime);
           }
           case "sync_codex_default_service_tier": return null;
@@ -655,8 +653,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
         if (input.payload?.routingStrategy) remoteRuntime.gateway.routingStrategy = input.payload.routingStrategy as "adaptive" | "oldest_account";
         if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast";
-        remoteRuntime.gateway.sessionAffinity = Boolean(input.payload?.sessionAffinity);
-        remoteRuntime.gateway.sessionAffinityTtlSeconds = Number(input.payload?.sessionAffinityTtlSeconds);
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_pool_quotas") return { refreshed: remoteRuntime.accounts.filter((item) => item.inPool && item.enabled).length, failed: 0, snapshot: structuredClone(remoteRuntime) };

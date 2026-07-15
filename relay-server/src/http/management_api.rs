@@ -2065,8 +2065,6 @@ pub struct RoutingPolicyInput {
     routing_strategy: RoutingStrategy,
     #[serde(default)]
     default_service_tier: Option<DefaultServiceTier>,
-    session_affinity: bool,
-    session_affinity_ttl_seconds: u64,
 }
 
 pub async fn set_routing_policy(
@@ -2079,23 +2077,12 @@ pub async fn set_routing_policy(
             "max retry candidates must be between 1 and 8",
         ));
     }
-    if !(crate::store::MIN_SESSION_AFFINITY_TTL_SECONDS
-        ..=crate::store::MAX_SESSION_AFFINITY_TTL_SECONDS)
-        .contains(&input.session_affinity_ttl_seconds)
-    {
-        return Err(ManagementError::validation(
-            "session_affinity_ttl_invalid",
-            "session affinity TTL must be between 60 and 86400 seconds",
-        ));
-    }
     let previous = state.store.routing_policy().map_err(store_error)?;
-    let default_service_tier = input.default_service_tier.unwrap_or(previous.4);
+    let default_service_tier = input.default_service_tier.unwrap_or(previous.2);
     state
         .store
         .set_routing_policy(
             input.max_retry_candidates,
-            input.session_affinity,
-            input.session_affinity_ttl_seconds,
             input.routing_strategy,
             default_service_tier,
         )
@@ -2103,7 +2090,7 @@ pub async fn set_routing_policy(
     if let Err(error) = state.rebuild_runtime().await {
         state
             .store
-            .set_routing_policy(previous.0, previous.1, previous.2, previous.3, previous.4)
+            .set_routing_policy(previous.0, previous.1, previous.2)
             .map_err(store_error)?;
         if let Err(restore) = state.rebuild_runtime().await {
             return Err(store_error(format!(

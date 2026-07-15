@@ -10,7 +10,6 @@ use zenith_relay_core::{
 pub const CURRENT_SCHEMA_VERSION: u32 = 13;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
-pub const DEFAULT_SESSION_AFFINITY_TTL_SECONDS: u64 = 3_600;
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
@@ -48,10 +47,6 @@ pub struct GatewaySettings {
     pub client_host: String,
     #[serde(default = "default_max_retry_candidates")]
     pub max_retry_candidates: u8,
-    #[serde(default = "default_session_affinity")]
-    pub session_affinity: bool,
-    #[serde(default = "default_session_affinity_ttl_seconds")]
-    pub session_affinity_ttl_seconds: u64,
     #[serde(default)]
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
@@ -175,8 +170,6 @@ impl Default for GatewaySettings {
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
-            session_affinity: false,
-            session_affinity_ttl_seconds: DEFAULT_SESSION_AFFINITY_TTL_SECONDS,
             routing_strategy: RoutingStrategy::Adaptive,
             default_service_tier: DefaultServiceTier::Standard,
             common_proxy_configured: false,
@@ -199,9 +192,6 @@ impl GatewaySettings {
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
-        }
-        if !(60..=86_400).contains(&self.session_affinity_ttl_seconds) {
-            return Err("session affinity TTL must be between 60 and 86400 seconds");
         }
         if !(MIN_QUOTA_REFRESH_INTERVAL_SECONDS..=MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
             .contains(&self.quota_refresh_interval_seconds)
@@ -265,14 +255,6 @@ fn default_max_retry_candidates() -> u8 {
     DEFAULT_MAX_RETRY_CANDIDATES
 }
 
-fn default_session_affinity() -> bool {
-    false
-}
-
-fn default_session_affinity_ttl_seconds() -> u64 {
-    DEFAULT_SESSION_AFFINITY_TTL_SECONDS
-}
-
 fn default_weight() -> u32 {
     1
 }
@@ -318,9 +300,6 @@ mod tests {
 
         settings.client_host = "127.0.0.1".to_string();
         settings.max_retry_candidates = 0;
-        assert!(settings.validate().is_err());
-        settings.max_retry_candidates = DEFAULT_MAX_RETRY_CANDIDATES;
-        settings.session_affinity_ttl_seconds = 59;
         assert!(settings.validate().is_err());
     }
 

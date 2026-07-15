@@ -771,13 +771,13 @@ There is no MVP strategy selector. Runtime order is fixed:
 
 ```text
 hard filters
-previous-response binding or valid session affinity
+mandatory previous-response binding
 API source role tier
 active requests normalized by traffic share and available quota
 OAuth preference inside the stabilizer tier
 committed dispatch balance normalized by traffic share and available quota
 greatest minimum known quota reserve when balances are equal
-least recently used, manual priority, weight, and stable id
+least recently used, manual priority, weight, measured-speed tie-break, and stable id
 ```
 
 The scheduler makes this choice for every request. `API first` sources run before
@@ -789,7 +789,7 @@ visible member list never changes runtime order. Rows use `In rotation`,
 account is labelled `Codex interface` and is not a pinned pool route.
 
 Request details show the redacted routing reason and the counters used for that
-decision. This explains quota, parallel-load, affinity, and tie-break choices
+decision. This explains quota, parallel-load, response ownership, and tie-break choices
 without exposing prompt/response content or credentials.
 
 Creating or importing a connection does not add it to the pool. The empty
