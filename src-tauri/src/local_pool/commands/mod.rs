@@ -115,7 +115,11 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     }
     let mut keys = Vec::new();
     for key in key_records {
-        let Some(secret) = secret_store::load(&key.secret_ref)? else {
+        let secret = if key.enabled {
+            pool::ensure_local_gateway_key_secret(&key)?
+        } else if let Some(secret) = secret_store::load(&key.secret_ref)? {
+            secret
+        } else {
             continue;
         };
         keys.push(RuntimeMixedLocalKey {
@@ -351,6 +355,74 @@ mod tests {
         assert!(!account_routing_allowed(&settings, &subscription));
         settings.use_free_accounts = true;
         assert!(account_routing_allowed(&settings, &subscription));
+    }
+
+    #[tokio::test]
+    async fn runtime_repairs_missing_enabled_gateway_key_secret() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-key-repair-{id}"));
+        let source_secret_ref = format!("source:key-repair-{id}");
+        let key_secret_ref = format!("key:key-repair-{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_source(ProviderSourceRecord {
+                id: "source_1".into(),
+                name: "Synthetic".into(),
+                enabled: true,
+                in_pool: true,
+                draining: false,
+                base_url: "http://127.0.0.1:9/v1".into(),
+                secret_ref: source_secret_ref.clone(),
+                wire_api: zenith_relay_core::WireApi::Responses,
+                models: vec!["gpt-test".into()],
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                priority: 0,
+                weight: 1,
+                last_used_at: None,
+                last_test_at: None,
+                last_test_status: None,
+                last_error: None,
+            })
+            .unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_key(LocalGatewayKeyRecord {
+                id: "key_1".into(),
+                label: "Default".into(),
+                enabled: true,
+                secret_ref: key_secret_ref.clone(),
+                source_ids: None,
+                account_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
+                created_at: "2026-07-15T00:00:00Z".into(),
+                last_used_at: None,
+            })
+            .unwrap();
+
+        let runtime = runtime_from_store(&state).await.unwrap();
+        let generated = secret_store::load(&key_secret_ref).unwrap().unwrap();
+        assert!(generated.starts_with("zlr_"));
+        let address = state.gateway.start(runtime, 0).await.unwrap();
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth(&generated)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        state.gateway.stop().await;
+        secret_store::delete(&source_secret_ref).unwrap();
+        secret_store::delete(&key_secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

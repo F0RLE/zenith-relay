@@ -49,8 +49,7 @@ pub async fn attach_codex_to_local_gateway(
         )
         .into());
     }
-    let secret = secret_store::load(&key.secret_ref)?
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key secret is missing"))?;
+    let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
     let profile_dir = default_codex_home();
     let previous = codex::credential_kind(&profile_dir, &state.profile_backup_root())?;
     let stopped = stop_codex_and_sync_account(&state).await?;

@@ -26,6 +26,15 @@ pub struct GeneratedLocalKey {
     pub secret: String,
 }
 
+pub(super) fn ensure_local_gateway_key_secret(key: &LocalGatewayKeyRecord) -> LocalResult<String> {
+    if let Some(secret) = secret_store::load(&key.secret_ref)? {
+        return Ok(secret);
+    }
+    let secret = format!("zlr_{}", Uuid::new_v4().simple());
+    secret_store::save(&key.secret_ref, &secret)?;
+    Ok(secret)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateGatewayKeyInput {
