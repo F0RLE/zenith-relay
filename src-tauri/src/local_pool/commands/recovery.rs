@@ -118,8 +118,12 @@ pub fn get_relay_storage_info(
     .map(|path| path.to_string_lossy().into_owned());
     Ok(RelayStorageInfo {
         data_path: root.to_string_lossy().into_owned(),
-        backups_path: root.join("backups").to_string_lossy().into_owned(),
-        exports_path: root.join("exports").to_string_lossy().into_owned(),
+        backups_path: state.backup_root().to_string_lossy().into_owned(),
+        exports_path: state
+            .output_root()
+            .join("exports")
+            .to_string_lossy()
+            .into_owned(),
         cache_path,
         chatgpt_profile_path: platform::default_codex_home()
             .to_string_lossy()
@@ -136,7 +140,7 @@ pub fn open_relay_folder(
 ) -> Result<(), CommandError> {
     let path = match folder {
         RelayFolder::Data => state.root().to_path_buf(),
-        RelayFolder::ProfileBackups => state.profile_backup_root(),
+        RelayFolder::ProfileBackups => state.backup_root(),
     };
     fs::create_dir_all(&path).map_err(io_error)?;
     app.opener()
@@ -181,8 +185,8 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
         failed |= credentials.delete(&account_id).is_err();
     }
     failed |= secret_store::delete(COMMON_PROXY_SECRET_REF).is_err();
-    remove_transient_dir(state.root().join("imports"), &mut failed);
-    remove_transient_dir(state.root().join("oauth_pending"), &mut failed);
+    remove_transient_dir(state.transient_root().join("imports"), &mut failed);
+    remove_transient_dir(state.transient_root().join("oauth_pending"), &mut failed);
     if failed {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -252,7 +256,7 @@ fn write_export(
     app: &AppHandle,
     state: &DesktopState,
 ) -> Result<String, CommandError> {
-    let directory = state.root().join("exports");
+    let directory = state.output_root().join("exports");
     fs::create_dir_all(&directory).map_err(io_error)?;
     let filename = format!(
         "{prefix}-{}.json",
@@ -274,7 +278,7 @@ pub(crate) fn write_account_export(
     document
         .validate()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    let directory = state.root().join("exports");
+    let directory = state.output_root().join("exports");
     fs::create_dir_all(&directory).map_err(io_error)?;
     let filename = format!(
         "{}-{}-{}.json",

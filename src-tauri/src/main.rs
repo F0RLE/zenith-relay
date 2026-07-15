@@ -204,8 +204,8 @@ struct PreparedTopUpAmount {
 }
 
 #[tauri::command]
-fn get_state() -> UiState {
-    let _ = ensure_provider_on_launch();
+fn get_state(state: tauri::State<'_, local_pool::DesktopState>) -> UiState {
+    let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
     UiState {
         provider_active: provider_has_token(),
         codex_running: is_codex_running(),
@@ -498,8 +498,12 @@ async fn create_top_up_intent(
 }
 
 #[tauri::command]
-fn save_key(api_key: String, app: AppHandle) -> Result<String, String> {
-    enable_provider(api_key.trim())?;
+fn save_key(
+    api_key: String,
+    app: AppHandle,
+    state: tauri::State<'_, local_pool::DesktopState>,
+) -> Result<String, String> {
+    enable_provider(api_key.trim(), &state.ready_api_backup_root())?;
     save_app_key(api_key.trim())?;
     let message = restart_codex_if_running().unwrap_or_else(|| "Ключ сохранен.".to_string());
     let _ = app.emit("zenith-state-changed", ());
@@ -507,15 +511,21 @@ fn save_key(api_key: String, app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn reset_key(app: AppHandle) -> Result<String, String> {
-    reset_provider()?;
+fn reset_key(
+    app: AppHandle,
+    state: tauri::State<'_, local_pool::DesktopState>,
+) -> Result<String, String> {
+    reset_provider(&state.ready_api_backup_root())?;
     let _ = app.emit("zenith-state-changed", ());
     Ok("Настройки восстановлены.".to_string())
 }
 
 #[tauri::command]
-fn launch_saved_codex(app: AppHandle) -> Result<String, String> {
-    let _ = ensure_provider_on_launch();
+fn launch_saved_codex(
+    app: AppHandle,
+    state: tauri::State<'_, local_pool::DesktopState>,
+) -> Result<String, String> {
+    let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
     if !provider_has_token() {
         return Err("Сначала сохраните API key.".to_string());
     }
@@ -1220,7 +1230,8 @@ fn main() {
                 let state = startup_handle.state::<local_pool::DesktopState>();
                 let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
             });
-            let _ = ensure_provider_on_launch();
+            let relay_state = app.state::<local_pool::DesktopState>();
+            let _ = ensure_provider_on_launch(&relay_state.ready_api_backup_root());
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
             start_key_stats_watcher(handle.clone());

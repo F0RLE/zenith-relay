@@ -568,43 +568,60 @@ verified. `src-tauri` and `relay-server` keep their own lockfiles and depend on
 ## Desktop Runtime Data Tree
 
 The desktop keeps the existing stable `local-pool` directory under Tauri's
-platform app-data directory:
+platform-local app-data directory. On Windows this resolves to
+`%LOCALAPPDATA%\\com.zenith.codex\\local-pool`; macOS and Linux use the
+equivalent Tauri local-data location. The bundle identifier remains unchanged
+so existing installations continue to update in place.
 
 ```text
-<app_data_dir>/local-pool/
+<app_local_data_dir>/local-pool/
   metadata.json                     schema version and migration state
 
   settings/
     gateway.json
-    routing.json
-    model_rules.json
     remote_targets.json
-    onboarding.json
 
   records/
     sources.json
     accounts.json
     keys.json
     automations.json
-    profiles.json
 
   telemetry/
     usage.sqlite                    no prompt or response bodies
 
   backups/
     migrations/
-    profiles/<profile_id>/
-    repairs/<profile_id>/
+    profiles/                       reversible client profiles and snapshots
+    history-repair/                 explicit ChatGPT history repair backups
+    ready-api/                      redacted Ready API config backups
 
-  vault/                            only when native secret storage is absent
-    metadata.json
+  vault/                            encrypted values; master key stays in OS storage
     secrets.enc
+    secrets.enc.bak
 
-  imports/                          short-lived encrypted/import metadata
-  locks/
-  quarantine/
-  logs/                             redacted operational logs only
+  transient/
+    imports/                        short-lived import sessions
+    oauth_pending/                  resumable OAuth flow metadata
+    repair_previews/                expiring history-repair previews
+    locks/                          cross-process token refresh locks
+
+  output/
+    exports/                        user-requested account/usage/support exports
+    deployments/                    generated self-host deployment files
+
+  quarantine/                       invalid store files preserved for recovery
 ```
+
+Tauri's platform WebView data remains next to `local-pool` in the same local
+application directory. On Windows WebView2 names this cache `EBWebView`; it is
+rebuildable interface data and is not part of backups or account state.
+
+The ChatGPT client profile remains external at `<user_home>/.codex`. Zenith
+Relay edits `config.toml`, `auth.json`, and compatible desktop state only for
+explicit attach, restore, or service-tier actions. It does not move ChatGPT
+sessions or databases. Legacy Zenith config backups from `.codex` and
+`.codex/zenith-backups` are migrated into `backups/ready-api`.
 
 Storage rules:
 
@@ -615,10 +632,13 @@ Storage rules:
    and previous auth files never appear in normal JSON or SQLite rows.
 5. Prompt bodies and generated responses are not stored in telemetry, wake
    history, support bundles, or logs.
-6. Migration writes are atomic, create a backup first, and quarantine corrupt
-   input instead of deleting it.
-7. Keep `local-pool` as the directory name until a migration is implemented;
-   branding alone is not a migration.
+6. Durable record migrations create a backup first and quarantine corrupt
+   input instead of deleting it. Directory-layout migrations use same-volume
+   renames, are restart-safe, and never overwrite a name that already exists.
+7. Temporary state, generated output, profile backups, and durable records stay
+   in separate directories so clearing one category cannot remove another.
+8. Keep `local-pool` as the directory name and `com.zenith.codex` as the bundle
+   identifier for upgrade compatibility; branding alone is not a migration.
 
 ## Server Runtime Data Tree
 

@@ -7,8 +7,8 @@ use tauri::{
     AppHandle, Emitter, Manager, State, WebviewWindowBuilder,
 };
 
-use crate::codex_config::reset_provider;
 use crate::platform::ui_text;
+use crate::{codex_config::reset_provider, local_pool::DesktopState};
 
 pub struct AppState {
     allow_exit: Mutex<bool>,
@@ -56,7 +56,8 @@ pub fn build_tray(app: &AppHandle, _state: &State<AppState>) -> tauri::Result<()
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main_window(app),
             "reset" => {
-                let _ = reset_provider();
+                let state = app.state::<DesktopState>();
+                let _ = reset_provider(&state.ready_api_backup_root());
                 let _ = app.emit("zenith-state-changed", ());
                 show_main_window(app);
             }

@@ -66,15 +66,13 @@ pub struct DesktopState {
 
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
-        let repair_backups = root.join("backups").join("profiles");
-        let repair_previews = root.join("repair_previews");
-        if repair_backups.exists() || repair_previews.exists() {
+        let repair_previews = root.join("transient").join("repair_previews");
+        if repair_previews.exists() {
             let repair_state_root = root.clone();
             let _ = std::thread::Builder::new()
                 .name("history-repair-cleanup".to_string())
                 .spawn(move || {
-                    let _ = repair::cleanup_history_repair_backups(&repair_backups);
-                    let _ = repair::cleanup_expired_previews(&repair_state_root);
+                    let _ = repair::cleanup_expired_previews(&repair_state_root.join("transient"));
                 });
         }
         let mut store = LocalPoolStore::open(root.clone())?;
@@ -101,8 +99,11 @@ impl DesktopState {
                 .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
         );
         let oauth_events = DesktopOAuthEvents::default();
-        let oauth_flow =
-            OAuthFlowManager::new(root.clone(), NativeSecretBackend, oauth_events.clone());
+        let oauth_flow = OAuthFlowManager::new(
+            root.join("transient"),
+            NativeSecretBackend,
+            oauth_events.clone(),
+        );
         Ok(Self {
             root,
             gateway: GatewayManager::default(),
@@ -556,7 +557,27 @@ impl DesktopState {
     }
 
     pub fn profile_backup_root(&self) -> PathBuf {
-        self.root.join("backups").join("profiles")
+        self.backup_root().join("profiles")
+    }
+
+    pub fn history_repair_backup_root(&self) -> PathBuf {
+        self.backup_root().join("history-repair")
+    }
+
+    pub fn ready_api_backup_root(&self) -> PathBuf {
+        self.backup_root().join("ready-api")
+    }
+
+    pub fn backup_root(&self) -> PathBuf {
+        self.root.join("backups")
+    }
+
+    pub fn transient_root(&self) -> PathBuf {
+        self.root.join("transient")
+    }
+
+    pub fn output_root(&self) -> PathBuf {
+        self.root.join("output")
     }
 
     #[allow(dead_code)]
@@ -870,6 +891,33 @@ mod tests {
         assert!(reopened.source("source_1").unwrap().last_used_at.is_some());
         assert!(reopened.key("key_1").unwrap().last_used_at.is_some());
         drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn startup_preserves_existing_history_repair_backups() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-repair-backup-preservation-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let backup_root = root.join("backups").join("history-repair");
+        let ids = [
+            format!("history_repair_{}", uuid::Uuid::new_v4().simple()),
+            format!("history_repair_{}", uuid::Uuid::new_v4().simple()),
+        ];
+        for id in &ids {
+            std::fs::create_dir_all(backup_root.join(id)).unwrap();
+            std::fs::write(backup_root.join(id).join("manifest.json"), "preserved").unwrap();
+        }
+
+        drop(DesktopState::open(root.clone()).unwrap());
+
+        for id in &ids {
+            assert_eq!(
+                std::fs::read_to_string(backup_root.join(id).join("manifest.json")).unwrap(),
+                "preserved"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

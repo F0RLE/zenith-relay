@@ -130,14 +130,13 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     }
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
-        StoredRefreshAdapter::new(state.root.clone(), credentials.clone(), oauth, 60_000).map_err(
-            |error| {
+        StoredRefreshAdapter::new(state.transient_root(), credentials.clone(), oauth, 60_000)
+            .map_err(|error| {
                 LocalPoolError::new(
                     ErrorCode::InvalidState,
                     format!("failed to initialize account refresh locks: {error:?}"),
                 )
-            },
-        )?,
+            })?,
     );
     let persistence = Arc::new(CredentialPersistence::new(
         credentials,

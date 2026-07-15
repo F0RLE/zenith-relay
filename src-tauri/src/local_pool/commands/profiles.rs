@@ -309,7 +309,7 @@ pub fn preview_codex_history_repair(
             .collect::<Result<Vec<_>, _>>()?
     };
     repair::preview(
-        state.root(),
+        &state.transient_root(),
         &profiles,
         input.target_provider,
         crate::launcher::is_codex_running(),
@@ -324,7 +324,12 @@ pub async fn apply_codex_history_repair(
 ) -> Result<repair::RepairResult, CommandError> {
     let _mutation = state.setup_guard().await;
     ensure_codex_stopped()?;
-    repair::apply(state.root(), &state.profile_backup_root(), &session_id).map_err(repair_error)
+    repair::apply(
+        &state.transient_root(),
+        &state.history_repair_backup_root(),
+        &session_id,
+    )
+    .map_err(repair_error)
 }
 
 #[tauri::command]
@@ -334,7 +339,7 @@ pub async fn rollback_codex_history_repair(
 ) -> Result<repair::RollbackResult, CommandError> {
     let _mutation = state.setup_guard().await;
     ensure_codex_stopped()?;
-    repair::rollback(&state.profile_backup_root(), &backup_id).map_err(repair_error)
+    repair::rollback(&state.history_repair_backup_root(), &backup_id).map_err(repair_error)
 }
 
 #[tauri::command]

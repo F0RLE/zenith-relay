@@ -19,7 +19,7 @@ const MAX_ROLLOUT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TOTAL_ROLLOUT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_ROLLOUT_HEADER_BYTES: usize = 1024 * 1024;
 const MAX_REPAIR_MANIFEST_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_HISTORY_REPAIR_BACKUPS: usize = 2;
+const MAX_HISTORY_REPAIR_BACKUPS: usize = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -231,8 +231,40 @@ pub fn apply(
     })
 }
 
+#[cfg(test)]
 pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, String> {
     cleanup_history_repair_backups_preserving(backup_root, None)
+}
+
+pub fn migrate_history_repair_backups(
+    legacy_root: &Path,
+    target_root: &Path,
+) -> Result<usize, String> {
+    let entries = match fs::read_dir(legacy_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(io_error(error)),
+    };
+    let mut moved = 0;
+    for entry in entries {
+        let entry = entry.map_err(io_error)?;
+        let file_type = entry.file_type().map_err(io_error)?;
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if validate_id(&name, "history_repair_").is_err() {
+            continue;
+        }
+        if crate::platform::migrate_directory(&entry.path(), &target_root.join(&name))?
+            == crate::platform::StorageMigration::Moved
+        {
+            moved += 1;
+        }
+    }
+    Ok(moved)
 }
 
 pub fn cleanup_expired_previews(state_root: &Path) -> Result<usize, String> {
@@ -981,7 +1013,30 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_keeps_two_recent_internal_backups_and_preserves_user_directories() {
+    fn migration_moves_only_history_repairs_out_of_profile_backups() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-repair-layout-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let legacy = root.join("profiles");
+        let target = root.join("history-repair");
+        let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
+        fs::create_dir_all(legacy.join(&backup_id)).unwrap();
+        fs::create_dir_all(legacy.join("snapshots")).unwrap();
+        fs::write(legacy.join(&backup_id).join("manifest.json"), "repair").unwrap();
+        fs::write(legacy.join("snapshots/index.json"), "snapshot").unwrap();
+
+        assert_eq!(migrate_history_repair_backups(&legacy, &target).unwrap(), 1);
+        assert_eq!(
+            fs::read_to_string(target.join(&backup_id).join("manifest.json")).unwrap(),
+            "repair"
+        );
+        assert!(legacy.join("snapshots/index.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_keeps_latest_internal_backup_and_preserves_user_directories() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-repair-retention-{}",
             uuid::Uuid::new_v4().simple()
@@ -1002,10 +1057,10 @@ mod tests {
         let user_snapshot = root.join("snapshot_user_named");
         fs::create_dir_all(&user_snapshot).unwrap();
 
-        assert_eq!(cleanup_history_repair_backups(&root).unwrap(), 2);
+        assert_eq!(cleanup_history_repair_backups(&root).unwrap(), 3);
         assert!(!root.join(&ids[0]).exists());
         assert!(!root.join(&ids[1]).exists());
-        assert!(root.join(&ids[2]).exists());
+        assert!(!root.join(&ids[2]).exists());
         assert!(root.join(&ids[3]).exists());
         assert!(user_snapshot.exists());
 
@@ -1018,7 +1073,7 @@ mod tests {
         );
         assert!(root.join(&ids[0]).exists());
         assert!(!root.join(&ids[2]).exists());
-        assert!(root.join(&ids[3]).exists());
+        assert!(!root.join(&ids[3]).exists());
         assert!(user_snapshot.exists());
         fs::remove_dir_all(root).unwrap();
     }

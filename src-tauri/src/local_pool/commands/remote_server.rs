@@ -289,7 +289,7 @@ pub fn prepare_remote_server_deployment(
     input: PrepareRemoteDeploymentInput,
     state: State<'_, DesktopState>,
 ) -> Result<DeploymentPlan, CommandError> {
-    deployment::prepare(&state.root, &input.public_base_url).map_err(Into::into)
+    deployment::prepare(&state.output_root(), &input.public_base_url).map_err(Into::into)
 }
 
 #[tauri::command]

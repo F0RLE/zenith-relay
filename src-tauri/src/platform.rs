@@ -80,18 +80,18 @@ pub fn legacy_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let target = local_app_data_dir(app)?.join("local-pool");
     let legacy = legacy_local_pool_dir(app)?;
-    migrate_local_pool_dir(&legacy, &target)?;
+    migrate_directory(&legacy, &target)?;
     Ok(target)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StorageMigration {
+pub(crate) enum StorageMigration {
     Current,
     Moved,
     Conflict,
 }
 
-fn migrate_local_pool_dir(legacy: &Path, target: &Path) -> Result<StorageMigration, String> {
+pub(crate) fn migrate_directory(legacy: &Path, target: &Path) -> Result<StorageMigration, String> {
     if legacy == target {
         validate_storage_directory(target)?;
         return Ok(StorageMigration::Current);
@@ -177,7 +177,7 @@ mod tests {
         let target = root.join("local/local-pool");
 
         assert_eq!(
-            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            migrate_directory(&legacy, &target).unwrap(),
             StorageMigration::Current
         );
         assert!(!legacy.exists());
@@ -194,7 +194,7 @@ mod tests {
         fs::write(legacy.join("metadata.json"), "legacy").unwrap();
 
         assert_eq!(
-            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            migrate_directory(&legacy, &target).unwrap(),
             StorageMigration::Moved
         );
         assert!(!legacy.exists());
@@ -216,7 +216,7 @@ mod tests {
         fs::write(target.join("origin"), "current").unwrap();
 
         assert_eq!(
-            migrate_local_pool_dir(&legacy, &target).unwrap(),
+            migrate_directory(&legacy, &target).unwrap(),
             StorageMigration::Conflict
         );
         assert_eq!(fs::read_to_string(legacy.join("origin")).unwrap(), "legacy");
@@ -240,7 +240,7 @@ mod tests {
             return;
         }
 
-        let error = migrate_local_pool_dir(&legacy, &target).unwrap_err();
+        let error = migrate_directory(&legacy, &target).unwrap_err();
         assert!(error.contains("symbolic link"));
         assert!(!target.exists());
         cleanup(root);

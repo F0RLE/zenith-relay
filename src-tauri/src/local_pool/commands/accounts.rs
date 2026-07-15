@@ -516,7 +516,7 @@ pub async fn start_local_account_import(
     let (content, source_file) = normalize_import_input(input)?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
-    let session = ImportSessionStore::new(state.root.clone(), NativeSecretBackend)
+    let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
         .start(
             &content,
             source_file.as_deref(),
@@ -547,7 +547,7 @@ pub async fn preview_local_account_import_files(
     })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
-    let sessions = ImportSessionStore::new(state.root.clone(), NativeSecretBackend);
+    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let session = sessions
         .start(
             &content,
@@ -677,7 +677,7 @@ pub async fn resume_local_account_import(
     let _mutation = state.setup_guard().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
-    let session = ImportSessionStore::new(state.root.clone(), NativeSecretBackend)
+    let session = ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
         .resume(&session_id, &existing.keys().cloned().collect::<Vec<_>>())
         .map_err(import_session_error)?;
     Ok(session.into())
@@ -691,7 +691,7 @@ pub async fn prepare_local_account_import(
     let _mutation = state.setup_guard().await;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(&state, &credentials)?;
-    let sessions = ImportSessionStore::new(state.root.clone(), NativeSecretBackend);
+    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let session = sessions
         .resume(
             &input.session_id,
@@ -718,7 +718,7 @@ pub async fn cancel_local_account_import(
     state: State<'_, DesktopState>,
 ) -> CommandResult<()> {
     let _mutation = state.setup_guard().await;
-    ImportSessionStore::new(state.root.clone(), NativeSecretBackend)
+    ImportSessionStore::new(state.transient_root(), NativeSecretBackend)
         .cancel(&session_id)
         .map_err(import_session_error)?;
     Ok(())
@@ -741,7 +741,7 @@ async fn confirm_local_account_import_inner(
     let configured_models = normalize_models(input.models.clone())?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let existing = existing_identity_index(state, &credentials)?;
-    let sessions = ImportSessionStore::new(state.root.clone(), NativeSecretBackend);
+    let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let session = sessions
         .resume(
             &input.session_id,
@@ -1395,7 +1395,7 @@ pub(crate) async fn prepare_account_credentials(
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
     );
     let refresh = StoredRefreshAdapter::new(
-        state.root.clone(),
+        state.transient_root(),
         credentials.clone(),
         oauth,
         TOKEN_REFRESH_SKEW_MS,
@@ -3974,7 +3974,7 @@ mod tests {
             source_file: None,
         })
         .unwrap();
-        let sessions = ImportSessionStore::new(root.clone(), NativeSecretBackend);
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
         let session = sessions.start(&content, None, &[]).unwrap();
         let selected_item_ids = session
             .preview
@@ -4042,7 +4042,7 @@ mod tests {
             {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-one","api_base_url":"https://one.example.test/v1","api_provider_name":"One API"},
             {"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-key-two","api_base_url":"https://two.example.test/v1","api_provider_name":"Two API"}
         ]"#;
-        let sessions = ImportSessionStore::new(root.clone(), NativeSecretBackend);
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
         let session = sessions.start(content, None, &[]).unwrap();
         let selected_item_ids = session
             .preview

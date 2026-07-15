@@ -216,43 +216,20 @@ zenith-relay/
 Keep `Zenith API Mode` separate from `Personal Local Pool Mode`. Zenith API is
 one preset source in local mode, not the local pool's hard dependency.
 
-Runtime data lives under the app data directory, not in the repository:
-
-```text
-<app_data_dir>/local-pool/
-  settings/
-    gateway.json
-    sources.json
-    accounts_index.json
-    keys.json
-    routing.json
-    model_rules.json
-    self_host.json
-  secrets/
-    refs.json               non-secret secret refs and key ids only
-  telemetry/
-    request_logs.sqlite
-  backups/
-    profiles/<profile_hash>/
-    repairs/<profile_hash>/
-  oauth_pending/
-  import_sessions/
-  locks/
-    profile_<hash>.lock
-    gateway_<port>.lock
-    token_<credential_id>.lock
-  quarantine/
-  logs/
-```
+Runtime data lives under the platform-local application data directory, not in
+the repository. The exact durable, transient, backup, output, cache, and
+external ChatGPT profile paths are defined only in
+[project-structure.md](project-structure.md#desktop-runtime-data-tree).
 
 Rules:
 
 1. Frontend files never read or write this data directly.
 2. Secrets use OS keychain first. Encrypted file fallback is allowed only with a
    local master key outside repo/config exports.
-3. `settings/` stores only non-secret records with `secret_ref` values.
-4. `locks/` coordinates profile writes, token refresh, and one gateway per
-   profile/port. Stale locks require PID/process check before takeover.
+3. Settings and records store only non-secret values and `secret_ref` ids.
+4. Transient locks coordinate token refresh. In-process guards coordinate
+   profile writes and gateway lifecycle; stale filesystem locks expire before
+   takeover.
 5. `quarantine/` keeps corrupt or unsafe files with reason metadata instead of
    silent deletion.
 6. Private admin code, Zenith server secrets, and backend execution policy do
