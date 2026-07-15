@@ -158,10 +158,36 @@ for (const viewport of viewports) {
     await expect(poolToolbar).toBeVisible();
     expect(await poolToolbar.evaluate((toolbar) => {
       const tabs = document.querySelector<HTMLElement>(".relay-tabs");
-      const select = toolbar.querySelector<HTMLElement>("select");
-      if (!tabs || !select) return false;
-      return select.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
+      const trigger = toolbar.querySelector<HTMLElement>(".relay-option-trigger");
+      if (!tabs || !trigger) return false;
+      return trigger.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
     })).toBe(true);
+    const headerActions = page.locator(".pool-header-actions");
+    await expect(headerActions.locator(":scope > *").first()).toHaveClass(/relay-action-menu/);
+    await expect(headerActions.locator(":scope > *").last()).toHaveClass(/relay-button/);
+    await headerActions.locator("summary").click();
+    const actionMenu = headerActions.getByRole("menu");
+    await expect(actionMenu).toBeVisible();
+    expect(await actionMenu.getByRole("menuitem").evaluateAll((items) => items.every((item) => getComputedStyle(item).display === "grid"))).toBe(true);
+    await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
+    await page.keyboard.press("Escape");
+
+    const sortTrigger = page.locator(".pool-sort-menu .relay-option-trigger");
+    await expect(sortTrigger).toHaveAccessibleName("Порядок отображения: Состояние и квота");
+    await sortTrigger.click();
+    const sortList = page.getByRole("listbox", { name: "Порядок отображения" });
+    await expect(sortList.getByRole("option")).toHaveCount(3);
+    expect(await sortList.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/pool-sort-menu-ru-dark-${viewport.width}x${viewport.height}.png` });
+    await sortList.getByRole("option", { name: "Минимальный запас квоты" }).click();
+    await expect(sortTrigger).toHaveAccessibleName("Порядок отображения: Минимальный запас квоты");
+    await sortTrigger.click();
+    await page.keyboard.press("Escape");
+    await expect(sortList).toBeHidden();
+    await expect(sortTrigger).toBeFocused();
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
       const cellRect = cell.getBoundingClientRect();
       const center = (cellRect.top + cellRect.bottom) / 2;
@@ -616,6 +642,77 @@ for (const viewport of viewports) {
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
     })).toBe(true);
   });
+}
+
+for (const theme of themes) {
+  for (const viewport of viewports) {
+    test(`app context menu ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Подключения", exact: true }).click();
+      const search = page.getByPlaceholder("Поиск").first();
+      await search.fill("Business");
+      await search.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        input.setSelectionRange(0, 4);
+        const rect = input.getBoundingClientRect();
+        input.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + 24, clientY: rect.bottom - 6 }));
+      });
+
+      const menu = page.getByRole("menu", { name: "Контекстное меню" });
+      await expect(menu).toBeVisible();
+      await expect(menu.getByRole("menuitem")).toHaveCount(4);
+      expect(await menu.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+      })).toBe(true);
+      await page.screenshot({ path: `output/playwright/context-menu-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+
+      await menu.getByRole("menuitem", { name: "Вырезать" }).click();
+      await expect(search).toHaveValue("ness");
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Busi");
+      await search.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        const rect = input.getBoundingClientRect();
+        input.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + 24, clientY: rect.bottom - 6 }));
+      });
+      await expect(menu).toBeVisible();
+      await menu.getByRole("menuitem", { name: "Вставить" }).click();
+      await expect(search).toHaveValue("Business");
+      await search.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        const rect = input.getBoundingClientRect();
+        input.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + 24, clientY: rect.bottom - 6 }));
+      });
+      await expect(menu).toBeVisible();
+      await menu.getByRole("menuitem", { name: "Выделить всё" }).click();
+      expect(await search.evaluate((element) => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 0, end: 8 });
+      await search.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        const rect = input.getBoundingClientRect();
+        input.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: rect.left + 24, clientY: rect.bottom - 6 }));
+      });
+      await expect(menu).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(menu).toBeHidden();
+      await expect(search).toBeFocused();
+
+      await search.evaluate((element) => {
+        const input = element as HTMLInputElement;
+        input.setSelectionRange(0, 0);
+        input.blur();
+        window.getSelection()?.removeAllRanges();
+      });
+      expect(await page.locator(".relay-page-header").evaluate((element) => {
+        const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 300, clientY: 80 });
+        element.dispatchEvent(event);
+        return event.defaultPrevented;
+      })).toBe(true);
+      await expect(menu).toBeHidden();
+    });
+  }
 }
 
 for (const viewport of viewports) {

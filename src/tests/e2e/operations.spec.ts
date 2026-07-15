@@ -730,15 +730,19 @@ test("pool display order follows availability and quota without exposing raw pri
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const order = page.getByLabel("Display order");
-  await expect(order.locator("option")).toHaveText(["State and quota", "Minimum quota reserve", "Name"]);
+  const order = page.locator(".pool-sort-menu .relay-option-trigger");
+  await expect(order).toHaveAccessibleName("Display order: State and quota");
+  await order.click();
+  const options = page.getByRole("listbox", { name: "Display order" }).getByRole("option");
+  await expect(options).toHaveText(["State and quota", "Minimum quota reserve", "Name"]);
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
   expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
-  await order.selectOption("quota");
+  await options.getByText("Minimum quota reserve", { exact: true }).click();
   expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
-  await order.selectOption("name");
+  await order.click();
+  await options.getByText("Name", { exact: true }).click();
   expect(await names()).toEqual(["Backup account", "Business Workspace", "Example compatible API", "Personal Plus"]);
 });
 
@@ -1238,7 +1242,7 @@ test("pool toggle changes state without switching Codex", async ({ page }) => {
   await expect(page.getByText("Endpoint started.")).toBeVisible();
   const header = page.locator(".relay-page-header");
   await expect(header.getByRole("button", { name: "Switch Codex to pool", exact: true })).toBeVisible();
-  await expect(header.locator(".relay-page-actions > *")).toHaveCount(2);
+  await expect(header.locator(".pool-header-actions > *")).toHaveCount(2);
   await header.locator(".relay-action-menu summary").click();
   await header.getByRole("menuitem", { name: "Stop pool", exact: true }).click();
   await expect(page.getByText("Endpoint stopped.")).toBeVisible();

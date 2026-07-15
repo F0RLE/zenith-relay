@@ -1,6 +1,6 @@
 import { ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { CheckCircle2, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
+import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
@@ -178,6 +178,134 @@ export function ActionMenu({ children, className = "", label }: { children: Reac
 export function ActionMenuItem({ children, icon, danger = false, className = "", onClick, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon: ReactNode; danger?: boolean }) {
   const classes = [danger ? "danger" : "", className].filter(Boolean).join(" ");
   return <button type="button" role="menuitem" className={classes || undefined} {...props} onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}>{icon}<span>{children}</span></button>;
+}
+
+export function OptionMenu({ label, value, options, icon, onChange, className = "" }: {
+  label: string;
+  value: string;
+  options: Array<{ value: string; label: string }>;
+  icon?: ReactNode;
+  onChange: (value: string) => void;
+  className?: string;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [position, setPosition] = useState<{ left: number; top: number; width: number } | null>(null);
+  const selected = options.find((option) => option.value === value) ?? options[0];
+
+  const close = (restoreFocus = false) => {
+    setOpen(false);
+    setPosition(null);
+    if (restoreFocus) triggerRef.current?.focus();
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = triggerRef.current?.getBoundingClientRect();
+    const list = listRef.current;
+    if (!trigger || !list) return;
+    const margin = 8;
+    const gap = 6;
+    const width = Math.min(Math.max(trigger.width, 220), window.innerWidth - margin * 2);
+    const left = Math.max(margin, Math.min(trigger.right - width, window.innerWidth - width - margin));
+    const below = trigger.bottom + gap;
+    const top = below + list.offsetHeight <= window.innerHeight - margin
+      ? below
+      : Math.max(margin, trigger.top - list.offsetHeight - gap);
+    setPosition({ left, top, width });
+  }, [open, options.length]);
+
+  useEffect(() => {
+    if (!open) return;
+    const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+    selectedOption?.focus();
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close(true);
+    };
+    const dismiss = () => close();
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", dismiss);
+    window.addEventListener("scroll", dismiss, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("resize", dismiss);
+      window.removeEventListener("scroll", dismiss, true);
+    };
+  }, [open]);
+
+  const moveFocus = (event: React.KeyboardEvent<HTMLElement>, index: number) => {
+    const direction = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1 : direction ? (index + direction + options.length) % options.length : -1;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close(true);
+      return;
+    }
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[nextIndex]?.focus();
+  };
+
+  return <div className={`relay-option-menu ${className}`.trim()}>
+    <button
+      ref={triggerRef}
+      type="button"
+      className="relay-option-trigger"
+      aria-label={`${label}: ${selected?.label ?? ""}`}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      onClick={() => setOpen((current) => !current)}
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && open) {
+          event.preventDefault();
+          close(true);
+          return;
+        }
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        setOpen(true);
+      }}
+    >
+      {icon}
+      <span>{selected?.label}</span>
+      <ChevronDown aria-hidden />
+    </button>
+    {open && typeof document !== "undefined" ? createPortal(
+      <div
+        ref={listRef}
+        className="relay-option-list"
+        role="listbox"
+        aria-label={label}
+        data-positioned={Boolean(position)}
+        style={position ? { left: position.left, top: position.top, width: position.width } : undefined}
+      >
+        {options.map((option, index) => <button
+          key={option.value}
+          type="button"
+          role="option"
+          aria-selected={option.value === value}
+          onClick={() => {
+            onChange(option.value);
+            close(true);
+          }}
+          onKeyDown={(event) => moveFocus(event, index)}
+        >
+          <span>{option.label}</span>
+          {option.value === value ? <Check aria-hidden /> : null}
+        </button>)}
+      </div>,
+      document.body,
+    ) : null}
+  </div>;
 }
 
 export function StatusBadge({ status, label }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string }) {

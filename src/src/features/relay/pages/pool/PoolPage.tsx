@@ -3,7 +3,7 @@ import { ArrowRightLeft, ArrowUpDown, CheckCheck, KeyRound, LayoutGrid, List, Lo
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, KeySummary, ModelSummary, SourceSummary } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { SourceDialog } from "../connections/ConnectionsPage";
@@ -57,21 +57,21 @@ export function PoolPage() {
     return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId, codexPoolOauthSelection === "none");
   }, true);
   const running = Boolean(runtime?.gateway.running);
-  const action = mode === "local" ? <>
-    {running
-      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
-      : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
+  const action = mode === "local" ? <div className="pool-header-actions">
     <ActionMenu label={t("common.actions")}>
       {viewMenuAction}
       <ActionMenuItem icon={<Settings2 aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={() => setRoutingPolicy(true)}>{t("pool.routingSettings")}</ActionMenuItem>
       {running ? <ActionMenuItem icon={<Power aria-hidden />} disabled={busy === "pool-toggle"} onClick={() => void perform("pool-toggle", relayCommands.stopGateway, "feedback.stopped")}>{t("pool.stop")}</ActionMenuItem> : null}
     </ActionMenu>
-  </> : <>
-    {viewAction}
+    {running
+      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchCodex")}</Button>
+      : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
+  </div> : <div className="pool-header-actions">
     <ActionMenu label={t("common.actions")}>
       <ActionMenuItem icon={<Settings2 aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={() => setRoutingPolicy(true)}>{t("pool.routingSettings")}</ActionMenuItem>
     </ActionMenu>
-  </>;
+    {viewAction}
+  </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
@@ -114,7 +114,7 @@ function MembersView({ onAdd, onQuotaPolicy }: { onAdd: () => void; onQuotaPolic
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <label className="account-sort-select" title={t("pool.routingOrderHint")}><ArrowUpDown aria-hidden /><span>{t("pool.sortLabel")}</span><select aria-label={t("pool.sortLabel")} value={sortBy} onChange={(event) => setSortBy(event.target.value as MemberSort)}><option value="routing">{t("pool.sort.routing")}</option><option value="quota">{t("pool.sort.quota")}</option><option value="name">{t("pool.sort.name")}</option></select></label>
+        <div className="pool-sort-control" title={t("pool.routingOrderHint")}><span>{t("pool.sortLabel")}</span><OptionMenu className="pool-sort-menu" label={t("pool.sortLabel")} value={sortBy} onChange={(value) => setSortBy(value as MemberSort)} icon={<ArrowUpDown aria-hidden />} options={[{ value: "routing", label: t("pool.sort.routing") }, { value: "quota", label: t("pool.sort.quota") }, { value: "name", label: t("pool.sort.name") }]} /></div>
         <div className="inline-actions pool-quota-actions"><div className="view-layout-switcher" role="group" aria-label={t("pool.layout.label")}><IconButton label={t("pool.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")} icon={<Rows3 aria-hidden />} /><IconButton label={t("pool.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")} icon={<List aria-hidden />} /><IconButton label={t("pool.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")} icon={<LayoutGrid aria-hidden />} /></div><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button><IconButton label={t("pool.refreshPolicy")} icon={<Settings2 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} /></div>
       </div>
       <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><strong>{counts.quotaWait}</strong></div><div><span>{t("pool.memberStatus.unavailable")}</span><strong>{counts.unavailable}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><strong>{counts.disabled}</strong></div></div>
