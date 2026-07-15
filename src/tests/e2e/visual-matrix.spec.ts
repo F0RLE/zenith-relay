@@ -628,6 +628,14 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
+    await expect(dialog).toContainText("Selection reasonLargest current quota reserve");
+    await expect(dialog).toContainText("Eligible participants4");
+    await expect(dialog).toContainText("Quota at selection63.00%");
+    expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
     await page.screenshot({ path: `output/playwright/request-details-dialog-${viewport.width}x${viewport.height}.png` });
     await dialog.getByRole("button", { name: "Close" }).first().click();
 
@@ -824,6 +832,14 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.locator(".request-disclosure").click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
   await expect(dialog).toContainText("req_synthetic_local");
+  await expect(dialog).toContainText("Причина выбораНаибольший текущий запас квоты");
+  await expect(dialog).toContainText("Доступных участников4");
+  await expect(dialog).toContainText("Квота при выборе63.00%");
+  expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+  })).toBe(true);
   await page.screenshot({ path: "output/playwright/request-details-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 

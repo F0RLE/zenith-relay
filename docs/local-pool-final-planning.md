@@ -123,12 +123,17 @@ Runtime ordering is intentionally small:
    reserve last;
 4. lowest active-request load normalized by traffic share and available quota;
 5. OAuth preference within an otherwise equal stabilizer comparison;
-6. committed dispatch balance, greatest known quota reserve, and least recently
-   used;
+6. greatest known quota reserve, then committed dispatch balance and least
+   recently used;
 7. manual priority, weight, and stable id as final tie-breakers.
 
 Source role is explicit and editable. Subscription plan names and expiry dates
 must not create a hidden routing rule.
+
+Each persisted usage attempt includes a redacted routing decision: selection
+reason, eligible count, quota reserve, effective weight, and pre-dispatch load.
+It never includes request/response bodies, credentials, proxy addresses, or raw
+account identities.
 
 Retry rules:
 

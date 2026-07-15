@@ -89,6 +89,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "011_request_rotation_default",
         sql: include_str!("../../migrations/011_request_rotation_default.sql"),
     },
+    Migration {
+        version: 12,
+        name: "012_routing_diagnostics",
+        sql: include_str!("../../migrations/012_routing_diagnostics.sql"),
+    },
 ];
 
 struct Migration {
@@ -580,8 +585,8 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -597,6 +602,7 @@ impl Store {
                 };
                 let candidate_hint =
                     format!("{:x}", Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
+                let routing_json = event.routing.as_ref().map(to_json).transpose()?;
                 statement
                     .execute(params![
                         event.request_id,
@@ -617,6 +623,7 @@ impl Store {
                         event.output_tokens.map(|value| value as i64),
                         event.total_tokens.map(|value| value as i64),
                         *created_at_ms as i64,
+                        routing_json,
                     ])
                     .map_err(db_error)?;
             }
@@ -642,7 +649,7 @@ impl Store {
             .max(0) as u64;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -659,6 +666,10 @@ impl Store {
                     candidate_kind: row.get(3)?,
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
+                    routing: row
+                        .get::<_, Option<String>>(19)?
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(5)?,
                     resolved_model: row.get(6)?,
                     wire_api: parse_wire_api(&wire_api),
@@ -1195,6 +1206,7 @@ fn io_error(error: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zenith_relay_core::{RoutingDiagnostics, SelectionReason};
 
     #[test]
     fn pool_membership_migration_defaults_existing_records_outside_pool() {
@@ -1405,7 +1417,8 @@ mod tests {
                 (8, "008_reasoning_tokens".to_string()),
                 (9, "009_ttft_ms".to_string()),
                 (10, "010_reset_legacy_cooldowns".to_string()),
-                (11, "011_request_rotation_default".to_string())
+                (11, "011_request_rotation_default".to_string()),
+                (12, "012_routing_diagnostics".to_string())
             ]
         );
         drop(store);
@@ -1510,6 +1523,14 @@ mod tests {
                         source_id: "source_alpha".to_string(),
                         candidate_id: Some("source_alpha".to_string()),
                         account_id: None,
+                        routing: Some(RoutingDiagnostics {
+                            reason: SelectionReason::QuotaHeadroom,
+                            eligible_candidates: 3,
+                            quota_remaining_basis_points: Some(5_400),
+                            effective_weight: 5_400,
+                            in_flight_before: 0,
+                            dispatches_before: index - 1,
+                        }),
                         requested_model: Some(model.to_string()),
                         resolved_model: Some(model.to_string()),
                         wire_api: WireApi::Responses,
@@ -1550,6 +1571,13 @@ mod tests {
         assert_eq!(page.total_pages, 1);
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
+        assert_eq!(
+            page.events[0]
+                .routing
+                .as_ref()
+                .map(|routing| routing.reason),
+            Some(SelectionReason::QuotaHeadroom)
+        );
         let hint = format!("{:x}", Sha256::digest(b"source_alpha"))[..12].to_string();
         assert_eq!(
             store.api_equivalents().unwrap().get(&hint),

@@ -1055,6 +1055,9 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("First output128 ms");
   await expect(details).toContainText("Total time428 ms");
+  await expect(details).toContainText("Selection reasonLargest current quota reserve");
+  await expect(details).toContainText("Eligible participants4");
+  await expect(details).toContainText("Quota at selection63.00%");
 });
 
 test("pool member fields explain tie-break priority and traffic share", async ({ page }) => {

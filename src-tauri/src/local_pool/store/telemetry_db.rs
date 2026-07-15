@@ -2,7 +2,9 @@ use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::{collections::HashMap, path::Path, sync::Mutex};
-use zenith_relay_core::{estimate_api_equivalent, ApiEquivalentSummary, UsageEvent};
+use zenith_relay_core::{
+    estimate_api_equivalent, ApiEquivalentSummary, RoutingDiagnostics, UsageEvent,
+};
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -75,7 +77,14 @@ PRAGMA user_version = 6;
 COMMIT;
 "#;
 
-const USAGE_SCHEMA_VERSION: u32 = 6;
+const MIGRATION_007: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN routing_json TEXT;
+PRAGMA user_version = 7;
+COMMIT;
+"#;
+
+const USAGE_SCHEMA_VERSION: u32 = 7;
 const PRUNE_USAGE_SQL: &str =
     "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
 
@@ -94,6 +103,7 @@ pub struct UsageLog {
     pub source_id: String,
     pub candidate_id: Option<String>,
     pub account_id: Option<String>,
+    pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: String,
@@ -150,6 +160,9 @@ impl TelemetryDb {
         if version <= 5 {
             connection.execute_batch(MIGRATION_006).map_err(db_error)?;
         }
+        if version <= 6 {
+            connection.execute_batch(MIGRATION_007).map_err(db_error)?;
+        }
         connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -163,6 +176,17 @@ impl TelemetryDb {
                 "usage attempt must be at least one",
             ));
         }
+        let routing_json = event
+            .routing
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| {
+                LocalPoolError::new(
+                    ErrorCode::Io,
+                    format!("usage routing diagnostics serialization failed: {error}"),
+                )
+            })?;
         self.connection
             .lock()
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
@@ -171,8 +195,8 @@ impl TelemetryDb {
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens,
-                    reasoning_tokens, output_tokens, total_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    reasoning_tokens, output_tokens, total_tokens, routing_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 params![
                     event.request_id,
                     event.attempt,
@@ -193,6 +217,7 @@ impl TelemetryDb {
                     event.reasoning_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
+                    routing_json,
                 ],
             )
             .map(|_| ())
@@ -210,7 +235,7 @@ impl TelemetryDb {
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
                     ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens,
-                    total_tokens
+                    total_tokens, routing_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -223,6 +248,7 @@ impl TelemetryDb {
                 let reasoning_tokens: Option<i64> = row.get(18)?;
                 let output_tokens: Option<i64> = row.get(19)?;
                 let total_tokens: Option<i64> = row.get(20)?;
+                let routing_json: Option<String> = row.get(21)?;
                 Ok(UsageLog {
                     id: row.get(0)?,
                     created_at: row.get(1)?,
@@ -232,6 +258,9 @@ impl TelemetryDb {
                     source_id: row.get(5)?,
                     candidate_id: row.get(6)?,
                     account_id: row.get(7)?,
+                    routing: routing_json
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(8)?,
                     resolved_model: row.get(9)?,
                     wire_api: row.get(10)?,
@@ -328,7 +357,7 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zenith_relay_core::WireApi;
+    use zenith_relay_core::{SelectionReason, WireApi};
 
     #[test]
     fn usage_survives_database_reopen() {
@@ -342,6 +371,14 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            routing: Some(RoutingDiagnostics {
+                reason: SelectionReason::QuotaHeadroom,
+                eligible_candidates: 4,
+                quota_remaining_basis_points: Some(6_300),
+                effective_weight: 6_300,
+                in_flight_before: 0,
+                dispatches_before: 3,
+            }),
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
@@ -368,6 +405,10 @@ mod tests {
         assert_eq!(logs[0].ttft_ms, Some(4));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
+        assert_eq!(
+            logs[0].routing.as_ref().map(|routing| routing.reason),
+            Some(SelectionReason::QuotaHeadroom)
+        );
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
@@ -390,6 +431,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("source_1".into()),
             account_id: None,
+            routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
@@ -440,6 +482,7 @@ mod tests {
             source_id: "source_1".into(),
             candidate_id: Some("account_1".into()),
             account_id: Some("account_1".into()),
+            routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
             wire_api: WireApi::Responses,
@@ -543,7 +586,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 7).unwrap();
+        connection.pragma_update(None, "user_version", 8).unwrap();
         drop(connection);
 
         assert!(matches!(
@@ -554,7 +597,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -603,6 +646,7 @@ mod tests {
                 source_id: "source".into(),
                 candidate_id: None,
                 account_id: None,
+                routing: None,
                 requested_model: None,
                 resolved_model: None,
                 wire_api: WireApi::Responses,

@@ -373,9 +373,11 @@ async fn execute_request(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(route) = runtime.executor_route(&selected.candidate_id, &resolved_model) else {
+        let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
+        else {
             continue;
         };
+        route.routing = Some(selected.diagnostics);
         let source_model = route.source_model.clone();
         let responses_via_chat =
             wire_api == WireApi::Responses && route.wire_api == WireApi::ChatCompletions;
@@ -1799,6 +1801,7 @@ fn usage_event(
         source_id: route.source_id.clone(),
         candidate_id: Some(route.candidate_id.clone()),
         account_id: route.account_id.clone(),
+        routing: route.routing.clone(),
         requested_model: Some(requested_model.to_string()),
         resolved_model: Some(route.source_model.clone()),
         wire_api: route.wire_api,
@@ -2295,6 +2298,7 @@ mod tests {
                 source_id: "source".into(),
                 candidate_id: Some("source".into()),
                 account_id: None,
+                routing: None,
                 requested_model: Some("model".into()),
                 resolved_model: Some("model".into()),
                 wire_api: crate::WireApi::Responses,
@@ -2426,6 +2430,7 @@ mod tests {
             source_id: "source".into(),
             candidate_id: Some("source".into()),
             account_id: None,
+            routing: None,
             requested_model: Some("model".into()),
             resolved_model: Some("model".into()),
             wire_api: crate::WireApi::Responses,

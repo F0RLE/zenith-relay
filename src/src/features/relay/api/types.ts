@@ -176,6 +176,15 @@ export type AccountExportResult = {
   path?: string;
 };
 
+export type RoutingDiagnostics = {
+  reason: "response_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  eligibleCandidates: number;
+  quotaRemainingBasisPoints: number | null;
+  effectiveWeight: number;
+  inFlightBefore: number;
+  dispatchesBefore: number;
+};
+
 export type LocalUsage = {
   id: number;
   createdAt: string;
@@ -184,6 +193,7 @@ export type LocalUsage = {
   localKeyId: string;
   sourceId: string;
   accountId?: string | null;
+  routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: "responses" | "chat_completions" | "messages";
@@ -242,6 +252,7 @@ export type RemoteUsage = {
   candidateKind: string;
   candidateHint: string;
   candidateLabel?: string | null;
+  routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: "responses" | "chat_completions" | "messages";

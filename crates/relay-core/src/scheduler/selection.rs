@@ -2,6 +2,7 @@ use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use super::capacity::CandidateQuota;
 use crate::WireApi;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 
@@ -23,6 +24,36 @@ pub struct SelectionRequest<'a> {
 pub struct Selection {
     pub candidate_id: String,
     pub affinity_hit: bool,
+    pub diagnostics: RoutingDiagnostics,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionReason {
+    ResponseAffinity,
+    SessionAffinity,
+    ConnectionAffinity,
+    OnlyEligible,
+    RoutingTier,
+    ParallelLoad,
+    PoolPolicy,
+    QuotaHeadroom,
+    FairRotation,
+    LeastRecentlyUsed,
+    ManualPriority,
+    ManualWeight,
+    StableTieBreak,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingDiagnostics {
+    pub reason: SelectionReason,
+    pub eligible_candidates: u32,
+    pub quota_remaining_basis_points: Option<u64>,
+    pub effective_weight: u64,
+    pub in_flight_before: u32,
+    pub dispatches_before: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -78,9 +109,14 @@ impl PoolScheduler {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
+        let routing_state_changed =
+            candidate.enabled != enabled || candidate.health != health || candidate.quota != quota;
         candidate.enabled = enabled;
         candidate.health = health;
         candidate.quota = quota;
+        if routing_state_changed {
+            self.dispatches.clear();
+        }
         true
     }
 
@@ -102,9 +138,15 @@ impl PoolScheduler {
                 });
                 if eligible {
                     self.response_affinity.refresh(key, request.now_ms);
+                    let diagnostics = self.diagnostics(
+                        &candidate_id,
+                        SelectionReason::ResponseAffinity,
+                        self.eligible_count(&request),
+                    )?;
                     return Some(Selection {
                         candidate_id,
                         affinity_hit: true,
+                        diagnostics,
                     });
                 }
                 return None;
@@ -129,9 +171,15 @@ impl PoolScheduler {
                         ) =>
                 {
                     self.session_affinity.refresh(key, request.now_ms);
+                    let diagnostics = self.diagnostics(
+                        &candidate_id,
+                        SelectionReason::SessionAffinity,
+                        self.eligible_count(&request),
+                    )?;
                     return Some(Selection {
                         candidate_id,
                         affinity_hit: true,
+                        diagnostics,
                     });
                 }
                 Some(candidate)
@@ -147,6 +195,101 @@ impl PoolScheduler {
             }
         }
 
+        let eligible = self
+            .candidates
+            .values()
+            .filter(|candidate| {
+                !request.tried.contains(&candidate.id)
+                    && candidate.is_eligible(
+                        request.model,
+                        request.allowed_protocols,
+                        request.scope,
+                        request.now_ms,
+                    )
+            })
+            .collect::<Vec<_>>();
+        let selected = eligible.iter().copied().max_by(|left, right| {
+            compare_preference(
+                left,
+                right,
+                self.in_flight.get(&left.id).copied().unwrap_or_default(),
+                self.in_flight.get(&right.id).copied().unwrap_or_default(),
+                self.dispatches.get(&left.id).copied().unwrap_or_default(),
+                self.dispatches.get(&right.id).copied().unwrap_or_default(),
+            )
+        })?;
+        let runner_up = eligible
+            .iter()
+            .copied()
+            .filter(|candidate| candidate.id != selected.id)
+            .max_by(|left, right| {
+                compare_preference(
+                    left,
+                    right,
+                    self.in_flight.get(&left.id).copied().unwrap_or_default(),
+                    self.in_flight.get(&right.id).copied().unwrap_or_default(),
+                    self.dispatches.get(&left.id).copied().unwrap_or_default(),
+                    self.dispatches.get(&right.id).copied().unwrap_or_default(),
+                )
+            });
+        let reason = runner_up.map_or(SelectionReason::OnlyEligible, |runner_up| {
+            selection_reason(
+                selected,
+                runner_up,
+                self.in_flight
+                    .get(&selected.id)
+                    .copied()
+                    .unwrap_or_default(),
+                self.in_flight
+                    .get(&runner_up.id)
+                    .copied()
+                    .unwrap_or_default(),
+                self.dispatches
+                    .get(&selected.id)
+                    .copied()
+                    .unwrap_or_default(),
+                self.dispatches
+                    .get(&runner_up.id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        });
+        Some(Selection {
+            candidate_id: selected.id.clone(),
+            affinity_hit: false,
+            diagnostics: self.diagnostics(&selected.id, reason, eligible.len())?,
+        })
+    }
+
+    pub(crate) fn diagnostics(
+        &self,
+        candidate_id: &str,
+        reason: SelectionReason,
+        eligible_candidates: usize,
+    ) -> Option<RoutingDiagnostics> {
+        let candidate = self.candidates.get(candidate_id)?;
+        Some(RoutingDiagnostics {
+            reason,
+            eligible_candidates: u32::try_from(eligible_candidates).unwrap_or(u32::MAX),
+            quota_remaining_basis_points: match candidate.quota {
+                CandidateQuota::Available(remaining) => Some(remaining),
+                CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
+            },
+            effective_weight: u64::try_from(effective_weight(candidate)).unwrap_or(u64::MAX),
+            in_flight_before: self
+                .in_flight
+                .get(candidate_id)
+                .copied()
+                .unwrap_or_default(),
+            dispatches_before: self
+                .dispatches
+                .get(candidate_id)
+                .copied()
+                .unwrap_or_default(),
+        })
+    }
+
+    fn eligible_count(&self, request: &SelectionRequest<'_>) -> usize {
         self.candidates
             .values()
             .filter(|candidate| {
@@ -158,20 +301,7 @@ impl PoolScheduler {
                         request.now_ms,
                     )
             })
-            .max_by(|left, right| {
-                compare_preference(
-                    left,
-                    right,
-                    self.in_flight.get(&left.id).copied().unwrap_or_default(),
-                    self.in_flight.get(&right.id).copied().unwrap_or_default(),
-                    self.dispatches.get(&left.id).copied().unwrap_or_default(),
-                    self.dispatches.get(&right.id).copied().unwrap_or_default(),
-                )
-            })
-            .map(|candidate| Selection {
-                candidate_id: candidate.id.clone(),
-                affinity_hit: false,
-            })
+            .count()
     }
 
     pub fn earliest_retry_at(&self, request: SelectionRequest<'_>) -> Option<u64> {
@@ -304,12 +434,49 @@ fn compare_preference(
         .cmp(&routing_tier(right))
         .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
         .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-        .then_with(|| compare_weighted_dispatches(left, right, left_dispatches, right_dispatches))
         .then_with(|| left.quota.compare_preference(right.quota))
+        .then_with(|| compare_weighted_dispatches(left, right, left_dispatches, right_dispatches))
         .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.priority.cmp(&right.priority))
         .then_with(|| left.weight.cmp(&right.weight))
         .then_with(|| right.id.cmp(&left.id))
+}
+
+fn selection_reason(
+    selected: &RuntimeCandidate,
+    runner_up: &RuntimeCandidate,
+    selected_in_flight: u32,
+    runner_up_in_flight: u32,
+    selected_dispatches: u64,
+    runner_up_dispatches: u64,
+) -> SelectionReason {
+    if routing_tier(selected) != routing_tier(runner_up) {
+        SelectionReason::RoutingTier
+    } else if compare_weighted_load(selected, runner_up, selected_in_flight, runner_up_in_flight)
+        != Ordering::Equal
+    {
+        SelectionReason::ParallelLoad
+    } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
+        SelectionReason::PoolPolicy
+    } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
+        SelectionReason::QuotaHeadroom
+    } else if compare_weighted_dispatches(
+        selected,
+        runner_up,
+        selected_dispatches,
+        runner_up_dispatches,
+    ) != Ordering::Equal
+    {
+        SelectionReason::FairRotation
+    } else if compare_lru(selected.last_used_at, runner_up.last_used_at) != Ordering::Equal {
+        SelectionReason::LeastRecentlyUsed
+    } else if selected.priority != runner_up.priority {
+        SelectionReason::ManualPriority
+    } else if selected.weight != runner_up.weight {
+        SelectionReason::ManualWeight
+    } else {
+        SelectionReason::StableTieBreak
+    }
 }
 
 fn routing_tier(candidate: &RuntimeCandidate) -> i8 {
@@ -700,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn active_requests_spread_and_committed_dispatches_remain_fair_after_release() {
+    fn active_requests_spread_while_idle_selection_returns_to_quota_headroom() {
         let mut scheduler = PoolScheduler::new(1, 100);
         let mut full = candidate("full");
         full.quota = CandidateQuota::Available(100);
@@ -723,24 +890,17 @@ mod tests {
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "low"
-        );
-        assert!(scheduler.reserve("low"));
-        assert!(scheduler.release("low"));
-        assert_eq!(
-            select(&mut scheduler, &HashSet::new())
-                .unwrap()
-                .candidate_id,
             "full"
         );
     }
 
     #[test]
-    fn sequential_requests_follow_configured_weight_and_available_quota() {
+    fn equal_quota_sequential_requests_follow_configured_weight() {
         let mut scheduler = PoolScheduler::new(1, 100);
-        for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
+        for (id, weight) in [("full", 4), ("half", 2), ("quarter", 1)] {
             let mut account = oauth_candidate(id);
-            account.quota = CandidateQuota::Available(quota);
+            account.quota = CandidateQuota::Available(5_000);
+            account.weight = weight;
             scheduler.upsert(account);
         }
 
@@ -755,6 +915,70 @@ mod tests {
         assert_eq!(counts.get("full"), Some(&40));
         assert_eq!(counts.get("half"), Some(&20));
         assert_eq!(counts.get("quarter"), Some(&10));
+    }
+
+    #[test]
+    fn sequential_requests_prefer_the_largest_current_quota_reserve() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [
+            ("sixty-three", 6_300),
+            ("fifty-four", 5_400),
+            ("fifty-two", 5_200),
+            ("fifty-one", 5_100),
+        ] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+
+        for index in 0..4 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert_eq!(selected.candidate_id, "sixty-three");
+            if index == 0 {
+                assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
+                assert_eq!(selected.diagnostics.eligible_candidates, 4);
+                assert_eq!(
+                    selected.diagnostics.quota_remaining_basis_points,
+                    Some(6_300)
+                );
+                assert_eq!(selected.diagnostics.in_flight_before, 0);
+            }
+            assert!(scheduler.reserve(&selected.candidate_id));
+            assert!(scheduler.release(&selected.candidate_id));
+        }
+    }
+
+    #[test]
+    fn quota_refresh_rebases_historical_rotation_debt() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [("first", 10_000), ("second", 1_000)] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+        for _ in 0..11 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selected.candidate_id));
+            assert!(scheduler.release(&selected.candidate_id));
+        }
+
+        for id in ["first", "second"] {
+            assert!(scheduler.update_candidate_availability(
+                id,
+                true,
+                CandidateHealth::Healthy,
+                CandidateQuota::Available(5_000),
+            ));
+        }
+
+        let mut selected = BTreeSet::new();
+        for _ in 0..2 {
+            let selection = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selection.candidate_id));
+            assert!(scheduler.release(&selection.candidate_id));
+            selected.insert(selection.candidate_id);
+        }
+        assert_eq!(selected, ["first".to_string(), "second".to_string()].into());
     }
 
     #[test]
@@ -779,6 +1003,42 @@ mod tests {
     }
 
     #[test]
+    fn two_hundred_concurrent_requests_use_every_eligible_account() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [
+            ("sixty-three", 6_300),
+            ("fifty-four", 5_400),
+            ("fifty-two", 5_200),
+            ("fifty-one", 5_100),
+        ] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+
+        let mut counts = BTreeMap::new();
+        for _ in 0..200 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selected.candidate_id));
+            *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
+        }
+
+        assert_eq!(counts.len(), 4);
+        assert!(counts.values().all(|count| *count > 0));
+        let total_weight = 6_300_u64 + 5_400 + 5_200 + 5_100;
+        for (id, weight) in [
+            ("sixty-three", 6_300_u64),
+            ("fifty-four", 5_400),
+            ("fifty-two", 5_200),
+            ("fifty-one", 5_100),
+        ] {
+            let actual = u64::from(counts[id]) * total_weight;
+            let expected = 200 * weight;
+            assert!(actual.abs_diff(expected) <= total_weight);
+        }
+    }
+
+    #[test]
     fn affinity_wins_but_never_bypasses_filters_or_tried_exclusion() {
         let mut scheduler = PoolScheduler::new(4, 100);
         let mut preferred = candidate("preferred");
@@ -789,20 +1049,23 @@ mod tests {
 
         let scope = CandidateScope::default();
         let empty = HashSet::new();
-        assert_eq!(
-            scheduler.select(SelectionRequest {
+        let selection = scheduler
+            .select(SelectionRequest {
                 model: "gpt-5",
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &empty,
                 affinity_key: Some("session"),
                 now_ms: 1,
-            }),
-            Some(Selection {
-                candidate_id: "affinity".to_string(),
-                affinity_hit: true,
             })
+            .unwrap();
+        assert_eq!(selection.candidate_id, "affinity");
+        assert!(selection.affinity_hit);
+        assert_eq!(
+            selection.diagnostics.reason,
+            SelectionReason::SessionAffinity
         );
+        assert_eq!(selection.diagnostics.eligible_candidates, 2);
 
         let tried: HashSet<String> = ["affinity".to_string()].into();
         assert_eq!(
@@ -847,19 +1110,21 @@ mod tests {
 
         let scope = CandidateScope::default();
         let empty = HashSet::new();
-        assert_eq!(
-            scheduler.select(SelectionRequest {
+        let selection = scheduler
+            .select(SelectionRequest {
                 model: "gpt-5",
                 allowed_protocols: &[WireApi::Responses],
                 scope: &scope,
                 tried: &empty,
                 affinity_key: Some("response"),
                 now_ms: 1,
-            }),
-            Some(Selection {
-                candidate_id: "creator".to_string(),
-                affinity_hit: true,
             })
+            .unwrap();
+        assert_eq!(selection.candidate_id, "creator");
+        assert!(selection.affinity_hit);
+        assert_eq!(
+            selection.diagnostics.reason,
+            SelectionReason::ResponseAffinity
         );
 
         scheduler.set_cooldown("creator", "gpt-5", 10);

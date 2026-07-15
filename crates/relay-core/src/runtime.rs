@@ -6,8 +6,8 @@ use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
-    ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RuntimeCandidate, Selection,
-    SelectionRequest, UsageCallback, WireApi,
+    ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RoutingDiagnostics,
+    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, UsageCallback, WireApi,
 };
 use futures_util::StreamExt;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -253,6 +253,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) wire_api: WireApi,
     pub(crate) upstream_url: Url,
     pub(crate) source_model: String,
+    pub(crate) routing: Option<RoutingDiagnostics>,
 }
 
 pub(crate) struct PreparedAuthorization {
@@ -781,6 +782,7 @@ impl GatewayRuntime {
                 wire_api: source.wire_api,
                 upstream_url: source.endpoint(source.wire_api)?.clone(),
                 source_model,
+                routing: None,
             });
         }
         let account = self.accounts.get(candidate_id)?;
@@ -792,6 +794,7 @@ impl GatewayRuntime {
             wire_api: WireApi::Responses,
             upstream_url: account.responses_url.clone(),
             source_model,
+            routing: None,
         })
     }
 
@@ -862,12 +865,22 @@ impl GatewayRuntime {
             .unwrap_or(&self.websocket_client)
     }
 
-    pub(crate) fn reserve_candidate(&self, candidate_id: &str) -> Option<CandidateLease> {
+    pub(crate) fn reserve_candidate(
+        &self,
+        candidate_id: &str,
+    ) -> Option<(CandidateLease, RoutingDiagnostics)> {
         let mut scheduler = self.lock_scheduler();
-        scheduler.reserve(candidate_id).then(|| CandidateLease {
-            scheduler: self.scheduler.clone(),
-            candidate_id: candidate_id.to_string(),
-            released: AtomicBool::new(false),
+        let diagnostics =
+            scheduler.diagnostics(candidate_id, SelectionReason::ConnectionAffinity, 1)?;
+        scheduler.reserve(candidate_id).then(|| {
+            (
+                CandidateLease {
+                    scheduler: self.scheduler.clone(),
+                    candidate_id: candidate_id.to_string(),
+                    released: AtomicBool::new(false),
+                },
+                diagnostics,
+            )
         })
     }
 

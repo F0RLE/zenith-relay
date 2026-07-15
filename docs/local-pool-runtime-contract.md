@@ -638,12 +638,19 @@ Selection:
 4. Otherwise, use a valid session binding when it still points to a healthy
    capable candidate.
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request load normalized by traffic share.
+6. Prefer the lowest active-request load normalized by traffic share and current
+   quota reserve.
 7. Within the tier, prefer OAuth when otherwise equal, then the greatest known
-   minimum quota reserve, least recently used, committed dispatch balance,
-   manual tie-break priority, weight, and stable id.
+   minimum quota reserve, committed dispatch balance, least recently used,
+   manual tie-break priority, weight, and stable id. A quota/health eligibility
+   update resets old dispatch debt so the new snapshot takes effect immediately.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
+
+Usage telemetry persists only bounded routing diagnostics: reason, eligible
+count, selected quota reserve, effective weight, in-flight count, and dispatch
+count. Bodies, headers, credentials, proxy addresses, and raw identities are
+outside this record.
 
 `tried` and `attempted` stay separate. A candidate can be tried but not
 attempted when it fails mapping/preparation before executor call.

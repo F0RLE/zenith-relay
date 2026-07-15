@@ -272,10 +272,12 @@ async fn connect_upstream(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(route) = runtime.executor_route(&selected.candidate_id, &request.resolved_model)
+        let Some(mut route) =
+            runtime.executor_route(&selected.candidate_id, &request.resolved_model)
         else {
             continue;
         };
+        route.routing = Some(selected.diagnostics);
         if route.wire_api != WireApi::Responses {
             continue;
         }
@@ -797,14 +799,15 @@ async fn start_next_request(
         return Ok(handle_upstream_message(downstream, runtime, state, first_message).await);
     }
 
-    let route = runtime
+    let mut route = runtime
         .executor_route(&state.candidate_id, &request.resolved_model)
         .filter(|route| route.wire_api == WireApi::Responses)
         .ok_or_else(GatewayFailure::model_not_found)?;
     let payload = request.payload_for(&route)?;
-    let lease = runtime
+    let (lease, routing) = runtime
         .reserve_candidate(&state.candidate_id)
         .ok_or_else(GatewayFailure::unavailable)?;
+    route.routing = Some(routing);
     let started = Instant::now();
     send_request(upstream, payload).await?;
     state.lease = Some(lease);

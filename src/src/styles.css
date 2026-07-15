@@ -2684,6 +2684,19 @@ textarea:focus-visible {
   text-overflow: ellipsis;
 }
 
+.detail-list > .detail-section-heading {
+  grid-template-columns: 1fr;
+  min-height: 28px;
+  padding-top: 8px;
+  border-bottom: 0;
+  color: var(--relay-text);
+  font-weight: 650;
+}
+
+.detail-section-heading dd {
+  display: none;
+}
+
 .activity-section {
   margin-top: 12px;
   padding: 0 16px 8px;

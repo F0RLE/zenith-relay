@@ -776,8 +776,8 @@ API source role tier
 active requests normalized by traffic share and available quota
 OAuth preference inside the stabilizer tier
 greatest minimum known quota reserve
-least recently used
-committed dispatch balance, manual priority, weight, and stable id
+committed dispatch balance
+least recently used, manual priority, weight, and stable id
 ```
 
 The scheduler makes this choice for every request. `API first` sources run before
@@ -787,6 +787,10 @@ share affects concurrent distribution inside the same role tier. Sorting the
 visible member list never changes runtime order. Rows use `In rotation`,
 `Waiting for quota`, `Unavailable`, and `Disabled`; a manually chosen OAuth
 account is labelled `Codex interface` and is not a pinned pool route.
+
+Request details show the redacted routing reason and the counters used for that
+decision. This explains quota, parallel-load, affinity, and tie-break choices
+without exposing prompt/response content or credentials.
 
 Creating or importing a connection does not add it to the pool. The empty
 Members view asks the user to choose existing connections, and only confirmed

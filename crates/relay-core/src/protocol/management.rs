@@ -4,7 +4,7 @@ use crate::{
     api_model_price,
     automations::{WakeHistory, WakeTask},
     quota::{QuotaSnapshot, Subscription},
-    ApiEquivalentSummary, ModelRules, WireApi,
+    ApiEquivalentSummary, ModelRules, RoutingDiagnostics, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -286,6 +286,8 @@ pub struct UsageSummary {
     pub candidate_hint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: WireApi,

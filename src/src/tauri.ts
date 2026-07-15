@@ -67,6 +67,7 @@ export type LocalUsageLog = {
   attempt: number;
   localKeyId: string;
   sourceId: string;
+  routing?: import("./features/relay/api/types").RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: string;

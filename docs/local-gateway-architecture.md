@@ -587,11 +587,19 @@ Selection contract:
 7. Prefer the lowest active-request load normalized by `weight * available
    quota reserve`; this gives parallel requests proportional capacity.
 8. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then committed dispatch balance, least recently used, manual tie-break
-   priority, weight, and stable id.
+   then the greatest current quota reserve, committed dispatch balance, least
+   recently used, manual tie-break priority, weight, and stable id. Quota or
+   health changes clear historical dispatch debt so stale weights cannot delay
+   the new order.
 9. Exclude candidates already tried for this request.
 10. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
+
+Every emitted usage attempt may carry a bounded redacted routing diagnostic:
+the decisive comparison, eligible count, selected quota reserve, effective
+weight, and load counters before reservation. Local and self-hosted stores keep
+this as structured JSON without request text, response text, headers, secrets,
+proxy addresses, or raw account identities.
 
 Single-source and mixed-source paths should share the same candidate state
 logic. Mixed-source selection must not skip model cooldown state just because

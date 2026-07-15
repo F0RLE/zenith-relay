@@ -1,4 +1,4 @@
-use crate::WireApi;
+use crate::{RoutingDiagnostics, WireApi};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
@@ -15,6 +15,8 @@ pub struct UsageEvent {
     pub candidate_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: WireApi,

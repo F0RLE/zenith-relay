@@ -20,7 +20,7 @@ pub use runtime::{
 };
 pub use scheduler::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, PoolScheduler,
-    RuntimeCandidate, Selection, SelectionRequest,
+    RoutingDiagnostics, RuntimeCandidate, Selection, SelectionReason, SelectionRequest,
 };
 pub use sources::{source_points_to_gateway, LocalGatewayKey, ProviderSource, WireApi};
 pub use usage::{
