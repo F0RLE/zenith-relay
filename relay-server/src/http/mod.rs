@@ -119,7 +119,18 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(management_api::health))
         .merge(management)
         .route("/v1/models", get(public_api::proxy))
-        .route("/v1/responses", post(public_api::proxy))
+        .route(
+            "/v1/responses",
+            get(public_api::proxy).post(public_api::proxy),
+        )
+        .route("/v1/responses/compact", post(public_api::proxy))
+        .route("/v1/chat/completions/v1/responses", post(public_api::proxy))
+        .route(
+            "/v1/chat/completions/v1/responses/compact",
+            post(public_api::proxy),
+        )
+        .route("/v1/alpha/search", post(public_api::proxy))
+        .route("/backend-api/codex/alpha/search", post(public_api::proxy))
         .route("/v1/chat/completions", post(public_api::proxy))
         .fallback(public_api::not_found)
         .with_state(state)

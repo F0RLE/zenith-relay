@@ -22,6 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zenith_relay_server::{
     config::Config,
     http,
@@ -113,6 +114,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap();
     assert_eq!(models.status(), StatusCode::OK);
     assert!(models.text().await.unwrap().contains("gpt-test"));
+    assert_websocket_upgrade(&first.origin, &pool_key).await;
 
     let response = client
         .post(format!("{}/v1/responses", first.origin))
@@ -394,6 +396,47 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap()
         .contains("account-response-test"));
 
+    let compact: Value = client
+        .post(format!("{}/v1/responses/compact", first.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({"model":"gpt-test","input":"compact","stream":false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(compact["type"], "compaction");
+
+    let search: Value = client
+        .post(format!("{}/v1/alpha/search", first.origin))
+        .bearer_auth(&pool_key)
+        .json(&json!({"model":"gpt-test","id":"remote-session","query":"search"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(search["results"][0]["title"], "remote result");
+
+    for path in [
+        "/v1/chat/completions/v1/responses",
+        "/v1/chat/completions/v1/responses/compact",
+        "/backend-api/codex/alpha/search",
+    ] {
+        let response = client
+            .post(format!("{}{path}", first.origin))
+            .bearer_auth(&pool_key)
+            .json(
+                &json!({"model":"gpt-test","id":"remote-session","input":"alias","query":"alias"}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+
     let deadline = Instant::now() + Duration::from_secs(5);
     let account_event = loop {
         let account_usage: Value = client
@@ -409,7 +452,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
             .as_array()
             .unwrap()
             .iter()
-            .find(|event| event["candidateKind"] == "account")
+            .find(|event| event["candidateKind"] == "account" && event["inputTokens"] == 1)
         {
             break event.clone();
         }
@@ -1569,7 +1612,9 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
     let router = Router::new()
         .route("/v1/models", get(models_response))
         .route("/v1/responses", post(upstream_response))
-        .route("/account/responses", post(account_response));
+        .route("/account/responses", post(account_response))
+        .route("/account/responses/compact", post(account_compact))
+        .route("/account/alpha/search", post(account_search));
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -1734,4 +1779,57 @@ async fn account_response(request: Request) -> Response {
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"account-response-test\",\"object\":\"response\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{\"input_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":1},\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
         ))
         .unwrap()
+}
+
+async fn account_compact(request: Request) -> Response {
+    assert_account_authorization(&request);
+    let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert!(body.get("stream").is_none());
+    Json(json!({"type":"compaction","items":[]})).into_response()
+}
+
+async fn account_search(request: Request) -> Response {
+    assert_account_authorization(&request);
+    assert_eq!(
+        request
+            .headers()
+            .get("x-session-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("remote-session")
+    );
+    Json(json!({"results":[{"title":"remote result"}]})).into_response()
+}
+
+fn assert_account_authorization(request: &Request) {
+    assert_eq!(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer synthetic-access-token")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("synthetic-chatgpt-account-id")
+    );
+}
+
+async fn assert_websocket_upgrade(origin: &str, key: &str) {
+    let address = origin.strip_prefix("http://").unwrap();
+    let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "GET /v1/responses HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {key}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = [0_u8; 1024];
+    let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8_lossy(&response[..read]);
+    assert!(response.starts_with("HTTP/1.1 101 "), "{response}");
 }
