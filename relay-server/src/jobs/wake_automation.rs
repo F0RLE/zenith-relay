@@ -296,6 +296,7 @@ mod tests {
             quota: Default::default(),
             cooldowns: Default::default(),
             consecutive_failures: 0,
+            created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
         };

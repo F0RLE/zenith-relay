@@ -19,7 +19,7 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     estimate_api_equivalent,
     protocol::{UsagePage, UsageQuery, UsageSummary},
-    ApiEquivalentSummary, UsageEvent, WireApi,
+    ApiEquivalentSummary, RoutingStrategy, UsageEvent, WireApi,
 };
 
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -93,6 +93,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 12,
         name: "012_routing_diagnostics",
         sql: include_str!("../../migrations/012_routing_diagnostics.sql"),
+    },
+    Migration {
+        version: 13,
+        name: "013_routing_strategy",
+        sql: include_str!("../../migrations/013_routing_strategy.sql"),
     },
 ];
 
@@ -268,7 +273,7 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn routing_policy(&self) -> Result<(u8, bool, u64), String> {
+    pub fn routing_policy(&self) -> Result<(u8, bool, u64, RoutingStrategy), String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
@@ -288,11 +293,17 @@ impl Store {
                     .map_err(|_| "session affinity TTL is invalid".to_string())
             },
         )?;
+        let routing_strategy = match self.metadata("routing_strategy")?.as_deref() {
+            None | Some("adaptive") => RoutingStrategy::Adaptive,
+            Some("oldest_account") => RoutingStrategy::OldestAccount,
+            Some(_) => return Err("routing strategy is invalid".to_string()),
+        };
         validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
         Ok((
             max_retry_candidates,
             session_affinity,
             session_affinity_ttl_seconds,
+            routing_strategy,
         ))
     }
 
@@ -301,6 +312,7 @@ impl Store {
         max_retry_candidates: u8,
         session_affinity: bool,
         session_affinity_ttl_seconds: u64,
+        routing_strategy: RoutingStrategy,
     ) -> Result<(), String> {
         validate_routing_policy(max_retry_candidates, session_affinity_ttl_seconds)?;
         let mut connection = self.lock()?;
@@ -313,6 +325,13 @@ impl Store {
             (
                 "session_affinity_ttl_seconds",
                 session_affinity_ttl_seconds.to_string(),
+            ),
+            (
+                "routing_strategy",
+                match routing_strategy {
+                    RoutingStrategy::Adaptive => "adaptive".to_string(),
+                    RoutingStrategy::OldestAccount => "oldest_account".to_string(),
+                },
             ),
         ] {
             transaction
@@ -1324,14 +1343,26 @@ mod tests {
         let root = test_root("routing-policy");
         let path = root.join("relay.sqlite");
         let store = Store::open(path.clone()).unwrap();
-        assert_eq!(store.routing_policy().unwrap(), (3, false, 3_600));
-        assert!(store.set_routing_policy(0, true, 3_600).is_err());
-        assert!(store.set_routing_policy(3, true, 59).is_err());
-        store.set_routing_policy(5, false, 300).unwrap();
+        assert_eq!(
+            store.routing_policy().unwrap(),
+            (3, false, 3_600, RoutingStrategy::Adaptive)
+        );
+        assert!(store
+            .set_routing_policy(0, true, 3_600, RoutingStrategy::Adaptive)
+            .is_err());
+        assert!(store
+            .set_routing_policy(3, true, 59, RoutingStrategy::Adaptive)
+            .is_err());
+        store
+            .set_routing_policy(5, false, 300, RoutingStrategy::OldestAccount)
+            .unwrap();
         drop(store);
 
         let reopened = Store::open(path).unwrap();
-        assert_eq!(reopened.routing_policy().unwrap(), (5, false, 300));
+        assert_eq!(
+            reopened.routing_policy().unwrap(),
+            (5, false, 300, RoutingStrategy::OldestAccount)
+        );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1418,7 +1449,8 @@ mod tests {
                 (9, "009_ttft_ms".to_string()),
                 (10, "010_reset_legacy_cooldowns".to_string()),
                 (11, "011_request_rotation_default".to_string()),
-                (12, "012_routing_diagnostics".to_string())
+                (12, "012_routing_diagnostics".to_string()),
+                (13, "013_routing_strategy".to_string())
             ]
         );
         drop(store);

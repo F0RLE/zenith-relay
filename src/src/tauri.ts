@@ -95,6 +95,7 @@ export type LocalPoolState = {
     port: number;
     clientHost: "localhost" | "127.0.0.1";
     maxRetryCandidates: number;
+    routingStrategy: "adaptive" | "oldest_account";
     sessionAffinity: boolean;
     sessionAffinityTtlSeconds: number;
   };
@@ -280,6 +281,7 @@ export function rotateLocalGatewayKey(keyId: string) {
 
 export function updateLocalRouting(input: {
   maxRetryCandidates: number;
+  routingStrategy: "adaptive" | "oldest_account";
   sessionAffinity: boolean;
   sessionAffinityTtlSeconds: number;
 }) {

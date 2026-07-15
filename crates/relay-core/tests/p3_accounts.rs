@@ -1408,6 +1408,7 @@ fn account(
         excluded_models: Vec::new(),
         health: CandidateHealth::Healthy,
         quota: CandidateQuota::Unknown,
+        created_at_ms: 1,
         last_used_at_ms: None,
         cooldowns: Default::default(),
         consecutive_failures: 0,
@@ -1505,6 +1506,7 @@ async fn spawn_mixed_gateway(
         },
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
+            routing_strategy: Default::default(),
             session_affinity_ttl: None,
             max_affinity_entries: 0,
             hidden_models: Vec::new(),

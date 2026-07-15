@@ -4,7 +4,7 @@ use crate::{
     api_model_price,
     automations::{WakeHistory, WakeTask},
     quota::{QuotaSnapshot, Subscription},
-    ApiEquivalentSummary, ModelRules, RoutingDiagnostics, WireApi,
+    ApiEquivalentSummary, ModelRules, RoutingDiagnostics, RoutingStrategy, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -44,6 +44,8 @@ pub struct GatewaySummary {
     pub session_affinity: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_affinity_ttl_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_strategy: Option<RoutingStrategy>,
     #[serde(default)]
     pub models: Vec<ModelSummary>,
     #[serde(default)]

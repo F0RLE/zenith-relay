@@ -37,7 +37,7 @@ use zenith_relay_core::{
         UsageRange,
     },
     quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
-    source_points_to_gateway, ProviderSource, WireApi,
+    source_points_to_gateway, ProviderSource, RoutingStrategy, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -1521,6 +1521,11 @@ async fn confirm_one_account_import(
             .unwrap_or_default(),
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
+        created_at_ms: existing
+            .as_ref()
+            .map(|value| value.created_at_ms)
+            .filter(|value| *value > 0)
+            .unwrap_or(pending.created_at_ms),
         last_used_at_ms: existing.as_ref().and_then(|value| value.last_used_at_ms),
         last_error_code: None,
     };
@@ -2056,6 +2061,8 @@ pub async fn set_quota_policy(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RoutingPolicyInput {
     max_retry_candidates: u8,
+    #[serde(default)]
+    routing_strategy: RoutingStrategy,
     session_affinity: bool,
     session_affinity_ttl_seconds: u64,
 }
@@ -2086,12 +2093,13 @@ pub async fn set_routing_policy(
             input.max_retry_candidates,
             input.session_affinity,
             input.session_affinity_ttl_seconds,
+            input.routing_strategy,
         )
         .map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
         state
             .store
-            .set_routing_policy(previous.0, previous.1, previous.2)
+            .set_routing_policy(previous.0, previous.1, previous.2, previous.3)
             .map_err(store_error)?;
         if let Err(restore) = state.rebuild_runtime().await {
             return Err(store_error(format!(

@@ -659,6 +659,7 @@ mod tests {
             quota: QuotaSnapshot::default(),
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
+            created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
         }

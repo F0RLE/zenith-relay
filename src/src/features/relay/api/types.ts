@@ -137,6 +137,7 @@ export type RuntimeSnapshot = {
     maxRetryCandidates?: number | null;
     sessionAffinity?: boolean | null;
     sessionAffinityTtlSeconds?: number | null;
+    routingStrategy?: RoutingStrategy | null;
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
@@ -154,6 +155,8 @@ export type RuntimeSnapshot = {
   wakeHistory: WakeHistory[];
   warnings: string[];
 };
+
+export type RoutingStrategy = "adaptive" | "oldest_account";
 
 export type ProxyAssignmentResult = {
   assigned: number;
@@ -177,7 +180,7 @@ export type AccountExportResult = {
 };
 
 export type RoutingDiagnostics = {
-  reason: "response_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  reason: "response_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "oldest_account" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
   effectiveWeight: number;

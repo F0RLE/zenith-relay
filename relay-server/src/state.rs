@@ -15,7 +15,7 @@ use zenith_relay_core::{
     GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 12;
+pub const SERVER_SCHEMA_VERSION: u32 = 13;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 
@@ -62,6 +62,8 @@ pub struct ServerAccountRecord {
     pub quota: QuotaSnapshot,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
+    #[serde(default)]
+    pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
     pub last_error_code: Option<String>,
 }

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
+use zenith_relay_core::RoutingStrategy;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -41,6 +42,7 @@ pub struct UpdateGatewayKeyInput {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRoutingInput {
     max_retry_candidates: u8,
+    routing_strategy: RoutingStrategy,
     session_affinity: bool,
     session_affinity_ttl_seconds: u64,
 }
@@ -391,6 +393,7 @@ pub async fn update_local_routing(
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = input.max_retry_candidates;
+    gateway.routing_strategy = input.routing_strategy;
     gateway.session_affinity = input.session_affinity;
     gateway.session_affinity_ttl_seconds = input.session_affinity_ttl_seconds;
     if gateway == old_gateway {

@@ -749,6 +749,7 @@ async fn affinity_reuses_bound_source_until_ttl_expires() {
         vec![local_key("key", LOCAL_KEY, None)],
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
+            routing_strategy: Default::default(),
             session_affinity_ttl: Some(Duration::from_millis(500)),
             max_affinity_entries: 16,
             hidden_models: Vec::new(),
@@ -838,6 +839,7 @@ async fn spawn_gateway(
         keys,
         GatewayRuntimeOptions {
             max_retry_candidates,
+            routing_strategy: Default::default(),
             session_affinity_ttl: None,
             max_affinity_entries: 0,
             hidden_models: Vec::new(),

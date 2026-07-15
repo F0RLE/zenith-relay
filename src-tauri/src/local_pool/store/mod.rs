@@ -430,7 +430,7 @@ mod tests {
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
         },
         quota::{QuotaSnapshot, Subscription},
-        WireApi,
+        RoutingStrategy, WireApi,
     };
 
     static NEXT_DIR: AtomicU64 = AtomicU64::new(0);
@@ -463,13 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn quota_policy_survives_restart() {
+    fn quota_and_routing_policy_survive_restart() {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
         gateway.quota_refresh_interval_seconds = 120;
         gateway.quota_request_timeout_seconds = 10;
         gateway.use_free_accounts = true;
+        gateway.routing_strategy = RoutingStrategy::OldestAccount;
         store.replace_gateway(gateway).unwrap();
         drop(store);
 
@@ -477,6 +478,10 @@ mod tests {
         assert_eq!(reopened.gateway().quota_refresh_interval_seconds, 120);
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
         assert!(reopened.gateway().use_free_accounts);
+        assert_eq!(
+            reopened.gateway().routing_strategy,
+            RoutingStrategy::OldestAccount
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

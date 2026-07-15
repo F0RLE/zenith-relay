@@ -105,6 +105,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             excluded_models: account.excluded_models,
             health,
             quota,
+            created_at_ms: account.account.created_at_ms,
             last_used_at_ms: account.account.last_used_at_ms,
             cooldowns: account.cooldowns,
             consecutive_failures: account.consecutive_failures,
@@ -154,6 +155,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         },
         GatewayRuntimeOptions {
             max_retry_candidates: usize::from(settings.max_retry_candidates),
+            routing_strategy: settings.routing_strategy,
             session_affinity_ttl: settings
                 .session_affinity
                 .then(|| Duration::from_secs(settings.session_affinity_ttl_seconds)),

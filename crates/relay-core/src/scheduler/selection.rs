@@ -10,6 +10,11 @@ const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+const SPEED_FACTOR_SCALE: u64 = 1_000;
+const MIN_SPEED_FACTOR: u64 = 250;
+const MAX_SPEED_FACTOR: u64 = 4_000;
+const NEUTRAL_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 10_000;
+const MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 1_000_000;
 
 pub struct SelectionRequest<'a> {
     pub model: &'a str,
@@ -27,6 +32,14 @@ pub struct Selection {
     pub diagnostics: RoutingDiagnostics,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutingStrategy {
+    #[default]
+    Adaptive,
+    OldestAccount,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionReason {
@@ -38,6 +51,8 @@ pub enum SelectionReason {
     ParallelLoad,
     PoolPolicy,
     QuotaHeadroom,
+    AdaptiveBalance,
+    OldestAccount,
     FairRotation,
     LeastRecentlyUsed,
     ManualPriority,
@@ -63,6 +78,10 @@ pub struct PoolScheduler {
     response_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
     dispatches: BTreeMap<String, u64>,
+    routing_strategy: RoutingStrategy,
+    created_at_ms: BTreeMap<String, u64>,
+    throughput_milli_tokens_per_second: BTreeMap<String, u64>,
+    throughput_total: u64,
 }
 
 impl PoolScheduler {
@@ -76,7 +95,31 @@ impl PoolScheduler {
             ),
             in_flight: BTreeMap::new(),
             dispatches: BTreeMap::new(),
+            routing_strategy: RoutingStrategy::Adaptive,
+            created_at_ms: BTreeMap::new(),
+            throughput_milli_tokens_per_second: BTreeMap::new(),
+            throughput_total: 0,
         }
+    }
+
+    pub fn set_routing_strategy(&mut self, strategy: RoutingStrategy) {
+        if self.routing_strategy != strategy {
+            self.routing_strategy = strategy;
+            self.dispatches.clear();
+        }
+    }
+
+    pub fn set_candidate_created_at(&mut self, candidate_id: &str, created_at_ms: u64) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        if created_at_ms == 0 {
+            self.created_at_ms.remove(candidate_id);
+        } else {
+            self.created_at_ms
+                .insert(candidate_id.to_string(), created_at_ms);
+        }
+        true
     }
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
@@ -88,6 +131,10 @@ impl PoolScheduler {
         self.response_affinity.invalidate_candidate(candidate_id);
         self.in_flight.remove(candidate_id);
         self.dispatches.remove(candidate_id);
+        self.created_at_ms.remove(candidate_id);
+        if let Some(throughput) = self.throughput_milli_tokens_per_second.remove(candidate_id) {
+            self.throughput_total = self.throughput_total.saturating_sub(throughput);
+        }
         self.candidates.remove(candidate_id)
     }
 
@@ -208,51 +255,17 @@ impl PoolScheduler {
                     )
             })
             .collect::<Vec<_>>();
-        let selected = eligible.iter().copied().max_by(|left, right| {
-            compare_preference(
-                left,
-                right,
-                self.in_flight.get(&left.id).copied().unwrap_or_default(),
-                self.in_flight.get(&right.id).copied().unwrap_or_default(),
-                self.dispatches.get(&left.id).copied().unwrap_or_default(),
-                self.dispatches.get(&right.id).copied().unwrap_or_default(),
-            )
-        })?;
+        let selected = eligible
+            .iter()
+            .copied()
+            .max_by(|left, right| self.compare_preference(left, right))?;
         let runner_up = eligible
             .iter()
             .copied()
             .filter(|candidate| candidate.id != selected.id)
-            .max_by(|left, right| {
-                compare_preference(
-                    left,
-                    right,
-                    self.in_flight.get(&left.id).copied().unwrap_or_default(),
-                    self.in_flight.get(&right.id).copied().unwrap_or_default(),
-                    self.dispatches.get(&left.id).copied().unwrap_or_default(),
-                    self.dispatches.get(&right.id).copied().unwrap_or_default(),
-                )
-            });
+            .max_by(|left, right| self.compare_preference(left, right));
         let reason = runner_up.map_or(SelectionReason::OnlyEligible, |runner_up| {
-            selection_reason(
-                selected,
-                runner_up,
-                self.in_flight
-                    .get(&selected.id)
-                    .copied()
-                    .unwrap_or_default(),
-                self.in_flight
-                    .get(&runner_up.id)
-                    .copied()
-                    .unwrap_or_default(),
-                self.dispatches
-                    .get(&selected.id)
-                    .copied()
-                    .unwrap_or_default(),
-                self.dispatches
-                    .get(&runner_up.id)
-                    .copied()
-                    .unwrap_or_default(),
-            )
+            self.selection_reason(selected, runner_up)
         });
         Some(Selection {
             candidate_id: selected.id.clone(),
@@ -275,7 +288,7 @@ impl PoolScheduler {
                 CandidateQuota::Available(remaining) => Some(remaining),
                 CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
             },
-            effective_weight: u64::try_from(effective_weight(candidate)).unwrap_or(u64::MAX),
+            effective_weight: u64::try_from(self.effective_weight(candidate)).unwrap_or(u64::MAX),
             in_flight_before: self
                 .in_flight
                 .get(candidate_id)
@@ -383,6 +396,17 @@ impl PoolScheduler {
     }
 
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
+        self.record_success_with_metrics(candidate_id, model, now_ms, None, 0)
+    }
+
+    pub fn record_success_with_metrics(
+        &mut self,
+        candidate_id: &str,
+        model: &str,
+        now_ms: u64,
+        output_tokens: Option<u64>,
+        latency_ms: u64,
+    ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
@@ -392,6 +416,24 @@ impl PoolScheduler {
         candidate.health = CandidateHealth::Healthy;
         candidate.last_used_at = Some(now_ms);
         candidate.consecutive_failures = 0;
+        if let (Some(output_tokens @ 1..), 1..) = (output_tokens, latency_ms) {
+            let measured = (u128::from(output_tokens) * 1_000_000 / u128::from(latency_ms))
+                .clamp(1, u128::from(MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND))
+                as u64;
+            let previous = self
+                .throughput_milli_tokens_per_second
+                .get(candidate_id)
+                .copied();
+            let smoothed = previous.map_or(measured, |previous| {
+                (previous.saturating_mul(3).saturating_add(measured)) / 4
+            });
+            self.throughput_total = self
+                .throughput_total
+                .saturating_sub(previous.unwrap_or_default())
+                .saturating_add(smoothed);
+            self.throughput_milli_tokens_per_second
+                .insert(candidate_id.to_string(), smoothed);
+        }
         true
     }
 
@@ -420,62 +462,194 @@ impl PoolScheduler {
                 candidate.cooldowns.len() != previous_len
             })
     }
-}
 
-fn compare_preference(
-    left: &RuntimeCandidate,
-    right: &RuntimeCandidate,
-    left_in_flight: u32,
-    right_in_flight: u32,
-    left_dispatches: u64,
-    right_dispatches: u64,
-) -> Ordering {
-    routing_tier(left)
-        .cmp(&routing_tier(right))
-        .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
-        .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-        .then_with(|| compare_weighted_dispatches(left, right, left_dispatches, right_dispatches))
-        .then_with(|| left.quota.compare_preference(right.quota))
-        .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
-        .then_with(|| left.priority.cmp(&right.priority))
-        .then_with(|| left.weight.cmp(&right.weight))
-        .then_with(|| right.id.cmp(&left.id))
-}
+    fn compare_preference(&self, left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
+        let left_in_flight = self.in_flight.get(&left.id).copied().unwrap_or_default();
+        let right_in_flight = self.in_flight.get(&right.id).copied().unwrap_or_default();
+        let left_dispatches = self.dispatches.get(&left.id).copied().unwrap_or_default();
+        let right_dispatches = self.dispatches.get(&right.id).copied().unwrap_or_default();
+        let common = routing_tier(left)
+            .cmp(&routing_tier(right))
+            .then_with(|| self.compare_weighted_load(left, right, left_in_flight, right_in_flight))
+            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)));
+        match self.routing_strategy {
+            RoutingStrategy::Adaptive => common
+                .then_with(|| {
+                    self.compare_weighted_dispatches(left, right, left_dispatches, right_dispatches)
+                })
+                .then_with(|| left.quota.compare_preference(right.quota))
+                .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
+                .then_with(|| left.priority.cmp(&right.priority))
+                .then_with(|| left.weight.cmp(&right.weight))
+                .then_with(|| right.id.cmp(&left.id)),
+            RoutingStrategy::OldestAccount => common
+                .then_with(|| self.compare_account_age(left, right))
+                .then_with(|| {
+                    compare_weighted_values(
+                        left_dispatches,
+                        right_dispatches,
+                        u128::from(left.weight.max(1)),
+                        u128::from(right.weight.max(1)),
+                    )
+                })
+                .then_with(|| left.quota.compare_preference(right.quota))
+                .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
+                .then_with(|| left.priority.cmp(&right.priority))
+                .then_with(|| right.id.cmp(&left.id)),
+        }
+    }
 
-fn selection_reason(
-    selected: &RuntimeCandidate,
-    runner_up: &RuntimeCandidate,
-    selected_in_flight: u32,
-    runner_up_in_flight: u32,
-    selected_dispatches: u64,
-    runner_up_dispatches: u64,
-) -> SelectionReason {
-    if routing_tier(selected) != routing_tier(runner_up) {
-        SelectionReason::RoutingTier
-    } else if compare_weighted_load(selected, runner_up, selected_in_flight, runner_up_in_flight)
-        != Ordering::Equal
-    {
-        SelectionReason::ParallelLoad
-    } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
-        SelectionReason::PoolPolicy
-    } else if compare_weighted_dispatches(
-        selected,
-        runner_up,
-        selected_dispatches,
-        runner_up_dispatches,
-    ) != Ordering::Equal
-    {
-        SelectionReason::FairRotation
-    } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
-        SelectionReason::QuotaHeadroom
-    } else if compare_lru(selected.last_used_at, runner_up.last_used_at) != Ordering::Equal {
-        SelectionReason::LeastRecentlyUsed
-    } else if selected.priority != runner_up.priority {
-        SelectionReason::ManualPriority
-    } else if selected.weight != runner_up.weight {
-        SelectionReason::ManualWeight
-    } else {
-        SelectionReason::StableTieBreak
+    fn selection_reason(
+        &self,
+        selected: &RuntimeCandidate,
+        runner_up: &RuntimeCandidate,
+    ) -> SelectionReason {
+        let selected_in_flight = self
+            .in_flight
+            .get(&selected.id)
+            .copied()
+            .unwrap_or_default();
+        let runner_up_in_flight = self
+            .in_flight
+            .get(&runner_up.id)
+            .copied()
+            .unwrap_or_default();
+        let selected_dispatches = self
+            .dispatches
+            .get(&selected.id)
+            .copied()
+            .unwrap_or_default();
+        let runner_up_dispatches = self
+            .dispatches
+            .get(&runner_up.id)
+            .copied()
+            .unwrap_or_default();
+        if routing_tier(selected) != routing_tier(runner_up) {
+            SelectionReason::RoutingTier
+        } else if self.compare_weighted_load(
+            selected,
+            runner_up,
+            selected_in_flight,
+            runner_up_in_flight,
+        ) != Ordering::Equal
+        {
+            SelectionReason::ParallelLoad
+        } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
+            SelectionReason::PoolPolicy
+        } else if self.routing_strategy == RoutingStrategy::OldestAccount
+            && self.compare_account_age(selected, runner_up) != Ordering::Equal
+        {
+            SelectionReason::OldestAccount
+        } else if self.compare_weighted_dispatches(
+            selected,
+            runner_up,
+            selected_dispatches,
+            runner_up_dispatches,
+        ) != Ordering::Equal
+        {
+            if self.routing_strategy == RoutingStrategy::Adaptive
+                && self.effective_weight(selected) != self.effective_weight(runner_up)
+            {
+                SelectionReason::AdaptiveBalance
+            } else {
+                SelectionReason::FairRotation
+            }
+        } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
+            SelectionReason::QuotaHeadroom
+        } else if compare_lru(selected.last_used_at, runner_up.last_used_at) != Ordering::Equal {
+            SelectionReason::LeastRecentlyUsed
+        } else if selected.priority != runner_up.priority {
+            SelectionReason::ManualPriority
+        } else if selected.weight != runner_up.weight {
+            SelectionReason::ManualWeight
+        } else {
+            SelectionReason::StableTieBreak
+        }
+    }
+
+    fn compare_weighted_load(
+        &self,
+        left: &RuntimeCandidate,
+        right: &RuntimeCandidate,
+        left_in_flight: u32,
+        right_in_flight: u32,
+    ) -> Ordering {
+        let (left_weight, right_weight) = match self.routing_strategy {
+            RoutingStrategy::Adaptive => {
+                (self.effective_weight(left), self.effective_weight(right))
+            }
+            RoutingStrategy::OldestAccount => (
+                u128::from(left.weight.max(1)),
+                u128::from(right.weight.max(1)),
+            ),
+        };
+        compare_weighted_values(
+            u64::from(left_in_flight),
+            u64::from(right_in_flight),
+            left_weight,
+            right_weight,
+        )
+    }
+
+    fn compare_weighted_dispatches(
+        &self,
+        left: &RuntimeCandidate,
+        right: &RuntimeCandidate,
+        left_dispatches: u64,
+        right_dispatches: u64,
+    ) -> Ordering {
+        let (left_weight, right_weight) = match self.routing_strategy {
+            RoutingStrategy::Adaptive => {
+                (self.effective_weight(left), self.effective_weight(right))
+            }
+            RoutingStrategy::OldestAccount => (
+                u128::from(left.weight.max(1)),
+                u128::from(right.weight.max(1)),
+            ),
+        };
+        compare_weighted_values(left_dispatches, right_dispatches, left_weight, right_weight)
+    }
+
+    fn effective_weight(&self, candidate: &RuntimeCandidate) -> u128 {
+        let base = u128::from(candidate.weight.max(1))
+            * u128::from(candidate.quota.routing_weight_factor());
+        if self.routing_strategy != RoutingStrategy::Adaptive {
+            return base;
+        }
+        (base * u128::from(self.speed_factor(&candidate.id)) / u128::from(SPEED_FACTOR_SCALE))
+            .max(1)
+    }
+
+    fn speed_factor(&self, candidate_id: &str) -> u64 {
+        let baseline = if self.throughput_milli_tokens_per_second.is_empty() {
+            NEUTRAL_THROUGHPUT_MILLI_TOKENS_PER_SECOND
+        } else {
+            (self.throughput_total
+                / u64::try_from(self.throughput_milli_tokens_per_second.len()).unwrap_or(1))
+            .max(1)
+        };
+        let measured = self
+            .throughput_milli_tokens_per_second
+            .get(candidate_id)
+            .copied()
+            .unwrap_or(baseline);
+        (measured.saturating_mul(SPEED_FACTOR_SCALE) / baseline)
+            .clamp(MIN_SPEED_FACTOR, MAX_SPEED_FACTOR)
+    }
+
+    fn compare_account_age(&self, left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
+        if left.kind != CandidateKind::OAuthAccount || right.kind != CandidateKind::OAuthAccount {
+            return Ordering::Equal;
+        }
+        match (
+            self.created_at_ms.get(&left.id),
+            self.created_at_ms.get(&right.id),
+        ) {
+            (Some(left), Some(right)) => right.cmp(left),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => Ordering::Equal,
+        }
     }
 }
 
@@ -492,28 +666,13 @@ fn candidate_kind_preference(candidate: &RuntimeCandidate) -> u8 {
     u8::from(candidate.kind == CandidateKind::OAuthAccount)
 }
 
-fn compare_weighted_load(
-    left: &RuntimeCandidate,
-    right: &RuntimeCandidate,
-    left_in_flight: u32,
-    right_in_flight: u32,
+fn compare_weighted_values(
+    left_value: u64,
+    right_value: u64,
+    left_weight: u128,
+    right_weight: u128,
 ) -> Ordering {
-    (u128::from(right_in_flight) * effective_weight(left))
-        .cmp(&(u128::from(left_in_flight) * effective_weight(right)))
-}
-
-fn compare_weighted_dispatches(
-    left: &RuntimeCandidate,
-    right: &RuntimeCandidate,
-    left_dispatches: u64,
-    right_dispatches: u64,
-) -> Ordering {
-    (u128::from(right_dispatches) * effective_weight(left))
-        .cmp(&(u128::from(left_dispatches) * effective_weight(right)))
-}
-
-fn effective_weight(candidate: &RuntimeCandidate) -> u128 {
-    u128::from(candidate.weight.max(1)) * u128::from(candidate.quota.routing_weight_factor())
+    (u128::from(right_value) * left_weight).cmp(&(u128::from(left_value) * right_weight))
 }
 
 fn compare_lru(left: Option<u64>, right: Option<u64>) -> Ordering {
@@ -1044,6 +1203,92 @@ mod tests {
             let expected = 200 * weight;
             assert!(actual.abs_diff(expected) <= total_weight);
         }
+    }
+
+    #[test]
+    fn adaptive_routing_combines_quota_and_measured_speed_without_starvation() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        for (id, quota) in [("fast", 10_000), ("slow", 5_000), ("unknown", 10_000)] {
+            let mut account = oauth_candidate(id);
+            account.quota = CandidateQuota::Available(quota);
+            scheduler.upsert(account);
+        }
+        assert!(scheduler.record_success_with_metrics("fast", "gpt-5", 1, Some(100), 1_000));
+        assert!(scheduler.record_success_with_metrics("slow", "gpt-5", 1, Some(25), 1_000));
+
+        let mut counts = BTreeMap::new();
+        for _ in 0..100 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert!(scheduler.reserve(&selected.candidate_id));
+            *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
+            assert!(scheduler.release(&selected.candidate_id));
+        }
+
+        assert!(counts["fast"] > counts["unknown"]);
+        assert!(counts["unknown"] > counts["slow"]);
+        assert!(counts.values().all(|count| *count > 0));
+    }
+
+    #[test]
+    fn oldest_account_routing_prefers_age_but_never_a_busy_or_ineligible_account() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        scheduler.set_routing_strategy(RoutingStrategy::OldestAccount);
+        for (id, created_at, quota) in [
+            ("oldest", 10, CandidateQuota::Available(100)),
+            ("newer", 20, CandidateQuota::Available(10_000)),
+            ("disabled-old", 1, CandidateQuota::Available(10_000)),
+            ("exhausted-old", 2, CandidateQuota::Exhausted),
+        ] {
+            let mut account = oauth_candidate(id);
+            account.quota = quota;
+            account.enabled = id != "disabled-old";
+            scheduler.upsert(account);
+            assert!(scheduler.set_candidate_created_at(id, created_at));
+        }
+
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "oldest");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::OldestAccount);
+        assert!(scheduler.reserve("oldest"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "newer"
+        );
+        assert!(scheduler.release("oldest"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "oldest"
+        );
+    }
+
+    #[test]
+    fn throughput_ewma_ignores_invalid_samples_and_is_bounded() {
+        let mut scheduler = PoolScheduler::new(1, 100);
+        scheduler.upsert(oauth_candidate("account"));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, 1_000));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), 0));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), 1_000));
+        assert!(scheduler.throughput_milli_tokens_per_second.is_empty());
+
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 4, Some(10), 1_000));
+        assert_eq!(
+            scheduler.throughput_milli_tokens_per_second["account"],
+            10_000
+        );
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 5, Some(20), 1_000));
+        assert_eq!(
+            scheduler.throughput_milli_tokens_per_second["account"],
+            12_500
+        );
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 6, Some(u64::MAX), 1,));
+        assert!(
+            scheduler.throughput_milli_tokens_per_second["account"]
+                <= MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND
+        );
     }
 
     #[test]

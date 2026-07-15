@@ -672,7 +672,6 @@ async fn execute_request(
             } else {
                 bytes
             };
-            runtime.record_success(&route.candidate_id, &source_model, now_ms());
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -686,6 +685,13 @@ async fn execute_request(
             );
             event.consecutive_failures = Some(0);
             populate_tokens(&mut event, &bytes);
+            runtime.record_success_with_metrics(
+                &route.candidate_id,
+                &source_model,
+                now_ms(),
+                event.output_tokens,
+                event.latency_ms,
+            );
             emit_usage(&runtime, event);
             runtime.bind_affinity(
                 session_affinity_key.as_deref(),
@@ -721,10 +727,12 @@ async fn execute_request(
                 let completion: CompletionCallback = Arc::new(move |event, response_id| {
                     lease.release();
                     if event.success {
-                        completion_runtime.record_success(
+                        completion_runtime.record_success_with_metrics(
                             &completion_source,
                             &completion_model,
                             now_ms(),
+                            event.output_tokens,
+                            event.latency_ms,
                         );
                         event.consecutive_failures = Some(0);
                         completion_runtime.bind_affinity(

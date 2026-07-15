@@ -69,8 +69,12 @@ impl AppState {
         let key_records = self.store.keys()?;
         let hidden_models = self.store.hidden_models()?;
         let use_free_accounts = self.store.quota_policy()?.2;
-        let (max_retry_candidates, session_affinity, session_affinity_ttl_seconds) =
-            self.store.routing_policy()?;
+        let (
+            max_retry_candidates,
+            session_affinity,
+            session_affinity_ttl_seconds,
+            routing_strategy,
+        ) = self.store.routing_policy()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -165,6 +169,7 @@ impl AppState {
             },
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
+                routing_strategy,
                 session_affinity_ttl: session_affinity
                     .then(|| Duration::from_secs(session_affinity_ttl_seconds)),
                 hidden_models,
@@ -221,8 +226,12 @@ impl AppState {
         let account_proxy_required = self.store.account_proxy_required()?;
         let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
             self.store.quota_policy()?;
-        let (max_retry_candidates, session_affinity, session_affinity_ttl_seconds) =
-            self.store.routing_policy()?;
+        let (
+            max_retry_candidates,
+            session_affinity,
+            session_affinity_ttl_seconds,
+            routing_strategy,
+        ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
         let mut warnings = Vec::new();
@@ -330,6 +339,7 @@ impl AppState {
                 max_retry_candidates: Some(max_retry_candidates),
                 session_affinity: Some(session_affinity),
                 session_affinity_ttl_seconds: Some(session_affinity_ttl_seconds),
+                routing_strategy: Some(routing_strategy),
                 models,
                 common_proxy_configured,
                 common_proxy_available,
@@ -517,6 +527,13 @@ fn runtime_account(
     use_free_accounts: bool,
 ) -> RuntimeAccount {
     let quota = candidate_quota(&record.quota, now_ms());
+    // Older server records predate the persisted creation timestamp; token issue time is the
+    // only stable ordering signal available for those records.
+    let created_at_ms = if record.created_at_ms > 0 {
+        record.created_at_ms
+    } else {
+        credential.issued_at_ms
+    };
     let enabled = record.enabled
         && record.in_pool
         && (use_free_accounts || !record.subscription.is_free_plan());
@@ -534,6 +551,7 @@ fn runtime_account(
         excluded_models: record.excluded_models,
         health: candidate_health(record.auth_state, record.health),
         quota,
+        created_at_ms,
         last_used_at_ms: record.last_used_at_ms,
         cooldowns: record.cooldowns,
         consecutive_failures: record.consecutive_failures,
@@ -991,6 +1009,7 @@ mod tests {
             quota: QuotaSnapshot::default(),
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
+            created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
         };

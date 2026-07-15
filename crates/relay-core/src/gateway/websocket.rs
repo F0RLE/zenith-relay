@@ -930,10 +930,12 @@ fn finish_terminal(
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.success = success;
     if success {
-        runtime.record_success(
+        runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
             now_ms(),
+            in_flight.event.output_tokens,
+            in_flight.event.latency_ms,
         );
         runtime.bind_affinity(
             in_flight.affinity_key.as_deref(),

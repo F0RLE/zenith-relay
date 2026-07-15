@@ -7,7 +7,8 @@ use crate::ProxyConfig;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
     ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RoutingDiagnostics,
-    RuntimeCandidate, Selection, SelectionReason, SelectionRequest, UsageCallback, WireApi,
+    RoutingStrategy, RuntimeCandidate, Selection, SelectionReason, SelectionRequest, UsageCallback,
+    WireApi,
 };
 use futures_util::StreamExt;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -67,6 +68,7 @@ pub struct RuntimeAccount {
     pub excluded_models: Vec<String>,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
+    pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
@@ -90,6 +92,7 @@ impl fmt::Debug for RuntimeAccount {
             .field("excluded_models", &self.excluded_models)
             .field("health", &self.health)
             .field("quota", &self.quota)
+            .field("created_at_ms", &self.created_at_ms)
             .field("last_used_at_ms", &self.last_used_at_ms)
             .field("cooldowns", &self.cooldowns)
             .field("consecutive_failures", &self.consecutive_failures)
@@ -156,6 +159,7 @@ impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
 #[derive(Clone, Debug)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
+    pub routing_strategy: RoutingStrategy,
     pub session_affinity_ttl: Option<Duration>,
     pub max_affinity_entries: usize,
     pub hidden_models: Vec<String>,
@@ -165,6 +169,7 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             max_retry_candidates: 3,
+            routing_strategy: RoutingStrategy::Adaptive,
             session_affinity_ttl: None,
             max_affinity_entries: 4_096,
             hidden_models: Vec::new(),
@@ -348,6 +353,7 @@ impl GatewayRuntime {
             .map(|ttl| ttl.as_millis().min(u128::from(u64::MAX)) as u64)
             .unwrap_or_default();
         let mut scheduler = PoolScheduler::new(options.max_affinity_entries, affinity_ttl_ms);
+        scheduler.set_routing_strategy(options.routing_strategy);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
         for source in sources {
@@ -455,7 +461,9 @@ impl GatewayRuntime {
                 .as_ref()
                 .expect("account auth was validated above");
             registry.replace(candidate.id.clone(), models.iter());
+            let candidate_id = candidate.id.clone();
             scheduler.upsert(candidate);
+            scheduler.set_candidate_created_at(&candidate_id, account.created_at_ms);
             account_executors.insert(
                 account.id.clone(),
                 AccountExecutor {
@@ -940,9 +948,21 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn record_success(&self, candidate_id: &str, model: &str, now_ms: u64) {
-        self.lock_scheduler()
-            .record_success(candidate_id, model, now_ms);
+    pub(crate) fn record_success_with_metrics(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        now_ms: u64,
+        output_tokens: Option<u64>,
+        latency_ms: u64,
+    ) {
+        self.lock_scheduler().record_success_with_metrics(
+            candidate_id,
+            model,
+            now_ms,
+            output_tokens,
+            latency_ms,
+        );
     }
 
     pub(crate) fn record_failure(&self, candidate_id: &str) -> u32 {

@@ -752,6 +752,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
             "maxRetryCandidates": 5,
+            "routingStrategy": "oldest_account",
             "sessionAffinity": false,
             "sessionAffinityTtlSeconds": 300
         }))
@@ -764,6 +765,7 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
     assert_eq!(routing["gateway"]["maxRetryCandidates"], 5);
     assert_eq!(routing["gateway"]["sessionAffinity"], false);
     assert_eq!(routing["gateway"]["sessionAffinityTtlSeconds"], 300);
+    assert_eq!(routing["gateway"]["routingStrategy"], "oldest_account");
 
     let free_enabled: Value = client
         .post(format!("{}/quota/settings", server.origin))

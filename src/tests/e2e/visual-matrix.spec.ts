@@ -531,22 +531,31 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/quota-windows-${viewport.width}x${viewport.height}.png` });
   });
 
-  test(`routing distribution ru dark ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
-    await page.setViewportSize(viewport);
-    await page.goto("/");
-    await page.getByRole("button", { name: "Пул", exact: true }).click();
-    const header = page.locator(".relay-page-header");
-    await header.locator(".relay-action-menu summary").click();
-    await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
-    await expect(dialog.getByLabel("Закреплять один чат за аккаунтом")).not.toBeChecked();
-    await expect(dialog.getByRole("button", { name: /^Срок закрепления:/ })).toBeDisabled();
-    await expect(dialog).toContainText("Ротация включена");
-    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.screenshot({ path: `output/playwright/routing-distribution-ru-dark-${viewport.width}x${viewport.height}.png` });
-  });
+  for (const theme of themes) {
+    test(`routing distribution ru ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 3 });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Пул", exact: true }).click();
+      const header = page.locator(".relay-page-header");
+      await header.locator(".relay-action-menu summary").click();
+      await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
+      const strategy = dialog.getByRole("button", { name: /^Режим распределения:/ });
+      await expect(strategy).toHaveAttribute("data-value", "adaptive");
+      await strategy.click();
+      await expect(page.getByRole("option", { name: "Автоматически", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "Старые аккаунты", exact: true })).toBeVisible();
+      await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(2);
+      await page.keyboard.press("Escape");
+      await expect(dialog.getByLabel("Закреплять один чат за аккаунтом")).not.toBeChecked();
+      await expect(dialog.getByRole("button", { name: /^Срок закрепления:/ })).toBeDisabled();
+      await expect(dialog).toContainText("Ротация включена");
+      expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    });
+  }
 
   test(`shell disclosure controls ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
