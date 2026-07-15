@@ -5,7 +5,7 @@ import { getSavedKeyModels, getSavedKeyStats, saveKey } from "../../../tauri";
 import { relayCommands } from "../api/commands";
 import type { RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
-import { Button, SecretField, copyText } from "../components/Ui";
+import { Button, OptionMenu, SecretField, copyText } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { ImportDialog } from "../pages/connections/ConnectionsPage";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -192,7 +192,7 @@ function ConnectedLine() {
 
 function LanguageSelect() {
   const { i18n, t } = useTranslation();
-  return <label className="language-select"><span>{t("settings.language")}</span><select value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(event) => i18n.changeLanguage(event.target.value)}><option value="ru">Русский</option><option value="en">English</option></select></label>;
+  return <div className="language-select"><span>{t("settings.language")}</span><OptionMenu label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>;
 }
 
 function pendingChecks() {

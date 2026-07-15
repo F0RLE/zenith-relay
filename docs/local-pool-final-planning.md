@@ -123,8 +123,8 @@ Runtime ordering is intentionally small:
    reserve last;
 4. lowest active-request load normalized by traffic share and available quota;
 5. OAuth preference within an otherwise equal stabilizer comparison;
-6. greatest known quota reserve, then committed dispatch balance and least
-   recently used;
+6. committed dispatch balance normalized by traffic share and available quota,
+   then greatest known quota reserve and least recently used;
 7. manual priority, weight, and stable id as final tie-breakers.
 
 Source role is explicit and editable. Subscription plan names and expiry dates

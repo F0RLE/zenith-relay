@@ -200,8 +200,8 @@ for (const viewport of viewports) {
 
     await page.getByRole("button", { name: "Настройки обновления квот", exact: true }).click();
     dialog = page.getByRole("dialog", { name: "Обновление квот" });
-    await expect(dialog.getByLabel("Интервал фонового обновления")).toHaveValue("300");
-    await expect(dialog.getByLabel("Таймаут запроса")).toHaveValue("20");
+    await expect(dialog.getByRole("button", { name: /^Интервал фонового обновления:/ })).toHaveAttribute("data-value", "300");
+    await expect(dialog.getByRole("button", { name: /^Таймаут запроса:/ })).toHaveAttribute("data-value", "20");
     await page.screenshot({ path: `output/playwright/pool-quota-policy-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -541,7 +541,7 @@ for (const viewport of viewports) {
     await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
     await expect(dialog.getByLabel("Закреплять один чат за аккаунтом")).not.toBeChecked();
-    await expect(dialog.getByLabel("Срок закрепления")).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: /^Срок закрепления:/ })).toBeDisabled();
     await expect(dialog).toContainText("Ротация включена");
     expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -553,11 +553,12 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     const shell = page.locator(".relay-shell");
-    const modeButton = page.getByRole("button", { name: "Mode: Account pool" });
+    const modeButton = page.getByRole("button", { name: "Mode: Computer" });
     await modeButton.click();
     const modeMenu = page.getByRole("menu");
     await expect(modeMenu.getByRole("menuitemradio")).toHaveCount(3);
-    await expect(modeMenu.getByRole("menuitemradio", { name: "Account pool" })).toHaveAttribute("aria-checked", "true");
+    await expect(modeMenu.getByRole("menuitemradio")).toHaveText(["Computer", "Choose API", "On your server"]);
+    await expect(modeMenu.getByRole("menuitemradio", { name: "Computer" })).toHaveAttribute("aria-checked", "true");
     expect(await modeMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
@@ -775,10 +776,10 @@ for (const theme of themes) {
 
       const setup = page.locator(".client-oauth-binding");
       await expect(setup.getByRole("heading", { name: "Codex в режиме пула" })).toBeVisible();
-      await expect(page.getByLabel("Аккаунт интерфейса Codex")).toHaveValue("auto");
+      await expect(page.getByRole("button", { name: /^Аккаунт интерфейса Codex:/ })).toHaveAttribute("data-value", "auto");
       await expect(setup).not.toContainText("Выбран");
       await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
-      await expect(page.locator(".client-setup button")).toHaveCount(0);
+      await expect(page.locator(".client-setup button")).toHaveCount(1);
       expect(await setup.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
@@ -866,7 +867,7 @@ for (const scenario of [
     await page.locator(".relay-sidebar nav button").nth(4).click();
 
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).getByRole("cell").nth(4);
+    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator("td:nth-child(5)");
     await expect(timing).toHaveText("128 / 428 ms");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));
@@ -897,7 +898,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Модели" }).click();
     const aggregate = page.locator(".usage-aggregate-table");
-    await expect(aggregate.getByRole("columnheader")).toHaveCount(6);
+    await expect(aggregate.getByRole("columnheader")).toHaveCount(7);
     expect(await aggregate.locator(".usage-token-breakdown").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   });

@@ -7,7 +7,7 @@ test("quick setup covers all three runtime choices", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Zenith Relay" })).toBeVisible();
   await page.getByRole("button", { name: "Get started" }).click();
   await expect(page.getByRole("heading", { name: "Where should Zenith Relay run?" })).toBeVisible();
-  await page.getByRole("button", { name: /Self-hosted/ }).click();
+  await page.getByRole("button", { name: /On your server/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Server address").fill("https://relay.example.invalid");
   await page.getByLabel("Management token").fill("synthetic-management-token-000000");
@@ -57,7 +57,7 @@ test("ready API step can add OpenRouter as a checked local source", async ({ pag
   await installTauriMock(page, { onboarding: false, locale: "en", mode: "local", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: /Ready API/ }).click();
+  await page.getByRole("button", { name: /Choose API/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("radio", { name: /OpenRouter/ }).click();
   await page.getByLabel("Upstream API key").fill("sk-or-synthetic");
@@ -72,7 +72,7 @@ test("remote quick setup requires explicit consent for plain HTTP", async ({ pag
   await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
-  await page.getByRole("button", { name: /Self-hosted/ }).click();
+  await page.getByRole("button", { name: /On your server/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByLabel("Server address").fill("http://127.0.0.1:14999");
   await page.getByLabel("Management token").fill("synthetic-management-token-000000");
@@ -109,7 +109,7 @@ for (const theme of ["light", "dark"] as const) {
       expect(await page.locator(".setup-connect-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-local-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await page.getByRole("button", { name: "Назад" }).click();
-      await page.getByRole("button", { name: /Готовый API/ }).click();
+      await page.getByRole("button", { name: /Выбор API/ }).click();
       await page.getByRole("button", { name: "Продолжить" }).click();
       expect(await page.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/onboarding-api-ru-${theme}-${viewport.width}x${viewport.height}.png` });

@@ -112,7 +112,7 @@ export function RelayShell() {
           </button>
           {modeOpen ? (
             <div className="mode-menu" role="menu">
-              {(["local", "remote", "zenith"] as RelayMode[]).map((value) => (
+              {(["local", "zenith", "remote"] as RelayMode[]).map((value) => (
                 <button
                   role="menuitemradio"
                   aria-checked={mode === value}

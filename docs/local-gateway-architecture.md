@@ -587,10 +587,11 @@ Selection contract:
 7. Prefer the lowest active-request load normalized by `weight * available
    quota reserve`; this gives parallel requests proportional capacity.
 8. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then the greatest current quota reserve, committed dispatch balance, least
-   recently used, manual tie-break priority, weight, and stable id. Quota or
-   health changes clear historical dispatch debt so stale weights cannot delay
-   the new order.
+   then committed dispatch balance normalized by `weight * available quota
+   reserve`. Use the greatest current quota reserve only when dispatch balances
+   are equal, followed by least recently used, manual tie-break priority,
+   weight, and stable id. Quota or health changes clear historical dispatch
+   debt so stale weights cannot delay the new order.
 9. Exclude candidates already tried for this request.
 10. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
@@ -987,7 +988,8 @@ hard filters
 API-source role
 active load normalized by traffic share
 OAuth preference inside the stabilizer tier
-greatest minimum quota reserve
+committed dispatch balance normalized by traffic share and quota reserve
+greatest minimum quota reserve when balances are equal
 least recently used
 manual priority/weight tie-breaks
 ```

@@ -640,10 +640,12 @@ Selection:
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
 6. Prefer the lowest active-request load normalized by traffic share and current
    quota reserve.
-7. Within the tier, prefer OAuth when otherwise equal, then the greatest known
-   minimum quota reserve, committed dispatch balance, least recently used,
-   manual tie-break priority, weight, and stable id. A quota/health eligibility
-   update resets old dispatch debt so the new snapshot takes effect immediately.
+7. Within the tier, prefer OAuth when otherwise equal, then committed dispatch
+   balance normalized by traffic share and current quota reserve. Use the
+   greatest known minimum quota reserve only when dispatch balances are equal,
+   followed by least recently used, manual tie-break priority, weight, and
+   stable id. A quota/health eligibility update resets old dispatch debt so the
+   new snapshot takes effect immediately.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
 

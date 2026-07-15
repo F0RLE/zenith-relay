@@ -434,8 +434,8 @@ fn compare_preference(
         .cmp(&routing_tier(right))
         .then_with(|| compare_weighted_load(left, right, left_in_flight, right_in_flight))
         .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
-        .then_with(|| left.quota.compare_preference(right.quota))
         .then_with(|| compare_weighted_dispatches(left, right, left_dispatches, right_dispatches))
+        .then_with(|| left.quota.compare_preference(right.quota))
         .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
         .then_with(|| left.priority.cmp(&right.priority))
         .then_with(|| left.weight.cmp(&right.weight))
@@ -458,8 +458,6 @@ fn selection_reason(
         SelectionReason::ParallelLoad
     } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
         SelectionReason::PoolPolicy
-    } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
-        SelectionReason::QuotaHeadroom
     } else if compare_weighted_dispatches(
         selected,
         runner_up,
@@ -468,6 +466,8 @@ fn selection_reason(
     ) != Ordering::Equal
     {
         SelectionReason::FairRotation
+    } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
+        SelectionReason::QuotaHeadroom
     } else if compare_lru(selected.last_used_at, runner_up.last_used_at) != Ordering::Equal {
         SelectionReason::LeastRecentlyUsed
     } else if selected.priority != runner_up.priority {
@@ -867,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn active_requests_spread_while_idle_selection_returns_to_quota_headroom() {
+    fn active_and_sequential_requests_spread_by_available_quota() {
         let mut scheduler = PoolScheduler::new(1, 100);
         let mut full = candidate("full");
         full.quota = CandidateQuota::Available(100);
@@ -886,6 +886,14 @@ mod tests {
             "low"
         );
         assert!(scheduler.release(&first.candidate_id));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "low"
+        );
+        assert!(scheduler.reserve("low"));
+        assert!(scheduler.release("low"));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
@@ -918,34 +926,34 @@ mod tests {
     }
 
     #[test]
-    fn sequential_requests_prefer_the_largest_current_quota_reserve() {
+    fn sequential_requests_rotate_proportionally_to_quota_headroom() {
         let mut scheduler = PoolScheduler::new(1, 100);
-        for (id, quota) in [
-            ("sixty-three", 6_300),
-            ("fifty-four", 5_400),
-            ("fifty-two", 5_200),
-            ("fifty-one", 5_100),
-        ] {
+        for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(quota);
             scheduler.upsert(account);
         }
 
-        for index in 0..4 {
+        let mut counts = BTreeMap::new();
+        for index in 0..70 {
             let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-            assert_eq!(selected.candidate_id, "sixty-three");
             if index == 0 {
+                assert_eq!(selected.candidate_id, "full");
                 assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
-                assert_eq!(selected.diagnostics.eligible_candidates, 4);
+                assert_eq!(selected.diagnostics.eligible_candidates, 3);
                 assert_eq!(
                     selected.diagnostics.quota_remaining_basis_points,
-                    Some(6_300)
+                    Some(10_000)
                 );
                 assert_eq!(selected.diagnostics.in_flight_before, 0);
             }
             assert!(scheduler.reserve(&selected.candidate_id));
+            *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
             assert!(scheduler.release(&selected.candidate_id));
         }
+        assert_eq!(counts.get("full"), Some(&40));
+        assert_eq!(counts.get("half"), Some(&20));
+        assert_eq!(counts.get("quarter"), Some(&10));
     }
 
     #[test]

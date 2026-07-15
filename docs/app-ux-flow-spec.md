@@ -775,8 +775,8 @@ previous-response binding or valid session affinity
 API source role tier
 active requests normalized by traffic share and available quota
 OAuth preference inside the stabilizer tier
-greatest minimum known quota reserve
-committed dispatch balance
+committed dispatch balance normalized by traffic share and available quota
+greatest minimum known quota reserve when balances are equal
 least recently used, manual priority, weight, and stable id
 ```
 

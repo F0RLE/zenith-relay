@@ -1,6 +1,6 @@
 import { Cloud, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { SecretField } from "./Ui";
+import { OptionMenu, SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
 export type ApiProviderValue = {
@@ -65,7 +65,7 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
     {value.kind !== "zenith" ? <div className="api-provider-fields">
       <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
       <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
-      <label className="relay-field"><span>{t("sources.protocol")}</span><select value={value.wireApi} onChange={(event) => onChange({ ...value, wireApi: event.target.value as ApiProviderValue["wireApi"] })}><option value="responses">Responses API</option><option value="chat_completions">Chat Completions</option></select></label>
+      <div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div>
     </div> : null}
     <SecretField label={value.kind === "zenith" ? t("readyApi.key") : t("sources.apiKey")} value={value.apiKey} onChange={(apiKey) => onChange({ ...value, apiKey })} />
     <p className="form-note">{t(value.kind === "zenith" ? "apiProviders.zenithHint" : "apiProviders.localPoolHint")}</p>

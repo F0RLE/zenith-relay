@@ -180,13 +180,14 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
   return <button type="button" role="menuitem" className={classes || undefined} {...props} onClick={(event) => { const menu = event.currentTarget.closest("details"); if (menu) menu.open = false; onClick?.(event); }}>{icon}<span>{children}</span></button>;
 }
 
-export function OptionMenu({ label, value, options, icon, onChange, className = "" }: {
+export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false }: {
   label: string;
   value: string;
   options: Array<{ value: string; label: string }>;
   icon?: ReactNode;
   onChange: (value: string) => void;
   className?: string;
+  disabled?: boolean;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -263,6 +264,8 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       aria-label={`${label}: ${selected?.label ?? ""}`}
       aria-haspopup="listbox"
       aria-expanded={open}
+      data-value={value}
+      disabled={disabled}
       onClick={() => setOpen((current) => !current)}
       onKeyDown={(event) => {
         if (event.key === "Escape" && open) {
@@ -292,6 +295,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
           key={option.value}
           type="button"
           role="option"
+          data-value={option.value}
           aria-selected={option.value === value}
           onClick={() => {
             onChange(option.value);
@@ -330,10 +334,10 @@ export function Dialog({ title, children, onClose, footer, wide = false }: { tit
   const dialogRef = useRef<HTMLElement>(null);
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
-    const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
+    const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
     focusable()[0]?.focus();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !event.defaultPrevented) onClose();
       if (event.key !== "Tab") return;
       const items = focusable();
       if (!items.length) return;

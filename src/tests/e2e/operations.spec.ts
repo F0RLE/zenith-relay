@@ -1,5 +1,10 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
+
+async function chooseOption(page: Page, scope: Page | Locator, label: string, value: string) {
+  await scope.getByRole("button", { name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:`) }).click();
+  await page.locator(`[role="option"][data-value="${value}"]`).click();
+}
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
@@ -8,7 +13,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
-  await sourceDialog.getByLabel("Protocol").selectOption("chat_completions");
+  await chooseOption(page, sourceDialog, "Protocol", "chat_completions");
   await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4-mini, gpt-5.4");
   await sourceDialog.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
   await sourceDialog.getByLabel("Excluded models", { exact: true }).fill("gpt-5.4");
@@ -54,10 +59,10 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Edit" }).click();
   const automation = page.getByRole("dialog", { name: "Edit automation" });
   await automation.getByLabel("Secondary").uncheck();
-  await automation.getByLabel("Account selection").selectOption("account_ids");
+  await chooseOption(page, automation, "Account selection", "account_ids");
   await automation.getByLabel("Personal Plus").check();
-  await automation.getByLabel("Model policy").selectOption("explicit");
-  await automation.getByRole("combobox", { name: "Model", exact: true }).selectOption("gpt-5.4-mini");
+  await chooseOption(page, automation, "Model policy", "explicit");
+  await chooseOption(page, automation, "Model", "gpt-5.4-mini");
   await automation.getByRole("button", { name: "Save" }).click();
   const automationRow = page.getByRole("row").filter({ hasText: "Start quota countdown" });
   await expect(automationRow).toContainText("Personal Plus");
@@ -89,7 +94,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Apply and restart" }).click();
   await expect(page.getByText("http://127.0.0.1:15001/v1")).toBeVisible();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await expect(page.getByLabel("Codex interface account")).toHaveValue("auto");
+  await expect(page.getByRole("button", { name: /^Codex interface account:/ })).toHaveAttribute("data-value", "auto");
   await expect(page.getByRole("heading", { name: "Codex in pool mode" })).toBeVisible();
   await page.getByRole("tab", { name: "Diagnostics" }).click();
   await page.locator(".diagnostics-list > section").filter({ hasText: "Endpoint health" }).getByRole("button", { name: "Run" }).click();
@@ -269,7 +274,7 @@ test("Ready API connection dialog can switch to a custom local source", async ({
   await dialog.getByLabel("API address").fill("https://gateway.example.invalid/v1");
   await dialog.getByLabel("Upstream API key").fill("synthetic-private-key");
   await dialog.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Mode: Account pool", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Mode: Computer", exact: true })).toBeVisible();
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Private gateway", baseUrl: "https://gateway.example.invalid/v1", wireApi: "responses" });
   expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_2"], inPool: true } });
@@ -441,14 +446,14 @@ test("account sorting follows pool and quota window usage", async ({ page }) => 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const labels = page.locator(".account-card .account-identity > strong");
 
-  await page.getByLabel("Sort accounts").selectOption("primary");
+  await chooseOption(page, page, "Sort accounts", "primary");
   await expect(labels).toHaveText(["Backup account", "Business Workspace", "Personal Plus"]);
   await page.getByRole("button", { name: "Descending order" }).click();
   await expect(labels).toHaveText(["Personal Plus", "Business Workspace", "Backup account"]);
 
-  await page.getByLabel("Sort accounts").selectOption("secondary");
+  await chooseOption(page, page, "Sort accounts", "secondary");
   await expect(labels).toHaveText(["Personal Plus", "Backup account", "Business Workspace"]);
-  await page.getByLabel("Sort accounts").selectOption("pool");
+  await chooseOption(page, page, "Sort accounts", "pool");
   await expect(labels).toHaveText(["Business Workspace", "Personal Plus", "Backup account"]);
   await expect(page.locator(".account-priority")).toHaveCount(0);
 });
@@ -498,7 +503,7 @@ test("plan filters and pool controls exclude a selected account without deleting
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await page.getByLabel("Sort accounts").selectOption("participation");
+  await chooseOption(page, page, "Sort accounts", "participation");
   await page.getByRole("button", { name: "Free (1)", exact: true }).click();
   await expect(page.locator(".account-card")).toHaveCount(1);
   await page.getByLabel("Select all accounts").check();
@@ -675,22 +680,23 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
     await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4");
-    const role = sourceDialog.getByLabel("API source role");
-    await expect(role.locator("option")).toHaveText(["API first", "Stabilizer", "Last resort"]);
-    await role.selectOption("primary");
+    const role = sourceDialog.getByRole("button", { name: /^API source role:/ });
+    await role.click();
+    await expect(page.getByRole("option")).toHaveText(["API first", "Stabilizer", "Last resort"]);
+    await page.locator('[role="option"][data-value="primary"]').click();
     await sourceDialog.getByRole("button", { name: "Save" }).click();
 
     const member = page.locator(".pool-member-card").filter({ hasText: "Failover API" });
     await expect(member).toContainText("API first");
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     let editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByLabel("API source role").selectOption("stabilizer");
+    await chooseOption(page, editor, "API source role", "stabilizer");
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("Stabilizer");
 
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByLabel("API source role").selectOption("reserve");
+    await chooseOption(page, editor, "API source role", "reserve");
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("Last resort");
 
@@ -804,8 +810,8 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   await expect(page.getByText("Updated.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
-  await dialog.getByLabel("Background refresh interval").selectOption("120");
-  await dialog.getByLabel("Request timeout").selectOption("10");
+  await chooseOption(page, dialog, "Background refresh interval", "120");
+  await chooseOption(page, dialog, "Request timeout", "10");
   await dialog.getByLabel("Use Free accounts").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(freeMember).toContainText("In rotation");
@@ -825,14 +831,14 @@ test("local pool rotates requests by default and can explicitly enable chat affi
   await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   const affinity = dialog.getByLabel("Keep one chat on one account");
-  const duration = dialog.getByLabel("Affinity duration");
+  const duration = dialog.getByRole("button", { name: /^Affinity duration:/ });
   await expect(affinity).not.toBeChecked();
   await expect(duration).toBeDisabled();
   await expect(dialog).toContainText("Request rotation is on");
   await affinity.check();
-  await duration.selectOption("300");
+  await chooseOption(page, dialog, "Affinity duration", "300");
   await expect(duration).toBeEnabled();
-  await dialog.getByLabel("Accounts tried after an error").selectOption("5");
+  await chooseOption(page, dialog, "Accounts tried after an error", "5");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -848,8 +854,8 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await dialog.getByLabel("Keep one chat on one account").check();
-  await dialog.getByLabel("Affinity duration").selectOption("900");
-  await dialog.getByLabel("Accounts tried after an error").selectOption("4");
+  await chooseOption(page, dialog, "Affinity duration", "900");
+  await chooseOption(page, dialog, "Accounts tried after an error", "4");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -867,8 +873,8 @@ test("remote pool uses the same quota refresh controls", async ({ page }) => {
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
-  await dialog.getByLabel("Background refresh interval").selectOption("600");
-  await dialog.getByLabel("Request timeout").selectOption("15");
+  await chooseOption(page, dialog, "Background refresh interval", "600");
+  await chooseOption(page, dialog, "Request timeout", "15");
   await dialog.getByLabel("Use Free accounts").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -977,12 +983,13 @@ test("Codex client setup offers no account, automatic, and manual pool identity 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
   const setup = page.locator(".client-setup");
-  const account = page.getByLabel("Codex interface account");
-  await expect(account).toHaveValue("auto");
-  await expect(account.locator("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business", "Personal Plus · Plus"]);
-  await expect(account.locator("optgroup")).toHaveAttribute("label", "Manual selection");
+  const account = setup.getByRole("button", { name: /^Codex interface account:/ });
+  await expect(account).toHaveAttribute("data-value", "auto");
+  await account.click();
+  await expect(page.getByRole("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business", "Personal Plus · Plus"]);
+  await page.locator('[role="option"][data-value="auto"]').click();
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("auto");
-  await expect(setup.getByRole("button")).toHaveCount(0);
+  await expect(setup.getByRole("button")).toHaveCount(1);
   await expect(setup).not.toContainText("Selected account");
   await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
   await expect(setup).not.toContainText("Generated configuration");
@@ -996,7 +1003,7 @@ test("Codex client setup offers no account, automatic, and manual pool identity 
   });
   expect(selectionMatchesTheme).toBe(true);
 
-  await account.selectOption("none");
+  await chooseOption(page, setup, "Codex interface account", "none");
   await expect(setup).toContainText("No OAuth account will be applied");
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("none");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -1007,7 +1014,7 @@ test("Codex client setup offers no account, automatic, and manual pool identity 
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await page.getByLabel("Codex interface account").selectOption("account_synthetic");
+  await chooseOption(page, page, "Codex interface account", "account_synthetic");
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("account_synthetic");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch Codex to pool", exact: true }).click();
@@ -1022,7 +1029,7 @@ test("Codex pool identity migrates the previous stored account selection", async
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "Codex Setup" }).click();
-  await expect(page.getByLabel("Codex interface account")).toHaveValue("account_synthetic");
+  await expect(page.getByRole("button", { name: /^Codex interface account:/ })).toHaveAttribute("data-value", "account_synthetic");
   expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic", legacy: null });
 });
 
@@ -1030,20 +1037,28 @@ test("usage filters name independent choices", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect(page.getByLabel("Status").locator("option").first()).toHaveText("Any status");
+  await page.getByRole("button", { name: /^Status:/ }).click();
+  await expect(page.getByRole("option").first()).toHaveText("Any status");
+  await page.locator('[role="option"][data-value="all"]').click();
   await page.getByRole("button", { name: "More filters" }).click();
-  await expect(page.getByLabel("Protocol").locator("option").first()).toHaveText("Any protocol");
+  await page.getByRole("button", { name: /^Protocol:/ }).click();
+  await expect(page.getByRole("option").first()).toHaveText("Any protocol");
 });
 
 test("usage attributes API token totals to the selected account", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("26.7 tok/s");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest measured speed26.7 tok/s");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cached12Reason5Out8", "28", "128 / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cached12Reason5Out8", "28", "26.7 tok/s", "128 / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cached12", "Reason5", "Out8"]);
+  await expect(page.locator(".usage-metrics")).toContainText("Average speed26.7 tok/s");
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -1055,6 +1070,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("First output128 ms");
   await expect(details).toContainText("Total time428 ms");
+  await expect(details).toContainText("Speed26.7 tok/s");
   await expect(details).toContainText("Selection reasonLargest current quota reserve");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
@@ -1086,7 +1102,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(rows.first()).toContainText("Output $15.00");
     await expect(page.locator('.model-rules li[data-model-id="o3"]')).toContainText("Price not listed");
 
-    await page.getByLabel("Sort models").selectOption("price_asc");
+    await chooseOption(page, page, "Sort models", "price_asc");
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4-mini", "gpt-5.4", "o3"]);
 
     const mini = page.locator('.model-rules li[data-model-id="gpt-5.4-mini"]');

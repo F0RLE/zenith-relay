@@ -18,6 +18,12 @@ describe("Relay translations", () => {
     }
     expect([...used].filter((key) => !known.has(key)).sort()).toEqual([]);
   });
+
+  test("themed menus replace native select controls", () => {
+    const nativeSelects = walk(join(import.meta.dir, "..", "src"))
+      .filter((file) => readFileSync(file, "utf8").includes("<select"));
+    expect(nativeSelects).toEqual([]);
+  });
 });
 
 function flatten(value: object, prefix = "", result: string[] = []) {
