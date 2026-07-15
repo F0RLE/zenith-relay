@@ -7,7 +7,9 @@ import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {
   const authState = typeof account.authState === "string" ? account.authState : account.authState.state;
-  return account.enabled && account.inPool && !account.draining && account.secretAvailable && !account.routingExclusion && authState === "active";
+  const quota = [account.quota.primary, account.quota.secondary]
+    .flatMap((window) => window?.availableBasisPoints == null ? [] : [window.availableBasisPoints]);
+  return account.enabled && account.inPool && !account.draining && account.secretAvailable && !account.routingExclusion && authState === "active" && quota.length > 0 && Math.min(...quota) > 100;
 }
 
 export function formatAccountPlan(planType: string | null, unknown: string) {

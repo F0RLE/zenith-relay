@@ -207,6 +207,7 @@ export type LocalUsage = {
   ttftMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheWriteInputTokens: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -220,6 +221,7 @@ export type UsageTotals = {
   ttftSamples: number;
   inputTokens: number;
   cachedInputTokens: number;
+  cacheWriteInputTokens: number;
   reasoningTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -254,6 +256,7 @@ export type UsageExportRow = {
   ttftMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheWriteInputTokens: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
@@ -299,6 +302,7 @@ export type RemoteUsage = {
   ttftMs?: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheWriteInputTokens?: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;

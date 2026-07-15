@@ -299,9 +299,20 @@ Optional proxy endpoints:
 ```text
 GET  /v1/models
 POST /v1/responses
+GET  /v1/responses (WebSocket upgrade)
+POST /v1/responses/compact
 POST /v1/chat/completions
+POST /v1/alpha/search
 POST /v1/messages
 ```
+
+`/v1/responses/compact` and `/v1/alpha/search` use only scoped OAuth account
+candidates because they target ChatGPT Codex account endpoints. They must pass
+through the same quota, health, cooldown, load, proxy, and bounded-retry rules
+as `/v1/responses`; a generic API-key source is never used as an implicit
+fallback. `/backend-api/codex/alpha/search` is a direct-compatible alias, and
+the duplicated `/v1/chat/completions/v1/responses[/compact]` paths are accepted
+for clients that append a Responses path to a Chat Completions base URL.
 
 Error shape:
 
@@ -638,14 +649,17 @@ Selection:
 4. Otherwise, use a valid session binding when it still points to a healthy
    capable candidate.
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request load normalized by traffic share and current
-   quota reserve.
+6. In adaptive mode, prefer the lowest active-request load normalized by
+   traffic share, current quota after protected reserve, and a bounded measured
+   output-speed factor.
 7. Within the tier, prefer OAuth when otherwise equal, then committed dispatch
-   balance normalized by traffic share and current quota reserve. Use the
+   balance normalized by the same effective weight. Use the
    greatest known minimum quota reserve only when dispatch balances are equal,
-   followed by least recently used, manual tie-break priority, weight, and
-   stable id. A quota/health eligibility update resets old dispatch debt so the
-   new snapshot takes effect immediately.
+   followed by least recently used, manual tie-break priority, weight, measured
+   speed, and stable id. Speed needs three meaningful samples and is clamped to
+   a `0.5..2.0` multiplier around the pool median. Quota/health updates preserve
+   dispatch history; their new effective weight takes effect on the next
+   projected comparison.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
 
@@ -653,6 +667,11 @@ Usage telemetry persists only bounded routing diagnostics: reason, eligible
 count, selected quota reserve, effective weight, in-flight count, and dispatch
 count. Bodies, headers, credentials, proxy addresses, and raw identities are
 outside this record.
+
+Usage token fields follow Responses semantics: cache reads and cache writes are
+separate breakdowns of input tokens, reasoning is a breakdown of output tokens,
+and none of these breakdowns is added again to `total_tokens`. Output speed uses
+reported output tokens divided by full request latency; TTFT remains separate.
 
 `tried` and `attempted` stay separate. A candidate can be tried but not
 attempted when it fails mapping/preparation before executor call.

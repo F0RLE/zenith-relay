@@ -557,15 +557,18 @@ Selection contract:
 4. If a previous-response binding exists, require its creating candidate; a
    cooldown or failed preparation does not authorize cross-account replay.
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request load normalized by `weight * available
-   quota reserve`; this gives parallel requests proportional capacity.
+6. In adaptive mode, prefer the lowest active-request load normalized by
+   `weight * available quota after protected reserve * bounded measured output
+   speed`; this gives parallel requests proportional current capacity.
 7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then committed dispatch balance normalized by `weight * available quota
-   reserve`. Use the greatest current quota reserve only when dispatch balances
-   are equal, followed by least recently used, manual tie-break priority,
-   weight, measured speed, and stable id. Measured speed never multiplies quota
-   share; it resolves only an otherwise equal choice. Quota or health changes
-   clear historical dispatch debt so stale weights cannot delay the new order.
+   then committed dispatch balance normalized by the same effective weight.
+   Use the greatest current quota reserve only when projected balances are
+   equal, followed by least recently used, manual tie-break priority, weight,
+   measured speed, and stable id. Speed affects adaptive weight only after
+   three successful samples of at least 16 reported output tokens; use a
+   smoothed estimate relative to the pool median and clamp its factor to
+   `0.5..2.0`. Quota and health refreshes preserve committed dispatch history;
+   the new effective weight changes the next projected comparison immediately.
 8. Exclude candidates already tried for this request.
 9. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
@@ -826,6 +829,7 @@ reserved for schema migration, corrupted store repair, or auth directory change.
 The gateway should normalize:
 
 - `/v1/responses` and `/v1/responses/compact`;
+- `/v1/alpha/search` for Responses Lite web search through OAuth accounts;
 - `/v1/chat/completions` into `/v1/responses`;
 - `/v1/images/generations` into `/v1/responses` with image tool payload;
 - `/v1/images/edits` multipart/JSON into `/v1/responses`;
@@ -837,10 +841,18 @@ Zenith first runtime should ship:
 ```text
 GET  /v1/models
 POST /v1/responses
+GET  /v1/responses (WebSocket upgrade)
+POST /v1/responses/compact
 POST /v1/chat/completions
+POST /v1/alpha/search
 ```
 
-Then add images. Add `/v1/messages` after OpenAI/Codex local path is stable.
+Compact and alpha-search are account-only paths: API-key sources are skipped,
+while local-key scope, quota, health, cooldown, active load, proxy, and retry
+policy still apply. Responses Lite strips hosted/server-executed tool
+declarations and keeps only client-executed function, custom, and tool-search
+entries before an OAuth request is sent. Then add images. Add `/v1/messages`
+after OpenAI/Codex local path is stable.
 
 ### Account Candidate Selection
 
@@ -1356,13 +1368,15 @@ request_logs
   input_tokens
   output_tokens
   total_tokens
-  cached_tokens
+  cached_input_tokens
+  cache_write_input_tokens
   reasoning_tokens
   estimated_cost_usd
   pricing_snapshot_version
   input_usd_per_million
   output_usd_per_million
   cached_input_usd_per_million
+  cache_write_input_usd_per_million
 ```
 
 Indexes needed:
@@ -1416,14 +1430,24 @@ Usage detail fields:
 input_tokens
 output_tokens
 reasoning_tokens
-cached_tokens
-cache_read_tokens
-cache_creation_tokens
+cached_input_tokens
+cache_write_input_tokens
 total_tokens
 ttft
 latency
 response_headers
 ```
+
+Token fields follow the upstream usage object. `input_tokens` already includes
+cache reads and writes, while `cached_input_tokens` and
+`cache_write_input_tokens` are breakdowns and must not be added to totals.
+`output_tokens` includes reasoning and other generated non-visible formatting
+tokens. Observed output speed is `output_tokens / end-to-end latency`; TTFT is
+reported separately because subtracting it would combine a post-first-token
+duration with reasoning tokens that may have been generated before first
+output. Cache-write pricing comes from the versioned local price catalog; for
+GPT-5.6-family models it is 1.25 times uncached input according to the official
+prompt-caching guide.
 
 ### Diagnostics And Support Bundles
 

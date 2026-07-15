@@ -4,7 +4,8 @@ use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::header::{
-    AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, RETRY_AFTER, WWW_AUTHENTICATE,
+    ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST, RETRY_AFTER, USER_AGENT,
+    WWW_AUTHENTICATE,
 };
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
@@ -26,9 +27,11 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
+const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
+const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 type CompletionCallback = Arc<dyn Fn(&mut UsageEvent, Option<&str>) + Send + Sync>;
 
@@ -36,6 +39,14 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
         .route("/v1/models", get(models))
         .route("/v1/responses", get(websocket::responses).post(responses))
+        .route("/v1/responses/compact", post(responses_compact))
+        .route("/v1/chat/completions/v1/responses", post(responses))
+        .route(
+            "/v1/chat/completions/v1/responses/compact",
+            post(responses_compact),
+        )
+        .route("/v1/alpha/search", post(alpha_search))
+        .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
         .with_state(runtime)
 }
@@ -235,11 +246,465 @@ async fn responses(
     execute_client_request(runtime, request, WireApi::Responses).await
 }
 
+async fn responses_compact(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    if !valid_local_host(&headers) {
+        return invalid_host();
+    }
+    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
+        return unauthorized();
+    };
+    let mut request = match read_json_object(body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    if request.get("stream").is_some_and(|stream| stream != false) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "streaming is not supported for compact responses",
+            "invalid_request",
+        );
+    }
+    normalize_service_tier(&mut request, runtime.default_service_tier());
+    let Some(requested_model) = request
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+    else {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "model must be a non-empty string",
+            "invalid_request",
+        );
+    };
+    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
+    else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "model is not available for this local key",
+            "model_not_found",
+        );
+    };
+    let responses_lite = headers
+        .get(CODEX_RESPONSES_LITE_HEADER)
+        .cloned()
+        .or_else(|| {
+            runtime
+                .codex_model_uses_responses_lite(&resolved_model)
+                .then(|| HeaderValue::from_static("true"))
+        });
+    let response_affinity_key =
+        runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
+    normalize_account_request(&mut request, responses_lite.is_some());
+    request.remove("stream");
+    execute_account_endpoint(
+        runtime,
+        key,
+        Value::Object(request),
+        requested_model,
+        resolved_model,
+        headers,
+        AccountEndpoint::Compact,
+        responses_lite,
+        response_affinity_key,
+        true,
+    )
+    .await
+}
+
+async fn alpha_search(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let (parts, body) = request.into_parts();
+    let mut headers = parts.headers;
+    if !valid_local_host(&headers) {
+        return invalid_host();
+    }
+    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
+        return unauthorized();
+    };
+    let mut request = match read_json_object(body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let model_was_provided = request
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(|model| !model.trim().is_empty());
+    let requested_model = request
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| runtime.visible_account_models(&key).into_iter().next());
+    let Some(requested_model) = requested_model else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no OAuth account model is available for search",
+            "no_eligible_source",
+        );
+    };
+    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
+    else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "model is not available for this local key",
+            "model_not_found",
+        );
+    };
+    if !model_was_provided {
+        request.remove("model");
+    }
+    request.remove("prompt_cache_key");
+    request.remove("prompt_cache_retention");
+    if let Some(session_id) = request
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .and_then(|value| HeaderValue::from_str(value).ok())
+    {
+        if !headers.contains_key("x-session-id") {
+            headers.insert("x-session-id", session_id.clone());
+        }
+        if !headers.contains_key("session_id") {
+            headers.insert("session_id", session_id);
+        }
+    }
+    execute_account_endpoint(
+        runtime,
+        key,
+        Value::Object(request),
+        requested_model,
+        resolved_model,
+        headers,
+        AccountEndpoint::AlphaSearch,
+        None,
+        None,
+        model_was_provided,
+    )
+    .await
+}
+
 async fn chat_completions(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
     execute_client_request(runtime, request, WireApi::ChatCompletions).await
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AccountEndpoint {
+    Compact,
+    AlphaSearch,
+}
+
+impl AccountEndpoint {
+    fn response_limit(self) -> usize {
+        match self {
+            Self::Compact => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+            Self::AlphaSearch => MAX_ALPHA_SEARCH_RESPONSE_BYTES,
+        }
+    }
+}
+
+async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Body>> {
+    let body = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
+        .await
+        .map_err(|_| {
+            api_error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "request body exceeds 16 MiB",
+                "request_too_large",
+            )
+        })?;
+    match serde_json::from_slice(&body) {
+        Ok(Value::Object(object)) => Ok(object),
+        _ => Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "request body must be a JSON object",
+            "invalid_request",
+        )),
+    }
+}
+
+fn resolve_visible_account_model(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    requested_model: &str,
+) -> Option<String> {
+    runtime
+        .visible_account_models(key)
+        .iter()
+        .any(|model| model.eq_ignore_ascii_case(requested_model))
+        .then(|| runtime.resolve_model(key, requested_model))
+        .flatten()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_account_endpoint(
+    runtime: Arc<GatewayRuntime>,
+    key: AuthenticatedKey,
+    request: Value,
+    requested_model: String,
+    resolved_model: String,
+    client_headers: HeaderMap,
+    endpoint: AccountEndpoint,
+    responses_lite: Option<HeaderValue>,
+    response_affinity_key: Option<String>,
+    rewrite_model: bool,
+) -> Response<Body> {
+    let request_id = request_id();
+    let has_previous_response_id = request
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let account_only_exclusions = runtime.api_source_candidate_ids();
+    let mut tried = account_only_exclusions.clone();
+    let mut attempt = 0_u16;
+    let mut last_failure = None;
+
+    while usize::from(attempt) < runtime.max_retry_candidates() {
+        let Some((selected, lease)) = runtime.select_and_reserve(
+            &key,
+            &resolved_model,
+            &[WireApi::Responses],
+            &tried,
+            response_affinity_key.as_deref(),
+            now_ms(),
+        ) else {
+            break;
+        };
+        tried.insert(selected.candidate_id.clone());
+        let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
+        else {
+            continue;
+        };
+        if route.account_id.is_none() {
+            continue;
+        }
+        route.routing = Some(selected.diagnostics);
+        let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint) else {
+            last_failure = Some(AttemptFailure::invalid_request());
+            continue;
+        };
+        let mut upstream_body = request.clone();
+        if rewrite_model {
+            upstream_body.as_object_mut().unwrap().insert(
+                "model".to_string(),
+                Value::String(route.source_model.clone()),
+            );
+        }
+        let request_body = match serde_json::to_vec(&upstream_body) {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "request body could not be serialized",
+                    "invalid_request",
+                )
+            }
+        };
+
+        attempt = attempt.saturating_add(1);
+        let started = Instant::now();
+        let prepared = match runtime
+            .prepare_authorization(&route.candidate_id, now_ms())
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let failure = AttemptFailure::prepare(error);
+                let state = apply_cooldown(&runtime, &route.candidate_id, "*", failure.cooldown_ms);
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
+        };
+        let mut upstream_request = runtime
+            .request_client(&route.candidate_id, false)
+            .post(upstream_url)
+            .header(AUTHORIZATION, prepared.authorization)
+            .header(CONTENT_TYPE, "application/json")
+            .header(ACCEPT, "application/json");
+        if let Some(account_id) = prepared.chatgpt_account_id {
+            upstream_request = upstream_request.header("ChatGPT-Account-Id", account_id);
+        }
+        if let Some(originator) = prepared.originator {
+            upstream_request = upstream_request.header("originator", originator);
+        }
+        if endpoint == AccountEndpoint::Compact {
+            if let Some(value) = responses_lite.as_ref() {
+                upstream_request =
+                    upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
+            }
+        } else {
+            for name in [
+                USER_AGENT.as_str(),
+                "version",
+                "session_id",
+                "x-session-id",
+                "x-client-request-id",
+                "x-openai-actor-authorization",
+            ] {
+                if let Some(value) = client_headers.get(name) {
+                    upstream_request = upstream_request.header(name, value.clone());
+                }
+            }
+        }
+        let upstream = upstream_request.body(request_body).send().await;
+        let upstream = match upstream {
+            Ok(upstream) => upstream,
+            Err(_) => {
+                let failure = AttemptFailure::transport();
+                let state =
+                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
+        };
+        let status = upstream.status();
+        let response_headers = upstream.headers().clone();
+        let bytes = match crate::runtime::collect_limited(upstream, endpoint.response_limit()).await
+        {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let failure = AttemptFailure::body();
+                let state =
+                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    failure.status.as_u16(),
+                    Some(failure.category.to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
+        };
+        if !status.is_success() {
+            let mut event = usage_event(
+                &request_id,
+                attempt,
+                &key.id,
+                &route,
+                &requested_model,
+                false,
+                status.as_u16(),
+                Some("upstream_status".to_string()),
+                started.elapsed().as_millis() as u64,
+            );
+            if retryable_status(status, has_previous_response_id) {
+                let state = apply_status_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    &route.source_model,
+                    status,
+                    &response_headers,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(AttemptFailure::status(status));
+                continue;
+            }
+            emit_usage(&runtime, event);
+            return proxy_response(status, &response_headers, Body::from(bytes));
+        }
+
+        let mut event = usage_event(
+            &request_id,
+            attempt,
+            &key.id,
+            &route,
+            &requested_model,
+            true,
+            status.as_u16(),
+            None,
+            started.elapsed().as_millis() as u64,
+        );
+        event.consecutive_failures = Some(0);
+        populate_tokens(&mut event, &bytes);
+        runtime.record_success_with_metrics(
+            &route.candidate_id,
+            &route.source_model,
+            now_ms(),
+            event.output_tokens,
+            event.latency_ms,
+        );
+        emit_usage(&runtime, event);
+        drop(lease);
+        return proxy_response(status, &response_headers, Body::from(bytes));
+    }
+
+    let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
+    if failure.status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(retry_at) = runtime.earliest_retry_at(
+            &key,
+            &resolved_model,
+            &[WireApi::Responses],
+            &account_only_exclusions,
+            now_ms(),
+        ) {
+            return cooldown_error(retry_at);
+        }
+    }
+    api_error(failure.status, failure.message, failure.category)
+}
+
+fn account_endpoint_url(
+    mut responses_url: url::Url,
+    endpoint: AccountEndpoint,
+) -> Option<url::Url> {
+    let mut segments = responses_url.path_segments_mut().ok()?;
+    segments.pop_if_empty().pop();
+    match endpoint {
+        AccountEndpoint::Compact => {
+            segments.push("responses").push("compact");
+        }
+        AccountEndpoint::AlphaSearch => {
+            segments.push("alpha").push("search");
+        }
+    }
+    drop(segments);
+    Some(responses_url)
 }
 
 async fn execute_client_request(
@@ -707,7 +1172,6 @@ async fn execute_request(
                 &source_model,
                 now_ms(),
                 event.output_tokens,
-                event.reasoning_tokens,
                 event.latency_ms,
             );
             emit_usage(&runtime, event);
@@ -744,7 +1208,6 @@ async fn execute_request(
                             &completion_model,
                             now_ms(),
                             event.output_tokens,
-                            event.reasoning_tokens,
                             event.latency_ms,
                         );
                         event.consecutive_failures = Some(0);
@@ -1103,6 +1566,7 @@ fn normalize_account_request(object: &mut serde_json::Map<String, Value>, respon
     object.remove("max_output_tokens");
     if responses_lite {
         object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
+        filter_responses_lite_tools(object);
     }
     if let Some(Value::String(text)) = object.get("input") {
         let text = text.clone();
@@ -1111,6 +1575,83 @@ fn normalize_account_request(object: &mut serde_json::Map<String, Value>, respon
             json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
         );
     }
+}
+
+fn filter_responses_lite_tools(object: &mut Map<String, Value>) {
+    if let Some(Value::Array(tools)) = object.get_mut("tools") {
+        tools.retain(responses_lite_tool_allowed);
+    }
+    if object
+        .get_mut("tool_choice")
+        .is_some_and(|choice| !responses_lite_tool_choice_allowed(choice))
+    {
+        object.remove("tool_choice");
+    }
+    if let Some(Value::Array(input)) = object.get_mut("input") {
+        input.retain_mut(|item| {
+            let Some(item) = item.as_object_mut() else {
+                return true;
+            };
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                return true;
+            }
+            filter_responses_lite_tools(item);
+            item.get("tools")
+                .and_then(Value::as_array)
+                .is_some_and(|tools| !tools.is_empty())
+        });
+    }
+    if let Some(Value::Object(response)) = object.get_mut("response") {
+        filter_responses_lite_tools(response);
+    }
+}
+
+fn responses_lite_tool_allowed(tool: &Value) -> bool {
+    let Some(tool_type) = tool.get("type").and_then(Value::as_str).map(str::trim) else {
+        return false;
+    };
+    if tool_type.eq_ignore_ascii_case("function") || tool_type.eq_ignore_ascii_case("custom") {
+        return true;
+    }
+    tool_type.eq_ignore_ascii_case("tool_search")
+        && tool
+            .get("execution")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"))
+}
+
+fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
+    if let Some(choice) = choice.as_str() {
+        return ["auto", "none", "required"]
+            .iter()
+            .any(|value| choice.trim().eq_ignore_ascii_case(value));
+    }
+    let Some(choice) = choice.as_object_mut() else {
+        return false;
+    };
+    let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
+        return false;
+    };
+    if choice_type.eq_ignore_ascii_case("function") || choice_type.eq_ignore_ascii_case("custom") {
+        return true;
+    }
+    if choice_type.eq_ignore_ascii_case("tool_search") {
+        return choice
+            .get("execution")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"));
+    }
+    if choice_type.eq_ignore_ascii_case("allowed_tools") {
+        let mut any_allowed = false;
+        for name in ["tools", "allowed_tools"] {
+            if let Some(tools) = choice.get_mut(name).and_then(Value::as_array_mut) {
+                tools.retain(responses_lite_tool_allowed);
+                any_allowed |= !tools.is_empty();
+            }
+        }
+        return any_allowed;
+    }
+    false
 }
 
 fn translate_chat_message_content(content: &Value) -> Result<Value, AttemptFailure> {
@@ -1649,7 +2190,7 @@ fn retry_after_ms(headers: &reqwest::header::HeaderMap, now: SystemTime) -> Opti
             .as_millis()
             .min(u128::from(u64::MAX)) as u64
     };
-    Some(duration_ms.min(MAX_RATE_LIMIT_COOLDOWN_MS))
+    Some(duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
 }
 
 fn exponential_backoff_ms(consecutive_failures: u32) -> u64 {
@@ -1811,6 +2352,7 @@ fn usage_event(
         ttft_ms: None,
         input_tokens: None,
         cached_input_tokens: None,
+        cache_write_input_tokens: None,
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
@@ -2217,6 +2759,17 @@ fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cached_tokens"))
         .and_then(Value::as_u64)
         .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
+    event.cache_write_input_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cache_write_tokens"))
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens"))
+        })
+        .or_else(|| usage.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .map(|written| written.min(input_tokens.unwrap_or(written)));
     event.reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
@@ -2281,6 +2834,58 @@ mod tests {
     use std::{convert::Infallible, sync::Mutex, time::Duration};
 
     #[test]
+    fn responses_lite_keeps_only_client_executed_tools() {
+        let mut request = json!({
+            "model": "gpt-lite",
+            "tools": [
+                {"type": "function", "name": "lookup"},
+                {"type": "custom", "name": "patch"},
+                {"type": "tool_search", "execution": "client"},
+                {"type": "tool_search", "execution": "server"},
+                {"type": "web_search"},
+                {"type": "image_generation"}
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "tools": [
+                    {"type": "function", "name": "lookup"},
+                    {"type": "web_search"}
+                ]
+            },
+            "input": [
+                {"type": "additional_tools", "tools": [{"type": "web_search"}]},
+                {"type": "additional_tools", "tools": [
+                    {"type": "custom", "name": "patch"},
+                    {"type": "image_generation"}
+                ]},
+                {"role": "user", "content": "hello"}
+            ],
+            "response": {
+                "tools": [{"type": "function", "name": "lookup"}, {"type": "web_search"}],
+                "tool_choice": {"type": "image_generation"}
+            }
+        });
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+
+        let types = |pointer: &str| {
+            request
+                .pointer(pointer)
+                .and_then(Value::as_array)
+                .unwrap()
+                .iter()
+                .filter_map(|tool| tool.get("type").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(types("/tools"), ["function", "custom", "tool_search"]);
+        assert_eq!(types("/tool_choice/tools"), ["function"]);
+        assert_eq!(types("/input/0/tools"), ["custom"]);
+        assert_eq!(types("/response/tools"), ["function"]);
+        assert_eq!(request["input"].as_array().unwrap().len(), 2);
+        assert!(request.pointer("/response/tool_choice").is_none());
+        assert_eq!(request["parallel_tool_calls"], false);
+    }
+
+    #[test]
     fn oversized_sse_event_is_recorded_as_failure() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
@@ -2308,6 +2913,7 @@ mod tests {
                 ttft_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
+                cache_write_input_tokens: None,
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
@@ -2335,11 +2941,12 @@ mod tests {
         let mut event = test_usage_event();
         populate_tokens(
             &mut event,
-            br#"{"response":{"response":{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":10}}}}"#,
+            br#"{"response":{"response":{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":7},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":10}}}}"#,
         );
 
         assert_eq!(event.input_tokens, Some(16));
         assert_eq!(event.cached_input_tokens, Some(16));
+        assert_eq!(event.cache_write_input_tokens, Some(7));
         assert_eq!(event.reasoning_tokens, Some(5));
         assert_eq!(event.output_tokens, Some(5));
         assert_eq!(event.total_tokens, Some(21));
@@ -2357,13 +2964,14 @@ mod tests {
             Arc::new(|_, _| {}),
         );
         stream.ingest_sse(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9,\"cache_write_tokens\":5},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
         );
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, Some(32));
         assert_eq!(events[0].cached_input_tokens, Some(9));
+        assert_eq!(events[0].cache_write_input_tokens, Some(5));
         assert_eq!(events[0].reasoning_tokens, Some(4));
         assert_eq!(events[0].output_tokens, Some(6));
         assert_eq!(events[0].total_tokens, Some(38));
@@ -2405,6 +3013,12 @@ mod tests {
         headers.insert(RETRY_AFTER, reqwest::header::HeaderValue::from_static("17"));
         assert_eq!(retry_after_ms(&headers, now), Some(17_000));
 
+        headers.insert(
+            RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("518400"),
+        );
+        assert_eq!(retry_after_ms(&headers, now), Some(518_400_000));
+
         let date = httpdate::fmt_http_date(now + Duration::from_secs(23));
         headers.insert(RETRY_AFTER, date.parse().unwrap());
         assert_eq!(retry_after_ms(&headers, now), Some(23_000));
@@ -2440,6 +3054,7 @@ mod tests {
             ttft_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
+            cache_write_input_tokens: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,

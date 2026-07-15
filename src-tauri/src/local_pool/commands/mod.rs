@@ -20,6 +20,7 @@ use super::{
     },
     error::{ErrorCode, LocalPoolError, Result},
     models::{GatewaySettings, LocalGatewayKeyRecord, ProviderSourceRecord},
+    profiles::codex,
     state::DesktopState,
     store::secret_store,
 };
@@ -29,7 +30,17 @@ use zenith_relay_core::{
     RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
 };
 
+pub(super) const CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
+
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
+    let codex_home = crate::platform::default_codex_home();
+    let protected_account_id = if codex::credential_kind(&codex_home, &state.profile_backup_root())?
+        == Some(codex::ProfileCredentialKind::LocalGateway)
+    {
+        codex::active_managed_account_id(&codex_home, &state.profile_backup_root())?
+    } else {
+        None
+    };
     let (source_records, account_records, key_records, settings) = {
         let store = state.store()?;
         (
@@ -146,7 +157,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         credentials,
         state.account_metadata_sink(),
     ));
-    GatewayRuntime::from_mixed_pool(
+    let runtime = GatewayRuntime::from_mixed_pool(
         sources,
         accounts,
         keys,
@@ -164,8 +175,12 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         },
         state.usage_callback(),
     )
-    .map(Arc::new)
-    .map_err(core_error)
+    .map_err(core_error)?;
+    runtime.set_protected_candidate(
+        protected_account_id.as_deref(),
+        CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
+    );
+    Ok(Arc::new(runtime))
 }
 
 pub(crate) fn account_routing_allowed(

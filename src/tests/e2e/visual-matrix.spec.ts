@@ -583,7 +583,7 @@ for (const viewport of viewports) {
       await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(2);
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
-      await expect(dialog).toContainText("Распределяет новые запросы по доступной квоте");
+      await expect(dialog).toContainText("Распределяет новые независимые цепочки по свободной нагрузке, запасу квоты и устойчиво измеренной скорости.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });

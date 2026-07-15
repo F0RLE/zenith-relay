@@ -101,6 +101,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "014_default_service_tier",
         sql: include_str!("../../migrations/014_default_service_tier.sql"),
     },
+    Migration {
+        version: 15,
+        name: "015_cache_write_input_tokens",
+        sql: include_str!("../../migrations/015_cache_write_input_tokens.sql"),
+    },
 ];
 
 struct Migration {
@@ -596,8 +601,8 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -630,6 +635,7 @@ impl Store {
                         event.ttft_ms.map(|value| value as i64),
                         event.input_tokens.map(|value| value as i64),
                         event.cached_input_tokens.map(|value| value as i64),
+                        event.cache_write_input_tokens.map(|value| value as i64),
                         event.reasoning_tokens.map(|value| value as i64),
                         event.output_tokens.map(|value| value as i64),
                         event.total_tokens.map(|value| value as i64),
@@ -663,6 +669,7 @@ impl Store {
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
                 Some(group.totals.cached_input_tokens),
+                Some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
             );
@@ -677,7 +684,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -695,7 +702,7 @@ impl Store {
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
                     routing: row
-                        .get::<_, Option<String>>(19)?
+                        .get::<_, Option<String>>(20)?
                         .as_deref()
                         .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(5)?,
@@ -708,10 +715,11 @@ impl Store {
                     ttft_ms: optional_u64(row.get(12)?),
                     input_tokens: optional_u64(row.get(13)?),
                     cached_input_tokens: optional_u64(row.get(14)?),
-                    reasoning_tokens: optional_u64(row.get(15)?),
-                    output_tokens: optional_u64(row.get(16)?),
-                    total_tokens: optional_u64(row.get(17)?),
-                    created_at_ms: row.get::<_, i64>(18)?.max(0) as u64,
+                    cache_write_input_tokens: optional_u64(row.get(15)?),
+                    reasoning_tokens: optional_u64(row.get(16)?),
+                    output_tokens: optional_u64(row.get(17)?),
+                    total_tokens: optional_u64(row.get(18)?),
+                    created_at_ms: row.get::<_, i64>(19)?.max(0) as u64,
                 })
             })
             .map_err(db_error)?;
@@ -738,7 +746,8 @@ impl Store {
         let mut statement = connection
             .prepare(
                 "SELECT candidate_hint, COALESCE(resolved_model, requested_model),
-                    SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens), SUM(total_tokens)
+                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+                    SUM(output_tokens), SUM(total_tokens)
                  FROM usage_events
                  GROUP BY candidate_hint, COALESCE(resolved_model, requested_model)",
             )
@@ -747,14 +756,16 @@ impl Store {
             .query_map([], |row| {
                 let input_tokens: Option<i64> = row.get(2)?;
                 let cached_input_tokens: Option<i64> = row.get(3)?;
-                let output_tokens: Option<i64> = row.get(4)?;
-                let total_tokens: Option<i64> = row.get(5)?;
+                let cache_write_input_tokens: Option<i64> = row.get(4)?;
+                let output_tokens: Option<i64> = row.get(5)?;
+                let total_tokens: Option<i64> = row.get(6)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     estimate_api_equivalent(
                         row.get::<_, Option<String>>(1)?.as_deref(),
                         optional_u64(input_tokens),
                         optional_u64(cached_input_tokens),
+                        optional_u64(cache_write_input_tokens),
                         optional_u64(output_tokens),
                         optional_u64(total_tokens),
                     ),
@@ -916,13 +927,13 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COALESCE(SUM(reasoning_tokens), 0), COALESCE(SUM(output_tokens), 0), \
+    COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), \
+    COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
-        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
-        THEN CASE WHEN ttft_ms IS NOT NULL AND latency_ms > ttft_ms THEN latency_ms - ttft_ms ELSE latency_ms END \
-        ELSE 0 END), 0)";
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
+        THEN output_tokens ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
+        THEN latency_ms ELSE 0 END), 0)";
 
 fn usage_totals(
     connection: &Connection,
@@ -969,11 +980,12 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         ttft_samples: nonnegative_u64(row.get(offset + 4)?),
         input_tokens: nonnegative_u64(row.get(offset + 5)?),
         cached_input_tokens: nonnegative_u64(row.get(offset + 6)?),
-        reasoning_tokens: nonnegative_u64(row.get(offset + 7)?),
-        output_tokens: nonnegative_u64(row.get(offset + 8)?),
-        total_tokens: nonnegative_u64(row.get(offset + 9)?),
-        speed_output_tokens: nonnegative_u64(row.get(offset + 10)?),
-        speed_duration_ms: nonnegative_u64(row.get(offset + 11)?),
+        cache_write_input_tokens: nonnegative_u64(row.get(offset + 7)?),
+        reasoning_tokens: nonnegative_u64(row.get(offset + 8)?),
+        output_tokens: nonnegative_u64(row.get(offset + 9)?),
+        total_tokens: nonnegative_u64(row.get(offset + 10)?),
+        speed_output_tokens: nonnegative_u64(row.get(offset + 11)?),
+        speed_duration_ms: nonnegative_u64(row.get(offset + 12)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -1522,7 +1534,8 @@ mod tests {
                 (11, "011_request_rotation_default".to_string()),
                 (12, "012_routing_diagnostics".to_string()),
                 (13, "013_routing_strategy".to_string()),
-                (14, "014_default_service_tier".to_string())
+                (14, "014_default_service_tier".to_string()),
+                (15, "015_cache_write_input_tokens".to_string())
             ]
         );
         drop(store);
@@ -1648,6 +1661,7 @@ mod tests {
                         ttft_ms: Some(4),
                         input_tokens: Some(1),
                         cached_input_tokens: Some(1),
+                        cache_write_input_tokens: Some(0),
                         reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),

@@ -120,11 +120,17 @@ Runtime ordering is intentionally small:
 1. mandatory `previous_response_id` binding to the account that created it;
 2. explicit API-source role: primary first, stabilizer with OAuth accounts,
    reserve last;
-3. lowest active-request load normalized by traffic share and available quota;
+3. lowest active-request load normalized by traffic share, quota after any
+   protected interface reserve, and bounded measured output speed;
 4. OAuth preference within an otherwise equal stabilizer comparison;
-5. committed dispatch balance normalized by traffic share and available quota,
+5. committed dispatch balance normalized by the same effective share,
    then greatest known quota reserve and least recently used;
 6. manual priority, weight, measured speed, and stable id as final tie-breakers.
+
+The OAuth account projected into the ChatGPT interface keeps a 1% quota reserve
+while pool mode is attached. At or below that reserve it fails the same hard
+gate as an exhausted candidate, including previous-response and WebSocket
+continuations.
 
 Chats are never optionally pinned to accounts. Only a continuation carrying
 `previous_response_id` stays with the account that created that response, and

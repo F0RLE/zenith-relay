@@ -767,18 +767,23 @@ weight
 allowed/excluded models
 ```
 
-There is no MVP strategy selector. Runtime order is fixed:
+The pool exposes two routing strategies: adaptive capacity and oldest eligible
+account. Adaptive order is:
 
 ```text
 hard filters
 mandatory previous-response binding
 API source role tier
-active requests normalized by traffic share and available quota
+active requests normalized by traffic share, available quota after reserve, and bounded output speed
 OAuth preference inside the stabilizer tier
-committed dispatch balance normalized by traffic share and available quota
+committed dispatch balance normalized by the same effective share
 greatest minimum known quota reserve when balances are equal
 least recently used, manual priority, weight, measured-speed tie-break, and stable id
 ```
+
+The oldest-account strategy applies all hard gates and active-load checks first,
+then prefers the earliest account creation time. It never revives an exhausted,
+busy, cooling-down, disabled, or out-of-scope account.
 
 The scheduler makes this choice for every request. `API first` sources run before
 OAuth accounts, `Stabilizer` sources absorb concurrent load and retryable account
@@ -786,7 +791,8 @@ failures, and `Last resort` sources wait behind other eligible members. Traffic
 share affects concurrent distribution inside the same role tier. Sorting the
 visible member list never changes runtime order. Rows use `In rotation`,
 `Waiting for quota`, `Unavailable`, and `Disabled`; a manually chosen OAuth
-account is labelled `Codex interface` and is not a pinned pool route.
+account is labelled `ChatGPT interface`, keeps a 1% reserve, and is not a pinned
+pool route.
 
 Request details show the redacted routing reason and the counters used for that
 decision. This explains quota, parallel-load, response ownership, and tie-break choices

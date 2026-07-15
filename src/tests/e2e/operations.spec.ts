@@ -818,7 +818,7 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 10, useFreeAccounts: true } });
 });
 
-test("local pool saves quota-first distribution without chat pinning", async ({ page }) => {
+test("local pool saves adaptive distribution without chat pinning", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -828,7 +828,7 @@ test("local pool saves quota-first distribution without chat pinning", async ({ 
   await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
-  await expect(dialog).toContainText("Distributes new requests by available quota");
+  await expect(dialog).toContainText("Distributes new independent chains by free capacity, quota headroom, and stable measured speed.");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "Distribution mode", "oldest_account");
@@ -1004,7 +1004,7 @@ test("ChatGPT client setup offers no account, automatic, and manual pool identit
   const account = setup.getByRole("button", { name: /^ChatGPT interface account:/ });
   await expect(account).toHaveAttribute("data-value", "auto");
   await account.click();
-  await expect(page.getByRole("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business", "Personal Plus · Plus"]);
+  await expect(page.getByRole("option")).toHaveText(["Without account", "Automatic selection", "Business Workspace · Business"]);
   await page.locator('[role="option"][data-value="auto"]').click();
   expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("auto");
   await expect(setup.getByRole("button")).toHaveCount(1);
@@ -1032,23 +1032,23 @@ test("ChatGPT client setup offers no account, automatic, and manual pool identit
 
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
-  await chooseOption(page, page, "ChatGPT interface account", "account_synthetic");
-  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("account_synthetic");
+  await chooseOption(page, page, "ChatGPT interface account", "account_synthetic_2");
+  expect(await page.evaluate(() => localStorage.getItem("relay.codexPoolOauthSelection"))).toBe("account_synthetic_2");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_local_gateway").length)).toBe(2);
   call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "attach_codex_to_local_gateway"));
-  expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic" });
+  expect(call?.args).toEqual({ keyId: "key_synthetic", boundOauthAccountId: "account_synthetic_2" });
 });
 
 test("ChatGPT pool identity migrates the previous stored account selection", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
-  await page.addInitScript(() => localStorage.setItem("relay.codexPoolOauthAccountId", "account_synthetic"));
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2 });
+  await page.addInitScript(() => localStorage.setItem("relay.codexPoolOauthAccountId", "account_synthetic_2"));
   await page.goto("/");
   await page.getByRole("button", { name: "Gateway", exact: true }).click();
   await page.getByRole("tab", { name: "ChatGPT Setup" }).click();
-  await expect(page.getByRole("button", { name: /^ChatGPT interface account:/ })).toHaveAttribute("data-value", "account_synthetic");
-  expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic", legacy: null });
+  await expect(page.getByRole("button", { name: /^ChatGPT interface account:/ })).toHaveAttribute("data-value", "account_synthetic_2");
+  expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic_2", legacy: null });
 });
 
 test("usage filters name independent choices", async ({ page }) => {
@@ -1067,28 +1067,29 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("10 tok/s");
+  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("18.7 tok/s");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest measured speed10 tok/s");
+  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest output speed18.7 tok/s");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cached12Reason5Out8", "28", "10 tok/s", "128 / 428 ms"]);
-  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cached12", "Reason5", "Out8"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Average speed10 tok/s");
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Cache ↑4Reason5Out8", "28", "18.7 tok/s", "128 / 428 ms"]);
+  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Cache ↑4", "Reason5", "Out8"]);
+  await expect(page.locator(".usage-metrics")).toContainText("Average output speed18.7 tok/s");
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Input tokens20");
-  await expect(details).toContainText("Cached input12");
+  await expect(details).toContainText("Cache reads12");
+  await expect(details).toContainText("Cache writes4");
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("First output128 ms");
   await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Speed10 tok/s");
+  await expect(details).toContainText("Output speed18.7 tok/s");
   await expect(details).toContainText("Selection reasonLargest current quota reserve");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");

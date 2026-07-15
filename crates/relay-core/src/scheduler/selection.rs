@@ -11,6 +11,17 @@ const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 1_000_000;
+const MIN_THROUGHPUT_OUTPUT_TOKENS: u64 = 16;
+const MIN_THROUGHPUT_SAMPLES: u32 = 3;
+const SPEED_FACTOR_SCALE: u128 = 1_000;
+const MIN_SPEED_FACTOR: u128 = 500;
+const MAX_SPEED_FACTOR: u128 = 2_000;
+
+#[derive(Clone, Copy, Debug)]
+struct ThroughputEstimate {
+    milli_tokens_per_second: u64,
+    samples: u32,
+}
 
 pub struct SelectionRequest<'a> {
     pub model: &'a str,
@@ -75,7 +86,9 @@ pub struct PoolScheduler {
     dispatches: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
     created_at_ms: BTreeMap<String, u64>,
-    throughput_milli_tokens_per_second: BTreeMap<String, u64>,
+    throughput: BTreeMap<String, ThroughputEstimate>,
+    throughput_baseline: Option<u64>,
+    protected_candidate: Option<(String, u64)>,
 }
 
 impl Default for PoolScheduler {
@@ -96,7 +109,9 @@ impl PoolScheduler {
             dispatches: BTreeMap::new(),
             routing_strategy: RoutingStrategy::Adaptive,
             created_at_ms: BTreeMap::new(),
-            throughput_milli_tokens_per_second: BTreeMap::new(),
+            throughput: BTreeMap::new(),
+            throughput_baseline: None,
+            protected_candidate: None,
         }
     }
 
@@ -129,12 +144,36 @@ impl PoolScheduler {
         self.in_flight.remove(candidate_id);
         self.dispatches.remove(candidate_id);
         self.created_at_ms.remove(candidate_id);
-        self.throughput_milli_tokens_per_second.remove(candidate_id);
+        self.throughput.remove(candidate_id);
+        self.recompute_throughput_baseline();
+        if self
+            .protected_candidate
+            .as_ref()
+            .is_some_and(|(protected_id, _)| protected_id == candidate_id)
+        {
+            self.protected_candidate = None;
+        }
         self.candidates.remove(candidate_id)
     }
 
     pub fn candidate(&self, candidate_id: &str) -> Option<&RuntimeCandidate> {
         self.candidates.get(candidate_id)
+    }
+
+    pub fn set_protected_candidate(
+        &mut self,
+        candidate_id: Option<&str>,
+        reserve_basis_points: u64,
+    ) -> bool {
+        let Some(candidate_id) = candidate_id else {
+            self.protected_candidate = None;
+            return true;
+        };
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        self.protected_candidate = Some((candidate_id.to_string(), reserve_basis_points));
+        true
     }
 
     pub fn candidates(&self) -> impl Iterator<Item = &RuntimeCandidate> {
@@ -151,14 +190,9 @@ impl PoolScheduler {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
-        let routing_state_changed =
-            candidate.enabled != enabled || candidate.health != health || candidate.quota != quota;
         candidate.enabled = enabled;
         candidate.health = health;
         candidate.quota = quota;
-        if routing_state_changed {
-            self.dispatches.clear();
-        }
         true
     }
 
@@ -171,7 +205,8 @@ impl PoolScheduler {
             {
                 let eligible = self.candidates.get(&candidate_id).is_some_and(|candidate| {
                     !request.tried.contains(&candidate_id)
-                        && candidate.is_eligible(
+                        && self.is_eligible(
+                            candidate,
                             request.model,
                             request.allowed_protocols,
                             request.scope,
@@ -200,7 +235,8 @@ impl PoolScheduler {
             .values()
             .filter(|candidate| {
                 !request.tried.contains(&candidate.id)
-                    && candidate.is_eligible(
+                    && self.is_eligible(
+                        candidate,
                         request.model,
                         request.allowed_protocols,
                         request.scope,
@@ -260,7 +296,8 @@ impl PoolScheduler {
             .values()
             .filter(|candidate| {
                 !request.tried.contains(&candidate.id)
-                    && candidate.is_eligible(
+                    && self.is_eligible(
+                        candidate,
                         request.model,
                         request.allowed_protocols,
                         request.scope,
@@ -274,6 +311,7 @@ impl PoolScheduler {
         self.candidates
             .values()
             .filter(|candidate| !request.tried.contains(&candidate.id))
+            .filter(|candidate| self.quota_reserve_allows(candidate))
             .filter_map(|candidate| {
                 candidate.retry_at_if_visible(
                     request.model,
@@ -283,6 +321,18 @@ impl PoolScheduler {
                 )
             })
             .min()
+    }
+
+    pub(crate) fn is_eligible(
+        &self,
+        candidate: &RuntimeCandidate,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        scope: &CandidateScope,
+        now_ms: u64,
+    ) -> bool {
+        self.quota_reserve_allows(candidate)
+            && candidate.is_eligible(model, allowed_protocols, scope, now_ms)
     }
 
     pub fn bind_response_affinity(
@@ -322,7 +372,7 @@ impl PoolScheduler {
     }
 
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
-        self.record_success_with_metrics(candidate_id, model, now_ms, None, None, 0)
+        self.record_success_with_metrics(candidate_id, model, now_ms, None, 0)
     }
 
     pub fn record_success_with_metrics(
@@ -331,7 +381,6 @@ impl PoolScheduler {
         model: &str,
         now_ms: u64,
         output_tokens: Option<u64>,
-        reasoning_tokens: Option<u64>,
         latency_ms: u64,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
@@ -343,21 +392,29 @@ impl PoolScheduler {
         candidate.health = CandidateHealth::Healthy;
         candidate.last_used_at = Some(now_ms);
         candidate.consecutive_failures = 0;
-        let visible_output_tokens = output_tokens
-            .map(|output| output.saturating_sub(reasoning_tokens.unwrap_or_default().min(output)));
-        if let (Some(visible_output_tokens @ 1..), 1..) = (visible_output_tokens, latency_ms) {
-            let measured = (u128::from(visible_output_tokens) * 1_000_000 / u128::from(latency_ms))
+        if let (Some(output_tokens @ MIN_THROUGHPUT_OUTPUT_TOKENS..), 1..) =
+            (output_tokens, latency_ms)
+        {
+            let measured = (u128::from(output_tokens) * 1_000_000 / u128::from(latency_ms))
                 .clamp(1, u128::from(MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND))
                 as u64;
-            let previous = self
-                .throughput_milli_tokens_per_second
-                .get(candidate_id)
-                .copied();
-            let smoothed = previous.map_or(measured, |previous| {
-                (previous.saturating_mul(3).saturating_add(measured)) / 4
-            });
-            self.throughput_milli_tokens_per_second
-                .insert(candidate_id.to_string(), smoothed);
+            let previous = self.throughput.get(candidate_id).copied();
+            let estimate = previous.map_or(
+                ThroughputEstimate {
+                    milli_tokens_per_second: measured,
+                    samples: 1,
+                },
+                |previous| ThroughputEstimate {
+                    milli_tokens_per_second: (previous
+                        .milli_tokens_per_second
+                        .saturating_mul(3)
+                        .saturating_add(measured))
+                        / 4,
+                    samples: previous.samples.saturating_add(1),
+                },
+            );
+            self.throughput.insert(candidate_id.to_string(), estimate);
+            self.recompute_throughput_baseline();
         }
         true
     }
@@ -537,11 +594,55 @@ impl PoolScheduler {
                 u128::from(right.weight.max(1)),
             ),
         };
-        compare_weighted_values(left_dispatches, right_dispatches, left_weight, right_weight)
+        compare_projected_weighted_values(
+            left_dispatches,
+            right_dispatches,
+            left_weight,
+            right_weight,
+        )
     }
 
     fn effective_weight(&self, candidate: &RuntimeCandidate) -> u128 {
-        u128::from(candidate.weight.max(1)) * u128::from(candidate.quota.routing_weight_factor())
+        let base =
+            u128::from(candidate.weight.max(1)) * u128::from(self.routing_quota_factor(candidate));
+        let Some(baseline @ 1..) = self.throughput_baseline else {
+            return base;
+        };
+        let Some(estimate) = self
+            .throughput
+            .get(&candidate.id)
+            .filter(|estimate| estimate.samples >= MIN_THROUGHPUT_SAMPLES)
+        else {
+            return base;
+        };
+        let speed_factor = (u128::from(estimate.milli_tokens_per_second) * SPEED_FACTOR_SCALE
+            / u128::from(baseline))
+        .clamp(MIN_SPEED_FACTOR, MAX_SPEED_FACTOR);
+        base.saturating_mul(speed_factor) / SPEED_FACTOR_SCALE
+    }
+
+    fn quota_reserve_allows(&self, candidate: &RuntimeCandidate) -> bool {
+        let Some((_, reserve)) = self
+            .protected_candidate
+            .as_ref()
+            .filter(|(candidate_id, _)| candidate_id == &candidate.id)
+        else {
+            return true;
+        };
+        matches!(candidate.quota, CandidateQuota::Available(remaining) if remaining > *reserve)
+    }
+
+    fn routing_quota_factor(&self, candidate: &RuntimeCandidate) -> u64 {
+        let reserve = self
+            .protected_candidate
+            .as_ref()
+            .filter(|(candidate_id, _)| candidate_id == &candidate.id)
+            .map_or(0, |(_, reserve)| *reserve);
+        match candidate.quota {
+            CandidateQuota::Available(remaining) => remaining.saturating_sub(reserve),
+            CandidateQuota::Unknown if reserve == 0 => 1,
+            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => 0,
+        }
     }
 
     fn compare_measured_speed(
@@ -550,12 +651,25 @@ impl PoolScheduler {
         right: &RuntimeCandidate,
     ) -> Ordering {
         match (
-            self.throughput_milli_tokens_per_second.get(&left.id),
-            self.throughput_milli_tokens_per_second.get(&right.id),
+            self.throughput.get(&left.id),
+            self.throughput.get(&right.id),
         ) {
-            (Some(left), Some(right)) => left.cmp(right),
+            (Some(left), Some(right)) => left
+                .milli_tokens_per_second
+                .cmp(&right.milli_tokens_per_second),
             _ => Ordering::Equal,
         }
+    }
+
+    fn recompute_throughput_baseline(&mut self) {
+        let mut measured = self
+            .throughput
+            .values()
+            .filter(|estimate| estimate.samples >= MIN_THROUGHPUT_SAMPLES)
+            .map(|estimate| estimate.milli_tokens_per_second)
+            .collect::<Vec<_>>();
+        measured.sort_unstable();
+        self.throughput_baseline = measured.get(measured.len() / 2).copied();
     }
 
     fn compare_account_age(&self, left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
@@ -594,6 +708,20 @@ fn compare_weighted_values(
     right_weight: u128,
 ) -> Ordering {
     (u128::from(right_value) * left_weight).cmp(&(u128::from(left_value) * right_weight))
+}
+
+fn compare_projected_weighted_values(
+    left_value: u64,
+    right_value: u64,
+    left_weight: u128,
+    right_weight: u128,
+) -> Ordering {
+    compare_weighted_values(
+        left_value.saturating_add(1),
+        right_value.saturating_add(1),
+        left_weight,
+        right_weight,
+    )
 }
 
 fn compare_lru(left: Option<u64>, right: Option<u64>) -> Ordering {
@@ -970,16 +1098,28 @@ mod tests {
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "low"
-        );
-        assert!(scheduler.reserve("low"));
-        assert!(scheduler.release("low"));
-        assert_eq!(
-            select(&mut scheduler, &HashSet::new())
-                .unwrap()
-                .candidate_id,
             "full"
         );
+    }
+
+    #[test]
+    fn low_quota_account_waits_for_its_proportional_turn() {
+        let mut scheduler = PoolScheduler::new();
+        let mut full = oauth_candidate("full");
+        full.quota = CandidateQuota::Available(100);
+        scheduler.upsert(full);
+        let mut low = oauth_candidate("low");
+        low.quota = CandidateQuota::Available(1);
+        scheduler.upsert(low);
+
+        for _ in 0..100 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert_eq!(selected.candidate_id, "full");
+            assert!(scheduler.reserve(&selected.candidate_id));
+            assert!(scheduler.release(&selected.candidate_id));
+        }
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "low");
     }
 
     #[test]
@@ -1019,7 +1159,10 @@ mod tests {
             let selected = select(&mut scheduler, &HashSet::new()).unwrap();
             if index == 0 {
                 assert_eq!(selected.candidate_id, "full");
-                assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
+                assert_eq!(
+                    selected.diagnostics.reason,
+                    SelectionReason::AdaptiveBalance
+                );
                 assert_eq!(selected.diagnostics.eligible_candidates, 3);
                 assert_eq!(
                     selected.diagnostics.quota_remaining_basis_points,
@@ -1037,7 +1180,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_refresh_rebases_historical_rotation_debt() {
+    fn quota_refresh_preserves_historical_rotation_debt() {
         let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("first", 10_000), ("second", 1_000)] {
             let mut account = oauth_candidate(id);
@@ -1059,14 +1202,18 @@ mod tests {
             ));
         }
 
-        let mut selected = BTreeSet::new();
-        for _ in 0..2 {
+        for _ in 0..9 {
             let selection = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert_eq!(selection.candidate_id, "second");
             assert!(scheduler.reserve(&selection.candidate_id));
             assert!(scheduler.release(&selection.candidate_id));
-            selected.insert(selection.candidate_id);
         }
-        assert_eq!(selected, ["first".to_string(), "second".to_string()].into());
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "first"
+        );
     }
 
     #[test]
@@ -1127,15 +1274,29 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_routing_uses_speed_only_to_break_equal_quota_ties() {
+    fn adaptive_routing_gives_faster_accounts_more_work_without_starving_slow_ones() {
         let mut scheduler = PoolScheduler::new();
         for id in ["fast", "slow"] {
             let mut account = oauth_candidate(id);
             account.quota = CandidateQuota::Available(5_000);
             scheduler.upsert(account);
         }
-        assert!(scheduler.record_success_with_metrics("fast", "gpt-5", 1, Some(100), None, 1_000));
-        assert!(scheduler.record_success_with_metrics("slow", "gpt-5", 1, Some(25), None, 1_000));
+        for now_ms in 1..=3 {
+            assert!(scheduler.record_success_with_metrics(
+                "fast",
+                "gpt-5",
+                now_ms,
+                Some(100),
+                1_000
+            ));
+            assert!(scheduler.record_success_with_metrics(
+                "slow",
+                "gpt-5",
+                now_ms,
+                Some(25),
+                1_000
+            ));
+        }
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
@@ -1151,8 +1312,8 @@ mod tests {
             assert!(scheduler.release(&selected.candidate_id));
         }
 
-        assert_eq!(counts["fast"], 50);
-        assert_eq!(counts["slow"], 50);
+        assert_eq!(counts["fast"], 67);
+        assert_eq!(counts["slow"], 33);
     }
 
     #[test]
@@ -1192,48 +1353,28 @@ mod tests {
     }
 
     #[test]
-    fn throughput_ewma_ignores_invalid_samples_and_is_bounded() {
+    fn throughput_ewma_ignores_short_or_invalid_samples_and_is_bounded() {
         let mut scheduler = PoolScheduler::new();
         scheduler.upsert(oauth_candidate("account"));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, None, 1_000));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), None, 0));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), None, 1_000));
-        assert!(scheduler.throughput_milli_tokens_per_second.is_empty());
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, 1_000));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), 0));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), 1_000));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 4, Some(15), 1_000));
+        assert!(scheduler.throughput.is_empty());
 
-        assert!(scheduler.record_success_with_metrics(
-            "account",
-            "gpt-5",
-            4,
-            Some(100),
-            Some(90),
-            1_000
-        ));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 5, Some(20), 1_000));
         assert_eq!(
-            scheduler.throughput_milli_tokens_per_second["account"],
-            10_000
+            scheduler.throughput["account"].milli_tokens_per_second,
+            20_000
         );
-        assert!(scheduler.record_success_with_metrics(
-            "account",
-            "gpt-5",
-            5,
-            Some(20),
-            None,
-            1_000
-        ));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 6, Some(20), 1_000));
         assert_eq!(
-            scheduler.throughput_milli_tokens_per_second["account"],
-            12_500
+            scheduler.throughput["account"].milli_tokens_per_second,
+            20_000
         );
-        assert!(scheduler.record_success_with_metrics(
-            "account",
-            "gpt-5",
-            6,
-            Some(u64::MAX),
-            None,
-            1,
-        ));
+        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 7, Some(u64::MAX), 1,));
         assert!(
-            scheduler.throughput_milli_tokens_per_second["account"]
+            scheduler.throughput["account"].milli_tokens_per_second
                 <= MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND
         );
     }
@@ -1415,5 +1556,35 @@ mod tests {
                 now_ms: 0,
             })
             .is_none());
+    }
+
+    #[test]
+    fn protected_account_keeps_its_quota_reserve() {
+        let mut scheduler = PoolScheduler::new();
+        let mut protected = oauth_candidate("protected");
+        protected.quota = CandidateQuota::Available(100);
+        scheduler.upsert(protected);
+        let mut available = oauth_candidate("available");
+        available.quota = CandidateQuota::Available(5_000);
+        scheduler.upsert(available);
+        assert!(scheduler.set_protected_candidate(Some("protected"), 100));
+
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "available"
+        );
+
+        assert!(scheduler.update_candidate_availability(
+            "protected",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Available(200),
+        ));
+        assert_eq!(
+            scheduler.effective_weight(scheduler.candidate("protected").unwrap()),
+            100
+        );
     }
 }

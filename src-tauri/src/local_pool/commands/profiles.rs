@@ -1,6 +1,7 @@
 use crate::{
     launcher::{launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
+        accounts::records::candidate_quota,
         commands::accounts::{
             prepare_account_credentials, sync_managed_account_profile, PreparedAccountCredentials,
         },
@@ -15,7 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
-use zenith_relay_core::DefaultServiceTier;
+use zenith_relay_core::{CandidateQuota, DefaultServiceTier};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +83,7 @@ pub async fn attach_codex_to_local_gateway(
                 &secret,
             )?,
         };
+        set_runtime_pool_interface_reserve(&state, binding.bound_oauth_account_id.as_deref()).await;
         Ok(profile_activation(binding, previous, stopped))
     }
     .await;
@@ -134,6 +136,7 @@ async fn resolve_gateway_oauth_binding(
         Some(account_id) => Some(account_id.to_string()),
         None => codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?,
     };
+    let automatic = requested_account_id.is_none();
     let mut candidates = {
         let store = state.store()?;
         let gateway = store.gateway();
@@ -167,16 +170,23 @@ async fn resolve_gateway_oauth_binding(
                 }
             }
             if secrets_available {
-                candidates.push(account.account.id.clone());
+                let remaining =
+                    match candidate_quota(&account.account.quota, super::current_time_ms()) {
+                        CandidateQuota::Available(remaining) => remaining,
+                        CandidateQuota::Unknown
+                        | CandidateQuota::Exhausted
+                        | CandidateQuota::Stale => 0,
+                    };
+                candidates.push((account.account.id.clone(), remaining));
             }
         }
         candidates
     };
-    prioritize_account_ids(&mut candidates, preferred_account_id.as_deref());
+    prioritize_account_candidates(&mut candidates, preferred_account_id.as_deref(), automatic);
     if requested_account_id.is_some()
         && candidates
             .first()
-            .is_none_or(|candidate| Some(candidate.as_str()) != requested_account_id)
+            .is_none_or(|(candidate, _)| Some(candidate.as_str()) != requested_account_id)
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -185,7 +195,7 @@ async fn resolve_gateway_oauth_binding(
     }
 
     let mut last_error = None;
-    for account_id in candidates {
+    for (account_id, _) in candidates {
         match prepare_account_credentials(state, &account_id).await {
             Ok(prepared)
                 if prepared.tokens().refresh_token().is_some()
@@ -211,16 +221,25 @@ async fn resolve_gateway_oauth_binding(
     }
 }
 
-fn prioritize_account_ids(candidates: &mut Vec<String>, preferred: Option<&str>) {
-    candidates.sort();
-    candidates.dedup();
-    if let Some(index) = preferred.and_then(|preferred| {
-        candidates
-            .iter()
-            .position(|candidate| candidate == preferred)
-    }) {
-        candidates[..=index].rotate_right(1);
+fn prioritize_account_candidates(
+    candidates: &mut Vec<(String, u64)>,
+    preferred: Option<&str>,
+    automatic: bool,
+) {
+    if automatic {
+        candidates.retain(|(_, remaining)| {
+            *remaining > super::CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS
+        });
     }
+    candidates.sort_by(|left, right| {
+        let left_preferred = Some(left.0.as_str()) == preferred;
+        let right_preferred = Some(right.0.as_str()) == preferred;
+        right_preferred
+            .cmp(&left_preferred)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    candidates.dedup_by(|left, right| left.0 == right.0);
 }
 
 #[tauri::command]
@@ -229,7 +248,11 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result =
         codex::restore(&default_codex_home(), &state.profile_backup_root()).map_err(Into::into);
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
+    if result.is_ok() {
+        set_runtime_pool_interface_reserve(&state, None).await;
+    }
+    result
 }
 
 #[tauri::command]
@@ -418,7 +441,20 @@ async fn activate_account_profile(
         Ok(profile_activation(binding, previous, stopped))
     }
     .await;
-    restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
+    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
+    if result.is_ok() {
+        set_runtime_pool_interface_reserve(state, None).await;
+    }
+    result
+}
+
+async fn set_runtime_pool_interface_reserve(state: &DesktopState, account_id: Option<&str>) {
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.set_protected_candidate(
+            account_id,
+            super::CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
+        );
+    }
 }
 
 fn profile_activation(
@@ -554,14 +590,51 @@ mod tests {
 
     #[test]
     fn oauth_binding_order_is_stable_and_preserves_the_active_account() {
-        let mut candidates = vec!["account-z".into(), "account-a".into(), "account-m".into()];
+        let mut candidates = vec![
+            ("account-z".into(), 9_000),
+            ("account-a".into(), 8_000),
+            ("account-m".into(), 1_000),
+        ];
 
-        prioritize_account_ids(&mut candidates, Some("account-m"));
+        prioritize_account_candidates(&mut candidates, Some("account-m"), true);
 
         assert_eq!(
             candidates,
-            ["account-m", "account-a", "account-z"].map(str::to_string)
+            [
+                ("account-m".to_string(), 1_000),
+                ("account-z".to_string(), 9_000),
+                ("account-a".to_string(), 8_000),
+            ]
         );
+    }
+
+    #[test]
+    fn automatic_oauth_binding_skips_the_reserved_account() {
+        let mut candidates = vec![
+            ("preferred".into(), 100),
+            ("highest".into(), 9_000),
+            ("available".into(), 5_000),
+            ("unknown".into(), 0),
+        ];
+
+        prioritize_account_candidates(&mut candidates, Some("preferred"), true);
+
+        assert_eq!(
+            candidates,
+            [
+                ("highest".to_string(), 9_000),
+                ("available".to_string(), 5_000),
+            ]
+        );
+    }
+
+    #[test]
+    fn manual_oauth_binding_keeps_the_explicit_account() {
+        let mut candidates = vec![("selected".into(), 100), ("highest".into(), 9_000)];
+
+        prioritize_account_candidates(&mut candidates, Some("selected"), false);
+
+        assert_eq!(candidates[0], ("selected".to_string(), 100));
     }
 
     #[test]

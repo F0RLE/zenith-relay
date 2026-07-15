@@ -231,8 +231,7 @@ impl ClientRequest {
 
 struct Connected {
     upstream: UpstreamWebSocket,
-    first_message: UpstreamMessage,
-    candidate_id: String,
+    initial_messages: Vec<UpstreamMessage>,
     route: ExecutorRoute,
     request: ClientRequest,
     lease: CandidateLease,
@@ -348,8 +347,8 @@ async fn connect_upstream(
             last_failure = Some(failure);
             continue;
         }
-        let first_message = match first_application_message(&mut upstream).await {
-            Ok(message) => message,
+        let initial_messages = match initial_application_messages(&mut upstream).await {
+            Ok(messages) => messages,
             Err(failure) => {
                 let response_headers = HeaderMap::new();
                 record_connect_failure(
@@ -366,7 +365,7 @@ async fn connect_upstream(
                 continue;
             }
         };
-        if let Some(terminal) = first_message_terminal(&first_message) {
+        if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(false) {
                 let status = terminal.status.unwrap_or(StatusCode::BAD_GATEWAY);
                 if super::retryable_status(status, request.has_previous_response_id()) {
@@ -388,8 +387,7 @@ async fn connect_upstream(
         }
         return Ok(Connected {
             upstream,
-            first_message,
-            candidate_id: route.candidate_id.clone(),
+            initial_messages,
             route,
             request,
             lease,
@@ -408,6 +406,32 @@ async fn connect_upstream(
         return Err(GatewayFailure::cooldown(retry_at_ms));
     }
     Err(last_failure.unwrap_or_else(GatewayFailure::unavailable))
+}
+
+async fn initial_application_messages(
+    upstream: &mut UpstreamWebSocket,
+) -> Result<Vec<UpstreamMessage>, GatewayFailure> {
+    let mut messages = Vec::new();
+    let mut buffered_bytes = 0_usize;
+    loop {
+        let message = first_application_message(upstream).await?;
+        let message_bytes = match &message {
+            UpstreamMessage::Text(text) => text.len(),
+            UpstreamMessage::Binary(bytes) => bytes.len(),
+            _ => 0,
+        };
+        buffered_bytes = buffered_bytes.saturating_add(message_bytes);
+        if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
+            return Err(GatewayFailure::bootstrap_too_large());
+        }
+        let committed = initial_message_state(&message)
+            .map(|(has_output, terminal)| has_output || terminal.outcome.is_some())
+            .unwrap_or(true);
+        messages.push(message);
+        if committed {
+            return Ok(messages);
+        }
+    }
 }
 
 async fn first_application_message(
@@ -451,13 +475,18 @@ async fn first_application_message(
 }
 
 fn first_message_terminal(message: &UpstreamMessage) -> Option<EventTerminal> {
+    initial_message_state(message).map(|(_, terminal)| terminal)
+}
+
+fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTerminal)> {
     let payload = match message {
         UpstreamMessage::Text(text) => text.as_bytes(),
         UpstreamMessage::Binary(bytes) => bytes.as_ref(),
         _ => return None,
     };
     let value = serde_json::from_slice::<Value>(payload).ok()?;
-    Some(event_terminal(&value))
+    let event_type = value.get("type").and_then(Value::as_str);
+    Some((has_output_delta(&value, event_type), event_terminal(&value)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,7 +589,6 @@ struct InFlight {
 }
 
 struct BridgeState {
-    candidate_id: String,
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
 }
@@ -585,7 +613,6 @@ async fn bridge(
         0,
     );
     let mut state = BridgeState {
-        candidate_id: connected.candidate_id,
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
             route: connected.route,
@@ -594,15 +621,10 @@ async fn bridge(
             response_id: None,
         }),
     };
-    if !handle_upstream_message(
-        &mut downstream,
-        &runtime,
-        &mut state,
-        connected.first_message,
-    )
-    .await
-    {
-        return;
+    for message in connected.initial_messages {
+        if !handle_upstream_message(&mut downstream, &runtime, &mut state, message).await {
+            return;
+        }
     }
     let mut last_activity = TokioInstant::now();
     let mut heartbeat = interval_at(
@@ -746,75 +768,46 @@ async fn start_next_request(
         ));
     }
     let request = ClientRequest::parse(runtime, key, headers, payload)?;
-    if !request.has_previous_response_id() {
-        let connected = connect_upstream(runtime, key, headers, request).await?;
-        let Connected {
-            upstream: next_upstream,
-            first_message,
-            candidate_id,
-            route,
-            request,
-            lease,
-            attempt,
-            started,
-        } = connected;
-        let event = usage_event(
-            &super::request_id(),
-            attempt,
-            &key.id,
-            &route,
-            &request.requested_model,
-            true,
-            StatusCode::OK.as_u16(),
-            None,
-            0,
-        );
-        let _ = upstream
-            .send(UpstreamMessage::Close {
-                code: UpstreamCloseCode::Normal,
-                reason: String::new(),
-            })
-            .await;
-        *upstream = next_upstream;
-        state.candidate_id = candidate_id;
-        state.lease = Some(lease);
-        state.in_flight = Some(InFlight {
-            route,
-            event,
-            started,
-            response_id: None,
-        });
-        return Ok(handle_upstream_message(downstream, runtime, state, first_message).await);
-    }
-
-    let mut route = runtime
-        .executor_route(&state.candidate_id, &request.resolved_model)
-        .filter(|route| route.wire_api == WireApi::Responses)
-        .ok_or_else(GatewayFailure::model_not_found)?;
-    let payload = request.payload_for(&route)?;
-    let (lease, routing) = runtime
-        .reserve_candidate(&state.candidate_id)
-        .ok_or_else(GatewayFailure::unavailable)?;
-    route.routing = Some(routing);
-    let started = Instant::now();
-    send_request(upstream, payload).await?;
+    let connected = connect_upstream(runtime, key, headers, request).await?;
+    let Connected {
+        upstream: next_upstream,
+        initial_messages,
+        route,
+        request,
+        lease,
+        attempt,
+        started,
+    } = connected;
+    let event = usage_event(
+        &super::request_id(),
+        attempt,
+        &key.id,
+        &route,
+        &request.requested_model,
+        true,
+        StatusCode::OK.as_u16(),
+        None,
+        0,
+    );
+    let _ = upstream
+        .send(UpstreamMessage::Close {
+            code: UpstreamCloseCode::Normal,
+            reason: String::new(),
+        })
+        .await;
+    *upstream = next_upstream;
     state.lease = Some(lease);
     state.in_flight = Some(InFlight {
-        event: usage_event(
-            &super::request_id(),
-            1,
-            &key.id,
-            &route,
-            &request.requested_model,
-            true,
-            StatusCode::OK.as_u16(),
-            None,
-            0,
-        ),
         route,
+        event,
         started,
         response_id: None,
     });
+    for message in initial_messages {
+        if !handle_upstream_message(downstream, runtime, state, message).await {
+            return Ok(false);
+        }
+    }
     Ok(true)
 }
 
@@ -922,7 +915,6 @@ fn finish_terminal(
             &in_flight.route.source_model,
             now_ms(),
             in_flight.event.output_tokens,
-            in_flight.event.reasoning_tokens,
             in_flight.event.latency_ms,
         );
         runtime.bind_response_affinity(
@@ -1001,17 +993,21 @@ fn websocket_status(value: &Value) -> Option<StatusCode> {
 
 fn websocket_retry_headers(value: &Value) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    let retry_after = value
-        .pointer("/headers/retry-after")
-        .or_else(|| value.pointer("/headers/retry_after"))
-        .or_else(|| value.pointer("/body/headers/retry-after"))
-        .or_else(|| value.pointer("/body/error/resets_in_seconds"))
-        .or_else(|| value.pointer("/error/resets_in_seconds"));
-    let retry_after = retry_after.and_then(|value| match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    });
+    let retry_after = websocket_reset_delay_seconds(value, now_ms() / 1_000)
+        .map(|seconds| seconds.to_string())
+        .or_else(|| {
+            value
+                .pointer("/headers/retry-after")
+                .or_else(|| value.pointer("/headers/retry_after"))
+                .or_else(|| value.pointer("/body/headers/retry-after"))
+                .or_else(|| value.pointer("/body/error/resets_in_seconds"))
+                .or_else(|| value.pointer("/error/resets_in_seconds"))
+                .and_then(|value| match value {
+                    Value::String(value) => Some(value.clone()),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                })
+        });
     if let Some(value) = retry_after
         .filter(|value| value.len() <= 128)
         .and_then(|value| HeaderValue::from_str(&value).ok())
@@ -1019,6 +1015,22 @@ fn websocket_retry_headers(value: &Value) -> HeaderMap {
         headers.insert(RETRY_AFTER, value);
     }
     headers
+}
+
+fn websocket_reset_delay_seconds(value: &Value, now_seconds: u64) -> Option<u64> {
+    let reset_at = value
+        .pointer("/body/error/resets_at")
+        .or_else(|| value.pointer("/response/error/resets_at"))
+        .or_else(|| value.pointer("/error/resets_at"))?;
+    let mut reset_at = reset_at
+        .as_u64()
+        .or_else(|| reset_at.as_str().and_then(|value| value.parse().ok()))?;
+    if reset_at > 10_000_000_000 {
+        reset_at /= 1_000;
+    }
+    reset_at
+        .checked_sub(now_seconds)
+        .filter(|seconds| *seconds > 0)
 }
 
 fn websocket_error_category(status: StatusCode) -> &'static str {
@@ -1158,6 +1170,16 @@ impl GatewayFailure {
         }
     }
 
+    fn bootstrap_too_large() -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            category: "stream_event_too_large",
+            message: "upstream WebSocket bootstrap is too large",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            retry_at_ms: None,
+        }
+    }
+
     fn upstream_status(status: StatusCode) -> Self {
         Self {
             status,
@@ -1191,7 +1213,8 @@ impl GatewayFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::incomplete_requires_cooldown;
+    use super::{incomplete_requires_cooldown, websocket_reset_delay_seconds};
+    use serde_json::json;
 
     #[test]
     fn only_upstream_incomplete_failures_cool_the_candidate() {
@@ -1199,5 +1222,17 @@ mod tests {
         assert!(incomplete_requires_cooldown("websocket_idle_timeout"));
         assert!(!incomplete_requires_cooldown("client_cancelled"));
         assert!(!incomplete_requires_cooldown("invalid_request"));
+    }
+
+    #[test]
+    fn absolute_usage_reset_becomes_retry_delay() {
+        let value = json!({
+            "type": "error",
+            "body": {"error": {"type": "usage_limit_reached", "resets_at": 1_700_000_120}}
+        });
+        assert_eq!(
+            websocket_reset_delay_seconds(&value, 1_700_000_000),
+            Some(120)
+        );
     }
 }

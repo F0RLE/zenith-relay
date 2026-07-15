@@ -2,7 +2,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::http::{HeaderMap, Response, StatusCode};
+use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::future::{join_all, BoxFuture};
@@ -35,10 +35,12 @@ const MODEL: &str = "gpt-p3";
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
+    path: String,
     authorization: Option<String>,
     chatgpt_account_id: Option<String>,
     originator: Option<String>,
     responses_lite: Option<String>,
+    session_id: Option<String>,
     body: Value,
 }
 
@@ -332,7 +334,12 @@ async fn account_requests_preserve_responses_lite_compatibility() {
         .json(&json!({
             "model": MODEL,
             "input": "hello",
-            "parallel_tool_calls": true
+            "parallel_tool_calls": true,
+            "tools": [
+                {"type": "function", "name": "local_tool"},
+                {"type": "web_search"},
+                {"type": "image_generation"}
+            ]
         }))
         .send()
         .await
@@ -342,6 +349,174 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
     assert_eq!(requests[0].body["parallel_tool_calls"], false);
+    assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(requests[0].body["tools"][0]["name"], "local_tool");
+}
+
+#[tokio::test]
+async fn compact_and_alpha_search_use_the_oauth_account_runtime() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(StatusCode::OK, json!({"type": "compaction", "items": []})),
+        Reply::Json(StatusCode::OK, json!({"results": [{"title": "result"}]})),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let compact = client
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-openai-internal-codex-responses-lite", "true")
+        .json(&json!({
+            "model": MODEL,
+            "input": "compact this",
+            "stream": false,
+            "max_output_tokens": 4
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compact.status(), StatusCode::OK);
+    assert_eq!(compact.json::<Value>().await.unwrap()["type"], "compaction");
+
+    let search = client
+        .post(format!("{}/v1/alpha/search", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("user-agent", "synthetic-codex")
+        .json(&json!({
+            "model": MODEL,
+            "id": "session-42",
+            "query": "search query",
+            "prompt_cache_key": "local-only",
+            "prompt_cache_retention": "24h"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::OK);
+    assert_eq!(
+        search.json::<Value>().await.unwrap()["results"][0]["title"],
+        "result"
+    );
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].path, "/v1/responses/compact");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer account-access")
+    );
+    assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
+    assert!(requests[0].body.get("stream").is_none());
+    assert!(requests[0].body.get("max_output_tokens").is_none());
+    assert_eq!(requests[1].path, "/v1/alpha/search");
+    assert_eq!(requests[1].session_id.as_deref(), Some("session-42"));
+    assert!(requests[1].body.get("prompt_cache_key").is_none());
+    assert!(requests[1].body.get("prompt_cache_retention").is_none());
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert!(events
+        .iter()
+        .all(|event| event.account_id.as_deref() == Some("relay-account")));
+}
+
+#[tokio::test]
+async fn codex_compatibility_aliases_reach_the_canonical_account_endpoints() {
+    let (upstream, state) = spawn_upstream(vec![
+        success_reply("alias-response"),
+        Reply::Json(StatusCode::OK, json!({"type": "compaction"})),
+        Reply::Json(StatusCode::OK, json!({"results": []})),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/v1/chat/completions/v1/responses",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let compact = client
+        .post(format!(
+            "{}/v1/chat/completions/v1/responses/compact",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(compact.status(), StatusCode::OK);
+    let search = client
+        .post(format!(
+            "{}/backend-api/codex/alpha/search",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "query": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(requests[1].path, "/v1/responses/compact");
+    assert_eq!(requests[2].path, "/v1/alpha/search");
+}
+
+#[tokio::test]
+async fn account_only_endpoints_never_forward_to_an_api_key_source() {
+    let (upstream, state) = spawn_upstream(Vec::new()).await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        vec![source("api-source", &upstream, "source-secret", 100)],
+        Vec::new(),
+        vec![mixed_key(None, None)],
+        Arc::new(TokenAuthority::new(1).unwrap()),
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let client = reqwest::Client::new();
+    for path in ["/v1/responses/compact", "/v1/alpha/search"] {
+        let response = client
+            .post(format!("{}{path}", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": MODEL, "input": "hello", "query": "hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    assert!(state.requests.lock().unwrap().is_empty());
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -518,13 +693,21 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
 }
 
 #[tokio::test]
-async fn account_websocket_retries_retryable_first_event_and_early_close() {
+async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
+    let reset_at = current_time_ms() / 1_000 + 6 * 24 * 60 * 60;
     let (status_upstream, status_state) =
-        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
-            "type": "error",
-            "status": 502,
-            "error": {"message": "synthetic upstream failure"}
-        })])))
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![
+            json!({"type": "response.created", "response": {"id": "discarded-response"}}),
+            json!({
+                "type": "error",
+                "status": 429,
+                "body": {"error": {
+                    "type": "usage_limit_reached",
+                    "message": "Usage limit reached. Try again after the reset.",
+                    "resets_at": reset_at
+                }}
+            }),
+        ])))
         .await;
     let (closed_upstream, closed_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Close).await;
@@ -569,6 +752,24 @@ async fn account_websocket_retries_retryable_first_event_and_early_close() {
 
     let first = receive_websocket_json(&mut socket).await;
     assert_eq!(first["type"], "response.output_text.delta");
+    let completed = receive_websocket_completion(&mut socket).await;
+    assert_eq!(completed["type"], "response.completed");
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue after fallback",
+                "previous_response_id": completed["response"]["id"]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.output_text.delta"
+    );
     assert_eq!(
         receive_websocket_completion(&mut socket).await["type"],
         "response.completed"
@@ -577,19 +778,26 @@ async fn account_websocket_retries_retryable_first_event_and_early_close() {
 
     assert_eq!(status_state.requests.lock().unwrap().len(), 1);
     assert_eq!(closed_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(success_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(success_state.requests.lock().unwrap().len(), 2);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 3);
-    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[0].http_status,
+        StatusCode::TOO_MANY_REQUESTS.as_u16()
+    );
     assert_eq!(
         events[0].error_category.as_deref(),
-        Some("upstream_websocket")
+        Some("upstream_rate_limited")
     );
+    assert!(events[0]
+        .retry_at_ms
+        .is_some_and(|retry_at| retry_at > current_time_ms() + 5 * 24 * 60 * 60_000));
     assert_eq!(
         events[1].error_category.as_deref(),
         Some("upstream_websocket_closed")
     );
     assert!(events[2].success);
+    assert!(events[3].success);
 }
 
 #[tokio::test]
@@ -743,22 +951,28 @@ async fn account_websocket_keeps_previous_response_on_its_current_account() {
         .await
         .unwrap();
     let mut socket = upgraded.into_websocket().await.unwrap();
-    for request in [
-        json!({"type": "response.create", "model": MODEL, "input": "start"}),
-        json!({
-            "type": "response.create",
-            "model": MODEL,
-            "input": "continue",
-            "previous_response_id": "resp_previous"
-        }),
-    ] {
-        socket
-            .send(ClientWsMessage::Text(request.to_string()))
-            .await
-            .unwrap();
-        let _ = receive_websocket_json(&mut socket).await;
-        let _ = receive_websocket_completion(&mut socket).await;
-    }
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "start"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let completed = receive_websocket_completion(&mut socket).await;
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue",
+                "previous_response_id": completed["response"]["id"]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut socket).await;
+    let _ = receive_websocket_completion(&mut socket).await;
     tokio::time::sleep(Duration::from_millis(10)).await;
 
     let counts = [
@@ -1605,6 +1819,8 @@ async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
     let app = Router::new()
         .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream))
+        .route("/v1/responses/compact", post(upstream))
+        .route("/v1/alpha/search", post(upstream))
         .with_state(state.clone());
     (spawn(app).await, state)
 }
@@ -1661,13 +1877,16 @@ async fn spawn(app: Router) -> TestServer {
 async fn upstream(
     State(state): State<UpstreamState>,
     headers: HeaderMap,
+    uri: Uri,
     body: Bytes,
 ) -> Response<Body> {
     state.requests.lock().unwrap().push(ObservedRequest {
+        path: uri.path().to_string(),
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+        session_id: header(&headers, "x-session-id"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     tokio::time::sleep(state.delay).await;
@@ -1706,13 +1925,16 @@ async fn upstream(
 async fn held_stream_upstream(
     State(state): State<HeldStreamState>,
     headers: HeaderMap,
+    uri: Uri,
     body: Bytes,
 ) -> Response<Body> {
     state.requests.lock().unwrap().push(ObservedRequest {
+        path: uri.path().to_string(),
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+        session_id: header(&headers, "x-session-id"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
     let release = state.release.clone();
@@ -1833,10 +2055,12 @@ async fn upstream_models(
         .and_then(|query| query.strip_prefix("client_version="))
         .unwrap_or_default();
     state.requests.lock().unwrap().push(ObservedRequest {
+        path: uri.path().to_string(),
         authorization: header(&headers, AUTHORIZATION.as_str()),
         chatgpt_account_id: header(&headers, "chatgpt-account-id"),
         originator: header(&headers, "originator"),
         responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+        session_id: header(&headers, "x-session-id"),
         body: json!({ "client_version": client_version }),
     });
     let status = if client_version == CODEX_MODELS_CLIENT_VERSION {

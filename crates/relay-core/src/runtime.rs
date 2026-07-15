@@ -7,8 +7,7 @@ use crate::ProxyConfig;
 use crate::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
     ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RoutingDiagnostics,
-    RoutingStrategy, RuntimeCandidate, Selection, SelectionReason, SelectionRequest, UsageCallback,
-    WireApi,
+    RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest, UsageCallback, WireApi,
 };
 use futures_util::StreamExt;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
@@ -709,6 +708,31 @@ impl GatewayRuntime {
             .contains(&model.to_ascii_lowercase())
     }
 
+    pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
+        let scheduler = self.lock_scheduler();
+        let mut models = BTreeSet::new();
+        for account in self.accounts.values() {
+            let Some(candidate) = scheduler.candidate(&account.id) else {
+                continue;
+            };
+            for model in &account.configured_models {
+                if key.model_rules.allows(model)
+                    && candidate.is_catalog_visible(model, &[WireApi::Responses], &key.scope)
+                {
+                    models.insert(match key.model_prefix.as_deref() {
+                        Some(prefix) => format!("{prefix}/{model}"),
+                        None => model.clone(),
+                    });
+                }
+            }
+        }
+        models.into_iter().collect()
+    }
+
+    pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
+        self.sources.keys().cloned().collect()
+    }
+
     pub fn visible_models_for_secret(
         &self,
         secret: &str,
@@ -744,6 +768,15 @@ impl GatewayRuntime {
     ) -> bool {
         self.lock_scheduler()
             .update_candidate_availability(candidate_id, enabled, health, quota)
+    }
+
+    pub fn set_protected_candidate(
+        &self,
+        candidate_id: Option<&str>,
+        reserve_basis_points: u64,
+    ) -> bool {
+        self.lock_scheduler()
+            .set_protected_candidate(candidate_id, reserve_basis_points)
     }
 
     pub(crate) fn select_and_reserve(
@@ -885,25 +918,6 @@ impl GatewayRuntime {
             .unwrap_or(&self.websocket_client)
     }
 
-    pub(crate) fn reserve_candidate(
-        &self,
-        candidate_id: &str,
-    ) -> Option<(CandidateLease, RoutingDiagnostics)> {
-        let mut scheduler = self.lock_scheduler();
-        let diagnostics =
-            scheduler.diagnostics(candidate_id, SelectionReason::ConnectionAffinity, 1)?;
-        scheduler.reserve(candidate_id).then(|| {
-            (
-                CandidateLease {
-                    scheduler: self.scheduler.clone(),
-                    candidate_id: candidate_id.to_string(),
-                    released: AtomicBool::new(false),
-                },
-                diagnostics,
-            )
-        })
-    }
-
     pub(crate) fn max_retry_candidates(&self) -> usize {
         self.max_retry_candidates
     }
@@ -941,7 +955,6 @@ impl GatewayRuntime {
         model: &str,
         now_ms: u64,
         output_tokens: Option<u64>,
-        reasoning_tokens: Option<u64>,
         latency_ms: u64,
     ) {
         self.lock_scheduler().record_success_with_metrics(
@@ -949,7 +962,6 @@ impl GatewayRuntime {
             model,
             now_ms,
             output_tokens,
-            reasoning_tokens,
             latency_ms,
         );
     }

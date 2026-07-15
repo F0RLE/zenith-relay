@@ -11,14 +11,8 @@ export type TokenSpeedSample = {
 
 function measurement(sample: TokenSpeedSample) {
   if (!sample.success || !sample.outputTokens || sample.outputTokens < 0) return null;
-  const visibleOutputTokens = Math.max(0, sample.outputTokens - Math.min(sample.reasoningTokens ?? 0, sample.outputTokens));
-  if (!visibleOutputTokens) return null;
-  const measuredDuration = sample.generationDurationMs
-    ?? (sample.ttftMs != null && sample.durationMs != null && sample.durationMs > sample.ttftMs
-      ? sample.durationMs - sample.ttftMs
-      : sample.durationMs);
-  if (!measuredDuration || measuredDuration <= 0) return null;
-  return { outputTokens: visibleOutputTokens, durationMs: measuredDuration };
+  if (!sample.durationMs || sample.durationMs <= 0) return null;
+  return { outputTokens: sample.outputTokens, durationMs: sample.durationMs };
 }
 
 export function tokenSpeed(sample: TokenSpeedSample) {
