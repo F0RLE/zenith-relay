@@ -637,6 +637,7 @@ async fn execute_account_endpoint(
                 status,
                 has_previous_response_id,
                 response_affinity_hit,
+                previous_response_not_found(&bytes),
             );
             if affinity_miss || retryable_status(status, has_previous_response_id) {
                 if affinity_miss {
@@ -996,10 +997,52 @@ async fn execute_request(
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
+            if status == StatusCode::BAD_REQUEST
+                && has_previous_response_id
+                && !response_affinity_hit
+            {
+                let mut event = usage_event(
+                    &request_id,
+                    attempt,
+                    &key.id,
+                    &route,
+                    &requested_model,
+                    false,
+                    status.as_u16(),
+                    Some("upstream_status".to_string()),
+                    started.elapsed().as_millis() as u64,
+                );
+                let bytes = match crate::runtime::collect_limited(
+                    upstream,
+                    crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+                )
+                .await
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return upstream_body_error_response(&runtime, event, started, error)
+                    }
+                };
+                if recoverable_response_affinity_miss(
+                    status,
+                    has_previous_response_id,
+                    response_affinity_hit,
+                    previous_response_not_found(&bytes),
+                ) {
+                    event.error_category = Some("response_affinity_miss".to_string());
+                    emit_usage(&runtime, event);
+                    last_failure = Some(AttemptFailure::status(status));
+                    continue;
+                }
+                populate_tokens(&mut event, &bytes);
+                emit_usage(&runtime, event);
+                return proxy_response(status, &response_headers, Body::from(bytes));
+            }
             let affinity_miss = recoverable_response_affinity_miss(
                 status,
                 has_previous_response_id,
                 response_affinity_hit,
+                false,
             );
             if affinity_miss || retryable_status(status, has_previous_response_id) {
                 let _ = crate::runtime::collect_limited(
@@ -1325,28 +1368,35 @@ async fn finish_non_stream(
             emit_usage(runtime, event);
             proxy_response(status, response_headers, Body::from(bytes))
         }
-        Err(error) => {
-            event.success = false;
-            event.http_status = StatusCode::BAD_GATEWAY.as_u16();
-            let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-            event.error_category = Some(if too_large {
-                "upstream_body_too_large".to_string()
-            } else {
-                "upstream_body".to_string()
-            });
-            event.latency_ms = started.elapsed().as_millis() as u64;
-            emit_usage(runtime, event);
-            api_error(
-                StatusCode::BAD_GATEWAY,
-                if too_large {
-                    "upstream response is too large"
-                } else {
-                    "upstream response failed"
-                },
-                "upstream_error",
-            )
-        }
+        Err(error) => upstream_body_error_response(runtime, event, started, error),
     }
+}
+
+fn upstream_body_error_response(
+    runtime: &GatewayRuntime,
+    mut event: UsageEvent,
+    started: Instant,
+    error: Error,
+) -> Response<Body> {
+    event.success = false;
+    event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+    let too_large = matches!(error, Error::UpstreamBodyTooLarge);
+    event.error_category = Some(if too_large {
+        "upstream_body_too_large".to_string()
+    } else {
+        "upstream_body".to_string()
+    });
+    event.latency_ms = started.elapsed().as_millis() as u64;
+    emit_usage(runtime, event);
+    api_error(
+        StatusCode::BAD_GATEWAY,
+        if too_large {
+            "upstream response is too large"
+        } else {
+            "upstream response failed"
+        },
+        "upstream_error",
+    )
 }
 
 async fn bootstrap_stream(
@@ -2147,8 +2197,42 @@ fn recoverable_response_affinity_miss(
     status: StatusCode,
     has_previous_response_id: bool,
     response_affinity_hit: bool,
+    previous_response_not_found: bool,
 ) -> bool {
-    status == StatusCode::NOT_FOUND && has_previous_response_id && !response_affinity_hit
+    has_previous_response_id
+        && !response_affinity_hit
+        && (status == StatusCode::NOT_FOUND
+            || (status == StatusCode::BAD_REQUEST && previous_response_not_found))
+}
+
+fn previous_response_not_found(payload: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(payload)
+        .ok()
+        .is_some_and(|value| previous_response_not_found_value(&value))
+}
+
+fn previous_response_not_found_value(value: &Value) -> bool {
+    [value.pointer("/error/code"), value.pointer("/error/type")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|value| {
+            value
+                .trim()
+                .eq_ignore_ascii_case("previous_response_not_found")
+        })
+        || [value.pointer("/error/message"), value.get("message")]
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(previous_response_not_found_message)
+}
+
+fn previous_response_not_found_message(message: &str) -> bool {
+    let message = message.trim().trim_end_matches('.').to_ascii_lowercase();
+    message == "previous response not found"
+        || (message.starts_with("previous response with id ") && message.ends_with(" not found"))
+        || message.starts_with("no response found for previous_response_id ")
 }
 
 fn apply_status_cooldown(
@@ -2862,6 +2946,38 @@ impl<S> Drop for UsageStream<S> {
 mod tests {
     use super::*;
     use std::{convert::Infallible, sync::Mutex, time::Duration};
+
+    #[test]
+    fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() {
+        for payload in [
+            br#"{"error":{"code":"previous_response_not_found"}}"#.as_slice(),
+            br#"{"message":"Previous response with id 'resp_123' not found."}"#.as_slice(),
+        ] {
+            assert!(recoverable_response_affinity_miss(
+                StatusCode::BAD_REQUEST,
+                true,
+                false,
+                previous_response_not_found(payload),
+            ));
+        }
+        for payload in [
+            br#"{"error":{"code":"invalid_request","message":"Invalid request body."}}"#.as_slice(),
+            b"Previous response with id 'resp_123' not found.".as_slice(),
+        ] {
+            assert!(!recoverable_response_affinity_miss(
+                StatusCode::BAD_REQUEST,
+                true,
+                false,
+                previous_response_not_found(payload),
+            ));
+        }
+        assert!(!recoverable_response_affinity_miss(
+            StatusCode::BAD_REQUEST,
+            true,
+            true,
+            true,
+        ));
+    }
 
     #[test]
     fn responses_lite_keeps_only_client_executed_tools() {

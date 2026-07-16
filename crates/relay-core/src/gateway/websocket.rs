@@ -373,6 +373,7 @@ async fn connect_upstream(
                     status,
                     request.has_previous_response_id(),
                     response_affinity_hit,
+                    terminal.previous_response_not_found,
                 );
                 if affinity_miss
                     || super::retryable_status(status, request.has_previous_response_id())
@@ -380,7 +381,7 @@ async fn connect_upstream(
                     let failure = GatewayFailure::upstream_status(status);
                     if affinity_miss {
                         record_connect_affinity_miss(
-                            runtime, key, &route, &request, attempt, started,
+                            runtime, key, &route, &request, attempt, started, status,
                         );
                     } else {
                         record_connect_failure(
@@ -546,6 +547,7 @@ fn record_connect_affinity_miss(
     request: &ClientRequest,
     attempt: u16,
     started: Instant,
+    status: StatusCode,
 ) {
     emit_usage(
         runtime,
@@ -556,7 +558,7 @@ fn record_connect_affinity_miss(
             route,
             &request.requested_model,
             false,
-            StatusCode::NOT_FOUND.as_u16(),
+            status.as_u16(),
             Some("response_affinity_miss".to_string()),
             started.elapsed().as_millis() as u64,
         ),
@@ -900,6 +902,7 @@ struct EventTerminal {
     outcome: Option<bool>,
     status: Option<StatusCode>,
     headers: HeaderMap,
+    previous_response_not_found: bool,
 }
 
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
@@ -931,6 +934,7 @@ fn event_terminal(value: &Value) -> EventTerminal {
         outcome,
         status: websocket_status(value),
         headers: websocket_retry_headers(value),
+        previous_response_not_found: super::previous_response_not_found_value(value),
     }
 }
 

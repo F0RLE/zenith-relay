@@ -585,8 +585,12 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 #[tokio::test]
 async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts() {
     let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
-        StatusCode::NOT_FOUND,
-        json!({"error": {"message": "previous response not found"}}),
+        StatusCode::BAD_REQUEST,
+        json!({"error": {
+            "message": "Previous response with id 'response-from-before-restart' not found.",
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found"
+        }}),
     )])
     .await;
     let (owner_upstream, owner_state) = spawn_upstream(vec![
@@ -650,6 +654,54 @@ async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts
     assert_eq!(events[0].retry_at_ms, None);
     assert!(events[1].success);
     assert_eq!(events[1].candidate_id, events[2].candidate_id);
+}
+
+#[tokio::test]
+async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
+    let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::BAD_REQUEST,
+        json!({"error": {
+            "message": "Invalid request body.",
+            "type": "invalid_request_error",
+            "code": "invalid_request"
+        }}),
+    )])
+    .await;
+    let (owner_upstream, owner_state) = spawn_upstream(vec![success_reply("must-not-run")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "wrong-account", "wrong-access").await;
+    register_ready(&authority, "owner-account", "owner-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("wrong-account", "provider-wrong", &wrong_upstream, 100),
+            account("owner-account", "provider-owner", &owner_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "invalid continuation",
+            "previous_response_id": "response-from-before-restart"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
+    assert!(owner_state.requests.lock().unwrap().is_empty());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].error_category.as_deref(), Some("upstream_status"));
 }
 
 #[tokio::test]
@@ -1134,8 +1186,12 @@ async fn unknown_websocket_response_owner_is_recovered_before_output() {
     let (wrong_upstream, wrong_state) =
         spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
             "type": "error",
-            "status": 404,
-            "error": {"message": "previous response not found"}
+            "status": 400,
+            "error": {
+                "message": "Previous response with id 'response-from-before-restart' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found"
+            }
         })])))
         .await;
     let (owner_upstream, owner_state) = spawn_websocket_upstream().await;
@@ -1194,6 +1250,7 @@ async fn unknown_websocket_response_owner_is_recovered_before_output() {
         Some("response_affinity_miss")
     );
     assert_eq!(events[0].retry_at_ms, None);
+    assert_eq!(events[0].http_status, StatusCode::BAD_REQUEST.as_u16());
     assert!(events[1].success);
 }
 
