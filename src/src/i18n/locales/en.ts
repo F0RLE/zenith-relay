@@ -691,7 +691,7 @@ const relayEn = {
     noAvailableMembersHint: "Add another connection or remove an existing pool member first.",
     removeMember: "Remove from pool",
     priorityTitle: "Routing",
-    priorityHint: "The latest successful route is shown first; remaining members are sorted by availability and quota.",
+    priorityHint: "The latest request marker does not pin an account. New requests are distributed by available quota, load, and speed.",
     currentRoute: "Latest request",
     priorityEmpty: "No requests yet",
     layout: {
