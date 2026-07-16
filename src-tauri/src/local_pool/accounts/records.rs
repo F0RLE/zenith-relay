@@ -132,6 +132,7 @@ pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {
         _ => {}
     }
     match account.last_error_code.as_deref() {
+        Some("upstream_unauthorized") => return CandidateHealth::ReauthRequired,
         Some("checkpoint") => return CandidateHealth::Checkpoint,
         Some("captcha") => return CandidateHealth::Captcha,
         _ => {}
@@ -265,6 +266,13 @@ mod tests {
         record.account.auth_state = AccountAuthState::Active;
         record.account.subscription.status = SubscriptionStatus::Forbidden;
         assert_eq!(candidate_health(&record.account), CandidateHealth::Blocked);
+        record.account.subscription.status = SubscriptionStatus::Active;
+        record.account.auth_state = AccountAuthState::DegradedAccessOnly;
+        record.account.last_error_code = Some("upstream_unauthorized".into());
+        assert_eq!(
+            candidate_health(&record.account),
+            CandidateHealth::ReauthRequired
+        );
     }
 
     #[test]

@@ -952,6 +952,7 @@ test("invalid OAuth grants keep the account and explain the required action", as
     locale: "en",
     populated: true,
     accountAuthReason: "invalid_grant",
+    quotaAvailable: true,
   });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -960,6 +961,11 @@ test("invalid OAuth grants keep the account and explain the required action", as
   await expect(page.locator(".account-card")).toContainText("Personal Plus");
   await expect(page.locator(".account-error-line")).toContainText("Signed out or account changed");
   await expect(page.locator(".account-error-line code")).toHaveText("auth_invalid_grant");
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const member = page.locator('[data-member-label="Personal Plus"]');
+  await expect(member).toContainText("Unavailable");
+  await expect(member).not.toContainText("In rotation");
 });
 
 test("source, automation, and key rows keep rare actions in consistent menus", async ({ page }) => {

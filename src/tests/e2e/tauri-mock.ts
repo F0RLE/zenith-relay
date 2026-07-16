@@ -22,6 +22,7 @@ export type MockOptions = {
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
+  quotaAvailable?: boolean;
   freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
   poolKeyPresent?: boolean;
@@ -54,7 +55,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     localStorage.setItem("relay.compact", input.compact ? "1" : "0");
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
-    const exhaustedQuotaWindow = input.exhaustedQuotaWindow ?? "primary";
+    const exhaustedQuotaWindow = input.quotaAvailable ? null : input.exhaustedQuotaWindow ?? "primary";
     const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
       primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: Date.now() + 90 * 60_000, windowMinutes: 300, observedAtMs: Date.now() },
       secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: Date.now() + 3 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() },
@@ -208,7 +209,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       .map((item, index) => ({
         candidateId: item.id,
         kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
-        available: item.enabled && !item.draining && !("routingExclusion" in item && item.routingExclusion) && !("quota" in item && [item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0)),
+        available: item.enabled && !item.draining && !("routingExclusion" in item && item.routingExclusion) && !("authState" in item && (typeof item.authState === "string" ? item.authState : item.authState.state) !== "active") && !("quota" in item && [item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0)),
         inFlight: input.usageActive === false ? 0 : item.id === usageAccount.id ? 1 : 0,
         lastUsedAtMs: item.id === usageAccount.id ? Date.now() - 1_000 : null,
         nextRetryAtMs: null,
@@ -575,6 +576,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       for (const item of runtime.accounts) {
         const free = item.subscription.planType?.toLowerCase().includes("free") ?? false;
         item.routingExclusion = free && !runtime.gateway.useFreeAccounts ? "free_plan_policy" : null;
+        const candidate = runtime.gateway.routingOrder.find((entry) => entry.candidateId === item.id);
+        if (candidate) candidate.available = item.enabled && !item.draining && !item.routingExclusion && (typeof item.authState === "string" ? item.authState : item.authState.state) === "active" && ![item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0);
       }
       refreshGatewayModels(runtime);
     }

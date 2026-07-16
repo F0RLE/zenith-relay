@@ -515,6 +515,7 @@ function poolMemberStatus(member: Member, runtimeState?: CandidateRuntimeSnapsho
   if (!member.enabled) return "disabled";
   if (runtimeState?.available) return "rotation";
   if (member.kind === "account" && (memberRoutingExcluded(member) || [member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0))) return "quotaWait";
+  if (runtimeState) return "unavailable";
   return poolMemberReady(member) ? "rotation" : "unavailable";
 }
 function poolMemberReady(member: Member) {
