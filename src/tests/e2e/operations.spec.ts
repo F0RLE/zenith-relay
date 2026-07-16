@@ -838,7 +838,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  const speed = page.getByRole("switch", { name: "Response speed" });
+  const speed = page.getByRole("switch", { name: "Request mode" });
   await expect(speed).not.toBeChecked();
   await speed.check();
   await expect(speed).toBeChecked();
@@ -849,7 +849,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
 
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
-  await expect(dialog).not.toContainText("Response speed");
+  await expect(dialog).not.toContainText("Request mode");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
   await expect(dialog).toContainText("Chooses the greatest quota remaining among free accounts and rotates equal candidates.");
@@ -869,13 +869,13 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("switch", { name: "Response speed" });
+  const speed = page.getByRole("switch", { name: "Request mode" });
   await speed.check();
   await expect(speed).toBeChecked();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
-  await expect(dialog).not.toContainText("Response speed");
+  await expect(dialog).not.toContainText("Request mode");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -884,18 +884,18 @@ test("remote pool saves distribution settings on the connected runtime", async (
     action: { type: "set_routing_policy" },
     payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", imageBaseModel: null },
   });
-  expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
+  expect(calls.some((call) => call.command === "sync_codex_default_service_tier")).toBe(false);
 });
 
 test("legacy remote pool keeps the new distribution mode read-only", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, legacyRemoteRouting: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.getByRole("switch", { name: "Response speed" })).toBeDisabled();
+  await expect(page.getByRole("switch", { name: "Request mode" })).toBeDisabled();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toBeDisabled();
-  await expect(dialog).not.toContainText("Response speed");
+  await expect(dialog).not.toContainText("Request mode");
   await expect(dialog).toContainText("The connected server does not support this action.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -1106,7 +1106,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("26.7 tok/s");
+  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("10 tok/s");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("API equiv.");
   await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).not.toContainText("Latest output speed");
@@ -1114,10 +1114,10 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "26.7 tok/s", "128 / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "10 tok/s", "128 / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Reason5", "Out8"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Generation speed26.7 tok/s");
-  await expect(page.locator(".usage-metrics")).toContainText("Effective end-to-end speed18.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed10 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Effective end-to-end speed7 tok/s");
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -1130,8 +1130,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("First output128 ms");
   await expect(details).toContainText("Generation time300 ms");
   await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Generation speed26.7 tok/s");
-  await expect(details).toContainText("Effective end-to-end speed18.7 tok/s");
+  await expect(details).toContainText("Generation speed10 tok/s");
+  await expect(details).toContainText("Effective end-to-end speed7 tok/s");
   await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");

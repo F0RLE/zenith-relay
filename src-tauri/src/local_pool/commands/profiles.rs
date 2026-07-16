@@ -16,7 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::State;
-use zenith_relay_core::{CandidateQuota, DefaultServiceTier};
+use zenith_relay_core::CandidateQuota;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -253,16 +253,6 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
         set_runtime_pool_interface_reserve(&state, None).await;
     }
     result
-}
-
-#[tauri::command]
-pub async fn sync_codex_default_service_tier(
-    default_service_tier: DefaultServiceTier,
-    state: State<'_, DesktopState>,
-) -> Result<(), CommandError> {
-    let _mutation = state.setup_guard().await;
-    codex::sync_default_service_tier(&default_codex_home(), default_service_tier)
-        .map_err(Into::into)
 }
 
 #[tauri::command]

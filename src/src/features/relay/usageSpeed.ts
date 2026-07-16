@@ -9,16 +9,26 @@ export type TokenSpeedSample = {
   generationDurationMs?: number | null;
 };
 
-function measurement(sample: TokenSpeedSample) {
+function visibleOutputTokens(sample: TokenSpeedSample) {
   if (!sample.success || !sample.outputTokens || sample.outputTokens < 0) return null;
+  const tokens = sample.outputTokens - Math.max(0, sample.reasoningTokens ?? 0);
+  return tokens > 0 ? tokens : null;
+}
+
+function measurement(sample: TokenSpeedSample) {
+  const outputTokens = visibleOutputTokens(sample);
+  if (outputTokens == null) return null;
   if (!sample.durationMs || sample.durationMs <= 0) return null;
-  return { outputTokens: sample.outputTokens, durationMs: sample.durationMs };
+  return { outputTokens, durationMs: sample.durationMs };
 }
 
 function generationMeasurement(sample: TokenSpeedSample) {
-  if (!sample.success || !sample.outputTokens || sample.outputTokens < 0) return null;
-  if (!sample.generationDurationMs || sample.generationDurationMs <= 0) return null;
-  return { outputTokens: sample.outputTokens, durationMs: sample.generationDurationMs };
+  const outputTokens = visibleOutputTokens(sample);
+  if (outputTokens == null) return null;
+  const durationMs = sample.generationDurationMs
+    ?? (sample.durationMs != null && sample.ttftMs != null ? sample.durationMs - sample.ttftMs : null);
+  if (!durationMs || durationMs <= 0) return null;
+  return { outputTokens, durationMs };
 }
 
 export function generationTokenSpeed(sample: TokenSpeedSample) {

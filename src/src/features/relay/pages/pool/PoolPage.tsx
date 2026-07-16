@@ -125,9 +125,7 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
     const imageBaseModel = runtime?.gateway.imageBaseModel;
     void perform("pool-service-tier", async () => {
       if (mode === "local") return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel ?? null);
-      const snapshot = await relayCommands.remoteAction({ type: "set_routing_policy" }, { maxRetryCandidates, routingStrategy, defaultServiceTier, ...(imageBaseModel !== undefined ? { imageBaseModel } : {}) });
-      await relayCommands.syncCodexDefaultServiceTier(defaultServiceTier);
-      return snapshot;
+      return relayCommands.remoteAction({ type: "set_routing_policy" }, { maxRetryCandidates, routingStrategy, defaultServiceTier, ...(imageBaseModel !== undefined ? { imageBaseModel } : {}) });
     });
   };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;

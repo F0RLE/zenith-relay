@@ -5,11 +5,9 @@ use super::{
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
-    profiles::codex,
     state::DesktopState,
     store::secret_store,
 };
-use crate::platform::default_codex_home;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -412,24 +410,10 @@ pub async fn update_local_routing(
         gateway.image_base_model = image_base_model;
     }
     if gateway == old_gateway {
-        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);
     }
-    state.store()?.replace_gateway(gateway.clone())?;
-    sync_gateway_or_rollback(&state, old_gateway.clone()).await?;
-    if let Err(error) =
-        codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)
-    {
-        state.store()?.replace_gateway(old_gateway)?;
-        if let Err(restore) = sync_gateway_or_rollback(&state, gateway).await {
-            return Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!("{error}; failed to restore previous gateway speed: {restore}"),
-            )
-            .into());
-        }
-        return Err(error.into());
-    }
+    state.store()?.replace_gateway(gateway)?;
+    sync_gateway_or_rollback(&state, old_gateway).await?;
     state.snapshot().await.map_err(Into::into)
 }
 

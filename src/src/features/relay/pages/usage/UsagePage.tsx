@@ -241,7 +241,7 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
     if (row.generationDurationMs != null && row.generationDurationMs > 0) {
       totals.generationMs += row.generationDurationMs;
       totals.generationSamples += 1;
-      if (row.success && (row.outputTokens ?? 0) > 0) totals.generationOutputTokens += row.outputTokens ?? 0;
+      if (row.success) totals.generationOutputTokens += Math.max(0, (row.outputTokens ?? 0) - (row.reasoningTokens ?? 0));
     }
     totals.inputTokens += row.inputTokens ?? 0;
     if (row.cachedInputTokens != null) {
@@ -251,8 +251,9 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
     totals.reasoningTokens += row.reasoningTokens ?? 0;
     totals.outputTokens += row.outputTokens ?? 0;
     totals.totalTokens += row.tokens ?? 0;
-    if (row.success && (row.outputTokens ?? 0) > 0 && row.duration > 0) {
-      totals.speedOutputTokens += row.outputTokens ?? 0;
+    const visibleOutputTokens = Math.max(0, (row.outputTokens ?? 0) - (row.reasoningTokens ?? 0));
+    if (row.success && visibleOutputTokens > 0 && row.duration > 0) {
+      totals.speedOutputTokens += visibleOutputTokens;
       totals.speedDurationMs += row.duration;
     }
     totals.apiEquivalent.unpricedTokens += row.tokens ?? 0;

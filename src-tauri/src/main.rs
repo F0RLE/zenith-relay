@@ -1338,7 +1338,6 @@ fn main() {
             local_pool::commands::usage::clear_local_usage,
             local_pool::commands::profiles::attach_codex_to_local_gateway,
             local_pool::commands::profiles::restore_codex_profile,
-            local_pool::commands::profiles::sync_codex_default_service_tier,
             local_pool::commands::profiles::stop_managed_codex_profile,
             local_pool::commands::profiles::launch_managed_codex_profile,
             local_pool::commands::profiles::attach_codex_to_account,

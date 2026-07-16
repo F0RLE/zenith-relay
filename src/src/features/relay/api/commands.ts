@@ -86,7 +86,6 @@ export const relayCommands = {
   setPoolMembership: (accountIds: string[], sourceIds: string[], inPool: boolean) => invoke("set_local_pool_membership", { input: { accountIds, sourceIds, inPool } }),
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
   updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, imageBaseModel: string | null) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel } }),
-  syncCodexDefaultServiceTier: (defaultServiceTier: DefaultServiceTier) => invoke("sync_codex_default_service_tier", { defaultServiceTier }),
   updateQuotaPolicy: (refreshIntervalSeconds: number, requestTimeoutSeconds: number, useFreeAccounts: boolean) => invoke("update_local_quota_policy", { input: { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts } }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),

@@ -167,15 +167,6 @@ pub enum DefaultServiceTier {
     Fast,
 }
 
-impl DefaultServiceTier {
-    pub(crate) fn upstream_value(self) -> Option<&'static str> {
-        match self {
-            Self::Standard => None,
-            Self::Fast => Some("priority"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResponseAffinityBinding {
     pub key: String,

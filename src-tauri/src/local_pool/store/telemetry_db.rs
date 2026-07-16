@@ -529,14 +529,14 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
     COALESCE(SUM(generation_ms), 0), COUNT(generation_ms), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
-        THEN COALESCE(output_tokens, 0) ELSE 0 END), 0), \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0), 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
-        THEN output_tokens ELSE 0 END), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
+        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
         THEN latency_ms ELSE 0 END), 0)";
 
 fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
@@ -885,7 +885,8 @@ mod tests {
         assert_eq!(page.total_pages, 2);
         assert_eq!(page.totals.requests, 2);
         assert_eq!(page.totals.total_tokens, 58);
-        assert_eq!(page.totals.speed_output_tokens, 28);
+        assert_eq!(page.totals.generation_output_tokens, 23);
+        assert_eq!(page.totals.speed_output_tokens, 23);
         assert_eq!(page.totals.speed_duration_ms, 928);
         assert_eq!(page.totals.api_equivalent.priced_tokens, 58);
         assert_eq!(page.models.len(), 1);

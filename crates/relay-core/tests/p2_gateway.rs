@@ -107,7 +107,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn fast_default_normalizes_service_tier_without_overwriting_explicit_values() {
+async fn fast_for_all_forces_priority_over_client_service_tier() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
@@ -152,9 +152,9 @@ async fn fast_default_normalizes_service_tier_without_overwriting_explicit_value
         [
             Some("priority"),
             Some("priority"),
-            Some("default"),
-            Some("flex"),
-            Some("default"),
+            Some("priority"),
+            Some("priority"),
+            Some("priority"),
             Some("priority"),
         ]
     );

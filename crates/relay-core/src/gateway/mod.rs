@@ -240,19 +240,17 @@ pub(super) fn normalize_service_tier(
     object: &mut Map<String, Value>,
     default_service_tier: DefaultServiceTier,
 ) {
-    if let Some(Value::String(value)) = object.get_mut("service_tier") {
+    if default_service_tier == DefaultServiceTier::Fast {
+        object.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
+        );
+    } else if let Some(Value::String(value)) = object.get_mut("service_tier") {
         match value.to_ascii_lowercase().as_str() {
             "fast" => *value = "priority".to_string(),
             "standard" => *value = "default".to_string(),
             _ => {}
         }
-        return;
-    }
-    if object.contains_key("service_tier") {
-        return;
-    }
-    if let Some(value) = default_service_tier.upstream_value() {
-        object.insert("service_tier".to_string(), Value::String(value.to_string()));
     }
 }
 
@@ -3086,6 +3084,27 @@ impl<S> Drop for UsageStream<S> {
 mod tests {
     use super::*;
     use std::{convert::Infallible, sync::Mutex, time::Duration};
+
+    #[test]
+    fn standard_mode_follows_each_chat_service_tier() {
+        let mut standard = json!({"service_tier": "standard"});
+        normalize_service_tier(
+            standard.as_object_mut().unwrap(),
+            DefaultServiceTier::Standard,
+        );
+        assert_eq!(standard["service_tier"], "default");
+
+        let mut fast = json!({"service_tier": "fast"});
+        normalize_service_tier(fast.as_object_mut().unwrap(), DefaultServiceTier::Standard);
+        assert_eq!(fast["service_tier"], "priority");
+
+        let mut inherited = json!({});
+        normalize_service_tier(
+            inherited.as_object_mut().unwrap(),
+            DefaultServiceTier::Standard,
+        );
+        assert!(inherited.get("service_tier").is_none());
+    }
 
     #[test]
     fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() {

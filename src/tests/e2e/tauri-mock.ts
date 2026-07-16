@@ -250,12 +250,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
       return events.reduce((totals, item) => {
+        const visibleOutputTokens = Math.max(0, (item.outputTokens ?? 0) - (item.reasoningTokens ?? 0));
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
-        if (item.generationMs != null) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += item.outputTokens ?? 0; }
+        if (item.generationMs != null) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += visibleOutputTokens; }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
-        if (item.success && item.outputTokens && item.latencyMs) { totals.speedOutputTokens += item.outputTokens; totals.speedDurationMs += item.latencyMs; }
+        if (item.success && visibleOutputTokens && item.latencyMs) { totals.speedOutputTokens += visibleOutputTokens; totals.speedDurationMs += item.latencyMs; }
         totals.apiEquivalent.microUsd += 148; totals.apiEquivalent.pricedTokens += item.totalTokens ?? 0;
         return totals;
       }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
@@ -394,7 +395,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             localRuntime.gateway.imageBaseModel = request.imageBaseModel;
             return structuredClone(localRuntime);
           }
-          case "sync_codex_default_service_tier": return null;
           case "delete_local_account": {
             localRuntime.accounts = localRuntime.accounts.filter((item) => item.id !== args.accountId);
             refreshGatewayModels(localRuntime);

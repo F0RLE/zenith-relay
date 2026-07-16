@@ -1036,7 +1036,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], false);
     assert_eq!(requests[0]["service_tier"], "priority");
-    assert_eq!(requests[1]["service_tier"], "flex");
+    assert_eq!(requests[1]["service_tier"], "priority");
     assert!(requests[0]["input"].is_array());
     drop(requests);
 
