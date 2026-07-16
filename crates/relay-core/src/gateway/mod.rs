@@ -818,6 +818,7 @@ async fn execute_client_request(
         response_affinity_key,
         wire_api,
         responses_lite,
+        true,
     )
     .await
 }
@@ -834,9 +835,11 @@ async fn execute_request(
     response_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
+    allow_previous_response_reset: bool,
 ) -> Response<Body> {
     let mut tried = HashSet::new();
     let mut attempt = 0_u16;
+    let mut confirmed_response_missing = false;
     let mut last_failure = None;
     let has_previous_response_id = request
         .get("previous_response_id")
@@ -998,7 +1001,9 @@ async fn execute_request(
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
-            if status == StatusCode::BAD_REQUEST && has_previous_response_id {
+            if matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+                && has_previous_response_id
+            {
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1021,16 +1026,21 @@ async fn execute_request(
                         return upstream_body_error_response(&runtime, event, started, error)
                     }
                 };
+                let response_missing = previous_response_not_found(&bytes);
                 if recoverable_response_affinity_miss(
                     status,
                     has_previous_response_id,
                     response_affinity_hit,
-                    previous_response_not_found(&bytes),
+                    response_missing,
                 ) {
+                    confirmed_response_missing |= response_missing;
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                     emit_usage(&runtime, event);
                     last_failure = Some(AttemptFailure::status(status));
+                    if response_missing && response_affinity_hit {
+                        break;
+                    }
                     continue;
                 }
                 populate_tokens(&mut event, &bytes);
@@ -1333,6 +1343,31 @@ async fn execute_request(
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
             }
+        }
+    }
+
+    if allow_previous_response_reset
+        && has_previous_response_id
+        && confirmed_response_missing
+        && !contains_function_call_output(&request)
+    {
+        let mut reset_request = request;
+        if let Some(object) = reset_request.as_object_mut() {
+            object.remove("previous_response_id");
+            return Box::pin(execute_request(
+                runtime,
+                key,
+                reset_request,
+                requested_model,
+                resolved_model,
+                stream,
+                crate::gateway::request_id(),
+                None,
+                wire_api,
+                responses_lite,
+                false,
+            ))
+            .await;
         }
     }
 
@@ -2232,6 +2267,20 @@ fn previous_response_not_found_message(message: &str) -> bool {
     message == "previous response not found"
         || (message.starts_with("previous response with id ") && message.ends_with(" not found"))
         || message.starts_with("no response found for previous_response_id ")
+}
+
+pub(super) fn contains_function_call_output(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => items.iter().any(contains_function_call_output),
+        Value::Object(object) => {
+            object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| kind == "function_call_output")
+                || object.values().any(contains_function_call_output)
+        }
+        _ => false,
+    }
 }
 
 fn apply_status_cooldown(

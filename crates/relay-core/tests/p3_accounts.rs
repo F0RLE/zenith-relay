@@ -706,6 +706,106 @@ async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
 }
 
 #[tokio::test]
+async fn orphaned_http_response_resets_once_without_tool_output() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {
+                "message": "Previous response with id 'orphaned-response' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found"
+            }}),
+        ),
+        success_reply("fresh-response"),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response: Value = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "continue without an available response owner",
+            "previous_response_id": "orphaned-response"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(response["id"], "fresh-response");
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].body["previous_response_id"],
+        "orphaned-response"
+    );
+    assert!(requests[1].body.get("previous_response_id").is_none());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn orphaned_http_response_with_tool_output_is_not_reset() {
+    let (upstream, state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::BAD_REQUEST,
+        json!({"error": {
+            "message": "Previous response with id 'orphaned-response' not found.",
+            "type": "invalid_request_error",
+            "code": "previous_response_not_found"
+        }}),
+    )])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "done"
+            }],
+            "previous_response_id": "orphaned-response"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn stale_http_response_affinity_is_invalidated_before_fallback() {
     let (fallback_upstream, fallback_state) =
         spawn_upstream(vec![success_reply("fallback-response")]).await;
@@ -1331,6 +1431,112 @@ async fn unknown_websocket_response_owner_is_recovered_before_output() {
     assert_eq!(events[0].retry_at_ms, None);
     assert_eq!(events[0].http_status, StatusCode::BAD_REQUEST.as_u16());
     assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn orphaned_websocket_response_resets_once_without_tool_output() {
+    let (missing_upstream, missing_state) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
+            vec![json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "message": "Previous response with id 'orphaned-response' not found.",
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found"
+                }
+            })],
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "fresh"}),
+                json!({
+                    "type": "response.completed",
+                    "response": {"id": "fresh-ws-response"}
+                }),
+            ],
+        ])))),
+    )
+    .await;
+    let (transport_upstream, transport_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
+            "type": "error",
+            "status": 502,
+            "error": {"code": "upstream_transport", "message": "temporary transport failure"}
+        })])))
+        .await;
+    let (limited_upstream, limited_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
+            "type": "error",
+            "status": 429,
+            "error": {"code": "rate_limit_exceeded", "message": "rate limited"}
+        })])))
+        .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "missing-account", "missing-access").await;
+    register_ready(&authority, "transport-account", "transport-access").await;
+    register_ready(&authority, "limited-account", "limited-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account(
+                "missing-account",
+                "provider-missing",
+                &missing_upstream,
+                100,
+            ),
+            account(
+                "transport-account",
+                "provider-transport",
+                &transport_upstream,
+                50,
+            ),
+            account("limited-account", "provider-limited", &limited_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue without an available response owner",
+                "previous_response_id": "orphaned-response"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(receive_websocket_json(&mut socket).await["delta"], "fresh");
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "fresh-ws-response"
+    );
+    let requests = missing_state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["previous_response_id"], "orphaned-response");
+    assert!(requests[1].get("previous_response_id").is_none());
+    assert_eq!(transport_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 4);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert!(events[3].success);
 }
 
 #[tokio::test]

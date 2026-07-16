@@ -90,7 +90,7 @@ async fn handle_connection(
         }
     };
 
-    let connected = match connect_upstream(&runtime, &key, &headers, request).await {
+    let connected = match connect_upstream(&runtime, &key, &headers, request, true).await {
         Ok(connected) => connected,
         Err(failure) => {
             send_gateway_error(&mut downstream, &failure).await;
@@ -227,6 +227,22 @@ impl ClientRequest {
             .and_then(Value::as_str)
             .is_some_and(|value| !value.trim().is_empty())
     }
+
+    fn has_function_call_output(&self) -> bool {
+        super::contains_function_call_output(&self.value)
+    }
+
+    fn drop_previous_response_id(&mut self) -> bool {
+        let Some(object) = self.value.as_object_mut() else {
+            return false;
+        };
+        if object.remove("previous_response_id").is_some() {
+            self.response_affinity_key = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 struct Connected {
@@ -244,9 +260,11 @@ async fn connect_upstream(
     key: &AuthenticatedKey,
     client_headers: &HeaderMap,
     request: ClientRequest,
+    allow_previous_response_reset: bool,
 ) -> Result<Connected, GatewayFailure> {
     let mut tried = HashSet::new();
     let mut attempt = 0_u16;
+    let mut confirmed_response_missing = false;
     let mut last_failure = None;
 
     while usize::from(attempt) < runtime.max_retry_candidates() {
@@ -380,6 +398,7 @@ async fn connect_upstream(
                 {
                     let failure = GatewayFailure::upstream_status(status);
                     if affinity_miss {
+                        confirmed_response_missing |= terminal.previous_response_not_found;
                         runtime
                             .invalidate_response_affinity(request.response_affinity_key.as_deref());
                         record_connect_affinity_miss(
@@ -398,6 +417,12 @@ async fn connect_upstream(
                         );
                     }
                     last_failure = Some(failure);
+                    if affinity_miss
+                        && terminal.previous_response_not_found
+                        && response_affinity_hit
+                    {
+                        break;
+                    }
                     continue;
                 }
             }
@@ -411,6 +436,24 @@ async fn connect_upstream(
             attempt,
             started,
         });
+    }
+
+    if allow_previous_response_reset
+        && request.has_previous_response_id()
+        && confirmed_response_missing
+        && !request.has_function_call_output()
+    {
+        let mut reset_request = request.clone();
+        if reset_request.drop_previous_response_id() {
+            return Box::pin(connect_upstream(
+                runtime,
+                key,
+                client_headers,
+                reset_request,
+                false,
+            ))
+            .await;
+        }
     }
 
     if let Some(retry_at_ms) = runtime.earliest_retry_at(
@@ -810,7 +853,7 @@ async fn start_next_request(
         ));
     }
     let request = ClientRequest::parse(runtime, key, headers, payload)?;
-    let connected = connect_upstream(runtime, key, headers, request).await?;
+    let connected = connect_upstream(runtime, key, headers, request, true).await?;
     let Connected {
         upstream: next_upstream,
         initial_messages,
