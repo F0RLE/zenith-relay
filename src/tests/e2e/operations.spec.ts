@@ -833,7 +833,9 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
-  await chooseOption(page, dialog, "Minimum image model", "gpt-5.4-mini");
+  await dialog.getByRole("button", { name: /^Minimum image model:/ }).click();
+  await expect(page.locator('[role="option"]').nth(1)).toHaveAttribute("data-value", "gpt-5.4-mini");
+  await page.locator('[role="option"][data-value="gpt-5.4-mini"]').click();
   await expect(dialog).toContainText("Uses accounts added earlier first and skips those that are busy.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 

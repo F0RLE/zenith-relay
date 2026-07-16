@@ -229,7 +229,7 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     if (imageBaseModel !== "auto" && imageBaseModel.trim()) ids.set(imageBaseModel.toLowerCase(), imageBaseModel);
     return [
       { value: "auto", label: t("pool.imageBaseModels.auto") },
-      ...[...ids.values()].sort((left, right) => left.localeCompare(right)).map((model) => ({ value: model, label: model })),
+      ...[...ids.values()].map((model) => ({ value: model, label: model })),
     ];
   }, [imageBaseModel, runtime?.gateway.models, t]);
   const save = async () => {
