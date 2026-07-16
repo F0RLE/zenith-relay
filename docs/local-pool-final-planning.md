@@ -133,8 +133,8 @@ continuations.
 
 Chats are never optionally pinned to accounts. Only a continuation carrying
 `previous_response_id` stays with the account that created that response, and
-an active WebSocket keeps ownership for the lifetime of its current upstream
-connection.
+an active compatibility WebSocket keeps ownership for the lifetime of its
+current upstream connection.
 
 Source role is explicit and editable. Subscription plan names and expiry dates
 must not create a hidden routing rule.
@@ -152,6 +152,26 @@ Retry rules:
 - local pool key is never forwarded as an upstream credential.
 
 ## Work Order
+
+### P5: Streaming Transport Baseline
+
+Use the smallest modern stack:
+
+- model requests: OpenAI-compatible HTTP/2 with pooled connections and SSE;
+- management: REST/JSON;
+- desktop-to-Rust: existing Tauri invoke IPC;
+- WebSocket: compatibility fallback only;
+- no public gRPC or JSON-RPC.
+
+The automated SSE and WebSocket correctness matrix passes at 1, 20, and 200
+parallel chats, so new and reattached managed profiles write
+`supports_websockets = false`. Release probes still measure visible tokens per
+second, TTFT, p95 failures, reconnects, CPU, and memory, and verify cancellation,
+bootstrap retry, no replay after first output, `previous_response_id`, quota
+rotation, and account proxy behavior. Keep the WebSocket route for one
+compatibility release.
+Reconsider gRPC only for a measured internal Rust-to-Rust bottleneck, and
+JSON-RPC only for a future plugin API that actually needs it.
 
 ### P6: Release Verification
 

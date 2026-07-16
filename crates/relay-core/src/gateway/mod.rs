@@ -1740,6 +1740,7 @@ fn normalize_account_request(object: &mut serde_json::Map<String, Value>, respon
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
     object.remove("max_output_tokens");
+    sanitize_unstored_reasoning_items(object);
     if responses_lite {
         object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
         filter_responses_lite_tools(object);
@@ -1750,6 +1751,28 @@ fn normalize_account_request(object: &mut serde_json::Map<String, Value>, respon
             "input".to_string(),
             json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
         );
+    }
+}
+
+fn sanitize_unstored_reasoning_items(object: &mut Map<String, Value>) {
+    let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            continue;
+        }
+        let has_encrypted_content = item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        if !has_encrypted_content {
+            item.remove("id");
+            item.remove("encrypted_content");
+        }
     }
 }
 
@@ -2013,7 +2036,8 @@ fn translate_chat_response(body: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
         }));
     }
     if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
-        for call in tool_calls {
+        let choice_index = choice.get("index").and_then(Value::as_u64).unwrap_or(0);
+        for (tool_index, call) in tool_calls.iter().enumerate() {
             let function = call
                 .get("function")
                 .and_then(Value::as_object)
@@ -2021,7 +2045,9 @@ fn translate_chat_response(body: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
             let call_id = call
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or_else(AttemptFailure::translation)?;
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("call_{id}_{choice_index}_{tool_index}"));
             output.push(json!({
                 "id": call_id,
                 "type": "function_call",
@@ -3194,6 +3220,46 @@ mod tests {
         assert_eq!(request["input"].as_array().unwrap().len(), 2);
         assert!(request.pointer("/response/tool_choice").is_none());
         assert_eq!(request["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn account_requests_drop_unusable_reasoning_ids_when_history_is_not_stored() {
+        let mut request = json!({
+            "store": true,
+            "input": [
+                {"id": "rs_orphan", "type": "reasoning", "summary": []},
+                {"id": "rs_null", "type": "reasoning", "encrypted_content": null, "summary": []},
+                {"id": "rs_valid", "type": "reasoning", "encrypted_content": "signed-content", "summary": []},
+                {"id": "msg_1", "type": "message", "role": "user", "content": "hello"}
+            ]
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), false);
+
+        assert_eq!(request["store"], false);
+        assert!(request.pointer("/input/0/id").is_none());
+        assert!(request.pointer("/input/1/id").is_none());
+        assert!(request.pointer("/input/1/encrypted_content").is_none());
+        assert_eq!(request.pointer("/input/2/id").unwrap(), "rs_valid");
+        assert_eq!(request.pointer("/input/3/id").unwrap(), "msg_1");
+    }
+
+    #[test]
+    fn chat_translation_synthesizes_missing_tool_call_ids() {
+        let translated = translate_chat_response(
+            br#"{"id":"chatcmpl_1","model":"model","choices":[{"index":2,"message":{"tool_calls":[{"type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}"#,
+        )
+        .unwrap_or_else(|_| panic!("chat response should translate"));
+        let response: Value = serde_json::from_slice(&translated).unwrap();
+
+        assert_eq!(
+            response.pointer("/output/0/id").unwrap(),
+            "call_chatcmpl_1_2_0"
+        );
+        assert_eq!(
+            response.pointer("/output/0/call_id").unwrap(),
+            "call_chatcmpl_1_2_0"
+        );
     }
 
     #[test]

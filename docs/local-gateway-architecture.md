@@ -829,7 +829,7 @@ The gateway should normalize:
 - `/v1/chat/completions` into `/v1/responses`;
 - `/v1/images/generations` into `/v1/responses` with image tool payload;
 - `/v1/images/edits` multipart/JSON into `/v1/responses`;
-- WebSocket Codex responses path;
+- SSE Responses streaming by default and a WebSocket compatibility path;
 - later runtime can expose `/v1/messages` and `/v1beta` Gemini routes.
 
 Zenith first runtime should ship:
@@ -842,6 +842,16 @@ POST /v1/responses/compact
 POST /v1/chat/completions
 POST /v1/alpha/search
 ```
+
+The managed client target is `POST /v1/responses` with `stream=true` over SSE.
+Reuse pooled HTTP connections and HTTP/2 where available. Keep the WebSocket
+upgrade route for explicit compatibility, but do not advertise it. The
+automated SSE and WebSocket correctness matrix passes at 1, 20, and 200
+concurrent requests; release probes retain retry, cancellation, continuity,
+and performance coverage.
+Public clients and the REST/JSON management plane do not use gRPC or JSON-RPC;
+Tauri invoke already owns desktop RPC. Add another protocol only for a measured
+internal bottleneck or a real future plugin contract.
 
 Compact and alpha-search are account-only paths: API-key sources are skipped,
 while local-key scope, quota, health, cooldown, active load, proxy, and retry
@@ -981,7 +991,7 @@ Subscription plan names and expiry dates do not determine runtime priority.
 Manual priority remains an advanced final tie-breaker rather than a routing
 group that starves otherwise eligible accounts.
 
-### Response Continuity And WebSocket Ownership
+### Response Continuity And Transport Ownership
 
 Zenith does not infer or persist chat-to-account bindings. Every new request is
 scheduled independently from headers, metadata, `conversation_id`, or client
@@ -992,9 +1002,9 @@ Two protocol constraints remain mandatory:
 - `previous_response_id` maps to the account that created the response. If that
   account is unavailable, the continuation fails instead of replaying through a
   different account;
-- an active WebSocket owns its current upstream account for continuation
-  messages on that connection. A new independent request may open a newly
-  scheduled upstream connection.
+- when the compatibility path is used, an active WebSocket owns its current
+  upstream account for continuation messages on that connection. A new
+  independent SSE or WebSocket request is scheduled normally.
 
 Response ownership uses a bounded 24-hour cache and is invalidated when its
 candidate is removed. This cache is protocol correctness, not an optional
@@ -1435,10 +1445,11 @@ Token fields follow the upstream usage object. `input_tokens` already includes
 cached input, while `cached_input_tokens` is a breakdown and must not be added
 to totals.
 `output_tokens` includes reasoning and other generated non-visible formatting
-tokens. Observed output speed is `output_tokens / end-to-end latency`; TTFT is
-reported separately because subtracting it would combine a post-first-token
-duration with reasoning tokens that may have been generated before first
-output.
+tokens. Visible generation speed is
+`max(output_tokens - reasoning_tokens, 0) / generation duration after first
+output`. TTFT and end-to-end latency are reported separately. If explicit
+generation duration is absent, derive it only when both latency and TTFT exist;
+otherwise report unknown speed.
 
 ### Diagnostics And Support Bundles
 

@@ -240,7 +240,7 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
-    const speed = page.getByRole("switch", { name: "Скорость ответа" });
+    const speed = page.getByRole("switch", { name: "Режим запросов" });
     await speed.check();
     await expect(speed).toBeChecked();
     const members = page.locator(".pool-member-list");

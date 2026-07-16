@@ -1423,8 +1423,83 @@ async fn account_websocket_reselects_for_each_independent_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_websocket_chats_are_balanced_and_release_all_leases() {
-    const REQUESTS: usize = 200;
+async fn sse_transport_concurrency_matrix_balances_and_releases_all_leases() {
+    for requests in [1, 20, 200] {
+        assert_sse_concurrency(requests).await;
+    }
+}
+
+async fn assert_sse_concurrency(requests: usize) {
+    let (first_upstream, first_state) =
+        spawn_upstream(vec![successful_sse_reply(); requests]).await;
+    let (second_upstream, second_state) =
+        spawn_upstream(vec![successful_sse_reply(); requests]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/responses", gateway.base_url);
+    let completed = tokio::time::timeout(
+        Duration::from_secs(20),
+        join_all((0..requests).map(|index| {
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                let response = client
+                    .post(url)
+                    .bearer_auth(LOCAL_KEY)
+                    .json(&json!({
+                        "model": MODEL,
+                        "input": format!("parallel SSE chat {index}"),
+                        "stream": true
+                    }))
+                    .send()
+                    .await
+                    .unwrap();
+                response.status() == StatusCode::OK
+                    && response
+                        .text()
+                        .await
+                        .unwrap()
+                        .contains("response.completed")
+            }
+        })),
+    )
+    .await
+    .expect("parallel SSE requests timed out");
+
+    assert!(completed.into_iter().all(|completed| completed));
+    assert_transport_matrix_state(
+        requests,
+        &first_state.requests,
+        &second_state.requests,
+        &events,
+        &gateway,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_transport_concurrency_matrix_balances_and_releases_all_leases() {
+    for requests in [1, 20, 200] {
+        assert_websocket_concurrency(requests).await;
+    }
+}
+
+async fn assert_websocket_concurrency(requests: usize) {
     let (first_upstream, first_state) = spawn_websocket_upstream().await;
     let (second_upstream, second_state) = spawn_websocket_upstream().await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -1447,7 +1522,7 @@ async fn concurrent_websocket_chats_are_balanced_and_release_all_leases() {
     let url = format!("{}/v1/responses", gateway.base_url);
     let completed = tokio::time::timeout(
         Duration::from_secs(20),
-        join_all((0..REQUESTS).map(|index| {
+        join_all((0..requests).map(|index| {
             let client = client.clone();
             let url = url.clone();
             async move {
@@ -1479,18 +1554,35 @@ async fn concurrent_websocket_chats_are_balanced_and_release_all_leases() {
     .expect("parallel websocket requests timed out");
 
     assert!(completed.into_iter().all(|completed| completed));
+    assert_transport_matrix_state(
+        requests,
+        &first_state.requests,
+        &second_state.requests,
+        &events,
+        &gateway,
+    )
+    .await;
+}
+
+async fn assert_transport_matrix_state<T, U>(
+    requests: usize,
+    first_requests: &Arc<Mutex<Vec<T>>>,
+    second_requests: &Arc<Mutex<Vec<T>>>,
+    events: &Arc<Mutex<Vec<U>>>,
+    gateway: &TestServer,
+) {
     tokio::time::timeout(Duration::from_secs(2), async {
-        while events.lock().unwrap().len() != REQUESTS {
+        while events.lock().unwrap().len() != requests {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("websocket usage events did not finish");
-    let first_requests = first_state.requests.lock().unwrap().len();
-    let second_requests = second_state.requests.lock().unwrap().len();
-    assert_eq!(first_requests + second_requests, REQUESTS);
+    .expect("transport usage events did not finish");
+    let first_requests = first_requests.lock().unwrap().len();
+    let second_requests = second_requests.lock().unwrap().len();
+    assert_eq!(first_requests + second_requests, requests);
     assert!(
-        first_requests.abs_diff(second_requests) <= REQUESTS / 20,
+        first_requests.abs_diff(second_requests) <= requests.max(20) / 20,
         "parallel routing was unexpectedly skewed: {first_requests}/{second_requests}"
     );
     assert!(gateway
@@ -3068,6 +3160,18 @@ fn success_reply(id: &str) -> Reply {
             "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
         }),
     )
+}
+
+fn successful_sse_reply() -> Reply {
+    Reply::Stream(vec![
+        StreamChunk::Data(
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n",
+        ),
+        StreamChunk::Data(
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+        ),
+        StreamChunk::Data("data: [DONE]\n\n"),
+    ])
 }
 
 async fn request(gateway: &TestServer, stream: bool) -> reqwest::Response {

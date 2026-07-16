@@ -822,7 +822,7 @@ fn attach_local_locked(
         .map(|oauth| oauth.account_id.to_string());
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
     backup.managed_bearer_in_config = true;
-    backup.managed_supports_websockets = true;
+    backup.managed_supports_websockets = false;
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,
         Err(error) => {
@@ -1571,7 +1571,7 @@ fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(true);
     provider["experimental_bearer_token"] = value(local_key);
-    provider["supports_websockets"] = value(true);
+    provider["supports_websockets"] = value(false);
 }
 
 fn restore_config(document: &mut DocumentMut, previous_model_provider: Option<&str>) {
@@ -2416,10 +2416,10 @@ mod tests {
             .starts_with("model_provider = \"zenith_relay_local\""));
         assert!(fs::read_to_string(home.join(CONFIG_FILE))
             .unwrap()
-            .contains("supports_websockets = true"));
+            .contains("supports_websockets = false"));
         let upgraded_backup: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
-        assert_eq!(upgraded_backup["managedSupportsWebsockets"], true);
+        assert_eq!(upgraded_backup["managedSupportsWebsockets"], false);
 
         restore_with(&home, &backups, &secrets).unwrap();
         let restored_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();

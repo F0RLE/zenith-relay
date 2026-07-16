@@ -231,6 +231,7 @@ function rowSpeedSample(row: UsageRow): TokenSpeedSample {
 
 function totalsFromRows(rows: UsageRow[]): UsageTotals {
   return rows.reduce<UsageTotals>((totals, row) => {
+    const visibleOutputTokens = row.success ? Math.max(0, (row.outputTokens ?? 0) - (row.reasoningTokens ?? 0)) : 0;
     totals.requests += 1;
     totals.successfulRequests += Number(row.success);
     totals.latencyMs += row.duration;
@@ -241,7 +242,7 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
     if (row.generationDurationMs != null && row.generationDurationMs > 0) {
       totals.generationMs += row.generationDurationMs;
       totals.generationSamples += 1;
-      if (row.success) totals.generationOutputTokens += Math.max(0, (row.outputTokens ?? 0) - (row.reasoningTokens ?? 0));
+      totals.generationOutputTokens += visibleOutputTokens;
     }
     totals.inputTokens += row.inputTokens ?? 0;
     if (row.cachedInputTokens != null) {
@@ -251,8 +252,7 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
     totals.reasoningTokens += row.reasoningTokens ?? 0;
     totals.outputTokens += row.outputTokens ?? 0;
     totals.totalTokens += row.tokens ?? 0;
-    const visibleOutputTokens = Math.max(0, (row.outputTokens ?? 0) - (row.reasoningTokens ?? 0));
-    if (row.success && visibleOutputTokens > 0 && row.duration > 0) {
+    if (visibleOutputTokens > 0 && row.duration > 0) {
       totals.speedOutputTokens += visibleOutputTokens;
       totals.speedDurationMs += row.duration;
     }

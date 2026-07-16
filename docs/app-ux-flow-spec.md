@@ -774,11 +774,11 @@ account. Adaptive order is:
 hard filters
 mandatory previous-response binding
 API source role tier
-active requests normalized by traffic share, available quota after reserve, and bounded output speed
+active requests normalized by traffic share and available quota after reserve
 OAuth preference inside the stabilizer tier
 committed dispatch balance normalized by the same effective share
 greatest minimum known quota reserve when balances are equal
-least recently used, manual priority, weight, measured-speed tie-break, and stable id
+least recently used, manual priority, weight, and stable id
 ```
 
 The oldest-account strategy applies all hard gates and active-load checks first,

@@ -153,8 +153,13 @@ base_url = "http://127.0.0.1:14998/v1"
 wire_api = "responses"
 requires_openai_auth = true
 experimental_bearer_token = "zlp_local_generated_key"
-supports_websockets = true
+supports_websockets = false
 ```
+
+Managed profiles write `supports_websockets = false` after the automated SSE
+and WebSocket correctness matrix passed at 1, 20, and 200 concurrent requests.
+The local WebSocket route remains an explicit compatibility fallback. Neither
+gRPC nor JSON-RPC is exposed at the OpenAI-compatible client boundary.
 
 The app should also write/repair the matching local `auth.json` API-key shape
 when needed:

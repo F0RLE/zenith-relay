@@ -306,6 +306,18 @@ POST /v1/alpha/search
 POST /v1/messages
 ```
 
+P5 transport target:
+
+- `POST /v1/responses` with `stream=true`, SSE, pooled connections, and HTTP/2
+  is the default client path;
+- `GET /v1/responses` WebSocket upgrade is a compatibility fallback;
+- management stays REST/JSON and desktop IPC stays Tauri invoke;
+- public clients do not require gRPC or JSON-RPC.
+
+Managed profiles advertise SSE by writing `supports_websockets = false`. The
+automated SSE and WebSocket correctness matrix passes at 1, 20, and 200
+concurrent requests; the WebSocket route remains available for compatibility.
+
 `/v1/responses/compact` and `/v1/alpha/search` use only scoped OAuth account
 candidates because they target ChatGPT Codex account endpoints. They must pass
 through the same quota, health, cooldown, load, proxy, and bounded-retry rules
@@ -667,8 +679,11 @@ record.
 
 Usage token fields follow Responses semantics: cached input is a breakdown of
 input tokens, reasoning is a breakdown of output tokens, and neither breakdown
-is added again to `total_tokens`. Output speed uses reported output tokens
-divided by full request latency; TTFT remains separate.
+is added again to `total_tokens`. Visible generation speed is
+`max(output_tokens - reasoning_tokens, 0) / generation duration after first
+output`. TTFT and full request latency remain separate. When explicit generation
+duration is unavailable, it may be derived from `latency - TTFT`; without both
+timestamps, visible generation speed is unknown rather than invented.
 
 `tried` and `attempted` stay separate. A candidate can be tried but not
 attempted when it fails mapping/preparation before executor call.
@@ -676,9 +691,10 @@ attempted when it fails mapping/preparation before executor call.
 ## Stream Retry Contract
 
 Streaming retry is allowed only before the first application event reaches the
-client. A WebSocket bootstrap error, early close, or transport failure may pick
-the next candidate; after the first event, the gateway forwards the terminal
-failure and never transparently replays the request.
+client. An SSE bootstrap failure or a WebSocket bootstrap error, early close,
+or transport failure may pick the next candidate; after the first event, the
+gateway forwards the terminal failure and never transparently replays the
+request.
 
 Flow:
 
@@ -963,6 +979,9 @@ runtime, self-host, gateway, and failure contracts only.
   registry entries.
 - Candidate selector applies API-source roles, spreads concurrent requests by
   traffic share, and rotates otherwise equal OAuth accounts per request.
+- SSE and WebSocket correctness probes run at 1, 20, and 200 concurrent
+  requests; release probes continue tracking visible tokens per second, TTFT,
+  p95 failures, reconnects, CPU, and memory without changing the SSE default.
 - Mixed-source selector does not select cooling-down credentials when another
   healthy candidate exists.
 - `tried` candidate without attempted execution does not count against

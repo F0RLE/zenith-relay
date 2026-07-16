@@ -30,7 +30,7 @@ if ($running) { throw "The previous Zenith Relay process did not stop" }
 if (Test-Path -LiteralPath $destinationPath) {
     Remove-Item -LiteralPath $destinationPath -Force
 }
-Move-Item -LiteralPath $sourcePath -Destination $destinationPath
+Copy-Item -LiteralPath $sourcePath -Destination $destinationPath
 
 $destinationHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $destinationPath).Hash
 if ($destinationHash -ne $sourceHash) {
