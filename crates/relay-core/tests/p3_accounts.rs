@@ -583,6 +583,76 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 }
 
 #[tokio::test]
+async fn unknown_http_response_owner_is_recovered_without_cooling_wrong_accounts() {
+    let (wrong_upstream, wrong_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::NOT_FOUND,
+        json!({"error": {"message": "previous response not found"}}),
+    )])
+    .await;
+    let (owner_upstream, owner_state) = spawn_upstream(vec![
+        success_reply("recovered-response"),
+        success_reply("continued-response"),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "wrong-account", "wrong-access").await;
+    register_ready(&authority, "owner-account", "owner-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("wrong-account", "provider-wrong", &wrong_upstream, 100),
+            account("owner-account", "provider-owner", &owner_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let recovered: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "continue after restart",
+            "previous_response_id": "response-from-before-restart"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovered["id"], "recovered-response");
+
+    let continued = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "continue again",
+            "previous_response_id": recovered["id"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(continued.status(), StatusCode::OK);
+    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert_eq!(events[0].retry_at_ms, None);
+    assert!(events[1].success);
+    assert_eq!(events[1].candidate_id, events[2].candidate_id);
+}
+
+#[tokio::test]
 async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let (upstream, state) = spawn_websocket_upstream().await;
     let authority = ready_authority("relay-account", "account-access").await;
@@ -1057,6 +1127,74 @@ async fn account_websocket_restores_previous_response_affinity_after_reconnect()
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
+async fn unknown_websocket_response_owner_is_recovered_before_output() {
+    let (wrong_upstream, wrong_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Events(Arc::new(vec![json!({
+            "type": "error",
+            "status": 404,
+            "error": {"message": "previous response not found"}
+        })])))
+        .await;
+    let (owner_upstream, owner_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "wrong-account", "wrong-access").await;
+    register_ready(&authority, "owner-account", "owner-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("wrong-account", "provider-wrong", &wrong_upstream, 100),
+            account("owner-account", "provider-owner", &owner_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue after restart",
+                "previous_response_id": "response-from-before-restart"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.output_text.delta"
+    );
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["type"],
+        "response.completed"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(wrong_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert_eq!(events[0].retry_at_ms, None);
+    assert!(events[1].success);
 }
 
 #[tokio::test]

@@ -262,6 +262,7 @@ async fn connect_upstream(
             break;
         };
         tried.insert(selected.candidate_id.clone());
+        let response_affinity_hit = selected.response_affinity_hit;
         let Some(mut route) =
             runtime.executor_route(&selected.candidate_id, &request.resolved_model)
         else {
@@ -368,18 +369,31 @@ async fn connect_upstream(
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(false) {
                 let status = terminal.status.unwrap_or(StatusCode::BAD_GATEWAY);
-                if super::retryable_status(status, request.has_previous_response_id()) {
+                let affinity_miss = super::recoverable_response_affinity_miss(
+                    status,
+                    request.has_previous_response_id(),
+                    response_affinity_hit,
+                );
+                if affinity_miss
+                    || super::retryable_status(status, request.has_previous_response_id())
+                {
                     let failure = GatewayFailure::upstream_status(status);
-                    record_connect_failure(
-                        runtime,
-                        key,
-                        &route,
-                        &request,
-                        attempt,
-                        started,
-                        &failure,
-                        Some(&terminal.headers),
-                    );
+                    if affinity_miss {
+                        record_connect_affinity_miss(
+                            runtime, key, &route, &request, attempt, started,
+                        );
+                    } else {
+                        record_connect_failure(
+                            runtime,
+                            key,
+                            &route,
+                            &request,
+                            attempt,
+                            started,
+                            &failure,
+                            Some(&terminal.headers),
+                        );
+                    }
                     last_failure = Some(failure);
                     continue;
                 }
@@ -523,6 +537,30 @@ fn record_connect_failure(
     );
     apply_failure_state(&mut event, state);
     emit_usage(runtime, event);
+}
+
+fn record_connect_affinity_miss(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    route: &ExecutorRoute,
+    request: &ClientRequest,
+    attempt: u16,
+    started: Instant,
+) {
+    emit_usage(
+        runtime,
+        usage_event(
+            &super::request_id(),
+            attempt,
+            &key.id,
+            route,
+            &request.requested_model,
+            false,
+            StatusCode::NOT_FOUND.as_u16(),
+            Some("response_affinity_miss".to_string()),
+            started.elapsed().as_millis() as u64,
+        ),
+    );
 }
 
 fn upstream_headers(

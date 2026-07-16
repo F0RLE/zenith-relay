@@ -482,6 +482,7 @@ async fn execute_account_endpoint(
             break;
         };
         tried.insert(selected.candidate_id.clone());
+        let response_affinity_hit = selected.response_affinity_hit;
         let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
         else {
             continue;
@@ -632,15 +633,24 @@ async fn execute_account_endpoint(
                 Some("upstream_status".to_string()),
                 started.elapsed().as_millis() as u64,
             );
-            if retryable_status(status, has_previous_response_id) {
-                let state = apply_status_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    &route.source_model,
-                    status,
-                    &response_headers,
-                );
-                apply_failure_state(&mut event, state);
+            let affinity_miss = recoverable_response_affinity_miss(
+                status,
+                has_previous_response_id,
+                response_affinity_hit,
+            );
+            if affinity_miss || retryable_status(status, has_previous_response_id) {
+                if affinity_miss {
+                    event.error_category = Some("response_affinity_miss".to_string());
+                } else {
+                    let state = apply_status_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        &route.source_model,
+                        status,
+                        &response_headers,
+                    );
+                    apply_failure_state(&mut event, state);
+                }
                 emit_usage(&runtime, event);
                 last_failure = Some(AttemptFailure::status(status));
                 continue;
@@ -855,6 +865,7 @@ async fn execute_request(
             break;
         };
         tried.insert(selected.candidate_id.clone());
+        let response_affinity_hit = selected.response_affinity_hit;
         let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
         else {
             continue;
@@ -985,19 +996,17 @@ async fn execute_request(
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
-            if retryable_status(status, has_previous_response_id) {
+            let affinity_miss = recoverable_response_affinity_miss(
+                status,
+                has_previous_response_id,
+                response_affinity_hit,
+            );
+            if affinity_miss || retryable_status(status, has_previous_response_id) {
                 let _ = crate::runtime::collect_limited(
                     upstream,
                     crate::runtime::MAX_NON_STREAM_BODY_BYTES,
                 )
                 .await;
-                let state = apply_status_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    &source_model,
-                    status,
-                    &response_headers,
-                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1006,10 +1015,23 @@ async fn execute_request(
                     &requested_model,
                     false,
                     status.as_u16(),
-                    Some("upstream_status".to_string()),
+                    Some(if affinity_miss {
+                        "response_affinity_miss".to_string()
+                    } else {
+                        "upstream_status".to_string()
+                    }),
                     started.elapsed().as_millis() as u64,
                 );
-                apply_failure_state(&mut event, state);
+                if !affinity_miss {
+                    let state = apply_status_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        &source_model,
+                        status,
+                        &response_headers,
+                    );
+                    apply_failure_state(&mut event, state);
+                }
                 emit_usage(&runtime, event);
                 last_failure = Some(AttemptFailure::status(status));
                 continue;
@@ -2119,6 +2141,14 @@ fn retryable_status(status: StatusCode, has_previous_response_id: bool) -> bool 
             | StatusCode::SERVICE_UNAVAILABLE
             | StatusCode::GATEWAY_TIMEOUT
     ) || (status == StatusCode::NOT_FOUND && !has_previous_response_id)
+}
+
+fn recoverable_response_affinity_miss(
+    status: StatusCode,
+    has_previous_response_id: bool,
+    response_affinity_hit: bool,
+) -> bool {
+    status == StatusCode::NOT_FOUND && has_previous_response_id && !response_affinity_hit
 }
 
 fn apply_status_cooldown(
