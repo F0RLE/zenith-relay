@@ -208,7 +208,7 @@ for (const viewport of viewports) {
     await page.keyboard.press("Escape");
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-    await expect(page.locator(".pool-priority-label")).toContainText("Приоритет пула");
+    await expect(page.locator(".pool-priority-label")).toContainText("Маршрутизация");
     await expect(page.getByRole("button", { name: "Настройки распределения", exact: true })).toBeVisible();
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
@@ -228,8 +228,8 @@ for (const viewport of viewports) {
 
     await page.getByRole("button", { name: "Настройки обновления квот", exact: true }).click();
     dialog = page.getByRole("dialog", { name: "Обновление квот" });
-    await expect(dialog.getByRole("button", { name: /^Интервал фонового обновления:/ })).toHaveAttribute("data-value", "300");
-    await expect(dialog.getByRole("button", { name: /^Таймаут запроса:/ })).toHaveAttribute("data-value", "20");
+    await expect(dialog.getByRole("button", { name: /^Как часто обновлять квоты:/ })).toHaveAttribute("data-value", "300");
+    await expect(dialog).not.toContainText("Таймаут запроса");
     await page.screenshot({ path: `output/playwright/pool-quota-policy-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -566,17 +566,17 @@ for (const viewport of viewports) {
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
       await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
-      const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
-      const strategy = dialog.getByRole("button", { name: /^Режим распределения:/ });
+      const dialog = page.getByRole("dialog", { name: "Распределение" });
+      const strategy = dialog.getByRole("button", { name: /^Как выбирать аккаунт:/ });
       await expect(strategy).toHaveAttribute("data-value", "adaptive");
       await strategy.click();
-      await expect(page.getByRole("option", { name: "Автоматически", exact: true })).toBeVisible();
-      await expect(page.getByRole("option", { name: "Старые аккаунты", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "По квоте и нагрузке", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "Сначала старые", exact: true })).toBeVisible();
       await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(2);
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).toContainText("Распределяет новые независимые цепочки по свободной нагрузке, запасу квоты и устойчиво измеренной скорости.");
+      await expect(dialog).toContainText("Отдаёт больше запросов свободным аккаунтам с большим запасом квоты и стабильной скоростью.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });

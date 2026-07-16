@@ -168,7 +168,7 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(runtime?.gateway.quotaRefreshIntervalSeconds ?? 300);
-  const [requestTimeoutSeconds, setRequestTimeoutSeconds] = useState(runtime?.gateway.quotaRequestTimeoutSeconds ?? 20);
+  const requestTimeoutSeconds = runtime?.gateway.quotaRequestTimeoutSeconds ?? 20;
   const [useFreeAccounts, setUseFreeAccounts] = useState(runtime?.gateway.useFreeAccounts ?? mode === "remote");
   const supportsFreePolicy = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("free_account_policy"));
   const save = async () => {
@@ -178,7 +178,18 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
       : relayCommands.remoteAction({ type: "set_quota_policy" }, payload), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("pool.refreshPolicyTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "quota-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><div className="relay-field"><span>{t("pool.refreshInterval")}</span><OptionMenu className="field-option-menu" label={t("pool.refreshInterval")} value={String(refreshIntervalSeconds)} onChange={(value) => setRefreshIntervalSeconds(Number(value))} options={[{ value: "120", label: t("pool.refreshIntervals.twoMinutes") }, { value: "300", label: t("pool.refreshIntervals.fiveMinutes") }, { value: "600", label: t("pool.refreshIntervals.tenMinutes") }, { value: "1800", label: t("pool.refreshIntervals.thirtyMinutes") }, { value: "3600", label: t("pool.refreshIntervals.oneHour") }]} /></div><div className="relay-field"><span>{t("pool.requestTimeout")}</span><OptionMenu className="field-option-menu" label={t("pool.requestTimeout")} value={String(requestTimeoutSeconds)} onChange={(value) => setRequestTimeoutSeconds(Number(value))} options={[{ value: "10", label: t("pool.requestTimeouts.tenSeconds") }, { value: "15", label: t("pool.requestTimeouts.fifteenSeconds") }, { value: "20", label: t("pool.requestTimeouts.twentySeconds") }]} /></div><label className="toggle-row"><input type="checkbox" checked={useFreeAccounts} disabled={!supportsFreePolicy} title={!supportsFreePolicy ? t("remote.capabilityUnavailable") : undefined} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t("pool.useFreeAccounts")}</span></label><p className="form-note">{supportsFreePolicy ? t("pool.useFreeAccountsHint") : t("pool.useFreeAccountsLegacyHint")}</p><p className="form-note">{t("pool.refreshPolicyHint")}</p></div></Dialog>;
+  return <Dialog title={t("pool.refreshPolicyTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "quota-policy"} onClick={save}>{t("common.save")}</Button></>}>
+    <div className="relay-form pool-policy-form">
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.refreshInterval")}</strong></div>
+        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.refreshInterval")} value={String(refreshIntervalSeconds)} onChange={(value) => setRefreshIntervalSeconds(Number(value))} options={[{ value: "120", label: t("pool.refreshIntervals.twoMinutes") }, { value: "300", label: t("pool.refreshIntervals.fiveMinutes") }, { value: "600", label: t("pool.refreshIntervals.tenMinutes") }, { value: "1800", label: t("pool.refreshIntervals.thirtyMinutes") }, { value: "3600", label: t("pool.refreshIntervals.oneHour") }]} />
+      </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.useFreeAccounts")}</strong><small>{supportsFreePolicy ? t("pool.useFreeAccountsHint") : t("pool.useFreeAccountsLegacyHint")}</small></div>
+        <label className="toggle-row pool-policy-toggle"><input type="checkbox" aria-label={t("pool.useFreeAccounts")} checked={useFreeAccounts} disabled={!supportsFreePolicy} title={!supportsFreePolicy ? t("remote.capabilityUnavailable") : undefined} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t(useFreeAccounts ? "common.enabled" : "common.disabled")}</span></label>
+      </div>
+    </div>
+  </Dialog>;
 }
 
 function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
@@ -205,7 +216,18 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><div className="relay-field"><span>{t("pool.serviceTier")}</span><div className="segmented" role="group" aria-label={t("pool.serviceTier")}><button type="button" className={defaultServiceTier === "standard" ? "active" : ""} aria-pressed={defaultServiceTier === "standard"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("standard")}>{t("pool.serviceTiers.standard")}</button><button type="button" className={defaultServiceTier === "fast" ? "active" : ""} aria-pressed={defaultServiceTier === "fast"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("fast")}>{t("pool.serviceTiers.fast")}</button></div><small>{supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}</small></div><div className="relay-field"><span>{t("pool.routingStrategy")}</span><OptionMenu className="field-option-menu" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} /><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div></div></Dialog>;
+  return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}>
+    <div className="relay-form pool-policy-form">
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.serviceTier")}</strong><small>{supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}</small></div>
+        <div className="segmented pool-policy-control" role="group" aria-label={t("pool.serviceTier")}><button type="button" className={defaultServiceTier === "standard" ? "active" : ""} aria-pressed={defaultServiceTier === "standard"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("standard")}>{t("pool.serviceTiers.standard")}</button><button type="button" className={defaultServiceTier === "fast" ? "active" : ""} aria-pressed={defaultServiceTier === "fast"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("fast")}>{t("pool.serviceTiers.fast")}</button></div>
+      </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div>
+        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} />
+      </div>
+    </div>
+  </Dialog>;
 }
 
 function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {
@@ -298,10 +320,22 @@ function KeysView({ onCreate }: { onCreate: () => void }) {
   const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
   const [revealed, setRevealed] = useState("");
   const [editing, setEditing] = useState<KeySummary | null>(null);
-  if (!runtime?.keys.length) return <EmptyState title={t("keys.emptyTitle")} description={t("keys.emptyDescription")} action={<Button variant="primary" disabled={!canManage} title={!canManage ? t("remote.capabilityUnavailable") : undefined} onClick={onCreate}>{t("keys.create")}</Button>} />;
+  const [managedKeyIds, setManagedKeyIds] = useState<string[] | null>(mode === "local" ? null : []);
+  useEffect(() => {
+    let active = true;
+    if (mode !== "local") { setManagedKeyIds([]); return () => { active = false; }; }
+    setManagedKeyIds(null);
+    void relayCommands.profileBindings()
+      .then((bindings) => { if (active) setManagedKeyIds(bindings.filter((binding) => binding.credentialKind === "local_gateway").map((binding) => binding.credentialId)); })
+      .catch(() => { if (active) setManagedKeyIds([]); });
+    return () => { active = false; };
+  }, [mode, runtime?.keys]);
+  if (managedKeyIds === null) return <div className="relay-loading">{t("common.loading")}</div>;
+  const keys = (runtime?.keys ?? []).filter((key) => !managedKeyIds.includes(key.id));
+  if (!keys.length) return <EmptyState title={t("keys.emptyTitle")} description={t("keys.emptyDescription")} action={<Button variant="primary" disabled={!canManage} title={!canManage ? t("remote.capabilityUnavailable") : undefined} onClick={onCreate}>{t("keys.create")}</Button>} />;
   const formatLastUsed = new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" });
   return <>
-    <div className="relay-table-wrap"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("keys.masked")}</th><th>{t("keys.scope")}</th><th>{t("common.models")}</th><th>{t("common.lastUsed")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>{runtime.keys.map((key) => <tr key={key.id}>
+    <div className="relay-table-wrap"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("keys.masked")}</th><th>{t("keys.scope")}</th><th>{t("common.models")}</th><th>{t("common.lastUsed")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>{keys.map((key) => <tr key={key.id}>
       <td><StatusBadge status={key.enabled ? "ready" : "disabled"} label={key.enabled ? t("common.enabled") : t("common.disabled")} /></td>
       <td>{key.label}</td>
       <td><code>zlr_••••••••••••</code></td>

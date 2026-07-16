@@ -3994,6 +3994,69 @@ textarea {
   box-shadow: var(--relay-shadow-soft);
 }
 
+.pool-policy-form {
+  gap: 0;
+}
+
+.pool-policy-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 220px);
+  align-items: center;
+  gap: 18px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.pool-policy-row:first-child {
+  padding-top: 0;
+}
+
+.pool-policy-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.pool-policy-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.pool-policy-copy strong {
+  color: var(--relay-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.pool-policy-copy small {
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.pool-policy-control {
+  width: 100%;
+  min-width: 0;
+}
+
+.segmented.pool-policy-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.segmented.pool-policy-control button {
+  min-width: 0;
+  padding-inline: 8px;
+}
+
+.pool-policy-toggle {
+  min-height: 36px;
+  justify-self: end;
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
 .client-oauth-binding {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 390px);
@@ -7141,6 +7204,15 @@ input[type="password"] {
 }
 
 @media (max-width: 560px) {
+  .pool-policy-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .pool-policy-toggle {
+    justify-self: start;
+  }
+
   .account-command-bar:has(.account-command-context > span) {
     min-height: 0;
     width: 100%;

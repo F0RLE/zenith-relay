@@ -7,7 +7,7 @@ async function chooseOption(page: Page, scope: Page | Locator, label: string, va
 }
 
 test("local commands are reachable from the operational UI", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("tab", { name: "Sources" }).click();
@@ -711,7 +711,7 @@ for (const mode of ["local", "remote"] as const) {
   });
 
   test(`${mode} client access key can be deleted from its configuration dialog`, async ({ page }) => {
-    await installTauriMock(page, { mode, locale: "en", populated: true });
+    await installTauriMock(page, { mode, locale: "en", populated: true, codexBindings: mode === "local" ? false : undefined });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
     await page.getByRole("tab", { name: "Client Access" }).click();
@@ -729,12 +729,21 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
+test("the active ChatGPT pool key stays out of client access management", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Client Access" }).click();
+  await expect(page.getByText("No client access keys", { exact: true })).toBeVisible();
+  await expect(page.getByText("ChatGPT", { exact: true })).toHaveCount(0);
+});
+
 test("pool priority follows the current eligible route without manual display sorting", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-  await expect(page.locator(".pool-priority-label")).toHaveText("Pool priorityIn use now: Pro account");
+  await expect(page.locator(".pool-priority-label")).toHaveText("RoutingLatest request: Pro account");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
@@ -800,15 +809,15 @@ test("local pool refreshes only pool quotas and saves bounded refresh settings",
   await expect(page.getByText("Updated.", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
-  await chooseOption(page, dialog, "Background refresh interval", "120");
-  await chooseOption(page, dialog, "Request timeout", "10");
-  await dialog.getByLabel("Use Free accounts").check();
+  await chooseOption(page, dialog, "How often to refresh quotas", "120");
+  await expect(dialog).not.toContainText("Request timeout");
+  await dialog.getByLabel("Include Free accounts in the pool").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(freeMember).toContainText("In rotation");
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "refresh_local_pool_account_quotas")).toBe(true);
-  expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 10, useFreeAccounts: true } });
+  expect(calls.findLast((call) => call.command === "update_local_quota_policy")?.args).toEqual({ input: { refreshIntervalSeconds: 120, requestTimeoutSeconds: 20, useFreeAccounts: true } });
 });
 
 test("local pool saves adaptive distribution without chat pinning", async ({ page }) => {
@@ -817,14 +826,14 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog).toContainText("Distributes new independent chains by free capacity, quota headroom, and stable measured speed.");
+  await expect(dialog).toContainText("Gives more requests to available accounts with more quota headroom and stable speed.");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
-  await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toHaveAttribute("data-value", "adaptive");
-  await chooseOption(page, dialog, "Distribution mode", "oldest_account");
-  await expect(dialog).toContainText("The account added earlier gets priority.");
+  await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toHaveAttribute("data-value", "adaptive");
+  await chooseOption(page, dialog, "How to choose an account", "oldest_account");
+  await expect(dialog).toContainText("Uses accounts added earlier first and skips those that are busy.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -836,10 +845,10 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Request distribution" });
+  const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
-  await chooseOption(page, dialog, "Distribution mode", "oldest_account");
+  await chooseOption(page, dialog, "How to choose an account", "oldest_account");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
@@ -855,8 +864,8 @@ test("legacy remote pool keeps the new distribution mode read-only", async ({ pa
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Request distribution" });
-  await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toBeDisabled();
+  const dialog = page.getByRole("dialog", { name: "Distribution" });
+  await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Standard", exact: true })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Fast (1.5x)", exact: true })).toBeDisabled();
   await expect(dialog).toContainText("The connected server does not support this action.");
@@ -877,15 +886,15 @@ test("remote pool uses the same quota refresh controls", async ({ page }) => {
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Quota refresh" });
-  await chooseOption(page, dialog, "Background refresh interval", "600");
-  await chooseOption(page, dialog, "Request timeout", "15");
-  await dialog.getByLabel("Use Free accounts").check();
+  await chooseOption(page, dialog, "How often to refresh quotas", "600");
+  await expect(dialog).not.toContainText("Request timeout");
+  await dialog.getByLabel("Include Free accounts in the pool").check();
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const actions = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: { type?: string }; payload?: unknown } } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input));
   expect(actions).toEqual(expect.arrayContaining([
     { action: { type: "refresh_pool_quotas" }, payload: null },
-    { action: { type: "set_quota_policy" }, payload: { refreshIntervalSeconds: 600, requestTimeoutSeconds: 15, useFreeAccounts: true } },
+    { action: { type: "set_quota_policy" }, payload: { refreshIntervalSeconds: 600, requestTimeoutSeconds: 20, useFreeAccounts: true } },
   ]));
 });
 
@@ -899,7 +908,7 @@ test("legacy remote servers keep the unsupported Free policy read-only", async (
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Quota refresh settings", exact: true }).click();
-  await expect(page.getByRole("dialog").getByLabel("Use Free accounts")).toBeDisabled();
+  await expect(page.getByRole("dialog").getByLabel("Include Free accounts in the pool")).toBeDisabled();
   await expect(page.getByRole("dialog")).toContainText("Update the server");
 });
 
@@ -942,7 +951,7 @@ test("invalid OAuth grants keep the account and explain the required action", as
 });
 
 test("source, automation, and key rows keep rare actions in consistent menus", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindings: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
@@ -1177,7 +1186,7 @@ test("OAuth keeps recovery fields behind an explicit disclosure", async ({ page 
 });
 
 test("key and OAuth timestamps follow the active locale", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "ru", populated: true });
+  await installTauriMock(page, { mode: "local", locale: "ru", populated: true, codexBindings: false });
   await page.goto("/");
 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
