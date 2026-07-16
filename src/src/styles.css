@@ -2057,34 +2057,44 @@ textarea {
   color: var(--relay-muted);
 }
 
-.pool-member-options em {
-  padding: 2px 6px;
-  border: 1px solid var(--relay-border);
+.account-plan-badge {
+  --plan-accent: var(--relay-muted);
+  width: fit-content;
+  max-width: 100%;
+  height: 20px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  overflow: hidden;
+  padding: 0 3px;
+  border: 1px solid color-mix(in srgb, var(--plan-accent) 32%, var(--relay-border));
   border-radius: 4px;
-  color: var(--relay-muted);
-  font-size: 11px;
+  background: color-mix(in srgb, var(--plan-accent) 9%, var(--relay-surface));
+  color: color-mix(in srgb, var(--plan-accent) 78%, var(--relay-text));
+  font-size: 10px;
   font-style: normal;
-  text-transform: capitalize;
+  font-weight: 700;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.pool-member-options em[data-plan="plus"] {
-  border-color: var(--relay-accent);
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
+.account-plan-badge::before {
+  width: 4px;
+  height: 4px;
+  flex: 0 0 4px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
 }
 
-.pool-member-options em[data-plan^="pro"] {
-  border-color: var(--relay-info);
-  background: var(--relay-info-soft);
-  color: var(--relay-info);
-}
-
-.pool-member-options em[data-plan="business"],
-.pool-member-options em[data-plan="enterprise"] {
-  border-color: var(--relay-warning);
-  background: var(--relay-warning-soft);
-  color: var(--relay-warning);
-}
+.account-plan-badge[data-plan="plus"] { --plan-accent: var(--relay-accent-hover); }
+.account-plan-badge[data-plan^="pro"] { --plan-accent: var(--relay-info); }
+.account-plan-badge[data-plan="business"] { --plan-accent: #8257c7; }
+.account-plan-badge[data-plan="enterprise"] { --plan-accent: var(--relay-warning); }
+.account-plan-badge[data-plan="go"] { --plan-accent: #15869a; }
+.account-plan-badge[data-plan="edu"] { --plan-accent: #ad4f82; }
 
 @media (max-width: 1023px) {
   .scope-grid {
@@ -2912,6 +2922,124 @@ textarea:focus-visible {
   border-left: 1px solid var(--relay-border);
 }
 
+.pool-speed-control {
+  height: 34px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px minmax(66px, auto) 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 7px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-surface);
+  color: var(--relay-muted);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.pool-speed-control:hover {
+  border-color: var(--relay-border-strong);
+  background: var(--relay-subtle);
+}
+
+.pool-speed-control:has(> input:focus-visible) {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 2px;
+}
+
+.pool-speed-control:has(> input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pool-speed-control > svg {
+  width: 14px;
+  height: 14px;
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.pool-speed-control[data-fast="true"] > svg {
+  color: var(--relay-accent-hover);
+  transform: scale(1.08);
+}
+
+.pool-speed-copy {
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  text-align: left;
+}
+
+.pool-speed-copy small,
+.pool-speed-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-speed-copy small {
+  color: var(--relay-muted);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 11px;
+}
+
+.pool-speed-copy strong {
+  color: var(--relay-text);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.pool-member-toolbar .pool-speed-control > input {
+  position: absolute;
+  z-index: 1;
+  top: 7px;
+  right: 7px;
+  width: 32px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.pool-speed-track {
+  width: 32px;
+  height: 18px;
+  position: relative;
+  display: block;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 9px;
+  background: var(--relay-subtle);
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.pool-speed-track > span {
+  width: 12px;
+  height: 12px;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: var(--relay-muted);
+  box-shadow: var(--relay-shadow-soft);
+  transition: transform 180ms ease, background 180ms ease;
+}
+
+.pool-speed-control > input:checked + .pool-speed-track {
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-accent) 16%, transparent);
+}
+
+.pool-speed-control > input:checked + .pool-speed-track > span {
+  background: var(--relay-accent-hover);
+  transform: translateX(14px);
+}
+
 .pool-controls {
   margin: 10px 0 12px;
   overflow: hidden;
@@ -3045,6 +3173,21 @@ textarea:focus-visible {
 
 .pool-member-card .pool-member-identity small {
   font-size: 11px;
+}
+
+.pool-member-account-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pool-member-account-meta > small {
+  flex: 0 1 auto;
+}
+
+.pool-member-account-meta > .account-plan-badge {
+  flex: 0 0 auto;
 }
 
 .pool-member-routing {
@@ -6935,28 +7078,6 @@ input[type="password"] {
   color: var(--relay-muted);
 }
 
-.model-sort-select {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 100%;
-  flex-wrap: wrap;
-  font-size: 12px;
-}
-
-.model-sort-menu {
-  width: 260px;
-  max-width: 100%;
-}
-
-.model-sort-menu .relay-option-trigger {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  font-size: 12px;
-}
-
 .model-rules li {
   min-height: 66px;
   grid-template-columns: minmax(180px, 1.15fr) minmax(210px, 1fr) minmax(110px, auto) 36px;
@@ -7281,10 +7402,6 @@ input[type="password"] {
     flex-direction: column;
   }
 
-  .model-sort-select {
-    width: fit-content;
-  }
-
 }
 
 @media (max-width: 1200px) {
@@ -7445,20 +7562,6 @@ input[type="password"] {
     justify-content: flex-start;
   }
 
-  .model-sort-select {
-    width: 100%;
-  }
-
-  .model-sort-menu {
-    min-width: 0;
-    flex: 1;
-  }
-
-  .model-sort-menu .relay-option-trigger {
-    width: 100%;
-    min-width: 0;
-  }
-
   .model-rules li {
     grid-template-columns: minmax(0, 1fr) 36px;
     gap: 5px 12px;
@@ -7512,6 +7615,15 @@ input[type="password"] {
   .pool-member-card-main > .relay-icon-button {
     grid-column: 2;
     grid-row: 1 / span 4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pool-speed-control,
+  .pool-speed-control > svg,
+  .pool-speed-track,
+  .pool-speed-track > span {
+    transition: none;
   }
 }
 

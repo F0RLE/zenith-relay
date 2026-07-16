@@ -479,6 +479,8 @@ test("account cards show the subscription end date or an explicit unavailable st
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const cards = page.locator(".account-card");
+  await expect(cards.filter({ hasText: "Personal Plus" }).locator('.account-plan-badge[data-plan="plus"]')).toHaveText("Plus");
+  await expect(cards.filter({ hasText: "Business Workspace" }).locator('.account-plan-badge[data-plan="business"]')).toHaveText("Business");
   await expect(cards.filter({ hasText: "Personal Plus" }).locator(".account-subscription-line")).toContainText("Active until");
   await expect(cards.filter({ hasText: "Personal Plus" }).locator(".account-subscription-countdown")).toHaveText(/in \d+ days/);
   await expect(cards.filter({ hasText: "Business Workspace" }).locator(".account-subscription-line")).toContainText("Active until");
@@ -770,7 +772,7 @@ test("pool member picker lists individual accounts instead of subscription group
   await expect(accountRows).toHaveCount(4);
   await expect(accountRows.locator("strong")).toHaveText(["p***@example.test", "q***@example.test", "b***@example.test", "r***@example.test"]);
   await expect(accountRows.locator("small")).toHaveText(["Personal Plus", "Pro account", "Business Workspace", "Backup account"]);
-  await expect(accountRows.locator("em")).toHaveText(["Plus", "Pro", "Business", "Free"]);
+  await expect(accountRows.locator(".account-plan-badge")).toHaveText(["Plus", "Pro", "Business", "Free"]);
 
   await expect(dialog.getByRole("group", { name: "Filter by plan" }).getByRole("button")).toHaveCount(5);
   await dialog.getByRole("button", { name: "Business (1)" }).click();
@@ -796,6 +798,8 @@ test("pool member layouts switch between compact, detailed, and grid views", asy
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   const members = page.locator(".pool-member-list");
   await expect(members).toHaveAttribute("data-layout", "list");
+  await expect(members.locator('.account-plan-badge[data-plan="plus"]')).toBeVisible();
+  await expect(members.locator('.account-plan-badge[data-plan="business"]')).toBeVisible();
   await page.getByRole("button", { name: "Compact pool view" }).click();
   await expect(members).toHaveAttribute("data-layout", "compact");
   await expect(members.locator(".pool-member-quota").first()).toBeHidden();
@@ -834,12 +838,21 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
+  const speed = page.getByRole("switch", { name: "Response speed" });
+  await expect(speed).not.toBeChecked();
+  await speed.check();
+  await expect(speed).toBeChecked();
+  await speed.uncheck();
+  await expect(speed).not.toBeChecked();
+  await speed.check();
+  await expect(speed).toBeChecked();
+
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
+  await expect(dialog).not.toContainText("Response speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
   await expect(dialog).toContainText("Chooses the greatest quota remaining among free accounts and rotates equal candidates.");
-  await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
   await dialog.getByRole("button", { name: /^Minimum image model:/ }).click();
@@ -856,17 +869,20 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const speed = page.getByRole("switch", { name: "Response speed" });
+  await speed.check();
+  await expect(speed).toBeChecked();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
-  await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
+  await expect(dialog).not.toContainText("Response speed");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", defaultServiceTier: "fast", imageBaseModel: null },
+    payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", imageBaseModel: null },
   });
   expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
@@ -875,11 +891,11 @@ test("legacy remote pool keeps the new distribution mode read-only", async ({ pa
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, legacyRemoteRouting: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.getByRole("switch", { name: "Response speed" })).toBeDisabled();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: "Standard", exact: true })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: "Fast (1.5x)", exact: true })).toBeDisabled();
+  await expect(dialog).not.toContainText("Response speed");
   await expect(dialog).toContainText("The connected server does not support this action.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -1135,7 +1151,7 @@ test("OAuth member policy hides manual routing controls", async ({ page }) => {
 });
 
 for (const mode of ["local", "remote"] as const) {
-  test(`${mode} model rules sort and toggle the same runtime contract`, async ({ page }) => {
+  test(`${mode} model rules keep catalog order and toggle the same runtime contract`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true, accountCount: 2 });
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -1148,8 +1164,7 @@ for (const mode of ["local", "remote"] as const) {
     await expect(rows.first()).toContainText("Output $15.00");
     await expect(page.locator('.model-rules li[data-model-id="o3"]')).toContainText("Price not listed");
 
-    await chooseOption(page, page, "Sort models", "price_asc");
-    expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4-mini", "gpt-5.4", "o3"]);
+    await expect(page.locator(".model-sort-select")).toHaveCount(0);
 
     const mini = page.locator('.model-rules li[data-model-id="gpt-5.4-mini"]');
     await mini.getByRole("button", { name: "Disable gpt-5.4-mini" }).click();

@@ -813,13 +813,6 @@ const relayEn = {
     explanation: "Disabled models stay in this list but are hidden from clients and rejected by the pool endpoint.",
     available: "Available",
     disabled: "Disabled",
-    sortLabel: "Sort models",
-    sort: {
-      catalog: "Official order",
-      priceDesc: "Price: high to low",
-      priceAsc: "Price: low to high",
-      name: "Name",
-    },
     inputPrice: "Input {{price}}",
     outputPrice: "Output {{price}}",
     perMillion: "per 1M tokens",

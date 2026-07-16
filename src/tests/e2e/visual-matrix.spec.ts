@@ -159,10 +159,7 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await expect(model).toHaveAttribute("data-enabled", "false");
   await expect(model).toContainText("Отключена");
   expect(await page.locator(".model-rules li").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
-  expect(await page.locator(".model-sort-select").evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-  })).toBe(true);
+  await expect(page.locator(".model-sort-select")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/model-rules-disabled-ru-dark-840x560.png" });
 });
 
@@ -182,7 +179,7 @@ for (const viewport of viewports) {
     const accountSearch = dialog.getByLabel("Найти учётную запись");
     await accountSearch.fill("pro");
     await expect(dialog.locator(".pool-member-options > label").first()).toContainText("Pro account");
-    await expect(dialog.locator(".pool-member-options em")).toHaveText("Pro");
+    await expect(dialog.locator(".pool-member-options .account-plan-badge")).toHaveText("Pro");
     await page.screenshot({ path: `output/playwright/pool-add-pro-ru-dark-${viewport.width}x${viewport.height}.png` });
     await accountSearch.fill("");
     await dialog.getByText("Business Workspace", { exact: true }).click();
@@ -243,13 +240,18 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
+    const speed = page.getByRole("switch", { name: "Скорость ответа" });
+    await speed.check();
+    await expect(speed).toBeChecked();
     const members = page.locator(".pool-member-list");
     await expect(members.locator(".pool-member-card")).toHaveCount(5);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members).toHaveAttribute("data-layout", "list");
-    await expect(members).toContainText("Pro account · Pro");
+    await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
+    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
     await expect(members).toContainText("API-экв.");
     await expect(members).not.toContainText("Доля");
+    expect(await page.locator(".pool-speed-control").evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
     const listHeight = await members.locator(".pool-member-card").first().evaluate((item) => item.getBoundingClientRect().height);
     await page.screenshot({ path: `output/playwright/pool-layout-list-${viewport.width}x${viewport.height}.png` });
 
@@ -277,7 +279,8 @@ for (const viewport of viewports) {
     const members = page.locator(".pool-member-list");
 
     await expect(members).toHaveAttribute("data-layout", "list");
-    await expect(members).toContainText("Pro account · Pro");
+    await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
+    await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
     await expect(members).toContainText("API equiv.");
     await page.screenshot({ path: `output/playwright/pool-layout-list-en-light-${viewport.width}x${viewport.height}.png` });
 

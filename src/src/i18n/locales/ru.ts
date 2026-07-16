@@ -813,13 +813,6 @@ const relayRu = {
     explanation: "Отключённые модели остаются в списке, но скрываются от клиентов и отклоняются адресом пула.",
     available: "Доступна",
     disabled: "Отключена",
-    sortLabel: "Сортировка моделей",
-    sort: {
-      catalog: "Официальный порядок",
-      priceDesc: "Цена: от высокой",
-      priceAsc: "Цена: от низкой",
-      name: "По названию",
-    },
     inputPrice: "Вход {{price}}",
     outputPrice: "Выход {{price}}",
     perMillion: "за 1 млн токенов",

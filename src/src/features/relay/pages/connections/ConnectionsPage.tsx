@@ -8,6 +8,7 @@ import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse,
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
   Button,
+  AccountPlanBadge,
   ActionMenu,
   ActionMenuItem,
   Dialog,
@@ -24,7 +25,6 @@ import {
   apiSourcePriority,
   apiSourceRole,
   compareAccountPlans,
-  formatAccountPlan,
 } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
@@ -407,7 +407,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
               </div>
             </div>
             <div className="account-facts">
-              <div className="account-fact account-fact-plan"><CreditCard className="account-fact-icon" aria-hidden /><span>{t("accounts.plan")}</span><strong>{formatAccountPlan(account.subscription.planType, t("common.unknown"))}</strong></div>
+              <div className="account-fact account-fact-plan"><CreditCard className="account-fact-icon" aria-hidden /><span>{t("accounts.plan")}</span><strong><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></strong></div>
               <div className="account-fact account-fact-proxy"><Network className="account-fact-icon" aria-hidden /><span>{t("proxies.proxy")}</span><button type="button" className="proxy-status-button" disabled={!canManageProxies} title={!canManageProxies ? t("remote.capabilityUnavailable") : t("proxies.changeAccount")} onClick={() => onProxy(account)}><StatusBadge status={account.proxyAvailable === false ? "error" : account.proxyMode === "account" ? "info" : "ready"} label={account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></button></div>
               <div className="account-fact account-fact-pool"><Layers3 className="account-fact-icon" aria-hidden /><span>{t("accounts.poolParticipation")}</span><label className="account-pool-switch" title={excludedByFreePolicy ? t("accounts.participation.freePolicyHint") : participates ? t("accounts.excludeFromPool") : t("accounts.includeInPool")}><input type="checkbox" role="switch" checked={participates} disabled={busy === `pool-${account.id}`} aria-label={t("accounts.poolParticipationFor", { name: account.label })} onChange={(event) => void perform(`pool-${account.id}`, () => updateParticipation(account, event.target.checked), "feedback.saved")} /><strong>{excludedByFreePolicy && participates ? t("accounts.participation.freePolicy") : participates ? t("accounts.participation.included") : t("accounts.participation.excluded")}</strong></label></div>
             </div>

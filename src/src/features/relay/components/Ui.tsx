@@ -35,6 +35,11 @@ export function accountPlanOption(planType: string | null, unknown: string) {
   return { id: label.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "unknown", label };
 }
 
+export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {
+  const plan = accountPlanOption(planType, unknown);
+  return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
+}
+
 export function compareAccountPlans(left: { id: string; label: string }, right: { id: string; label: string }) {
   const leftRank = accountPlanOrder.indexOf(left.id);
   const rightRank = accountPlanOrder.indexOf(right.id);

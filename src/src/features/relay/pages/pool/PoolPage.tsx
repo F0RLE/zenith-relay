@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, ArrowUpDown, CheckCheck, Clock3, Gauge, KeyRound, LayoutGrid, List, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Rows3, Trash2, X } from "lucide-react";
+import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, LayoutGrid, List, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Rows3, Trash2, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
+import type { AccountSummary, CandidateRuntimeSnapshot, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
+import { AccountPlanBadge, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, isCodexOauthAccountEligible } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { SourceDialog } from "../connections/ConnectionsPage";
 
 type View = "members" | "keys" | "models";
 type MemberLayout = "compact" | "list" | "grid";
-type ModelSort = "catalog" | "price_desc" | "price_asc" | "name";
 type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source"; health: string; quota: null });
 
 export function PoolPage() {
@@ -78,6 +77,8 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   const { mode, runtime, perform, busy, codexPoolOauthSelection } = useRelayState();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
+  const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
+  const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [layout, setLayout] = useState<MemberLayout>(() => {
     const saved = localStorage.getItem("relay.pool.memberLayout");
@@ -116,6 +117,19 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   const refreshQuotas = () => perform("pool-quota-refresh", () => mode === "local"
     ? relayCommands.refreshPoolAccountQuotas()
     : relayCommands.remoteAction({ type: "refresh_pool_quotas" }), "feedback.refreshed");
+  const updateServiceTier = (fast: boolean) => {
+    const defaultServiceTier = fast ? "fast" : "standard";
+    if (defaultServiceTier === serviceTier) return;
+    const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
+    const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
+    const imageBaseModel = runtime?.gateway.imageBaseModel;
+    void perform("pool-service-tier", async () => {
+      if (mode === "local") return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel ?? null);
+      const snapshot = await relayCommands.remoteAction({ type: "set_routing_policy" }, { maxRetryCandidates, routingStrategy, defaultServiceTier, ...(imageBaseModel !== undefined ? { imageBaseModel } : {}) });
+      await relayCommands.syncCodexDefaultServiceTier(defaultServiceTier);
+      return snapshot;
+    });
+  };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
   const statuses = members.map((member) => poolMemberStatus(member, runtimeByMember.get(memberKey(member))));
   const counts = {
@@ -130,6 +144,12 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
         <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small></span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
+            <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}>
+              <Zap aria-hidden />
+              <span className="pool-speed-copy"><small>{t("pool.serviceTier")}</small><strong>{t(`pool.serviceTiers.${serviceTier}`)}</strong></span>
+              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={!supportsServiceTier || busy === "pool-service-tier"} onChange={(event) => updateServiceTier(event.target.checked)} />
+              <span className="pool-speed-track" aria-hidden><span /></span>
+            </label>
             <IconButton className="pool-routing-settings-button" label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
             <IconButton label={t("pool.refreshPolicy")} icon={<Clock3 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} />
           </div>
@@ -156,7 +176,7 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
           ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
-          : [member.label, formatAccountPlan(member.subscription.planType, t("common.unknown"))].join(" · ");
+          : member.label;
         const quota = memberQuota(member);
         const isCurrent = (runtimeState?.inFlight ?? 0) > 0;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
@@ -169,7 +189,7 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"}>
           <div className="pool-member-card-main">
             <div className="pool-member-state" title={runtimeHint}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} />{isCurrent ? <small className="pool-member-current"><Activity aria-hidden />{runtimeState?.halfOpen ? t("pool.recoveryProbe") : runtimeState && runtimeState.inFlight > 1 ? t("pool.activeRequests", { count: runtimeState.inFlight }) : t("pool.currentRoute")}</small> : isLastUsed ? <small className="pool-member-last"><Clock3 aria-hidden />{t("pool.lastRoute")}</small> : <small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small>}</div>
-            <div className="pool-member-identity"><strong title={identity}>{identity}</strong><small title={detail}>{detail}</small></div>
+            <div className="pool-member-identity"><strong title={identity}>{identity}</strong>{member.kind === "source" ? <small title={detail}>{detail}</small> : <div className="pool-member-account-meta">{identity !== member.label ? <small title={detail}>{detail}</small> : null}<AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /></div>}</div>
             <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
             <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
@@ -214,17 +234,16 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const supportsRoutingStrategy = mode !== "remote" || runtime?.gateway.routingStrategy != null;
-  const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
   const supportsImageBaseModel = mode !== "remote" || runtime?.gateway.imageBaseModel !== undefined;
   const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(runtime?.gateway.routingStrategy ?? "adaptive");
-  const [defaultServiceTier, setDefaultServiceTier] = useState<DefaultServiceTier>(runtime?.gateway.defaultServiceTier ?? "standard");
+  const defaultServiceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const [imageBaseModel, setImageBaseModel] = useState(runtime?.gateway.imageBaseModel ?? "auto");
   const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
   const imageModelOptions = useMemo(() => {
     const ids = new Map<string, string>();
     const models = [...(runtime?.gateway.models ?? [])]
       .filter((model) => model.enabled && !model.id.toLowerCase().includes("image"))
-      .sort((left, right) => compareModels(left, right, "price_asc"));
+      .sort((left, right) => compareModelPrice(left, right, 1) || compareModelCatalog(left, right));
     for (const model of models) {
       ids.set(model.id.toLowerCase(), model.id);
     }
@@ -238,25 +257,18 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const payload = {
       maxRetryCandidates,
       ...(supportsRoutingStrategy ? { routingStrategy } : {}),
-      ...(supportsServiceTier ? { defaultServiceTier } : {}),
       ...(supportsImageBaseModel ? { imageBaseModel: imageBaseModel === "auto" ? null : imageBaseModel } : {}),
     };
     const ok = await perform("routing-policy", async () => {
       if (mode === "local") {
         return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel === "auto" ? null : imageBaseModel);
       }
-      const snapshot = await relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
-      if (supportsServiceTier) await relayCommands.syncCodexDefaultServiceTier(defaultServiceTier);
-      return snapshot;
+      return relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
     }, "feedback.saved");
     if (ok) onClose();
   };
   return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}>
     <div className="relay-form pool-policy-form">
-      <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.serviceTier")}</strong><small>{supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}</small></div>
-        <div className="segmented pool-policy-control" role="group" aria-label={t("pool.serviceTier")}><button type="button" className={defaultServiceTier === "standard" ? "active" : ""} aria-pressed={defaultServiceTier === "standard"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("standard")}>{t("pool.serviceTiers.standard")}</button><button type="button" className={defaultServiceTier === "fast" ? "active" : ""} aria-pressed={defaultServiceTier === "fast"} disabled={!supportsServiceTier} onClick={() => setDefaultServiceTier("fast")}>{t("pool.serviceTiers.fast")}</button></div>
-      </div>
       <div className="pool-policy-row">
         <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div>
         <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} />
@@ -345,7 +357,7 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
         <header><strong>{t("connections.accounts")}</strong><span>{t("pool.availableAccounts", { count: allAccounts.length })}</span></header>
         <label className="relay-field"><span>{t("pool.searchAccounts")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchAccountsPlaceholder")} /></label>
         {plans.length > 1 ? <div className="pool-member-plan-tools"><div className="account-plan-filters" role="group" aria-label={t("accounts.filterByPlan")}><span>{t("accounts.plan")}</span><button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => setPlanFilter("all")}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>{plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => setPlanFilter(plan.id)}><span>{plan.label}</span><small>{plan.count}</small></button>)}</div><Button variant="secondary" icon={shownSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} disabled={!accounts.length} onClick={toggleShown}>{shownSelected ? t("pool.clearShown") : t("pool.selectShown", { count: accounts.length })}</Button></div> : null}
-        <div className="pool-member-options">{accounts.map((account) => { const plan = formatAccountPlan(account.subscription.planType, t("common.unknown")); return <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><em data-plan={plan.toLocaleLowerCase()}>{plan}</em></label>; })}</div>
+        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
         {!accounts.length ? <p className="form-note">{t("pool.noMatchingAccounts")}</p> : null}
       </section> : null}
       {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
@@ -423,8 +435,7 @@ function KeyPolicyDialog({ value, onClose }: { value: KeySummary; onClose: () =>
 function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
-  const [sortBy, setSortBy] = useState<ModelSort>("catalog");
-  const models = runtime ? modelSummaries(runtime).sort((left, right) => compareModels(left, right, sortBy)) : [];
+  const models = runtime ? modelSummaries(runtime).sort(compareModelCatalog) : [];
   const toggleModel = (model: ModelSummary) => perform(
     `model-toggle-${model.id}`,
     () => mode === "local"
@@ -436,7 +447,6 @@ function ModelsView() {
   return <section className="model-rules">
     <header>
       <div className="model-rules-copy"><h2>{t("models.visible")}</h2><p>{t("models.explanation")}</p></div>
-      <div className="model-sort-select"><span>{t("models.sortLabel")}</span><OptionMenu className="model-sort-menu" label={t("models.sortLabel")} value={sortBy} onChange={(value) => setSortBy(value as ModelSort)} icon={<ArrowUpDown aria-hidden />} options={[{ value: "catalog", label: t("models.sort.catalog") }, { value: "price_desc", label: t("models.sort.priceDesc") }, { value: "price_asc", label: t("models.sort.priceAsc") }, { value: "name", label: t("models.sort.name") }]} /></div>
     </header>
     <ul>{models.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
@@ -476,12 +486,6 @@ function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["r
     inputMicroUsdPerMillion: null,
     outputMicroUsdPerMillion: null,
   }));
-}
-function compareModels(left: ModelSummary, right: ModelSummary, sortBy: ModelSort) {
-  if (sortBy === "name") return left.id.localeCompare(right.id);
-  if (sortBy === "price_desc") return compareModelPrice(left, right, -1) || compareModelCatalog(left, right);
-  if (sortBy === "price_asc") return compareModelPrice(left, right, 1) || compareModelCatalog(left, right);
-  return compareModelCatalog(left, right);
 }
 function compareModelCatalog(left: ModelSummary, right: ModelSummary) {
   return (left.catalogRank ?? Number.MAX_SAFE_INTEGER) - (right.catalogRank ?? Number.MAX_SAFE_INTEGER)
