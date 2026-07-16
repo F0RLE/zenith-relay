@@ -3249,7 +3249,14 @@ textarea {
 .usage-request-table th {
   line-height: 15px;
   white-space: normal;
+  overflow-wrap: anywhere;
   text-overflow: clip;
+}
+
+.usage-request-table th:nth-child(5),
+.usage-request-table td:nth-child(5) {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .usage-request-table .request-link {
@@ -3278,8 +3285,8 @@ textarea {
 
 .usage-token-breakdown {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
 }
 
 .usage-token-breakdown span {
@@ -6888,6 +6895,31 @@ input[type="password"] {
   .usage-request-table th:nth-child(5) { width: 18%; }
   .usage-request-table th:nth-child(6) { width: 14%; }
   .usage-request-table th:nth-child(8) { width: 17%; }
+  .usage-request-table th {
+    height: auto;
+    line-height: 14px;
+    overflow-wrap: anywhere;
+  }
+  .usage-request-table td:nth-child(5) {
+    line-height: 15px;
+    overflow-wrap: anywhere;
+  }
+  .relay-shell[data-page="usage"] .usage-aggregate-table {
+    width: 100%;
+    min-width: 0;
+  }
+  .usage-aggregate-table th,
+  .usage-aggregate-table td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .usage-aggregate-table th:nth-child(1) { width: 22%; }
+  .usage-aggregate-table th:nth-child(2) { width: 8%; }
+  .usage-aggregate-table th:nth-child(3) { width: 8%; }
+  .usage-aggregate-table th:nth-child(4) { width: 30%; }
+  .usage-aggregate-table th:nth-child(5) { width: 10%; }
+  .usage-aggregate-table th:nth-child(6) { width: 12%; }
+  .usage-aggregate-table th:nth-child(7) { width: 10%; }
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5),
@@ -7079,6 +7111,14 @@ input[type="password"] {
   .relay-shell[data-page="profiles"] .relay-table:not(.profile-snapshot-table) th:nth-child(3),
   .relay-shell[data-page="profiles"] .relay-table:not(.profile-snapshot-table) td:nth-child(3) {
     display: none;
+  }
+}
+
+@media (max-width: 1200px) and (min-width: 1051px) {
+  .account-list[data-layout="list"] .account-facts .relay-status {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
   }
 }
 
