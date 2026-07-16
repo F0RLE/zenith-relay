@@ -2855,23 +2855,61 @@ textarea:focus-visible {
   row-gap: 8px;
 }
 
-.pool-member-toolbar .pool-sort-control {
+.pool-member-toolbar .pool-priority-label {
   order: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12px;
-  font-weight: 600;
+  gap: 9px;
 }
 
-.pool-member-toolbar .pool-sort-control > span {
-  flex: 0 0 auto;
+.pool-member-toolbar .pool-priority-label > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  color: var(--relay-accent-hover);
+}
+
+.pool-member-toolbar .pool-priority-label > span {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.pool-member-toolbar .pool-priority-label strong,
+.pool-member-toolbar .pool-priority-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-toolbar .pool-priority-label strong {
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.pool-member-toolbar .pool-priority-label small {
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 14px;
 }
 
 .pool-member-toolbar .pool-quota-actions {
   order: 2;
   margin-left: auto;
+  gap: 10px;
+}
+
+.pool-member-toolbar .pool-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pool-member-toolbar .pool-control-group + .pool-control-group {
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--relay-border);
 }
 
 .pool-controls {
@@ -2939,6 +2977,11 @@ textarea:focus-visible {
   border-color: var(--relay-accent);
 }
 
+.pool-member-card.current {
+  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  box-shadow: inset 3px 0 0 var(--relay-accent), var(--relay-shadow-soft);
+}
+
 .pool-member-card-main {
   min-height: 62px;
   display: grid;
@@ -2965,6 +3008,21 @@ textarea:focus-visible {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.pool-member-state .pool-member-current {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 0;
+  color: var(--relay-accent-hover);
+  font-weight: 600;
+}
+
+.pool-member-current svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
 }
 
 .pool-member-card .pool-member-identity strong {
@@ -6942,6 +7000,22 @@ input[type="password"] {
 }
 
 @media (max-width: 700px) {
+  .pool-member-toolbar .pool-priority-label,
+  .pool-member-toolbar .pool-quota-actions {
+    width: 100%;
+  }
+
+  .pool-member-toolbar .pool-quota-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+
+  .pool-member-toolbar .pool-control-group + .pool-control-group {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+  }
+
   .setup-progress,
   .setup-footer {
     padding-right: 14px;

@@ -8,6 +8,7 @@ export type MockOptions = {
   compact?: boolean;
   populated?: boolean;
   accountCount?: number;
+  usageAccountIndex?: number;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBoundOauthAccountId?: string | null;
@@ -221,8 +222,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, effectiveWeight: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: account.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
-    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: "a1b2c3d4e5f6", candidateLabel: account.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
+    const usageAccount = accounts[Math.max(0, Math.min(input.usageAccountIndex ?? 0, accounts.length - 1))];
+    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
+    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
       return events.reduce((totals, item) => {
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;

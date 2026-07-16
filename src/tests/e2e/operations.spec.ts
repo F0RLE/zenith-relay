@@ -729,24 +729,17 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
-test("pool display order follows availability and quota without exposing raw priority", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+test("pool priority follows the current eligible route without manual display sorting", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const order = page.locator(".pool-sort-menu .relay-option-trigger");
-  await expect(order).toHaveAccessibleName("Display order: State and quota");
-  await order.click();
-  const options = page.getByRole("listbox", { name: "Display order" }).getByRole("option");
-  await expect(options).toHaveText(["State and quota", "Minimum quota reserve", "Name"]);
-  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Business Workspace");
+  await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
+  await expect(page.locator(".pool-priority-label")).toHaveText("Pool priorityIn use now: Pro account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
+  await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
-  expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
+  expect(await names()).toEqual(["Pro account", "Business Workspace", "Example compatible API", "Personal Plus", "Backup account"]);
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
-  await options.getByText("Minimum quota reserve", { exact: true }).click();
-  expect(await names()).toEqual(["Business Workspace", "Example compatible API", "Backup account", "Personal Plus"]);
-  await order.click();
-  await options.getByText("Name", { exact: true }).click();
-  expect(await names()).toEqual(["Backup account", "Business Workspace", "Example compatible API", "Personal Plus"]);
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
@@ -823,41 +816,36 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
 
-  const header = page.locator(".relay-page-header");
-  await header.locator(".relay-action-menu summary").click();
-  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
+  await expect(dialog).not.toContainText("Accounts tried after an error");
   await expect(dialog).toContainText("Distributes new independent chains by free capacity, quota headroom, and stable measured speed.");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "Distribution mode", "oldest_account");
   await expect(dialog).toContainText("The account added earlier gets priority.");
-  await chooseOption(page, dialog, "Accounts tried after an error", "5");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 5, defaultServiceTier: "fast" } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 3, defaultServiceTier: "fast" } });
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const header = page.locator(".relay-page-header");
-  await header.locator(".relay-action-menu summary").click();
-  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await chooseOption(page, dialog, "Distribution mode", "oldest_account");
-  await chooseOption(page, dialog, "Accounts tried after an error", "4");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 4, routingStrategy: "oldest_account", defaultServiceTier: "fast" },
+    payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", defaultServiceTier: "fast" },
   });
   expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
@@ -866,9 +854,7 @@ test("legacy remote pool keeps the new distribution mode read-only", async ({ pa
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, legacyRemoteRouting: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const header = page.locator(".relay-page-header");
-  await header.locator(".relay-action-menu summary").click();
-  await header.getByRole("menuitem", { name: "Distribution settings", exact: true }).click();
+  await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Request distribution" });
   await expect(dialog.getByRole("button", { name: /^Distribution mode:/ })).toBeDisabled();
   await expect(dialog.getByRole("button", { name: "Standard", exact: true })).toBeDisabled();

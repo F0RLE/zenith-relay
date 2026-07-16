@@ -192,9 +192,9 @@ for (const viewport of viewports) {
     await expect(poolToolbar).toBeVisible();
     expect(await poolToolbar.evaluate((toolbar) => {
       const tabs = document.querySelector<HTMLElement>(".relay-tabs");
-      const trigger = toolbar.querySelector<HTMLElement>(".relay-option-trigger");
-      if (!tabs || !trigger) return false;
-      return trigger.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
+      const priority = toolbar.querySelector<HTMLElement>(".pool-priority-label");
+      if (!tabs || !priority) return false;
+      return priority.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
     })).toBe(true);
     const headerActions = page.locator(".pool-header-actions");
     await expect(headerActions.locator(":scope > *").first()).toHaveClass(/relay-action-menu/);
@@ -202,26 +202,20 @@ for (const viewport of viewports) {
     await headerActions.locator("summary").click();
     const actionMenu = headerActions.getByRole("menu");
     await expect(actionMenu).toBeVisible();
+    await expect(actionMenu).not.toContainText("Настройки распределения");
     expect(await actionMenu.getByRole("menuitem").evaluateAll((items) => items.every((item) => getComputedStyle(item).display === "grid"))).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
     await page.keyboard.press("Escape");
 
-    const sortTrigger = page.locator(".pool-sort-menu .relay-option-trigger");
-    await expect(sortTrigger).toHaveAccessibleName("Порядок отображения: Состояние и квота");
-    await sortTrigger.click();
-    const sortList = page.getByRole("listbox", { name: "Порядок отображения" });
-    await expect(sortList.getByRole("option")).toHaveCount(3);
-    expect(await sortList.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-    })).toBe(true);
-    await page.screenshot({ path: `output/playwright/pool-sort-menu-ru-dark-${viewport.width}x${viewport.height}.png` });
-    await sortList.getByRole("option", { name: "Минимальный запас квоты" }).click();
-    await expect(sortTrigger).toHaveAccessibleName("Порядок отображения: Минимальный запас квоты");
-    await sortTrigger.click();
-    await page.keyboard.press("Escape");
-    await expect(sortList).toBeHidden();
-    await expect(sortTrigger).toBeFocused();
+    await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
+    await expect(page.locator(".pool-priority-label")).toContainText("Приоритет пула");
+    await expect(page.getByRole("button", { name: "Настройки распределения", exact: true })).toBeVisible();
+    const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
+    await expect(poolToolbarGroups).toHaveCount(2);
+    await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh-and-view"]);
+    await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения", "Настройки обновления квот"]);
+    await expect(poolToolbarGroups.nth(1).locator(":scope > *").evaluateAll((items) => items.map((item) => item.classList.contains("view-layout-switcher") ? "layout" : "refresh"))).resolves.toEqual(["refresh", "layout"]);
+    await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
       const cellRect = cell.getBoundingClientRect();
       const center = (cellRect.top + cellRect.bottom) / 2;
@@ -245,7 +239,7 @@ for (const viewport of viewports) {
   });
 
   test(`pool member layouts ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4 });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, usageAccountIndex: 3 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
@@ -276,7 +270,7 @@ for (const viewport of viewports) {
   });
 
   test(`pool member layouts en light ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, accountCount: 4 });
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, accountCount: 4, usageAccountIndex: 3 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
@@ -571,9 +565,7 @@ for (const viewport of viewports) {
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Пул", exact: true }).click();
-      const header = page.locator(".relay-page-header");
-      await header.locator(".relay-action-menu summary").click();
-      await header.getByRole("menuitem", { name: "Настройки распределения", exact: true }).click();
+      await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
       const dialog = page.getByRole("dialog", { name: "Распределение запросов" });
       const strategy = dialog.getByRole("button", { name: /^Режим распределения:/ });
       await expect(strategy).toHaveAttribute("data-value", "adaptive");
@@ -583,6 +575,7 @@ for (const viewport of viewports) {
       await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(2);
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
+      await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
       await expect(dialog).toContainText("Распределяет новые независимые цепочки по свободной нагрузке, запасу квоты и устойчиво измеренной скорости.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
