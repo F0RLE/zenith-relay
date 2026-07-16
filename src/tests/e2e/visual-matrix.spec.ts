@@ -993,5 +993,6 @@ for (const viewport of viewports) {
     await expect(aggregate.getByRole("columnheader")).toHaveCount(7);
     expect(await aggregate.locator(".usage-token-breakdown").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await aggregate.locator("xpath=..").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/usage-models-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }
