@@ -243,19 +243,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, effectiveWeight: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
-    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
-    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
+    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
+    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
+    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
       return events.reduce((totals, item) => {
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
-        totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0;
-        totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0;
+        if (item.generationMs != null) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += item.outputTokens ?? 0; }
+        totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null);
+        totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (item.success && item.outputTokens && item.latencyMs) { totals.speedOutputTokens += item.outputTokens; totals.speedDurationMs += item.latencyMs; }
         totals.apiEquivalent.microUsd += 148; totals.apiEquivalent.pricedTokens += item.totalTokens ?? 0;
         return totals;
-      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
+      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
     let readyKey = "zrk_synthetic_ready_key";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];

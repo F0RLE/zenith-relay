@@ -3,6 +3,7 @@ use crate::local_pool::{
     state::DesktopState,
     store::telemetry_db::{LocalUsagePage, UsageLog},
 };
+use chrono::{DateTime, Days, Local, Utc};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::{UsageQuery, UsageRange};
@@ -34,7 +35,15 @@ pub fn clear_local_usage(state: State<'_, DesktopState>) -> Result<(), CommandEr
     state.telemetry.clear().map_err(Into::into)
 }
 
-fn normalize_usage_query(mut query: UsageQuery) -> UsageQuery {
+fn normalize_usage_query(query: UsageQuery) -> UsageQuery {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default();
+    normalize_usage_query_at(query, now)
+}
+
+fn normalize_usage_query_at(mut query: UsageQuery, now: u64) -> UsageQuery {
     query.page = query.page.max(1);
     query.page_size = if query.page_size == 0 {
         50
@@ -55,15 +64,61 @@ fn normalize_usage_query(mut query: UsageQuery) -> UsageQuery {
             }
         }
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default();
     query.from_ms = match query.range {
-        Some(UsageRange::Daily) => Some(now.saturating_sub(24 * 60 * 60 * 1_000)),
+        Some(UsageRange::Daily) => local_calendar_day_bounds(now).map(|bounds| bounds.0),
         Some(UsageRange::Weekly) => Some(now.saturating_sub(7 * 24 * 60 * 60 * 1_000)),
         Some(UsageRange::Monthly) => Some(now.saturating_sub(30 * 24 * 60 * 60 * 1_000)),
         Some(UsageRange::Custom) | None => query.from_ms,
     };
+    if matches!(query.range, Some(UsageRange::Daily)) {
+        query.to_ms = local_calendar_day_bounds(now).map(|bounds| bounds.1.saturating_sub(1));
+    }
     query
+}
+
+fn local_calendar_day_bounds(now_ms: u64) -> Option<(u64, u64)> {
+    let now =
+        DateTime::<Utc>::from_timestamp_millis(i64::try_from(now_ms).ok()?)?.with_timezone(&Local);
+    let start = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(Local)
+        .earliest()?;
+    let end = now
+        .date_naive()
+        .checked_add_days(Days::new(1))?
+        .and_hms_opt(0, 0, 0)?
+        .and_local_timezone(Local)
+        .earliest()?;
+    Some((
+        u64::try_from(start.timestamp_millis()).ok()?,
+        u64::try_from(end.timestamp_millis()).ok()?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Timelike;
+
+    #[test]
+    fn daily_usage_uses_local_calendar_day() {
+        let now = 1_784_201_430_000;
+        let query = normalize_usage_query_at(
+            UsageQuery {
+                range: Some(UsageRange::Daily),
+                ..Default::default()
+            },
+            now,
+        );
+        let from = query.from_ms.unwrap();
+        let to = query.to_ms.unwrap();
+
+        assert!(from <= now && now <= to);
+        assert!((23 * 60 * 60 * 1_000 - 1..=25 * 60 * 60 * 1_000 - 1).contains(&(to - from)));
+        let start = DateTime::<Utc>::from_timestamp_millis(from as i64)
+            .unwrap()
+            .with_timezone(&Local);
+        assert_eq!((start.hour(), start.minute(), start.second()), (0, 0, 0));
+    }
 }

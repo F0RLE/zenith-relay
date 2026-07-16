@@ -1065,16 +1065,17 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("18.7 tok/s");
+  await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("26.7 tok/s");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest output speed18.7 tok/s");
+  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest output speed26.7 tok/s");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Cache ↑4Reason5Out8", "28", "18.7 tok/s", "128 / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Cache ↑4Reason5Out8", "28", "26.7 tok/s", "128 / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Cache ↑4", "Reason5", "Out8"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Average output speed18.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Generation speed26.7 tok/s");
+  await expect(page.locator(".usage-metrics")).toContainText("Effective end-to-end speed18.7 tok/s");
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
@@ -1086,8 +1087,10 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("First output128 ms");
+  await expect(details).toContainText("Generation time300 ms");
   await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Output speed18.7 tok/s");
+  await expect(details).toContainText("Generation speed26.7 tok/s");
+  await expect(details).toContainText("Effective end-to-end speed18.7 tok/s");
   await expect(details).toContainText("Selection reasonLargest current quota reserve");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");

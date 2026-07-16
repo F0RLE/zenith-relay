@@ -1842,6 +1842,7 @@ mod tests {
         assert_eq!(page.total_pages, 1);
         assert_eq!(page.totals.requests, 1);
         assert_eq!(page.totals.total_tokens, 2);
+        assert_eq!(page.totals.cache_write_input_samples, 1);
         assert_eq!(page.totals.speed_output_tokens, 0);
         assert_eq!(page.models.len(), 1);
         assert_eq!(page.pool_members.len(), 1);

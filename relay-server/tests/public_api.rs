@@ -173,18 +173,26 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(diagnostic["stream"], true);
     assert_eq!(diagnostic["model"], "gpt-test");
 
-    let usage: Value = client
-        .get(format!(
-            "{}/usage?page=1&pageSize=1&range=daily&modelQuery=gpt-test&success=true",
-            first.origin
-        ))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let usage = loop {
+        let usage: Value = client
+            .get(format!(
+                "{}/usage?page=1&pageSize=1&range=daily&modelQuery=gpt-test&success=true",
+                first.origin
+            ))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if usage["total"].as_u64().is_some_and(|total| total >= 2) {
+            break usage;
+        }
+        assert!(Instant::now() < deadline, "usage queue did not drain");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert!(usage["total"].as_u64().is_some_and(|total| total >= 2));
     assert_eq!(usage["events"].as_array().unwrap().len(), 1);
     assert!(usage["totalPages"].as_u64().is_some_and(|pages| pages >= 2));
@@ -729,6 +737,26 @@ async fn remote_gateway_serves_two_hundred_concurrent_requests_and_flushes_usage
         assert!(Instant::now() < deadline, "usage queue did not drain");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let persisted: Value = client
+        .get(format!(
+            "{}/usage?page=1&pageSize={REQUESTS}",
+            server.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let events = persisted["events"].as_array().unwrap();
+    assert_eq!(events.len(), REQUESTS);
+    assert!(events.iter().any(|event| {
+        event
+            .pointer("/routing/inFlightBefore")
+            .and_then(Value::as_u64)
+            .is_some_and(|in_flight| in_flight > 0)
+    }));
     let snapshot: Value = client
         .get(format!("{}/state", server.origin))
         .bearer_auth("synthetic-management-token-value")

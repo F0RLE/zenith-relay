@@ -895,6 +895,8 @@ mod tests {
         assert_eq!(page.total_pages, 2);
         assert_eq!(page.totals.requests, 2);
         assert_eq!(page.totals.total_tokens, 58);
+        assert_eq!(page.totals.cache_write_input_tokens, 4);
+        assert_eq!(page.totals.cache_write_input_samples, 2);
         assert_eq!(page.totals.speed_output_tokens, 28);
         assert_eq!(page.totals.speed_duration_ms, 928);
         assert_eq!(page.totals.api_equivalent.priced_tokens, 58);
@@ -909,6 +911,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(chat.total, 1);
+        assert_eq!(chat.totals.cache_write_input_samples, 1);
         assert_eq!(chat.events[0].request_id, "req_page_2");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
