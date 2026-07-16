@@ -34,7 +34,7 @@ type UsageRow = {
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyUsage, refresh, loading, busy, perform } = useRelayState();
+  const { mode, runtime, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyUsage, refresh, loading, busy, perform, setPage: setShellPage } = useRelayState();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
   const [range, setRange] = useState<Range>("weekly");
@@ -48,6 +48,7 @@ export function UsagePage() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
   const [selected, setSelected] = useState<UsageRow | null>(null);
+  const [localProfileActive, setLocalProfileActive] = useState<boolean | null>(null);
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const usageQuery = useMemo<RemoteUsageQuery>(() => ({
     page,
@@ -82,6 +83,18 @@ export function UsagePage() {
   useEffect(() => {
     setPage(1);
     setSelected(null);
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode !== "local") {
+      setLocalProfileActive(null);
+      return;
+    }
+    let current = true;
+    relayCommands.profileBindings()
+      .then((bindings) => current && setLocalProfileActive(bindings.some((binding) => binding.active && binding.credentialKind === "local_gateway")))
+      .catch(() => current && setLocalProfileActive(null));
+    return () => { current = false; };
   }, [mode]);
 
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
@@ -133,6 +146,11 @@ export function UsagePage() {
 
   return <section className="relay-page">
     <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="secondary" icon={<Download aria-hidden />} busy={busy === "usage-export"} disabled={usageLoading} onClick={exportRows}>{t("common.export")}</Button><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
+    <div className={`usage-source-status ${mode === "local" && localProfileActive === false ? "warning" : ""}`}>
+      <StatusBadge status={mode === "local" && localProfileActive === false ? "warning" : "ready"} label={t(`usage.sources.${mode}`)} />
+      <span>{mode === "local" ? t(localProfileActive === null ? "usage.clientStateUnknown" : localProfileActive ? "usage.clientUsesLocal" : "usage.clientBypassesLocal") : t(`usage.sourceHints.${mode}`)}</span>
+      {mode === "local" && localProfileActive === false ? <Button variant="secondary" onClick={() => setShellPage("pool")}>{t("usage.openPool")}</Button> : null}
+    </div>
     <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
     <div className="metric-band usage-metrics"><div><span>{t("usage.requests")}</span><strong><CompactNumber value={totals.requests} locale={i18n.language} /></strong></div><div><span>{t("common.success")}</span><strong><CompactNumber value={totals.successfulRequests} locale={i18n.language} /></strong></div><div><span>{t("usage.totalTokens")}</span><strong><CompactNumber value={totals.totalTokens} locale={i18n.language} /></strong></div><div title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })}><span>{t("usage.apiEquivalent")}</span><strong>{formatApiEquivalent(totals.apiEquivalent, i18n.language)}</strong></div><div><span>{t("usage.generationSpeed")}</span><strong>{formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.effectiveSpeed")}</span><strong>{formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.timing")}</span><strong>{averageDuration == null ? "-" : `${averageFirstResponse ?? "-"} / ${averageDuration} ms`}</strong></div></div>
     <p className="form-note usage-metric-note">{t("usage.tokenCompositionHint")} {t("usage.visibleSpeedHint")}</p>

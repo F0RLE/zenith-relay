@@ -12,6 +12,7 @@ export type MockOptions = {
   usageActive?: boolean;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
+  codexBindingActive?: boolean;
   codexBoundOauthAccountId?: string | null;
   profileRepairRecommended?: boolean;
   profileSwitchError?: boolean;
@@ -501,9 +502,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
           case "stop_managed_codex_profile": return true;
-          case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
+          case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null, active: true }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
           case "attach_codex_to_account":
-          case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
+          case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null, active: true }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
           case "preview_codex_history_repair": { if (input.historyRepairError) throw { code: "recovery_required", message: "Synthetic history preview failure" }; const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: false, expiresAtMs: Date.now() + 60_000 }; }
           case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };
           case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
@@ -514,7 +515,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_usage": return "C:\\Temp\\usage.json";
           case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.0.5", platform: "windows", mode: "local", schemaVersion: 10, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
-          case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null }] : [];
+          case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.0.5", protocolVersion: 1, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };

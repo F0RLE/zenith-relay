@@ -963,6 +963,21 @@ for (const scenario of [
   });
 }
 
+for (const theme of themes) {
+  test(`usage source mismatch ${theme}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, codexBindingActive: false });
+    await page.setViewportSize({ width: 840, height: 560 });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Использование", exact: true }).click();
+
+    const source = page.locator(".usage-source-status");
+    await expect(source).toContainText("ChatGPT сейчас использует другого провайдера");
+    await expect(source.getByRole("button", { name: "Открыть пул" })).toBeVisible();
+    expect(await source.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/usage-source-mismatch-ru-${theme}-840x560.png` });
+  });
+}
+
 for (const viewport of viewports) {
   test(`usage filter hierarchy ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });

@@ -415,6 +415,7 @@ export type ProfileBinding = {
   credentialKind: "oauth_account" | "api_key" | "local_gateway";
   credentialId: string;
   boundOauthAccountId: string | null;
+  active: boolean;
 };
 
 export type ProfileActivation = {

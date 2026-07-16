@@ -5887,6 +5887,35 @@ textarea {
   color: var(--relay-warning);
 }
 
+.usage-source-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 0;
+  border-block: 1px solid var(--relay-border);
+}
+
+.usage-source-status > span:not(.status-badge) {
+  flex: 1;
+  color: var(--relay-text-muted);
+}
+
+.usage-source-status.warning > span:not(.status-badge) {
+  color: var(--relay-warning);
+}
+
+@media (max-width: 720px) {
+  .usage-source-status {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .usage-source-status > span:not(.status-badge) {
+    flex-basis: calc(100% - 120px);
+  }
+}
+
 .account-export-form {
   gap: 14px;
 }

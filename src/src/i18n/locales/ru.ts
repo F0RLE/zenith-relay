@@ -896,6 +896,19 @@ const relayRu = {
   },
   usage: {
     subtitle: "Диагностика запросов без сохранения их текста и ответов",
+    sources: {
+      local: "Локальный Relay",
+      remote: "Подключённый сервер",
+      zenith: "Zenith API",
+    },
+    sourceHints: {
+      remote: "Статистика загружается с подключённого сервера Relay.",
+      zenith: "Статистика загружается из сервиса Zenith API.",
+    },
+    clientStateUnknown: "Проверяем, какой адрес использует ChatGPT...",
+    clientUsesLocal: "ChatGPT настроен отправлять новые запросы через этот компьютер.",
+    clientBypassesLocal: "ChatGPT сейчас использует другого провайдера. Новые запросы не попадут в эту локальную историю.",
+    openPool: "Открыть пул",
     views: "Виды использования",
     requests: "Запросы",
     tokens: "Токены",

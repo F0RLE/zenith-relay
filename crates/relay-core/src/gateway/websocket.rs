@@ -1067,7 +1067,13 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
 fn event_terminal(value: &Value) -> EventTerminal {
     let outcome = match value.get("type").and_then(Value::as_str) {
         Some("response.completed" | "response.done") => Some(true),
-        Some("response.failed" | "response.incomplete" | "error") => Some(false),
+        Some(
+            "response.failed"
+            | "response.incomplete"
+            | "response.cancelled"
+            | "response.canceled"
+            | "error",
+        ) => Some(false),
         _ => None,
     };
     EventTerminal {

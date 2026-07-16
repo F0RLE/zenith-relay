@@ -2867,7 +2867,13 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
         }
-        Some("response.failed" | "response.incomplete" | "error") => Some(TerminalOutcome::Failure),
+        Some(
+            "response.failed"
+            | "response.incomplete"
+            | "response.cancelled"
+            | "response.canceled"
+            | "error",
+        ) => Some(TerminalOutcome::Failure),
         _ => None,
     };
     let has_output_delta = has_output_delta(&value, event_type);
@@ -3263,7 +3269,13 @@ mod tests {
 
     #[test]
     fn all_responses_error_terminal_types_are_failures() {
-        for event_type in ["response.failed", "response.incomplete", "error"] {
+        for event_type in [
+            "response.failed",
+            "response.incomplete",
+            "response.cancelled",
+            "response.canceled",
+            "error",
+        ] {
             let event = format!("data: {{\"type\":\"{event_type}\"}}\n\n");
             assert_eq!(
                 parse_sse_event(event.as_bytes()).outcome,

@@ -73,6 +73,7 @@ pub struct ProfileBinding {
     pub credential_kind: ProfileCredentialKind,
     pub credential_id: String,
     pub bound_oauth_account_id: Option<String>,
+    pub active: bool,
 }
 
 pub(super) struct UserProfileSnapshot {
@@ -437,11 +438,28 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
     let _profile_guard = lock_codex_profile();
     ensure_single_profile_backup(codex_home, backup_root)?;
     let mut bindings = account_bindings(backup_root)?;
+    for binding in &mut bindings {
+        let profile_dir = Path::new(&binding.profile_dir);
+        let backup_path = account_backup_path(backup_root, profile_dir);
+        let backup_content =
+            fs::read_to_string(&backup_path).map_err(|error| io_error_at(&backup_path, error))?;
+        let backup = parse_account_backup(&backup_content, &backup_path)?;
+        let config_path = profile_dir.join(CONFIG_FILE);
+        let config = read_optional_bytes(&config_path)?;
+        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        let auth_path = profile_dir.join(AUTH_FILE);
+        let auth = read_optional_bytes(&auth_path)?;
+        binding.active = account_managed_config_matches(&document)
+            && account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
+    }
     if let Some(backup) = local_backup(backup_root)? {
+        let profile_dir = canonical_profile_dir(codex_home)?;
+        let config_path = profile_dir.join(CONFIG_FILE);
+        let config = read_optional_bytes(&config_path)?;
+        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        let active = managed_config_matches(&document, &backup);
         bindings.push(ProfileBinding {
-            profile_dir: canonical_profile_dir(codex_home)?
-                .to_string_lossy()
-                .into_owned(),
+            profile_dir: profile_dir.to_string_lossy().into_owned(),
             credential_kind: ProfileCredentialKind::LocalGateway,
             credential_id: if backup.managed_key_id.is_empty() {
                 "local_gateway".to_string()
@@ -449,6 +467,7 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
                 backup.managed_key_id
             },
             bound_oauth_account_id: backup.bound_oauth_account_id,
+            active,
         });
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
@@ -470,7 +489,7 @@ pub fn account_bindings(backup_root: &Path) -> Result<Vec<ProfileBinding>> {
         let path = entry.path();
         let content = fs::read_to_string(&path).map_err(|error| io_error_at(&path, error))?;
         let backup = parse_account_backup(&content, &path)?;
-        bindings.push(binding_from_backup(&backup));
+        bindings.push(binding_from_backup(&backup, false));
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
     Ok(bindings)
@@ -762,6 +781,7 @@ fn switch_to_local_with(
         credential_kind: ProfileCredentialKind::LocalGateway,
         credential_id: key_id.to_string(),
         bound_oauth_account_id: backup.bound_oauth_account_id,
+        active: true,
     })
 }
 
@@ -1235,7 +1255,7 @@ fn attach_account_locked(
             merge_rollbacks(config_rollback, backup_rollback),
         ));
     }
-    Ok(binding_from_backup(&backup))
+    Ok(binding_from_backup(&backup, true))
 }
 
 #[cfg(test)]
@@ -1336,7 +1356,7 @@ fn restore_account_locked(
             ));
         }
     }
-    Ok(Some(binding_from_backup(&backup)))
+    Ok(Some(binding_from_backup(&backup, true)))
 }
 
 fn sync_account_profile_with(
@@ -1582,12 +1602,13 @@ fn serialize_account_backup(backup: &AccountProfileBackup) -> Result<String> {
     Ok(format!("{content}\n"))
 }
 
-fn binding_from_backup(backup: &AccountProfileBackup) -> ProfileBinding {
+fn binding_from_backup(backup: &AccountProfileBackup, active: bool) -> ProfileBinding {
     ProfileBinding {
         profile_dir: backup.profile_dir.clone(),
         credential_kind: ProfileCredentialKind::OAuthAccount,
         credential_id: backup.managed_account_id.clone(),
         bound_oauth_account_id: None,
+        active,
     }
 }
 
@@ -2774,7 +2795,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(binding.credential_id, "account-local");
-        assert_eq!(account_bindings(&backups).unwrap(), vec![binding.clone()]);
+        let stored_bindings = account_bindings(&backups).unwrap();
+        assert_eq!(stored_bindings.len(), 1);
+        assert_eq!(stored_bindings[0].credential_id, binding.credential_id);
+        assert!(profile_bindings(&home, &backups).unwrap()[0].active);
         assert!(!fs::read_to_string(home.join(CONFIG_FILE))
             .unwrap()
             .contains("model_provider ="));
@@ -3001,6 +3025,36 @@ mod tests {
             .unwrap()
             .contains("original"));
         assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_binding_detects_an_external_provider_takeover() {
+        let (root, home, backups) = profile_dirs("external-provider-active-state");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+        fs::write(home.join(AUTH_FILE), "{\"auth_mode\":\"apikey\"}").unwrap();
+        let secrets = MemorySecrets::default();
+        switch_to_local_with(
+            &home,
+            &backups,
+            "key-local",
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            None,
+            &secrets,
+        )
+        .unwrap();
+        assert!(profile_bindings(&home, &backups).unwrap()[0].active);
+
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"codex_local_access\"\n\n[model_providers.codex_local_access]\nbase_url = \"https://api.example.test/v1\"\n",
+        )
+        .unwrap();
+        let bindings = profile_bindings(&home, &backups).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert!(!bindings[0].active);
+
         fs::remove_dir_all(root).unwrap();
     }
 

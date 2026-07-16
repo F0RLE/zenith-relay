@@ -1070,6 +1070,16 @@ test("usage filters name independent choices", async ({ page }) => {
   await expect(page.getByRole("option").first()).toHaveText("Any protocol");
 });
 
+test("local usage warns when ChatGPT bypasses localhost", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, codexBindingActive: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+
+  await expect(page.getByText("ChatGPT currently uses another provider. New requests will not appear in this local history.")).toBeVisible();
+  await page.getByRole("button", { name: "Open pool" }).click();
+  await expect(page.locator('.relay-shell')).toHaveAttribute("data-page", "pool");
+});
+
 test("usage attributes API token totals to the selected account", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");

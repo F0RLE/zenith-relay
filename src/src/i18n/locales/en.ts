@@ -896,6 +896,19 @@ const relayEn = {
   },
   usage: {
     subtitle: "Request diagnostics without prompt or response bodies",
+    sources: {
+      local: "Local Relay",
+      remote: "Connected server",
+      zenith: "Zenith API",
+    },
+    sourceHints: {
+      remote: "Statistics are loaded from the connected Relay server.",
+      zenith: "Statistics are loaded from the Zenith API service.",
+    },
+    clientStateUnknown: "Checking which address ChatGPT uses...",
+    clientUsesLocal: "ChatGPT is configured to send new requests through this computer.",
+    clientBypassesLocal: "ChatGPT currently uses another provider. New requests will not appear in this local history.",
+    openPool: "Open pool",
     views: "Usage views",
     requests: "Requests",
     tokens: "Tokens",
