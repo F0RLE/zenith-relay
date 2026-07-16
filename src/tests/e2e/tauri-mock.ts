@@ -9,6 +9,7 @@ export type MockOptions = {
   populated?: boolean;
   accountCount?: number;
   usageAccountIndex?: number;
+  usageActive?: boolean;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBoundOauthAccountId?: string | null;
@@ -161,7 +162,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       authAvailable: true,
     }];
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null };
-    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; nextRetryAtMs: number | null; effectiveWeight: number; halfOpen: boolean; dispatches: number };
+    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { catalogRank: 6, inputMicroUsdPerMillion: 750_000, outputMicroUsdPerMillion: 4_500_000 },
@@ -206,10 +207,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       .map((item, index) => ({
         candidateId: item.id,
         kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
-        available: item.enabled && !item.draining && !("routingExclusion" in item && item.routingExclusion),
-        inFlight: item.id === usageAccount.id ? 1 : 0,
+        available: item.enabled && !item.draining && !("routingExclusion" in item && item.routingExclusion) && !("quota" in item && [item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0)),
+        inFlight: input.usageActive === false ? 0 : item.id === usageAccount.id ? 1 : 0,
+        lastUsedAtMs: item.id === usageAccount.id ? Date.now() - 1_000 : null,
         nextRetryAtMs: null,
-        effectiveWeight: Math.max(1, item.weight) * 100,
         halfOpen: false,
         dispatches: index,
       }));
@@ -242,21 +243,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       };
     }
 
-    const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, effectiveWeight: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
-    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
-    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
+    const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
+    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
+    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
+    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
       return events.reduce((totals, item) => {
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
         if (item.ttftMs != null) { totals.ttftMs += item.ttftMs; totals.ttftSamples += 1; }
         if (item.generationMs != null) { totals.generationMs += item.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += item.outputTokens ?? 0; }
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null);
-        totals.cacheWriteInputTokens += item.cacheWriteInputTokens ?? 0; totals.cacheWriteInputSamples += Number(item.cacheWriteInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (item.success && item.outputTokens && item.latencyMs) { totals.speedOutputTokens += item.outputTokens; totals.speedDurationMs += item.latencyMs; }
         totals.apiEquivalent.microUsd += 148; totals.apiEquivalent.pricedTokens += item.totalTokens ?? 0;
         return totals;
-      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
+      }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
     let readyKey = "zrk_synthetic_ready_key";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];

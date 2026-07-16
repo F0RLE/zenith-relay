@@ -34,7 +34,6 @@ pub struct UsageEvent {
     pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
-    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -69,7 +68,6 @@ struct PriceCatalog {
     schema_version: u32,
     catalog_version: String,
     source_url: String,
-    cache_write_source_url: String,
     verified_at: String,
     currency: String,
     unit_tokens: u64,
@@ -81,7 +79,6 @@ struct ModelPrice {
     id: String,
     input_micro_usd_per_million: u64,
     cached_input_micro_usd_per_million: Option<u64>,
-    cache_write_input_micro_usd_per_million: Option<u64>,
     output_micro_usd_per_million: u64,
 }
 
@@ -89,7 +86,6 @@ pub fn estimate_api_equivalent(
     model: Option<&str>,
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
-    cache_write_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 ) -> ApiEquivalentSummary {
@@ -105,18 +101,12 @@ pub fn estimate_api_equivalent(
     };
     let input_tokens = input_tokens.unwrap_or_default();
     let cached_input_tokens = cached_input_tokens.map(|tokens| tokens.min(input_tokens));
-    let cache_write_input_tokens = cache_write_input_tokens.map(|tokens| {
-        tokens.min(input_tokens.saturating_sub(cached_input_tokens.unwrap_or_default()))
-    });
-    let classified_input_tokens = cached_input_tokens
-        .unwrap_or_default()
-        .saturating_add(cache_write_input_tokens.unwrap_or_default());
-    let uncached_input_tokens = cached_input_tokens
-        .zip(cache_write_input_tokens)
-        .map(|(cached, written)| input_tokens.saturating_sub(cached).saturating_sub(written));
+    let uncached_input_tokens =
+        cached_input_tokens.map(|cached| input_tokens.saturating_sub(cached));
     let output_tokens = output_tokens.unwrap_or_default();
-    let priced_input_tokens =
-        classified_input_tokens.saturating_add(uncached_input_tokens.unwrap_or_default());
+    let priced_input_tokens = cached_input_tokens
+        .unwrap_or_default()
+        .saturating_add(uncached_input_tokens.unwrap_or_default());
     ApiEquivalentSummary {
         micro_usd: token_cost(
             uncached_input_tokens.unwrap_or_default(),
@@ -126,12 +116,6 @@ pub fn estimate_api_equivalent(
             cached_input_tokens.unwrap_or_default(),
             price
                 .cached_input_micro_usd_per_million
-                .unwrap_or(price.input_micro_usd_per_million),
-        ))
-        .saturating_add(token_cost(
-            cache_write_input_tokens.unwrap_or_default(),
-            price
-                .cache_write_input_micro_usd_per_million
                 .unwrap_or(price.input_micro_usd_per_million),
         ))
         .saturating_add(token_cost(
@@ -179,15 +163,11 @@ fn price_catalog() -> Option<&'static PriceCatalog> {
                 && catalog.currency == "USD"
                 && !catalog.catalog_version.is_empty()
                 && !catalog.source_url.is_empty()
-                && !catalog.cache_write_source_url.is_empty()
                 && !catalog.verified_at.is_empty()
                 && catalog.models.iter().all(|price| {
                     price
                         .cached_input_micro_usd_per_million
                         .is_none_or(|cached| cached <= price.input_micro_usd_per_million)
-                        && price
-                            .cache_write_input_micro_usd_per_million
-                            .is_none_or(|write| write >= price.input_micro_usd_per_million)
                 })
         })
 }
@@ -209,7 +189,6 @@ mod pricing_tests {
             Some("gpt-5.4"),
             Some(1_000_000),
             Some(400_000),
-            Some(0),
             Some(100_000),
             Some(1_100_000),
         );
@@ -232,28 +211,12 @@ mod pricing_tests {
                 .cached_input_micro_usd_per_million,
             Some(75_000)
         );
-        assert_eq!(
-            catalog
-                .models
-                .iter()
-                .find(|model| model.id == "gpt-5.6-sol")
-                .unwrap()
-                .cache_write_input_micro_usd_per_million,
-            Some(6_250_000)
-        );
     }
 
     #[test]
     fn unknown_or_unsplit_usage_is_never_silently_priced() {
         assert_eq!(
-            estimate_api_equivalent(
-                Some("private-model"),
-                Some(2),
-                Some(1),
-                None,
-                Some(3),
-                Some(5)
-            ),
+            estimate_api_equivalent(Some("private-model"), Some(2), Some(1), Some(3), Some(5)),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -261,7 +224,7 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, None, Some(9)),
+            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, Some(9)),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -269,15 +232,8 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(
-                Some("gpt-5.4"),
-                Some(10),
-                Some(100),
-                Some(0),
-                Some(0),
-                Some(10)
-            )
-            .micro_usd,
+            estimate_api_equivalent(Some("gpt-5.4"), Some(10), Some(100), Some(0), Some(10))
+                .micro_usd,
             3
         );
         assert_eq!(
@@ -285,12 +241,11 @@ mod pricing_tests {
                 Some("gpt-5.6-sol"),
                 Some(1_000_000),
                 Some(100_000),
-                Some(200_000),
                 Some(0),
                 Some(1_000_000)
             )
             .micro_usd,
-            4_800_000
+            4_550_000
         );
         assert!(api_model_price("gpt-future-codex").is_none());
     }

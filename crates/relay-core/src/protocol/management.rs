@@ -307,8 +307,6 @@ pub struct UsageSummary {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache_write_input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -329,10 +327,6 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub cached_input_samples: u64,
-    #[serde(default)]
-    pub cache_write_input_tokens: u64,
-    #[serde(default)]
-    pub cache_write_input_samples: u64,
     pub reasoning_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -473,7 +467,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.reasoning_tokens, None);
-        assert_eq!(summary.cache_write_input_tokens, None);
         assert_eq!(summary.ttft_ms, None);
     }
 

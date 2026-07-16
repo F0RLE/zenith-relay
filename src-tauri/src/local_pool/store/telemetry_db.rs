@@ -113,7 +113,14 @@ PRAGMA user_version = 10;
 COMMIT;
 "#;
 
-const USAGE_SCHEMA_VERSION: u32 = 10;
+const MIGRATION_011: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs DROP COLUMN cache_write_input_tokens;
+PRAGMA user_version = 11;
+COMMIT;
+"#;
+
+const USAGE_SCHEMA_VERSION: u32 = 11;
 const PRUNE_USAGE_SQL: &str =
     "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
 
@@ -144,7 +151,6 @@ pub struct UsageLog {
     pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
-    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -216,6 +222,9 @@ impl TelemetryDb {
         if version <= 9 {
             connection.execute_batch(MIGRATION_010).map_err(db_error)?;
         }
+        if version <= 10 {
+            connection.execute_batch(MIGRATION_011).map_err(db_error)?;
+        }
         connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -248,8 +257,8 @@ impl TelemetryDb {
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                    reasoning_tokens, output_tokens, total_tokens, routing_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     event.request_id,
                     event.attempt,
@@ -268,7 +277,6 @@ impl TelemetryDb {
                     event.generation_ms.map(sql_u64),
                     event.input_tokens.map(sql_u64),
                     event.cached_input_tokens.map(sql_u64),
-                    event.cache_write_input_tokens.map(sql_u64),
                     event.reasoning_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
@@ -289,8 +297,8 @@ impl TelemetryDb {
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
-                    reasoning_tokens, output_tokens, total_tokens, routing_json
+                    ttft_ms, generation_ms, input_tokens, cached_input_tokens, reasoning_tokens,
+                    output_tokens, total_tokens, routing_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -326,8 +334,6 @@ impl TelemetryDb {
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
                 (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
-                (group.totals.cache_write_input_samples > 0)
-                    .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
             );
@@ -345,8 +351,8 @@ impl TelemetryDb {
             "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                 local_key_id, source_id, candidate_id, account_id, requested_model,
                 resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
-                reasoning_tokens, output_tokens, total_tokens, routing_json
+                ttft_ms, generation_ms, input_tokens, cached_input_tokens, reasoning_tokens,
+                output_tokens, total_tokens, routing_json
              FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -384,9 +390,8 @@ impl TelemetryDb {
             .prepare(
                 "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model),
-                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
-                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
+                    SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens),
+                    SUM(total_tokens), COUNT(input_tokens), COUNT(cached_input_tokens)
                  FROM request_logs
                  GROUP BY 1, 2, 3",
             )
@@ -395,12 +400,10 @@ impl TelemetryDb {
             .query_map([], |row| {
                 let input_tokens: Option<i64> = row.get(3)?;
                 let cached_input_tokens: Option<i64> = row.get(4)?;
-                let cache_write_input_tokens: Option<i64> = row.get(5)?;
-                let output_tokens: Option<i64> = row.get(6)?;
-                let total_tokens: Option<i64> = row.get(7)?;
-                let input_samples: i64 = row.get(8)?;
-                let cached_samples: i64 = row.get(9)?;
-                let cache_write_samples: i64 = row.get(10)?;
+                let output_tokens: Option<i64> = row.get(5)?;
+                let total_tokens: Option<i64> = row.get(6)?;
+                let input_samples: i64 = row.get(7)?;
+                let cached_samples: i64 = row.get(8)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -409,9 +412,6 @@ impl TelemetryDb {
                         input_tokens.map(rust_u64),
                         (input_samples > 0 && cached_samples == input_samples)
                             .then(|| cached_input_tokens.map(rust_u64))
-                            .flatten(),
-                        (input_samples > 0 && cache_write_samples == input_samples)
-                            .then(|| cache_write_input_tokens.map(rust_u64))
                             .flatten(),
                         output_tokens.map(rust_u64),
                         total_tokens.map(rust_u64),
@@ -531,8 +531,7 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
         THEN COALESCE(output_tokens, 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
-    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
+    COUNT(cached_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
     COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
@@ -650,13 +649,11 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         input_tokens: rust_u64(row.get(offset + 8)?),
         cached_input_tokens: rust_u64(row.get(offset + 9)?),
         cached_input_samples: rust_u64(row.get(offset + 10)?),
-        cache_write_input_tokens: rust_u64(row.get(offset + 11)?),
-        cache_write_input_samples: rust_u64(row.get(offset + 12)?),
-        reasoning_tokens: rust_u64(row.get(offset + 13)?),
-        output_tokens: rust_u64(row.get(offset + 14)?),
-        total_tokens: rust_u64(row.get(offset + 15)?),
-        speed_output_tokens: rust_u64(row.get(offset + 16)?),
-        speed_duration_ms: rust_u64(row.get(offset + 17)?),
+        reasoning_tokens: rust_u64(row.get(offset + 11)?),
+        output_tokens: rust_u64(row.get(offset + 12)?),
+        total_tokens: rust_u64(row.get(offset + 13)?),
+        speed_output_tokens: rust_u64(row.get(offset + 14)?),
+        speed_duration_ms: rust_u64(row.get(offset + 15)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -667,11 +664,10 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
     let generation_ms: Option<i64> = row.get(16)?;
     let input_tokens: Option<i64> = row.get(17)?;
     let cached_input_tokens: Option<i64> = row.get(18)?;
-    let cache_write_input_tokens: Option<i64> = row.get(19)?;
-    let reasoning_tokens: Option<i64> = row.get(20)?;
-    let output_tokens: Option<i64> = row.get(21)?;
-    let total_tokens: Option<i64> = row.get(22)?;
-    let routing_json: Option<String> = row.get(23)?;
+    let reasoning_tokens: Option<i64> = row.get(19)?;
+    let output_tokens: Option<i64> = row.get(20)?;
+    let total_tokens: Option<i64> = row.get(21)?;
+    let routing_json: Option<String> = row.get(22)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -695,7 +691,6 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         generation_ms: generation_ms.map(rust_u64),
         input_tokens: input_tokens.map(rust_u64),
         cached_input_tokens: cached_input_tokens.map(rust_u64),
-        cache_write_input_tokens: cache_write_input_tokens.map(rust_u64),
         reasoning_tokens: reasoning_tokens.map(rust_u64),
         output_tokens: output_tokens.map(rust_u64),
         total_tokens: total_tokens.map(rust_u64),
@@ -768,7 +763,6 @@ mod tests {
                 reason: SelectionReason::QuotaHeadroom,
                 eligible_candidates: 4,
                 quota_remaining_basis_points: Some(6_300),
-                effective_weight: 6_300,
                 in_flight_before: 0,
                 dispatches_before: 3,
             }),
@@ -786,7 +780,6 @@ mod tests {
             generation_ms: Some(8),
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
-            cache_write_input_tokens: Some(1),
             reasoning_tokens: Some(2),
             output_tokens: Some(3),
             total_tokens: Some(5),
@@ -799,7 +792,6 @@ mod tests {
         assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
         assert_eq!(logs[0].ttft_ms, Some(4));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
-        assert_eq!(logs[0].cache_write_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
         assert_eq!(
             logs[0].routing.as_ref().map(|routing| routing.reason),
@@ -863,7 +855,6 @@ mod tests {
             generation_ms: Some(300),
             input_tokens: Some(20),
             cached_input_tokens: Some(12),
-            cache_write_input_tokens: Some(4),
             reasoning_tokens: Some(5),
             output_tokens: Some(8),
             total_tokens: Some(28),
@@ -877,7 +868,6 @@ mod tests {
         event.ttft_ms = Some(100);
         event.input_tokens = Some(10);
         event.cached_input_tokens = Some(0);
-        event.cache_write_input_tokens = Some(0);
         event.reasoning_tokens = Some(0);
         event.output_tokens = Some(20);
         event.total_tokens = Some(30);
@@ -895,8 +885,6 @@ mod tests {
         assert_eq!(page.total_pages, 2);
         assert_eq!(page.totals.requests, 2);
         assert_eq!(page.totals.total_tokens, 58);
-        assert_eq!(page.totals.cache_write_input_tokens, 4);
-        assert_eq!(page.totals.cache_write_input_samples, 2);
         assert_eq!(page.totals.speed_output_tokens, 28);
         assert_eq!(page.totals.speed_duration_ms, 928);
         assert_eq!(page.totals.api_equivalent.priced_tokens, 58);
@@ -911,7 +899,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(chat.total, 1);
-        assert_eq!(chat.totals.cache_write_input_samples, 1);
         assert_eq!(chat.events[0].request_id, "req_page_2");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
@@ -947,7 +934,6 @@ mod tests {
             generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
-            cache_write_input_tokens: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
@@ -1000,7 +986,6 @@ mod tests {
             generation_ms: None,
             input_tokens: Some(20),
             cached_input_tokens: Some(10),
-            cache_write_input_tokens: Some(5),
             reasoning_tokens: Some(3),
             output_tokens: Some(8),
             total_tokens: Some(28),
@@ -1010,7 +995,7 @@ mod tests {
         assert_eq!(
             equivalents.accounts.get("account_1"),
             Some(&ApiEquivalentSummary {
-                micro_usd: 149,
+                micro_usd: 148,
                 priced_tokens: 28,
                 unpriced_tokens: 0,
             })
@@ -1169,7 +1154,6 @@ mod tests {
                 generation_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
-                cache_write_input_tokens: None,
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,

@@ -2608,7 +2608,6 @@ fn usage_event(
         generation_ms: None,
         input_tokens: None,
         cached_input_tokens: None,
-        cache_write_input_tokens: None,
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
@@ -3019,17 +3018,6 @@ fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cached_tokens"))
         .and_then(Value::as_u64)
         .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
-    event.cache_write_input_tokens = usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cache_write_tokens"))
-        .or_else(|| {
-            usage
-                .get("prompt_tokens_details")
-                .and_then(|details| details.get("cache_write_tokens"))
-        })
-        .or_else(|| usage.get("cache_write_tokens"))
-        .and_then(Value::as_u64)
-        .map(|written| written.min(input_tokens.unwrap_or(written)));
     event.reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
@@ -3212,7 +3200,6 @@ mod tests {
                 generation_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
-                cache_write_input_tokens: None,
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
@@ -3240,12 +3227,11 @@ mod tests {
         let mut event = test_usage_event();
         populate_tokens(
             &mut event,
-            br#"{"response":{"response":{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30,"cache_write_tokens":7},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":10}}}}"#,
+            br#"{"response":{"response":{"usage":{"input_tokens":16,"input_tokens_details":{"cached_tokens":30},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":10}}}}"#,
         );
 
         assert_eq!(event.input_tokens, Some(16));
         assert_eq!(event.cached_input_tokens, Some(16));
-        assert_eq!(event.cache_write_input_tokens, Some(7));
         assert_eq!(event.reasoning_tokens, Some(5));
         assert_eq!(event.output_tokens, Some(5));
         assert_eq!(event.total_tokens, Some(21));
@@ -3263,14 +3249,13 @@ mod tests {
             Arc::new(|_, _| {}),
         );
         stream.ingest_sse(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9,\"cache_write_tokens\":5},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
         );
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, Some(32));
         assert_eq!(events[0].cached_input_tokens, Some(9));
-        assert_eq!(events[0].cache_write_input_tokens, Some(5));
         assert_eq!(events[0].reasoning_tokens, Some(4));
         assert_eq!(events[0].output_tokens, Some(6));
         assert_eq!(events[0].total_tokens, Some(38));
@@ -3369,7 +3354,6 @@ mod tests {
             generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
-            cache_write_input_tokens: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,

@@ -576,7 +576,7 @@ for (const viewport of viewports) {
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).toContainText("Отдаёт больше запросов свободным аккаунтам с большим запасом квоты и стабильной скоростью.");
+      await expect(dialog).toContainText("Среди свободных аккаунтов выбирает максимальный остаток квоты, а при равенстве чередует их.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -664,7 +664,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
-    await expect(dialog).toContainText("Selection reasonLargest current quota reserve");
+    await expect(dialog).toContainText("Selection reasonGreatest quota remaining");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");
     expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
@@ -909,8 +909,10 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.getByRole("button", { name: "Правила участника пула: Personal Plus", exact: true }).click();
   let dialog = page.getByRole("dialog", { name: /Правила участника пула/ });
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText("Приоритет при равенстве", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Доля трафика", { exact: true })).toBeVisible();
+  await expect(dialog).not.toContainText("Приоритет при равенстве");
+  await expect(dialog).not.toContainText("Доля трафика");
+  await expect(dialog.getByText("Не назначать запросы", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Разрешённые модели", { exact: true })).toBeVisible();
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 
@@ -918,7 +920,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.locator(".request-disclosure").click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("Причина выбораНаибольший текущий запас квоты");
+  await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
   await expect(dialog).toContainText("Доступных участников4");
   await expect(dialog).toContainText("Квота при выборе63.00%");
   expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);

@@ -84,6 +84,7 @@ enum WebSocketBehavior {
     Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
     Hold(Arc<Notify>),
     Close,
+    OutputThenClose,
 }
 
 struct TestServer {
@@ -864,7 +865,7 @@ async fn orphaned_http_response_with_tool_output_is_not_reset() {
 }
 
 #[tokio::test]
-async fn stale_http_response_affinity_is_invalidated_before_fallback() {
+async fn stale_http_response_affinity_resets_before_quota_routing() {
     let (fallback_upstream, fallback_state) =
         spawn_upstream(vec![success_reply("fallback-response")]).await;
     let (owner_upstream, owner_state) = spawn_upstream(vec![
@@ -877,6 +878,7 @@ async fn stale_http_response_affinity_is_invalidated_before_fallback() {
                 "code": "previous_response_not_found"
             }}),
         ),
+        success_reply("recovered-response"),
     ])
     .await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -927,9 +929,9 @@ async fn stale_http_response_affinity_is_invalidated_before_fallback() {
         .json()
         .await
         .unwrap();
-    assert_eq!(recovered["id"], "fallback-response");
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
-    assert_eq!(fallback_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(recovered["id"], "recovered-response");
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 3);
+    assert!(fallback_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     assert!(events[0].success);
@@ -938,7 +940,7 @@ async fn stale_http_response_affinity_is_invalidated_before_fallback() {
         Some("response_affinity_miss")
     );
     assert!(events[2].success);
-    assert_eq!(events[2].candidate_id.as_deref(), Some("fallback-account"));
+    assert_eq!(events[2].candidate_id.as_deref(), Some("owner-account"));
 }
 
 #[tokio::test]
@@ -1238,6 +1240,73 @@ async fn account_websocket_does_not_retry_after_output_begins() {
 }
 
 #[tokio::test]
+async fn account_websocket_reports_a_late_close_as_502_without_replaying() {
+    let (failing_upstream, failing_state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::OutputThenClose).await;
+    let (reserve_upstream, reserve_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "failing-account", "failing-access").await;
+    register_ready(&authority, "reserve-account", "reserve-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account(
+                "failing-account",
+                "provider-failing",
+                &failing_upstream,
+                200,
+            ),
+            account(
+                "reserve-account",
+                "provider-reserve",
+                &reserve_upstream,
+                100,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "close late"}).to_string(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.output_text.delta"
+    );
+    let error = receive_websocket_json(&mut socket).await;
+    assert_eq!(error["type"], "error");
+    assert_eq!(error["status"], StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(error["error"]["code"], "upstream_websocket_closed");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(failing_state.requests.lock().unwrap().len(), 1);
+    assert!(reserve_state.requests.lock().unwrap().is_empty());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_websocket_closed")
+    );
+}
+
+#[tokio::test]
 async fn abrupt_websocket_disconnect_releases_its_lease_without_retrying() {
     let release = Arc::new(Notify::new());
     let (upstream, state) =
@@ -1417,8 +1486,13 @@ async fn concurrent_websocket_chats_are_balanced_and_release_all_leases() {
     })
     .await
     .expect("websocket usage events did not finish");
-    assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
-    assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
+    let first_requests = first_state.requests.lock().unwrap().len();
+    let second_requests = second_state.requests.lock().unwrap().len();
+    assert_eq!(first_requests + second_requests, REQUESTS);
+    assert!(
+        first_requests.abs_diff(second_requests) <= REQUESTS / 20,
+        "parallel routing was unexpectedly skewed: {first_requests}/{second_requests}"
+    );
     assert!(gateway
         .runtime
         .as_ref()
@@ -1752,7 +1826,7 @@ async fn orphaned_websocket_response_resets_once_without_tool_output() {
 }
 
 #[tokio::test]
-async fn stale_websocket_response_affinity_is_invalidated_before_fallback() {
+async fn stale_websocket_response_affinity_resets_before_quota_routing() {
     let (fallback_upstream, fallback_state) = spawn_websocket_upstream().await;
     let (owner_upstream, owner_state) = spawn_websocket_upstream_with_behavior(
         WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
@@ -1769,6 +1843,10 @@ async fn stale_websocket_response_affinity_is_invalidated_before_fallback() {
                     "code": "previous_response_not_found"
                 }
             })],
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "recovered"}),
+                json!({"type": "response.completed", "response": {"id": "recovered-ws-response"}}),
+            ],
         ])))),
     )
     .await;
@@ -1839,15 +1917,15 @@ async fn stale_websocket_response_affinity_is_invalidated_before_fallback() {
         .unwrap();
     assert_eq!(
         receive_websocket_json(&mut second_socket).await["delta"],
-        "hello"
+        "recovered"
     );
     assert_eq!(
         receive_websocket_completion(&mut second_socket).await["response"]["id"],
-        "ws-response"
+        "recovered-ws-response"
     );
 
-    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
-    assert_eq!(fallback_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 3);
+    assert!(fallback_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     assert_eq!(
@@ -2509,7 +2587,7 @@ fn account(
     id: &str,
     chatgpt_account_id: &str,
     server: &TestServer,
-    priority: i32,
+    quota_remaining_basis_points: i32,
 ) -> RuntimeAccount {
     RuntimeAccount {
         id: id.to_string(),
@@ -2519,12 +2597,15 @@ fn account(
         models: vec![MODEL.to_string()],
         enabled: true,
         draining: false,
-        priority,
+        priority: 0,
         weight: 1,
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         health: CandidateHealth::Healthy,
-        quota: CandidateQuota::Unknown,
+        quota: u64::try_from(quota_remaining_basis_points)
+            .ok()
+            .filter(|remaining| *remaining > 0)
+            .map_or(CandidateQuota::Unknown, CandidateQuota::Available),
         created_at_ms: 1,
         last_used_at_ms: None,
         cooldowns: Default::default(),
@@ -2881,6 +2962,9 @@ async fn upstream_websocket(
                     let _ = socket.send(AxumWsMessage::Close(None)).await;
                     return;
                 }
+                WebSocketBehavior::OutputThenClose => {
+                    vec![json!({"type": "response.output_text.delta", "delta": "partial"})]
+                }
             };
             for event in events {
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -2891,6 +2975,10 @@ async fn upstream_websocket(
                 {
                     return;
                 }
+            }
+            if matches!(&state.behavior, WebSocketBehavior::OutputThenClose) {
+                let _ = socket.send(AxumWsMessage::Close(None)).await;
+                return;
             }
         }
     })

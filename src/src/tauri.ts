@@ -88,7 +88,6 @@ export type LocalUsageLog = {
   ttftMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  cacheWriteInputTokens: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;

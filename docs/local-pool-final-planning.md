@@ -120,12 +120,11 @@ Runtime ordering is intentionally small:
 1. mandatory `previous_response_id` binding to the account that created it;
 2. explicit API-source role: primary first, stabilizer with OAuth accounts,
    reserve last;
-3. lowest active-request load normalized by traffic share, quota after any
-   protected interface reserve, and bounded measured output speed;
+3. lowest active-request count so parallel work uses a free account;
 4. OAuth preference within an otherwise equal stabilizer comparison;
-5. committed dispatch balance normalized by the same effective share,
-   then greatest known quota reserve and least recently used;
-6. manual priority, weight, measured speed, and stable id as final tie-breakers.
+5. greatest known minimum quota remaining after any protected interface
+   reserve;
+6. recent use and dispatch count for equal-quota rotation, then stable id.
 
 The OAuth account projected into the ChatGPT interface keeps a 1% quota reserve
 while pool mode is attached. At or below that reserve it fails the same hard
@@ -141,7 +140,7 @@ Source role is explicit and editable. Subscription plan names and expiry dates
 must not create a hidden routing rule.
 
 Each persisted usage attempt includes a redacted routing decision: selection
-reason, eligible count, quota reserve, effective weight, and pre-dispatch load.
+reason, eligible count, quota reserve, and pre-dispatch load.
 It never includes request/response bodies, credentials, proxy addresses, or raw
 account identities.
 

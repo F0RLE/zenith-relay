@@ -106,8 +106,8 @@ export type CandidateRuntimeSnapshot = {
   kind: "api_source" | "oauth_account";
   available: boolean;
   inFlight: number;
+  lastUsedAtMs: number | null;
   nextRetryAtMs: number | null;
-  effectiveWeight: number;
   halfOpen: boolean;
   dispatches: number;
 };
@@ -196,7 +196,6 @@ export type RoutingDiagnostics = {
   reason: "response_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "oldest_account" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
-  effectiveWeight: number;
   inFlightBefore: number;
   dispatchesBefore: number;
 };
@@ -221,7 +220,6 @@ export type LocalUsage = {
   generationMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  cacheWriteInputTokens: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -239,8 +237,6 @@ export type UsageTotals = {
   inputTokens: number;
   cachedInputTokens: number;
   cachedInputSamples: number;
-  cacheWriteInputTokens: number;
-  cacheWriteInputSamples: number;
   reasoningTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -275,7 +271,6 @@ export type UsageExportRow = {
   ttftMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  cacheWriteInputTokens: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   tokens: number | null;
@@ -322,7 +317,6 @@ export type RemoteUsage = {
   generationMs?: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
-  cacheWriteInputTokens?: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;

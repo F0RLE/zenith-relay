@@ -3025,6 +3025,20 @@ textarea:focus-visible {
   flex: 0 0 13px;
 }
 
+.pool-member-state .pool-member-last {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-left: 0;
+  font-weight: 600;
+}
+
+.pool-member-last svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+}
+
 .pool-member-card .pool-member-identity strong {
   font-size: 13px;
 }

@@ -11,24 +11,12 @@ const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
-const MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND: u64 = 1_000_000;
-const MIN_THROUGHPUT_OUTPUT_TOKENS: u64 = 16;
-const MIN_THROUGHPUT_SAMPLES: u32 = 3;
-const SPEED_FACTOR_SCALE: u128 = 1_000;
-const MIN_SPEED_FACTOR: u128 = 500;
-const MAX_SPEED_FACTOR: u128 = 2_000;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum InFlightLane {
     Text,
     Image,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ThroughputEstimate {
-    milli_tokens_per_second: u64,
-    samples: u32,
 }
 
 pub struct SelectionRequest<'a> {
@@ -55,8 +43,8 @@ pub struct CandidateRuntimeSnapshot {
     pub kind: CandidateKind,
     pub available: bool,
     pub in_flight: u32,
+    pub last_used_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
-    pub effective_weight: u64,
     pub half_open: bool,
     pub dispatches: u64,
 }
@@ -95,7 +83,6 @@ pub struct RoutingDiagnostics {
     pub reason: SelectionReason,
     pub eligible_candidates: u32,
     pub quota_remaining_basis_points: Option<u64>,
-    pub effective_weight: u64,
     pub in_flight_before: u32,
     pub dispatches_before: u64,
 }
@@ -111,8 +98,6 @@ pub struct PoolScheduler {
     image_dispatches: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
     created_at_ms: BTreeMap<String, u64>,
-    throughput: BTreeMap<String, ThroughputEstimate>,
-    throughput_baseline: Option<u64>,
     protected_candidate: Option<(String, u64)>,
 }
 
@@ -137,8 +122,6 @@ impl PoolScheduler {
             image_dispatches: BTreeMap::new(),
             routing_strategy: RoutingStrategy::Adaptive,
             created_at_ms: BTreeMap::new(),
-            throughput: BTreeMap::new(),
-            throughput_baseline: None,
             protected_candidate: None,
         }
     }
@@ -177,8 +160,6 @@ impl PoolScheduler {
         self.dispatches.remove(candidate_id);
         self.image_dispatches.remove(candidate_id);
         self.created_at_ms.remove(candidate_id);
-        self.throughput.remove(candidate_id);
-        self.recompute_throughput_baseline();
         if self
             .protected_candidate
             .as_ref()
@@ -217,42 +198,48 @@ impl PoolScheduler {
         let mut candidates = self
             .candidates
             .values()
-            .map(|candidate| (candidate, self.is_runtime_available(candidate, now_ms)))
+            .map(|candidate| {
+                (
+                    candidate,
+                    self.is_runtime_available(candidate, now_ms),
+                    self.in_flight_count(&candidate.id, InFlightLane::Text),
+                )
+            })
             .collect::<Vec<_>>();
-        candidates.sort_by(|(left, left_available), (right, right_available)| {
-            right_available
-                .cmp(left_available)
-                .then_with(|| self.compare_preference(right, left, InFlightLane::Text))
-        });
+        candidates.sort_by(
+            |(left, left_available, left_in_flight), (right, right_available, right_in_flight)| {
+                (right_in_flight > &0)
+                    .cmp(&(left_in_flight > &0))
+                    .then_with(|| right_available.cmp(left_available))
+                    .then_with(|| self.compare_preference(right, left, InFlightLane::Text))
+            },
+        );
         candidates
             .into_iter()
-            .map(|(candidate, available)| CandidateRuntimeSnapshot {
-                candidate_id: candidate.id.clone(),
-                kind: candidate.kind,
-                available,
-                in_flight: self
-                    .in_flight
-                    .get(&candidate.id)
-                    .copied()
-                    .unwrap_or_default(),
-                next_retry_at_ms: candidate
-                    .cooldowns
-                    .values()
-                    .copied()
-                    .filter(|retry_at_ms| *retry_at_ms > now_ms)
-                    .min(),
-                effective_weight: u64::try_from(self.effective_weight(candidate))
-                    .unwrap_or(u64::MAX),
-                half_open: self
-                    .half_open
-                    .iter()
-                    .any(|(candidate_id, _)| candidate_id == &candidate.id),
-                dispatches: self
-                    .dispatches
-                    .get(&candidate.id)
-                    .copied()
-                    .unwrap_or_default(),
-            })
+            .map(
+                |(candidate, available, in_flight)| CandidateRuntimeSnapshot {
+                    candidate_id: candidate.id.clone(),
+                    kind: candidate.kind,
+                    available,
+                    in_flight,
+                    last_used_at_ms: candidate.last_used_at,
+                    next_retry_at_ms: candidate
+                        .cooldowns
+                        .values()
+                        .copied()
+                        .filter(|retry_at_ms| *retry_at_ms > now_ms)
+                        .min(),
+                    half_open: self
+                        .half_open
+                        .iter()
+                        .any(|(candidate_id, _)| candidate_id == &candidate.id),
+                    dispatches: self
+                        .dispatches
+                        .get(&candidate.id)
+                        .copied()
+                        .unwrap_or_default(),
+                },
+            )
             .collect()
     }
 
@@ -274,9 +261,14 @@ impl PoolScheduler {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
+        let quota_changed = candidate.quota != quota;
         candidate.enabled = enabled;
         candidate.health = health;
         candidate.quota = quota;
+        if quota_changed {
+            self.dispatches.clear();
+            self.image_dispatches.clear();
+        }
         true
     }
 
@@ -400,7 +392,6 @@ impl PoolScheduler {
                 CandidateQuota::Available(remaining) => Some(remaining),
                 CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => None,
             },
-            effective_weight: u64::try_from(self.effective_weight(candidate)).unwrap_or(u64::MAX),
             in_flight_before: self.in_flight_count(candidate_id, lane),
             dispatches_before: self.dispatch_count(candidate_id, lane),
         })
@@ -595,8 +586,8 @@ impl PoolScheduler {
         candidate_id: &str,
         model: &str,
         now_ms: u64,
-        output_tokens: Option<u64>,
-        latency_ms: u64,
+        _output_tokens: Option<u64>,
+        _latency_ms: u64,
     ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
@@ -609,30 +600,6 @@ impl PoolScheduler {
         candidate.health = CandidateHealth::Healthy;
         candidate.last_used_at = Some(now_ms);
         candidate.consecutive_failures = 0;
-        if let (Some(output_tokens @ MIN_THROUGHPUT_OUTPUT_TOKENS..), 1..) =
-            (output_tokens, latency_ms)
-        {
-            let measured = (u128::from(output_tokens) * 1_000_000 / u128::from(latency_ms))
-                .clamp(1, u128::from(MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND))
-                as u64;
-            let previous = self.throughput.get(candidate_id).copied();
-            let estimate = previous.map_or(
-                ThroughputEstimate {
-                    milli_tokens_per_second: measured,
-                    samples: 1,
-                },
-                |previous| ThroughputEstimate {
-                    milli_tokens_per_second: (previous
-                        .milli_tokens_per_second
-                        .saturating_mul(3)
-                        .saturating_add(measured))
-                        / 4,
-                    samples: previous.samples.saturating_add(1),
-                },
-            );
-            self.throughput.insert(candidate_id.to_string(), estimate);
-            self.recompute_throughput_baseline();
-        }
         true
     }
 
@@ -681,32 +648,39 @@ impl PoolScheduler {
         let right_dispatches = self.dispatch_count(&right.id, lane);
         let common = routing_tier(left)
             .cmp(&routing_tier(right))
-            .then_with(|| self.compare_weighted_load(left, right, left_in_flight, right_in_flight))
+            .then_with(|| right_in_flight.cmp(&left_in_flight))
             .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)));
         match self.routing_strategy {
             RoutingStrategy::Adaptive => common
                 .then_with(|| {
-                    self.compare_weighted_dispatches(left, right, left_dispatches, right_dispatches)
+                    self.routing_quota(left)
+                        .compare_preference(self.routing_quota(right))
                 })
-                .then_with(|| left.quota.compare_preference(right.quota))
+                .then_with(|| {
+                    self.compare_equal_quota_rotation(
+                        left,
+                        right,
+                        left_dispatches,
+                        right_dispatches,
+                    )
+                })
                 .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
-                .then_with(|| left.priority.cmp(&right.priority))
-                .then_with(|| left.weight.cmp(&right.weight))
-                .then_with(|| self.compare_measured_speed(left, right))
                 .then_with(|| right.id.cmp(&left.id)),
             RoutingStrategy::OldestAccount => common
                 .then_with(|| self.compare_account_age(left, right))
                 .then_with(|| {
-                    compare_weighted_values(
+                    self.compare_equal_quota_rotation(
+                        left,
+                        right,
                         left_dispatches,
                         right_dispatches,
-                        u128::from(left.weight.max(1)),
-                        u128::from(right.weight.max(1)),
                     )
                 })
-                .then_with(|| left.quota.compare_preference(right.quota))
+                .then_with(|| {
+                    self.routing_quota(left)
+                        .compare_preference(self.routing_quota(right))
+                })
                 .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
-                .then_with(|| left.priority.cmp(&right.priority))
                 .then_with(|| right.id.cmp(&left.id)),
         }
     }
@@ -723,13 +697,7 @@ impl PoolScheduler {
         let runner_up_dispatches = self.dispatch_count(&runner_up.id, lane);
         if routing_tier(selected) != routing_tier(runner_up) {
             SelectionReason::RoutingTier
-        } else if self.compare_weighted_load(
-            selected,
-            runner_up,
-            selected_in_flight,
-            runner_up_in_flight,
-        ) != Ordering::Equal
-        {
+        } else if selected_in_flight != runner_up_in_flight {
             SelectionReason::ParallelLoad
         } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
             SelectionReason::PoolPolicy
@@ -737,59 +705,25 @@ impl PoolScheduler {
             && self.compare_account_age(selected, runner_up) != Ordering::Equal
         {
             SelectionReason::OldestAccount
-        } else if self.compare_weighted_dispatches(
+        } else if self
+            .routing_quota(selected)
+            .compare_preference(self.routing_quota(runner_up))
+            != Ordering::Equal
+        {
+            SelectionReason::QuotaHeadroom
+        } else if self.compare_equal_quota_rotation(
             selected,
             runner_up,
             selected_dispatches,
             runner_up_dispatches,
         ) != Ordering::Equal
         {
-            if self.routing_strategy == RoutingStrategy::Adaptive
-                && self.effective_weight(selected) != self.effective_weight(runner_up)
-            {
-                SelectionReason::AdaptiveBalance
-            } else {
-                SelectionReason::FairRotation
-            }
-        } else if selected.quota.compare_preference(runner_up.quota) != Ordering::Equal {
-            SelectionReason::QuotaHeadroom
+            SelectionReason::FairRotation
         } else if compare_lru(selected.last_used_at, runner_up.last_used_at) != Ordering::Equal {
             SelectionReason::LeastRecentlyUsed
-        } else if selected.priority != runner_up.priority {
-            SelectionReason::ManualPriority
-        } else if selected.weight != runner_up.weight {
-            SelectionReason::ManualWeight
-        } else if self.routing_strategy == RoutingStrategy::Adaptive
-            && self.compare_measured_speed(selected, runner_up) != Ordering::Equal
-        {
-            SelectionReason::AdaptiveBalance
         } else {
             SelectionReason::StableTieBreak
         }
-    }
-
-    fn compare_weighted_load(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-        left_in_flight: u32,
-        right_in_flight: u32,
-    ) -> Ordering {
-        let (left_weight, right_weight) = match self.routing_strategy {
-            RoutingStrategy::Adaptive => {
-                (self.effective_weight(left), self.effective_weight(right))
-            }
-            RoutingStrategy::OldestAccount => (
-                u128::from(left.weight.max(1)),
-                u128::from(right.weight.max(1)),
-            ),
-        };
-        compare_weighted_values(
-            u64::from(left_in_flight),
-            u64::from(right_in_flight),
-            left_weight,
-            right_weight,
-        )
     }
 
     fn in_flight_count(&self, candidate_id: &str, lane: InFlightLane) -> u32 {
@@ -834,47 +768,22 @@ impl PoolScheduler {
         }
     }
 
-    fn compare_weighted_dispatches(
+    fn compare_equal_quota_rotation(
         &self,
         left: &RuntimeCandidate,
         right: &RuntimeCandidate,
         left_dispatches: u64,
         right_dispatches: u64,
     ) -> Ordering {
-        let (left_weight, right_weight) = match self.routing_strategy {
-            RoutingStrategy::Adaptive => {
-                (self.effective_weight(left), self.effective_weight(right))
-            }
-            RoutingStrategy::OldestAccount => (
+        if left.kind == CandidateKind::ApiSource && right.kind == CandidateKind::ApiSource {
+            return compare_projected_weighted_values(
+                left_dispatches,
+                right_dispatches,
                 u128::from(left.weight.max(1)),
                 u128::from(right.weight.max(1)),
-            ),
-        };
-        compare_projected_weighted_values(
-            left_dispatches,
-            right_dispatches,
-            left_weight,
-            right_weight,
-        )
-    }
-
-    fn effective_weight(&self, candidate: &RuntimeCandidate) -> u128 {
-        let base =
-            u128::from(candidate.weight.max(1)) * u128::from(self.routing_quota_factor(candidate));
-        let Some(baseline @ 1..) = self.throughput_baseline else {
-            return base;
-        };
-        let Some(estimate) = self
-            .throughput
-            .get(&candidate.id)
-            .filter(|estimate| estimate.samples >= MIN_THROUGHPUT_SAMPLES)
-        else {
-            return base;
-        };
-        let speed_factor = (u128::from(estimate.milli_tokens_per_second) * SPEED_FACTOR_SCALE
-            / u128::from(baseline))
-        .clamp(MIN_SPEED_FACTOR, MAX_SPEED_FACTOR);
-        base.saturating_mul(speed_factor) / SPEED_FACTOR_SCALE
+            );
+        }
+        right_dispatches.cmp(&left_dispatches)
     }
 
     fn quota_reserve_allows(&self, candidate: &RuntimeCandidate) -> bool {
@@ -901,31 +810,13 @@ impl PoolScheduler {
         }
     }
 
-    fn compare_measured_speed(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-    ) -> Ordering {
-        match (
-            self.throughput.get(&left.id),
-            self.throughput.get(&right.id),
-        ) {
-            (Some(left), Some(right)) => left
-                .milli_tokens_per_second
-                .cmp(&right.milli_tokens_per_second),
-            _ => Ordering::Equal,
+    fn routing_quota(&self, candidate: &RuntimeCandidate) -> CandidateQuota {
+        match candidate.quota {
+            CandidateQuota::Available(_) => {
+                CandidateQuota::Available(self.routing_quota_factor(candidate))
+            }
+            quota => quota,
         }
-    }
-
-    fn recompute_throughput_baseline(&mut self) {
-        let mut measured = self
-            .throughput
-            .values()
-            .filter(|estimate| estimate.samples >= MIN_THROUGHPUT_SAMPLES)
-            .map(|estimate| estimate.milli_tokens_per_second)
-            .collect::<Vec<_>>();
-        measured.sort_unstable();
-        self.throughput_baseline = measured.get(measured.len() / 2).copied();
     }
 
     fn compare_account_age(&self, left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
@@ -1208,21 +1099,21 @@ mod tests {
     }
 
     #[test]
-    fn selection_orders_equal_quota_by_lru_priority_weight_then_id() {
+    fn selection_orders_quota_then_lru_source_share_and_stable_id() {
         let mut scheduler = PoolScheduler::new();
-        let mut low_priority = candidate("priority-low");
+        let mut low_priority = candidate("a-low-priority");
         low_priority.priority = 1;
         low_priority.quota = CandidateQuota::Available(100);
         scheduler.upsert(low_priority);
-        let mut high_priority = candidate("priority-high");
-        high_priority.priority = 2;
+        let mut high_priority = candidate("z-high-priority");
+        high_priority.priority = 100;
         high_priority.quota = CandidateQuota::Available(100);
         scheduler.upsert(high_priority);
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "priority-high"
+            "a-low-priority"
         );
 
         scheduler = PoolScheduler::new();
@@ -1283,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_reserve_beats_lru_and_manual_priority() {
+    fn oauth_quota_beats_lru_and_legacy_priority() {
         let mut scheduler = PoolScheduler::new();
         let mut low_quota = oauth_candidate("low-quota");
         low_quota.quota = CandidateQuota::Available(1);
@@ -1305,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_requests_rotate_before_manual_priority() {
+    fn oauth_equal_quota_rotates_without_legacy_priority() {
         let mut scheduler = PoolScheduler::new();
         let mut high_priority = oauth_candidate("high-priority");
         high_priority.priority = 100;
@@ -1396,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn low_quota_account_waits_for_its_proportional_turn() {
+    fn higher_quota_account_remains_preferred_until_refresh() {
         let mut scheduler = PoolScheduler::new();
         let mut full = oauth_candidate("full");
         full.quota = CandidateQuota::Available(100);
@@ -1411,12 +1302,16 @@ mod tests {
             assert!(scheduler.reserve(&selected.candidate_id));
             assert!(scheduler.release(&selected.candidate_id));
         }
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "low");
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "full"
+        );
     }
 
     #[test]
-    fn equal_quota_sequential_requests_follow_configured_weight() {
+    fn equal_quota_sequential_requests_rotate_without_configured_weight() {
         let mut scheduler = PoolScheduler::new();
         for (id, weight) in [("full", 4), ("half", 2), ("quarter", 1)] {
             let mut account = oauth_candidate(id);
@@ -1433,13 +1328,13 @@ mod tests {
             assert!(scheduler.release(&selected.candidate_id));
         }
 
-        assert_eq!(counts.get("full"), Some(&40));
-        assert_eq!(counts.get("half"), Some(&20));
-        assert_eq!(counts.get("quarter"), Some(&10));
+        assert_eq!(counts.get("full"), Some(&24));
+        assert_eq!(counts.get("half"), Some(&23));
+        assert_eq!(counts.get("quarter"), Some(&23));
     }
 
     #[test]
-    fn sequential_requests_rotate_proportionally_to_quota_headroom() {
+    fn sequential_requests_use_the_greatest_refreshed_quota() {
         let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("full", 10_000), ("half", 5_000), ("quarter", 2_500)] {
             let mut account = oauth_candidate(id);
@@ -1452,10 +1347,7 @@ mod tests {
             let selected = select(&mut scheduler, &HashSet::new()).unwrap();
             if index == 0 {
                 assert_eq!(selected.candidate_id, "full");
-                assert_eq!(
-                    selected.diagnostics.reason,
-                    SelectionReason::AdaptiveBalance
-                );
+                assert_eq!(selected.diagnostics.reason, SelectionReason::QuotaHeadroom);
                 assert_eq!(selected.diagnostics.eligible_candidates, 3);
                 assert_eq!(
                     selected.diagnostics.quota_remaining_basis_points,
@@ -1467,13 +1359,13 @@ mod tests {
             *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
             assert!(scheduler.release(&selected.candidate_id));
         }
-        assert_eq!(counts.get("full"), Some(&40));
-        assert_eq!(counts.get("half"), Some(&20));
-        assert_eq!(counts.get("quarter"), Some(&10));
+        assert_eq!(counts.get("full"), Some(&70));
+        assert_eq!(counts.get("half"), None);
+        assert_eq!(counts.get("quarter"), None);
     }
 
     #[test]
-    fn quota_refresh_preserves_historical_rotation_debt() {
+    fn quota_refresh_rebases_rotation_on_current_headroom() {
         let mut scheduler = PoolScheduler::new();
         for (id, quota) in [("first", 10_000), ("second", 1_000)] {
             let mut account = oauth_candidate(id);
@@ -1495,17 +1387,15 @@ mod tests {
             ));
         }
 
-        for _ in 0..9 {
-            let selection = select(&mut scheduler, &HashSet::new()).unwrap();
-            assert_eq!(selection.candidate_id, "second");
-            assert!(scheduler.reserve(&selection.candidate_id));
-            assert!(scheduler.release(&selection.candidate_id));
-        }
+        let first = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(first.candidate_id, "first");
+        assert!(scheduler.reserve(&first.candidate_id));
+        assert!(scheduler.release(&first.candidate_id));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "first"
+            "second"
         );
     }
 
@@ -1525,9 +1415,9 @@ mod tests {
             *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
         }
 
-        assert_eq!(counts.get("full"), Some(&4));
+        assert_eq!(counts.get("full"), Some(&3));
         assert_eq!(counts.get("half"), Some(&2));
-        assert_eq!(counts.get("quarter"), Some(&1));
+        assert_eq!(counts.get("quarter"), Some(&2));
     }
 
     #[test]
@@ -1553,60 +1443,13 @@ mod tests {
 
         assert_eq!(counts.len(), 4);
         assert!(counts.values().all(|count| *count > 0));
-        let total_weight = 6_300_u64 + 5_400 + 5_200 + 5_100;
-        for (id, weight) in [
-            ("sixty-three", 6_300_u64),
-            ("fifty-four", 5_400),
-            ("fifty-two", 5_200),
-            ("fifty-one", 5_100),
-        ] {
-            let actual = u64::from(counts[id]) * total_weight;
-            let expected = 200 * weight;
-            assert!(actual.abs_diff(expected) <= total_weight);
-        }
-    }
-
-    #[test]
-    fn adaptive_routing_gives_faster_accounts_more_work_without_starving_slow_ones() {
-        let mut scheduler = PoolScheduler::new();
-        for id in ["fast", "slow"] {
-            let mut account = oauth_candidate(id);
-            account.quota = CandidateQuota::Available(5_000);
-            scheduler.upsert(account);
-        }
-        for now_ms in 1..=3 {
-            assert!(scheduler.record_success_with_metrics(
-                "fast",
-                "gpt-5",
-                now_ms,
-                Some(100),
-                1_000
-            ));
-            assert!(scheduler.record_success_with_metrics(
-                "slow",
-                "gpt-5",
-                now_ms,
-                Some(25),
-                1_000
-            ));
-        }
         assert_eq!(
-            select(&mut scheduler, &HashSet::new())
-                .unwrap()
-                .candidate_id,
-            "fast"
+            counts
+                .values()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [50].into()
         );
-
-        let mut counts = BTreeMap::new();
-        for _ in 0..100 {
-            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-            assert!(scheduler.reserve(&selected.candidate_id));
-            *counts.entry(selected.candidate_id.clone()).or_insert(0_u32) += 1;
-            assert!(scheduler.release(&selected.candidate_id));
-        }
-
-        assert_eq!(counts["fast"], 67);
-        assert_eq!(counts["slow"], 33);
     }
 
     #[test]
@@ -1642,33 +1485,6 @@ mod tests {
                 .unwrap()
                 .candidate_id,
             "oldest"
-        );
-    }
-
-    #[test]
-    fn throughput_ewma_ignores_short_or_invalid_samples_and_is_bounded() {
-        let mut scheduler = PoolScheduler::new();
-        scheduler.upsert(oauth_candidate("account"));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 1, None, 1_000));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 2, Some(10), 0));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 3, Some(0), 1_000));
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 4, Some(15), 1_000));
-        assert!(scheduler.throughput.is_empty());
-
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 5, Some(20), 1_000));
-        assert_eq!(
-            scheduler.throughput["account"].milli_tokens_per_second,
-            20_000
-        );
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 6, Some(20), 1_000));
-        assert_eq!(
-            scheduler.throughput["account"].milli_tokens_per_second,
-            20_000
-        );
-        assert!(scheduler.record_success_with_metrics("account", "gpt-5", 7, Some(u64::MAX), 1,));
-        assert!(
-            scheduler.throughput["account"].milli_tokens_per_second
-                <= MAX_THROUGHPUT_MILLI_TOKENS_PER_SECOND
         );
     }
 
@@ -1796,9 +1612,26 @@ mod tests {
 
         assert!(scheduler.reserve_for("first", "gpt-5", 50));
         let loaded = scheduler.runtime_order(50);
-        assert_eq!(loaded[0].candidate_id, "second");
-        assert_eq!(loaded[1].in_flight, 1);
-        assert_eq!(loaded[1].dispatches, 1);
+        assert_eq!(loaded[0].candidate_id, "first");
+        assert_eq!(loaded[0].in_flight, 1);
+        assert_eq!(loaded[0].dispatches, 1);
+        assert_eq!(loaded[0].last_used_at_ms, None);
+        assert_eq!(
+            scheduler
+                .select(SelectionRequest {
+                    model: "gpt-5",
+                    allowed_protocols: &[WireApi::Responses],
+                    scope: &CandidateScope::default(),
+                    tried: &HashSet::new(),
+                    response_affinity_key: None,
+                    now_ms: 50,
+                })
+                .unwrap()
+                .candidate_id,
+            "second"
+        );
+        assert!(scheduler.record_success("first", "gpt-5", 75));
+        assert_eq!(scheduler.runtime_order(75)[0].last_used_at_ms, Some(75));
 
         assert!(scheduler.set_cooldown("second", "gpt-5", 100));
         let cooling = scheduler.runtime_order(50);
@@ -1936,7 +1769,7 @@ mod tests {
             CandidateQuota::Available(200),
         ));
         assert_eq!(
-            scheduler.effective_weight(scheduler.candidate("protected").unwrap()),
+            scheduler.routing_quota_factor(scheduler.candidate("protected").unwrap()),
             100
         );
     }

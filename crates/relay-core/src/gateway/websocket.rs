@@ -759,7 +759,11 @@ async fn bridge(
             }
             _ = heartbeat.tick() => {
                 if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
+                    let active_request = state.in_flight.is_some();
                     finish_incomplete(&runtime, &mut state, "upstream_websocket");
+                    if active_request {
+                        send_gateway_error(&mut downstream, &GatewayFailure::transport()).await;
+                    }
                     break;
                 }
             }
@@ -794,11 +798,19 @@ async fn bridge(
             message = upstream.next() => {
                 last_activity = TokioInstant::now();
                 let Some(message) = message else {
+                    let active_request = state.in_flight.is_some();
                     finish_incomplete(&runtime, &mut state, "upstream_websocket_closed");
+                    if active_request {
+                        send_gateway_error(&mut downstream, &GatewayFailure::closed()).await;
+                    }
                     break;
                 };
                 let Ok(message) = message else {
+                    let active_request = state.in_flight.is_some();
                     finish_incomplete(&runtime, &mut state, "upstream_websocket");
+                    if active_request {
+                        send_gateway_error(&mut downstream, &GatewayFailure::transport()).await;
+                    }
                     break;
                 };
                 if !handle_upstream_message(&mut downstream, &runtime, &mut state, message).await {
@@ -1008,13 +1020,18 @@ async fn handle_upstream_message(
         UpstreamMessage::Ping(payload) => downstream.send(Message::Ping(payload)).await.is_ok(),
         UpstreamMessage::Pong(payload) => downstream.send(Message::Pong(payload)).await.is_ok(),
         UpstreamMessage::Close { code, reason } => {
+            let active_request = state.in_flight.is_some();
             finish_incomplete(runtime, state, "upstream_websocket_closed");
-            let _ = downstream
-                .send(Message::Close(Some(CloseFrame {
-                    code: u16::from(code),
-                    reason: reason.into(),
-                })))
-                .await;
+            if active_request {
+                send_gateway_error(downstream, &GatewayFailure::closed()).await;
+            } else {
+                let _ = downstream
+                    .send(Message::Close(Some(CloseFrame {
+                        code: u16::from(code),
+                        reason: reason.into(),
+                    })))
+                    .await;
+            }
             false
         }
     }
@@ -1124,6 +1141,9 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     in_flight.event.success = false;
     in_flight.event.error_category = Some(category.to_string());
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
+    if let Some(status) = incomplete_status(category) {
+        in_flight.event.http_status = status.as_u16();
+    }
     in_flight.event.generation_ms = in_flight
         .event
         .ttft_ms
@@ -1141,6 +1161,17 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
+}
+
+fn incomplete_status(category: &str) -> Option<StatusCode> {
+    match category {
+        "websocket_idle_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
+        "stream_event_too_large"
+        | "upstream_transport"
+        | "upstream_websocket"
+        | "upstream_websocket_closed" => Some(StatusCode::BAD_GATEWAY),
+        _ => None,
+    }
 }
 
 fn incomplete_requires_cooldown(category: &str) -> bool {
@@ -1335,7 +1366,7 @@ impl GatewayFailure {
         Self {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_websocket_closed",
-            message: "upstream WebSocket closed before the first event",
+            message: "upstream WebSocket closed before the response completed",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }

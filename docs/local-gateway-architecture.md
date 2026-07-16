@@ -557,25 +557,21 @@ Selection contract:
 4. If a previous-response binding exists, require its creating candidate; a
    cooldown or failed preparation does not authorize cross-account replay.
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. In adaptive mode, prefer the lowest active-request load normalized by
-   `weight * available quota after protected reserve * bounded measured output
-   speed`; this gives parallel requests proportional current capacity.
-7. Within the stabilizer tier, prefer OAuth on an otherwise equal comparison,
-   then committed dispatch balance normalized by the same effective weight.
-   Use the greatest current quota reserve only when projected balances are
-   equal, followed by least recently used, manual tie-break priority, weight,
-   measured speed, and stable id. Speed affects adaptive weight only after
-   three successful samples of at least 16 reported output tokens; use a
-   smoothed estimate relative to the pool median and clamp its factor to
-   `0.5..2.0`. Quota and health refreshes preserve committed dispatch history;
-   the new effective weight changes the next projected comparison immediately.
+6. Prefer the lowest active-request count so parallel work uses another free
+   candidate instead of waiting for a busy one.
+7. In adaptive mode, select the greatest known minimum remaining quota from the
+   latest backend refresh. A protected OAuth candidate contributes only quota
+   above its reserve. Equal-quota accounts rotate by recent use and dispatch
+   count. Subscription, token totals, measured speed, manual priority, and
+   manual weight do not affect OAuth selection. API-source roles remain strict,
+   with traffic share used only between API sources in the same role.
 8. Exclude candidates already tried for this request.
 9. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
 
 Every emitted usage attempt may carry a bounded redacted routing diagnostic:
-the decisive comparison, eligible count, selected quota reserve, effective
-weight, and load counters before reservation. Local and self-hosted stores keep
+the decisive comparison, eligible count, selected quota reserve, and load
+counters before reservation. Local and self-hosted stores keep
 this as structured JSON without request text, response text, headers, secrets,
 proxy addresses, or raw account identities.
 
@@ -1369,14 +1365,12 @@ request_logs
   output_tokens
   total_tokens
   cached_input_tokens
-  cache_write_input_tokens
   reasoning_tokens
   estimated_cost_usd
   pricing_snapshot_version
   input_usd_per_million
   output_usd_per_million
   cached_input_usd_per_million
-  cache_write_input_usd_per_million
 ```
 
 Indexes needed:
@@ -1431,7 +1425,6 @@ input_tokens
 output_tokens
 reasoning_tokens
 cached_input_tokens
-cache_write_input_tokens
 total_tokens
 ttft
 latency
@@ -1439,15 +1432,13 @@ response_headers
 ```
 
 Token fields follow the upstream usage object. `input_tokens` already includes
-cache reads and writes, while `cached_input_tokens` and
-`cache_write_input_tokens` are breakdowns and must not be added to totals.
+cached input, while `cached_input_tokens` is a breakdown and must not be added
+to totals.
 `output_tokens` includes reasoning and other generated non-visible formatting
 tokens. Observed output speed is `output_tokens / end-to-end latency`; TTFT is
 reported separately because subtracting it would combine a post-first-token
 duration with reasoning tokens that may have been generated before first
-output. Cache-write pricing comes from the versioned local price catalog; for
-GPT-5.6-family models it is 1.25 times uncached input according to the official
-prompt-caching guide.
+output.
 
 ### Diagnostics And Support Bundles
 

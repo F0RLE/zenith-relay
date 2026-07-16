@@ -751,6 +751,15 @@ test("pool priority follows the backend scheduler order without display heuristi
   await expect(page.locator(".pool-member-list")).not.toContainText("Priority 30");
 });
 
+test("pool keeps the last completed route visible after its lease is released", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3, usageActive: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator(".pool-priority-label")).toHaveText("RoutingLast request: Pro account");
+  await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
+  await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
+});
+
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, poolMembers: false });
   await page.goto("/");
@@ -829,7 +838,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
-  await expect(dialog).toContainText("Gives more requests to available accounts with more quota headroom and stable speed.");
+  await expect(dialog).toContainText("Chooses the greatest quota remaining among free accounts and rotates equal candidates.");
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
@@ -1067,13 +1076,14 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-token-speed")).toHaveText("26.7 tok/s");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("Latest output speed26.7 tok/s");
+  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).toContainText("API equiv.");
+  await expect(page.locator('[data-member-label="Personal Plus"] .pool-member-routing')).not.toContainText("Latest output speed");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Cache ↑4Reason5Out8", "28", "26.7 tok/s", "128 / 428 ms"]);
-  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Cache ↑4", "Reason5", "Out8"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "26.7 tok/s", "128 / 428 ms"]);
+  await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Reason5", "Out8"]);
   await expect(page.locator(".usage-metrics")).toContainText("Generation speed26.7 tok/s");
   await expect(page.locator(".usage-metrics")).toContainText("Effective end-to-end speed18.7 tok/s");
 
@@ -1082,7 +1092,6 @@ test("usage attributes API token totals to the selected account", async ({ page 
   const details = page.getByRole("dialog", { name: "Request details" });
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Cache reads12");
-  await expect(details).toContainText("Cache writes4");
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
@@ -1091,21 +1100,22 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Total time428 ms");
   await expect(details).toContainText("Generation speed26.7 tok/s");
   await expect(details).toContainText("Effective end-to-end speed18.7 tok/s");
-  await expect(details).toContainText("Selection reasonLargest current quota reserve");
+  await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
 });
 
-test("pool member fields explain tie-break priority and traffic share", async ({ page }) => {
+test("OAuth member policy hides manual routing controls", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool member policy: Personal Plus", exact: true }).click();
 
   const dialog = page.getByRole("dialog", { name: /Pool member policy/ });
-  await expect(dialog.getByText("Tie-break priority", { exact: true })).toHaveAttribute("title", "Used only when eligible members have equal active load, quota reserve, and recent-use order.");
-  await expect(dialog).toContainText("Used only when eligible members have equal active load");
-  await expect(dialog.getByText("Traffic share", { exact: true })).toHaveAttribute("title", "Among equally eligible members, a higher share receives more requests.");
+  await expect(dialog).not.toContainText("Tie-break priority");
+  await expect(dialog).not.toContainText("Traffic share");
+  await expect(dialog.getByText("Drain", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Allowed models", { exact: true })).toBeVisible();
 });
 
 for (const mode of ["local", "remote"] as const) {
