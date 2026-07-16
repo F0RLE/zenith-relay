@@ -348,6 +348,10 @@ impl PoolScheduler {
         true
     }
 
+    pub fn invalidate_response_affinity(&mut self, key: &str) -> bool {
+        self.response_affinity.invalidate(key)
+    }
+
     pub(crate) fn reserve(&mut self, candidate_id: &str) -> bool {
         if !self.candidates.contains_key(candidate_id) {
             return false;

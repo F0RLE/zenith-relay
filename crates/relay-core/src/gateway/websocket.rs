@@ -380,6 +380,8 @@ async fn connect_upstream(
                 {
                     let failure = GatewayFailure::upstream_status(status);
                     if affinity_miss {
+                        runtime
+                            .invalidate_response_affinity(request.response_affinity_key.as_deref());
                         record_connect_affinity_miss(
                             runtime, key, &route, &request, attempt, started, status,
                         );

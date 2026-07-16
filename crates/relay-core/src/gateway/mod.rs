@@ -641,6 +641,7 @@ async fn execute_account_endpoint(
             );
             if affinity_miss || retryable_status(status, has_previous_response_id) {
                 if affinity_miss {
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
                     let state = apply_status_cooldown(
@@ -997,10 +998,7 @@ async fn execute_request(
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
-            if status == StatusCode::BAD_REQUEST
-                && has_previous_response_id
-                && !response_affinity_hit
-            {
+            if status == StatusCode::BAD_REQUEST && has_previous_response_id {
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1029,6 +1027,7 @@ async fn execute_request(
                     response_affinity_hit,
                     previous_response_not_found(&bytes),
                 ) {
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                     emit_usage(&runtime, event);
                     last_failure = Some(AttemptFailure::status(status));
@@ -2200,8 +2199,8 @@ fn recoverable_response_affinity_miss(
     previous_response_not_found: bool,
 ) -> bool {
     has_previous_response_id
-        && !response_affinity_hit
-        && (status == StatusCode::NOT_FOUND
+        && ((status == StatusCode::NOT_FOUND
+            && (!response_affinity_hit || previous_response_not_found))
             || (status == StatusCode::BAD_REQUEST && previous_response_not_found))
 }
 
@@ -2971,11 +2970,17 @@ mod tests {
                 previous_response_not_found(payload),
             ));
         }
-        assert!(!recoverable_response_affinity_miss(
+        assert!(recoverable_response_affinity_miss(
             StatusCode::BAD_REQUEST,
             true,
             true,
             true,
+        ));
+        assert!(!recoverable_response_affinity_miss(
+            StatusCode::BAD_REQUEST,
+            true,
+            true,
+            false,
         ));
     }
 

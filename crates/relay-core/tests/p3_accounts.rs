@@ -81,6 +81,7 @@ enum WebSocketBehavior {
     #[default]
     Success,
     Events(Arc<Vec<Value>>),
+    Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
     Close,
 }
 
@@ -705,6 +706,84 @@ async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
 }
 
 #[tokio::test]
+async fn stale_http_response_affinity_is_invalidated_before_fallback() {
+    let (fallback_upstream, fallback_state) =
+        spawn_upstream(vec![success_reply("fallback-response")]).await;
+    let (owner_upstream, owner_state) = spawn_upstream(vec![
+        success_reply("stale-response"),
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {
+                "message": "Previous response with id 'stale-response' not found.",
+                "type": "invalid_request_error",
+                "code": "previous_response_not_found"
+            }}),
+        ),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "fallback-account", "fallback-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account(
+                "fallback-account",
+                "provider-fallback",
+                &fallback_upstream,
+                10,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "start"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["id"], "stale-response");
+
+    let recovered: Value = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "continue after stale binding",
+            "previous_response_id": first["id"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovered["id"], "fallback-response");
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(fallback_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events[0].success);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert!(events[2].success);
+    assert_eq!(events[2].candidate_id.as_deref(), Some("fallback-account"));
+}
+
+#[tokio::test]
 async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     let (upstream, state) = spawn_websocket_upstream().await;
     let authority = ready_authority("relay-account", "account-access").await;
@@ -1252,6 +1331,112 @@ async fn unknown_websocket_response_owner_is_recovered_before_output() {
     assert_eq!(events[0].retry_at_ms, None);
     assert_eq!(events[0].http_status, StatusCode::BAD_REQUEST.as_u16());
     assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn stale_websocket_response_affinity_is_invalidated_before_fallback() {
+    let (fallback_upstream, fallback_state) = spawn_websocket_upstream().await;
+    let (owner_upstream, owner_state) = spawn_websocket_upstream_with_behavior(
+        WebSocketBehavior::Sequence(Arc::new(Mutex::new(VecDeque::from(vec![
+            vec![
+                json!({"type": "response.output_text.delta", "delta": "owner"}),
+                json!({"type": "response.completed", "response": {"id": "stale-ws-response"}}),
+            ],
+            vec![json!({
+                "type": "error",
+                "status": 400,
+                "error": {
+                    "message": "Previous response with id 'stale-ws-response' not found.",
+                    "type": "invalid_request_error",
+                    "code": "previous_response_not_found"
+                }
+            })],
+        ])))),
+    )
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "owner-account", "owner-access").await;
+    register_ready(&authority, "fallback-account", "fallback-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("owner-account", "provider-owner", &owner_upstream, 100),
+            account(
+                "fallback-account",
+                "provider-fallback",
+                &fallback_upstream,
+                10,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let upgraded = client
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut first_socket = upgraded.into_websocket().await.unwrap();
+    first_socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "start"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    let _ = receive_websocket_json(&mut first_socket).await;
+    let first_completed = receive_websocket_completion(&mut first_socket).await;
+    let response_id = first_completed["response"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    drop(first_socket);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let upgraded = client
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut second_socket = upgraded.into_websocket().await.unwrap();
+    second_socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue after stale binding",
+                "previous_response_id": response_id
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut second_socket).await["delta"],
+        "hello"
+    );
+    assert_eq!(
+        receive_websocket_completion(&mut second_socket).await["response"]["id"],
+        "ws-response"
+    );
+
+    assert_eq!(owner_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(fallback_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("response_affinity_miss")
+    );
+    assert!(events[2].success);
 }
 
 #[tokio::test]
@@ -2199,6 +2384,9 @@ async fn upstream_websocket(
                     }),
                 ],
                 WebSocketBehavior::Events(events) => events.as_ref().clone(),
+                WebSocketBehavior::Sequence(events) => {
+                    events.lock().unwrap().pop_front().unwrap_or_default()
+                }
                 WebSocketBehavior::Close => {
                     let _ = socket.send(AxumWsMessage::Close(None)).await;
                     return;

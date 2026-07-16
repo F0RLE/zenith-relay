@@ -949,6 +949,10 @@ impl GatewayRuntime {
         }
     }
 
+    pub(crate) fn invalidate_response_affinity(&self, key: Option<&str>) -> bool {
+        key.is_some_and(|key| self.lock_scheduler().invalidate_response_affinity(key))
+    }
+
     pub(crate) fn record_success_with_metrics(
         &self,
         candidate_id: &str,
