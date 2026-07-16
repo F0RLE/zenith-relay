@@ -3265,17 +3265,24 @@ textarea {
 }
 
 .usage-aggregate-table {
-  min-width: 800px;
+  min-width: 720px;
   table-layout: fixed;
 }
 
-.usage-aggregate-table th:nth-child(1) { width: 20%; }
-.usage-aggregate-table th:nth-child(2) { width: 70px; }
-.usage-aggregate-table th:nth-child(3) { width: 76px; }
-.usage-aggregate-table th:nth-child(4) { width: 230px; }
-.usage-aggregate-table th:nth-child(5) { width: 90px; }
-.usage-aggregate-table th:nth-child(6) { width: 112px; }
-.usage-aggregate-table th:nth-child(7) { width: 110px; }
+.usage-aggregate-table th:nth-child(1) { width: 22%; }
+.usage-aggregate-table th:nth-child(2) { width: 8%; }
+.usage-aggregate-table th:nth-child(3) { width: 8%; }
+.usage-aggregate-table th:nth-child(4) { width: 30%; }
+.usage-aggregate-table th:nth-child(5) { width: 10%; }
+.usage-aggregate-table th:nth-child(6) { width: 12%; }
+.usage-aggregate-table th:nth-child(7) { width: 10%; }
+
+.usage-aggregate-table th,
+.usage-aggregate-table td {
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 .usage-aggregate-table td:first-child code {
   display: block;
@@ -6904,22 +6911,6 @@ input[type="password"] {
     line-height: 15px;
     overflow-wrap: anywhere;
   }
-  .relay-shell[data-page="usage"] .usage-aggregate-table {
-    width: 100%;
-    min-width: 0;
-  }
-  .usage-aggregate-table th,
-  .usage-aggregate-table td {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-  .usage-aggregate-table th:nth-child(1) { width: 22%; }
-  .usage-aggregate-table th:nth-child(2) { width: 8%; }
-  .usage-aggregate-table th:nth-child(3) { width: 8%; }
-  .usage-aggregate-table th:nth-child(4) { width: 30%; }
-  .usage-aggregate-table th:nth-child(5) { width: 10%; }
-  .usage-aggregate-table th:nth-child(6) { width: 12%; }
-  .usage-aggregate-table th:nth-child(7) { width: 10%; }
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5),
