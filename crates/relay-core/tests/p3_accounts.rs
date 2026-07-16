@@ -1265,7 +1265,11 @@ async fn account_websocket_keeps_previous_response_on_its_current_account() {
             json!({
                 "type": "response.create",
                 "model": MODEL,
-                "input": "continue",
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_live",
+                    "output": "done"
+                }],
                 "previous_response_id": completed["response"]["id"]
             })
             .to_string(),
@@ -1281,6 +1285,10 @@ async fn account_websocket_keeps_previous_response_on_its_current_account() {
         second_state.requests.lock().unwrap().len(),
     ];
     assert!(counts == [2, 0] || counts == [0, 2]);
+    assert_eq!(
+        first_state.headers.lock().unwrap().len() + second_state.headers.lock().unwrap().len(),
+        1
+    );
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].candidate_id, events[1].candidate_id);

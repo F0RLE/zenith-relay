@@ -222,10 +222,15 @@ impl ClientRequest {
     }
 
     fn has_previous_response_id(&self) -> bool {
+        self.previous_response_id().is_some()
+    }
+
+    fn previous_response_id(&self) -> Option<&str> {
         self.value
             .get("previous_response_id")
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
     }
 
     fn has_function_call_output(&self) -> bool {
@@ -676,6 +681,8 @@ struct InFlight {
 struct BridgeState {
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
+    upstream_candidate_id: String,
+    last_response_id: Option<String>,
 }
 
 async fn bridge(
@@ -697,6 +704,7 @@ async fn bridge(
         None,
         0,
     );
+    let upstream_candidate_id = connected.route.candidate_id.clone();
     let mut state = BridgeState {
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
@@ -705,6 +713,8 @@ async fn bridge(
             started: connected.started,
             response_id: None,
         }),
+        upstream_candidate_id,
+        last_response_id: None,
     };
     for message in connected.initial_messages {
         if !handle_upstream_message(&mut downstream, &runtime, &mut state, message).await {
@@ -853,6 +863,53 @@ async fn start_next_request(
         ));
     }
     let request = ClientRequest::parse(runtime, key, headers, payload)?;
+    if request
+        .previous_response_id()
+        .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
+    {
+        let tried = HashSet::new();
+        let Some((selected, lease)) = runtime.select_and_reserve(
+            key,
+            &request.resolved_model,
+            WEBSOCKET_PROTOCOLS,
+            &tried,
+            request.response_affinity_key.as_deref(),
+            now_ms(),
+        ) else {
+            return Err(GatewayFailure::unavailable());
+        };
+        if selected.candidate_id != state.upstream_candidate_id {
+            return Err(GatewayFailure::unavailable());
+        }
+        let mut route = runtime
+            .executor_route(&selected.candidate_id, &request.resolved_model)
+            .ok_or_else(GatewayFailure::unavailable)?;
+        route.routing = Some(selected.diagnostics);
+        let started = Instant::now();
+        if let Err(failure) = send_request(upstream, request.payload_for(&route)?).await {
+            record_connect_failure(runtime, key, &route, &request, 1, started, &failure, None);
+            return Err(failure);
+        }
+        let event = usage_event(
+            &super::request_id(),
+            1,
+            &key.id,
+            &route,
+            &request.requested_model,
+            true,
+            StatusCode::OK.as_u16(),
+            None,
+            0,
+        );
+        state.lease = Some(lease);
+        state.in_flight = Some(InFlight {
+            route: route.clone(),
+            event,
+            started,
+            response_id: None,
+        });
+        return Ok(true);
+    }
     let connected = connect_upstream(runtime, key, headers, request, true).await?;
     let Connected {
         upstream: next_upstream,
@@ -882,6 +939,8 @@ async fn start_next_request(
         .await;
     *upstream = next_upstream;
     state.lease = Some(lease);
+    state.upstream_candidate_id = route.candidate_id.clone();
+    state.last_response_id = None;
     state.in_flight = Some(InFlight {
         route,
         event,
@@ -997,6 +1056,7 @@ fn finish_terminal(
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.success = success;
     if success {
+        state.last_response_id = in_flight.response_id.clone();
         runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
