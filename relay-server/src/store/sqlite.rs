@@ -17,9 +17,10 @@ use std::{
 };
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
-    estimate_api_equivalent,
+    estimate_api_equivalent, normalize_image_base_model,
     protocol::{UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
-    ApiEquivalentSummary, DefaultServiceTier, RoutingStrategy, UsageEvent, WireApi,
+    ApiEquivalentSummary, DefaultServiceTier, ResponseAffinityBinding, ResponseAffinityStore,
+    RoutingStrategy, UsageEvent, WireApi,
 };
 
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -105,6 +106,21 @@ const MIGRATIONS: &[Migration] = &[
         version: 15,
         name: "015_cache_write_input_tokens",
         sql: include_str!("../../migrations/015_cache_write_input_tokens.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "016_response_affinity",
+        sql: include_str!("../../migrations/016_response_affinity.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "017_generation_ms",
+        sql: include_str!("../../migrations/017_generation_ms.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "018_image_base_model",
+        sql: include_str!("../../migrations/018_image_base_model.sql"),
     },
 ];
 
@@ -280,7 +296,9 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn routing_policy(&self) -> Result<(u8, RoutingStrategy, DefaultServiceTier), String> {
+    pub fn routing_policy(
+        &self,
+    ) -> Result<(u8, RoutingStrategy, DefaultServiceTier, Option<String>), String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
@@ -299,8 +317,15 @@ impl Store {
             Some("fast") => DefaultServiceTier::Fast,
             Some(_) => return Err("default service tier is invalid".to_string()),
         };
+        let image_base_model = normalize_image_base_model(self.metadata("image_base_model")?)
+            .map_err(|error| error.to_string())?;
         validate_routing_policy(max_retry_candidates)?;
-        Ok((max_retry_candidates, routing_strategy, default_service_tier))
+        Ok((
+            max_retry_candidates,
+            routing_strategy,
+            default_service_tier,
+            image_base_model,
+        ))
     }
 
     pub fn set_routing_policy(
@@ -308,8 +333,12 @@ impl Store {
         max_retry_candidates: u8,
         routing_strategy: RoutingStrategy,
         default_service_tier: DefaultServiceTier,
+        image_base_model: Option<String>,
     ) -> Result<(), String> {
         validate_routing_policy(max_retry_candidates)?;
+        let image_base_model = normalize_image_base_model(image_base_model)
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -330,6 +359,7 @@ impl Store {
                     DefaultServiceTier::Fast => "fast".to_string(),
                 },
             ),
+            ("image_base_model", image_base_model),
         ] {
             transaction
                 .execute(
@@ -601,8 +631,8 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -633,6 +663,7 @@ impl Store {
                         event.error_category,
                         event.latency_ms as i64,
                         event.ttft_ms.map(|value| value as i64),
+                        event.generation_ms.map(|value| value as i64),
                         event.input_tokens.map(|value| value as i64),
                         event.cached_input_tokens.map(|value| value as i64),
                         event.cache_write_input_tokens.map(|value| value as i64),
@@ -668,8 +699,9 @@ impl Store {
             group.totals.api_equivalent = estimate_api_equivalent(
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
-                Some(group.totals.cached_input_tokens),
-                Some(group.totals.cache_write_input_tokens),
+                (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
+                (group.totals.cache_write_input_samples > 0)
+                    .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
             );
@@ -684,7 +716,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -702,7 +734,7 @@ impl Store {
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
                     routing: row
-                        .get::<_, Option<String>>(20)?
+                        .get::<_, Option<String>>(21)?
                         .as_deref()
                         .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(5)?,
@@ -713,13 +745,14 @@ impl Store {
                     error_category: row.get(10)?,
                     latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
                     ttft_ms: optional_u64(row.get(12)?),
-                    input_tokens: optional_u64(row.get(13)?),
-                    cached_input_tokens: optional_u64(row.get(14)?),
-                    cache_write_input_tokens: optional_u64(row.get(15)?),
-                    reasoning_tokens: optional_u64(row.get(16)?),
-                    output_tokens: optional_u64(row.get(17)?),
-                    total_tokens: optional_u64(row.get(18)?),
-                    created_at_ms: row.get::<_, i64>(19)?.max(0) as u64,
+                    generation_ms: optional_u64(row.get(13)?),
+                    input_tokens: optional_u64(row.get(14)?),
+                    cached_input_tokens: optional_u64(row.get(15)?),
+                    cache_write_input_tokens: optional_u64(row.get(16)?),
+                    reasoning_tokens: optional_u64(row.get(17)?),
+                    output_tokens: optional_u64(row.get(18)?),
+                    total_tokens: optional_u64(row.get(19)?),
+                    created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
                 })
             })
             .map_err(db_error)?;
@@ -747,7 +780,8 @@ impl Store {
             .prepare(
                 "SELECT candidate_hint, COALESCE(resolved_model, requested_model),
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(output_tokens), SUM(total_tokens)
+                    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
+                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
                  FROM usage_events
                  GROUP BY candidate_hint, COALESCE(resolved_model, requested_model)",
             )
@@ -759,13 +793,20 @@ impl Store {
                 let cache_write_input_tokens: Option<i64> = row.get(4)?;
                 let output_tokens: Option<i64> = row.get(5)?;
                 let total_tokens: Option<i64> = row.get(6)?;
+                let input_samples: i64 = row.get(7)?;
+                let cached_samples: i64 = row.get(8)?;
+                let cache_write_samples: i64 = row.get(9)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     estimate_api_equivalent(
                         row.get::<_, Option<String>>(1)?.as_deref(),
                         optional_u64(input_tokens),
-                        optional_u64(cached_input_tokens),
-                        optional_u64(cache_write_input_tokens),
+                        (input_samples > 0 && cached_samples == input_samples)
+                            .then(|| optional_u64(cached_input_tokens))
+                            .flatten(),
+                        (input_samples > 0 && cache_write_samples == input_samples)
+                            .then(|| optional_u64(cache_write_input_tokens))
+                            .flatten(),
                         optional_u64(output_tokens),
                         optional_u64(total_tokens),
                     ),
@@ -874,6 +915,81 @@ impl Store {
     }
 }
 
+impl ResponseAffinityStore for Store {
+    fn load(&self, now_ms: u64) -> Result<Vec<ResponseAffinityBinding>, String> {
+        let connection = self.lock()?;
+        connection
+            .execute(
+                "DELETE FROM response_affinity WHERE expires_at_ms <= ?1",
+                [sql_u64(now_ms)],
+            )
+            .map_err(db_error)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT response_key, candidate_id, expires_at_ms
+                 FROM response_affinity ORDER BY updated_at_ms DESC",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], response_affinity_from_row)
+            .map_err(db_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)
+    }
+
+    fn find(&self, key: &str, now_ms: u64) -> Result<Option<ResponseAffinityBinding>, String> {
+        self.lock()?
+            .query_row(
+                "SELECT response_key, candidate_id, expires_at_ms
+                 FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2",
+                params![key, sql_u64(now_ms)],
+                response_affinity_from_row,
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
+    fn upsert(&self, binding: &ResponseAffinityBinding) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(response_key) DO UPDATE SET
+                    candidate_id = excluded.candidate_id,
+                    expires_at_ms = excluded.expires_at_ms,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    binding.key,
+                    binding.candidate_id,
+                    sql_u64(binding.expires_at_ms),
+                    sql_u64(unix_time_ms()),
+                ],
+            )
+            .map(|_| ())
+            .map_err(db_error)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), String> {
+        self.lock()?
+            .execute(
+                "DELETE FROM response_affinity WHERE response_key = ?1",
+                [key],
+            )
+            .map(|_| ())
+            .map_err(db_error)
+    }
+}
+
+fn response_affinity_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ResponseAffinityBinding> {
+    Ok(ResponseAffinityBinding {
+        key: row.get(0)?,
+        candidate_id: row.get(1)?,
+        expires_at_ms: optional_u64(Some(row.get(2)?)).unwrap_or_default(),
+    })
+}
+
 fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
@@ -926,8 +1042,12 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
+    COALESCE(SUM(generation_ms), 0), COUNT(generation_ms), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
+        THEN COALESCE(output_tokens, 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), \
+    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
+    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
     COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
@@ -978,14 +1098,19 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         latency_ms: nonnegative_u64(row.get(offset + 2)?),
         ttft_ms: nonnegative_u64(row.get(offset + 3)?),
         ttft_samples: nonnegative_u64(row.get(offset + 4)?),
-        input_tokens: nonnegative_u64(row.get(offset + 5)?),
-        cached_input_tokens: nonnegative_u64(row.get(offset + 6)?),
-        cache_write_input_tokens: nonnegative_u64(row.get(offset + 7)?),
-        reasoning_tokens: nonnegative_u64(row.get(offset + 8)?),
-        output_tokens: nonnegative_u64(row.get(offset + 9)?),
-        total_tokens: nonnegative_u64(row.get(offset + 10)?),
-        speed_output_tokens: nonnegative_u64(row.get(offset + 11)?),
-        speed_duration_ms: nonnegative_u64(row.get(offset + 12)?),
+        generation_ms: nonnegative_u64(row.get(offset + 5)?),
+        generation_samples: nonnegative_u64(row.get(offset + 6)?),
+        generation_output_tokens: nonnegative_u64(row.get(offset + 7)?),
+        input_tokens: nonnegative_u64(row.get(offset + 8)?),
+        cached_input_tokens: nonnegative_u64(row.get(offset + 9)?),
+        cached_input_samples: nonnegative_u64(row.get(offset + 10)?),
+        cache_write_input_tokens: nonnegative_u64(row.get(offset + 11)?),
+        cache_write_input_samples: nonnegative_u64(row.get(offset + 12)?),
+        reasoning_tokens: nonnegative_u64(row.get(offset + 13)?),
+        output_tokens: nonnegative_u64(row.get(offset + 14)?),
+        total_tokens: nonnegative_u64(row.get(offset + 15)?),
+        speed_output_tokens: nonnegative_u64(row.get(offset + 16)?),
+        speed_duration_ms: nonnegative_u64(row.get(offset + 17)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -1227,6 +1352,10 @@ fn unix_time_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn sql_u64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 fn to_json(value: &impl Serialize) -> Result<String, String> {
     serde_json::to_string(value).map_err(|_| "record serialization failed".to_string())
 }
@@ -1431,20 +1560,40 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(
             store.routing_policy().unwrap(),
-            (3, RoutingStrategy::Adaptive, DefaultServiceTier::Standard)
+            (
+                3,
+                RoutingStrategy::Adaptive,
+                DefaultServiceTier::Standard,
+                None
+            )
         );
         assert!(store
-            .set_routing_policy(0, RoutingStrategy::Adaptive, DefaultServiceTier::Standard,)
+            .set_routing_policy(
+                0,
+                RoutingStrategy::Adaptive,
+                DefaultServiceTier::Standard,
+                None,
+            )
             .is_err());
         store
-            .set_routing_policy(5, RoutingStrategy::OldestAccount, DefaultServiceTier::Fast)
+            .set_routing_policy(
+                5,
+                RoutingStrategy::OldestAccount,
+                DefaultServiceTier::Fast,
+                Some("gpt-5.4-mini".into()),
+            )
             .unwrap();
         drop(store);
 
         let reopened = Store::open(path).unwrap();
         assert_eq!(
             reopened.routing_policy().unwrap(),
-            (5, RoutingStrategy::OldestAccount, DefaultServiceTier::Fast)
+            (
+                5,
+                RoutingStrategy::OldestAccount,
+                DefaultServiceTier::Fast,
+                Some("gpt-5.4-mini".into())
+            )
         );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
@@ -1535,7 +1684,10 @@ mod tests {
                 (12, "012_routing_diagnostics".to_string()),
                 (13, "013_routing_strategy".to_string()),
                 (14, "014_default_service_tier".to_string()),
-                (15, "015_cache_write_input_tokens".to_string())
+                (15, "015_cache_write_input_tokens".to_string()),
+                (16, "016_response_affinity".to_string()),
+                (17, "017_generation_ms".to_string()),
+                (18, "018_image_base_model".to_string())
             ]
         );
         drop(store);
@@ -1659,6 +1811,7 @@ mod tests {
                         consecutive_failures: None,
                         latency_ms: 10,
                         ttft_ms: Some(4),
+                        generation_ms: Some(6),
                         input_tokens: Some(1),
                         cached_input_tokens: Some(1),
                         cache_write_input_tokens: Some(0),

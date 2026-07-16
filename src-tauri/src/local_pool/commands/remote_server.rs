@@ -20,6 +20,7 @@ use zenith_relay_core::protocol::{
     Capabilities, GatewayDiagnostic, HealthResponse, RevealedAccountIdentity, RuntimeStateSnapshot,
     UsagePage, UsageQuery,
 };
+use zenith_relay_core::CandidateRuntimeSnapshot;
 
 use super::accounts::{pick_account_import_documents, read_import_documents};
 
@@ -170,6 +171,16 @@ pub async fn get_remote_server_state(
         return Ok(None);
     };
     client.state().await.map(Some).map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn get_remote_runtime_order(
+    state: State<'_, DesktopState>,
+) -> Result<Option<Vec<CandidateRuntimeSnapshot>>, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Ok(None);
+    };
+    client.runtime_order().await.map(Some).map_err(remote_error)
 }
 
 #[tauri::command]

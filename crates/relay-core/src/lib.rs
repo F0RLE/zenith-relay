@@ -15,13 +15,14 @@ pub use catalog::{ModelRegistry, ModelRules};
 pub use error::{Error, Result};
 pub use proxy::{normalize_proxy_url, ProxyConfig};
 pub use runtime::{
-    discover_source_models, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
-    RuntimeAccount, RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    discover_source_models, normalize_image_base_model, DefaultServiceTier, GatewayRuntime,
+    GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore, RuntimeAccount,
+    RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
 };
 pub use scheduler::{
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, PoolScheduler,
-    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection, SelectionReason,
-    SelectionRequest,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
+    PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
+    SelectionReason, SelectionRequest, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{source_points_to_gateway, LocalGatewayKey, ProviderSource, WireApi};
 pub use usage::{

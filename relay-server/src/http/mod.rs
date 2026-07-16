@@ -18,6 +18,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     let management = Router::new()
         .route("/capabilities", get(management_api::capabilities))
         .route("/state", get(management_api::state_snapshot))
+        .route("/routing/runtime", get(management_api::runtime_order))
         .route(
             "/sources",
             get(management_api::list_sources).post(management_api::create_source),
@@ -132,6 +133,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/alpha/search", post(public_api::proxy))
         .route("/backend-api/codex/alpha/search", post(public_api::proxy))
         .route("/v1/chat/completions", post(public_api::proxy))
+        .route("/v1/images/generations", post(public_api::proxy))
+        .route("/v1/images/edits", post(public_api::proxy))
         .fallback(public_api::not_found)
         .with_state(state)
 }

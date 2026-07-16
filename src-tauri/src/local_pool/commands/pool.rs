@@ -56,6 +56,8 @@ pub struct UpdateRoutingInput {
     routing_strategy: RoutingStrategy,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
+    #[serde(default)]
+    image_base_model: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -406,6 +408,9 @@ pub async fn update_local_routing(
     gateway.max_retry_candidates = input.max_retry_candidates;
     gateway.routing_strategy = input.routing_strategy;
     gateway.default_service_tier = input.default_service_tier;
+    if let Some(image_base_model) = input.image_base_model {
+        gateway.image_base_model = image_base_model;
+    }
     if gateway == old_gateway {
         codex::sync_default_service_tier(&default_codex_home(), gateway.default_service_tier)?;
         return state.snapshot().await.map_err(Into::into);

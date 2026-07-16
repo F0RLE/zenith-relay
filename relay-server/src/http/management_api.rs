@@ -37,7 +37,8 @@ use zenith_relay_core::{
         UsageRange,
     },
     quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
-    source_points_to_gateway, DefaultServiceTier, ProviderSource, RoutingStrategy, WireApi,
+    source_points_to_gateway, CandidateRuntimeSnapshot, DefaultServiceTier, ProviderSource,
+    RoutingStrategy, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -68,6 +69,12 @@ pub async fn state_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+pub async fn runtime_order(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<CandidateRuntimeSnapshot>>, ManagementError> {
+    Ok(Json(state.runtime_order().map_err(runtime_error)?))
 }
 
 pub async fn list_sources(
@@ -2065,6 +2072,8 @@ pub struct RoutingPolicyInput {
     routing_strategy: RoutingStrategy,
     #[serde(default)]
     default_service_tier: Option<DefaultServiceTier>,
+    #[serde(default)]
+    image_base_model: Option<Option<String>>,
 }
 
 pub async fn set_routing_policy(
@@ -2079,18 +2088,20 @@ pub async fn set_routing_policy(
     }
     let previous = state.store.routing_policy().map_err(store_error)?;
     let default_service_tier = input.default_service_tier.unwrap_or(previous.2);
+    let image_base_model = input.image_base_model.unwrap_or(previous.3.clone());
     state
         .store
         .set_routing_policy(
             input.max_retry_candidates,
             input.routing_strategy,
             default_service_tier,
+            image_base_model,
         )
         .map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
         state
             .store
-            .set_routing_policy(previous.0, previous.1, previous.2)
+            .set_routing_policy(previous.0, previous.1, previous.2, previous.3)
             .map_err(store_error)?;
         if let Err(restore) = state.rebuild_runtime().await {
             return Err(store_error(format!(

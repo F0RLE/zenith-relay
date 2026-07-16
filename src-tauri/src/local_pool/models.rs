@@ -52,6 +52,8 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
+    pub image_base_model: Option<String>,
+    #[serde(default)]
     pub common_proxy_configured: bool,
     #[serde(default)]
     pub account_proxy_required: bool,
@@ -172,6 +174,7 @@ impl Default for GatewaySettings {
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
             routing_strategy: RoutingStrategy::Adaptive,
             default_service_tier: DefaultServiceTier::Standard,
+            image_base_model: None,
             common_proxy_configured: false,
             account_proxy_required: false,
             quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
@@ -192,6 +195,13 @@ impl GatewaySettings {
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
+        }
+        if self
+            .image_base_model
+            .as_deref()
+            .is_some_and(|model| model.len() > 256 || model.chars().any(char::is_control))
+        {
+            return Err("image base model id is invalid");
         }
         if !(MIN_QUOTA_REFRESH_INTERVAL_SECONDS..=MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
             .contains(&self.quota_refresh_interval_seconds)

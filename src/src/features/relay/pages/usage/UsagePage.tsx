@@ -89,8 +89,8 @@ export function UsagePage() {
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     if (mode === "zenith") return readyUsage.map((item) => ({ id: item.id, time: item.createdAt, success: item.status === "success", model: item.modelDisplay || item.model, connection: "Zenith API", key: "Zenith API", wireApi: null, ttft: item.timeToFirstByteMs ?? null, duration: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.status === "success" ? 200 : null, errorCategory: item.status === "success" ? null : item.status, routing: null, accountId: null, generationDurationMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? null }));
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateLabel ?? item.candidateHint, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, generationDurationMs: null }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? item.accountId : sourceLabels.get(item.sourceId) ?? item.sourceId, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: null }));
+    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateLabel ?? item.candidateHint, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, generationDurationMs: item.generationMs ?? null }));
+    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? item.accountId : sourceLabels.get(item.sourceId) ?? item.sourceId, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: item.generationMs }));
   }, [mode, readyUsage, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels]);
   const cutoff = range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000;
   const filtered = mode !== "zenith" ? rows : rows.filter((item) =>
@@ -106,7 +106,8 @@ export function UsagePage() {
   const totals = usagePage?.totals ?? totalsFromRows(filtered);
   const averageFirstResponse = totals.ttftSamples ? Math.round(totals.ttftMs / totals.ttftSamples) : null;
   const averageDuration = totals.requests ? Math.round(totals.latencyMs / totals.requests) : null;
-  const averageSpeed = totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
+  const averageGenerationSpeed = totals.generationMs ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
+  const averageEffectiveSpeed = totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
   const speedUnit = t("usage.tokensPerSecondUnit");
   const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
@@ -134,7 +135,7 @@ export function UsagePage() {
   return <section className="relay-page">
     <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="secondary" icon={<Download aria-hidden />} busy={busy === "usage-export"} disabled={usageLoading} onClick={exportRows}>{t("common.export")}</Button><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
     <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
-    <div className="metric-band usage-metrics"><div><span>{t("usage.requests")}</span><strong><CompactNumber value={totals.requests} locale={i18n.language} /></strong></div><div><span>{t("common.success")}</span><strong><CompactNumber value={totals.successfulRequests} locale={i18n.language} /></strong></div><div><span>{t("usage.totalTokens")}</span><strong><CompactNumber value={totals.totalTokens} locale={i18n.language} /></strong></div><div title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })}><span>{t("usage.apiEquivalent")}</span><strong>{formatApiEquivalent(totals.apiEquivalent, i18n.language)}</strong></div><div><span>{t("usage.averageSpeed")}</span><strong>{formatTokenSpeed(averageSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.timing")}</span><strong>{averageDuration == null ? "-" : `${averageFirstResponse ?? "-"} / ${averageDuration} ms`}</strong></div></div>
+    <div className="metric-band usage-metrics"><div><span>{t("usage.requests")}</span><strong><CompactNumber value={totals.requests} locale={i18n.language} /></strong></div><div><span>{t("common.success")}</span><strong><CompactNumber value={totals.successfulRequests} locale={i18n.language} /></strong></div><div><span>{t("usage.totalTokens")}</span><strong><CompactNumber value={totals.totalTokens} locale={i18n.language} /></strong></div><div title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })}><span>{t("usage.apiEquivalent")}</span><strong>{formatApiEquivalent(totals.apiEquivalent, i18n.language)}</strong></div><div><span>{t("usage.generationSpeed")}</span><strong>{formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.effectiveSpeed")}</span><strong>{formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.timing")}</span><strong>{averageDuration == null ? "-" : `${averageFirstResponse ?? "-"} / ${averageDuration} ms`}</strong></div></div>
     <p className="form-note usage-metric-note">{t("usage.tokenCompositionHint")} {t("usage.visibleSpeedHint")}</p>
     {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} range={range} setRange={(value) => resetPage(() => setRange(value))} modelQuery={modelQuery} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} keyQuery={keyQuery} setKeyQuery={(value) => resetPage(() => setKeyQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
@@ -176,7 +177,9 @@ type AggregateRow = {
   success: number;
   inputTokens: number;
   cachedInputTokens: number;
+  cachedInputSamples: number;
   cacheWriteInputTokens: number;
+  cacheWriteInputSamples: number;
   reasoningTokens: number;
   outputTokens: number;
   tokens: number;
@@ -184,13 +187,14 @@ type AggregateRow = {
   ttftCount: number;
   duration: number;
   speed: number | null;
+  generationSpeed: number | null;
 };
 
 function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]; groups?: UsageGroup[]; field: "model" | "connection"; empty: string }) {
   const { t, i18n } = useTranslation();
   const aggregateRows = groups?.map(({ key, label, totals }) => aggregateRowFromTotals(label || key || t("common.unknown"), totals)) ?? aggregateRowsFromUsage(rows, field, t("common.unknown"));
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
-  return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table"><thead><tr><th>{field === "model" ? t("common.model") : t("usage.poolMember")}</th><th>{t("usage.requests")}</th><th>{t("common.success")}</th><th>{t("usage.tokens")}</th><th>{t("usage.totalTokens")}</th><th>{t("usage.averageSpeed")}</th><th>{t("usage.timing")}</th></tr></thead><tbody>{aggregateRows.map((group) => <tr key={group.name}><td><code>{group.name}</code></td><td><CompactNumber value={group.requests} locale={i18n.language} /></td><td>{Math.round(group.success / group.requests * 100)}%</td><td><div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${formatFullNumber(group.cachedInputTokens, i18n.language)}`}><small>{t("usage.cachedShort")}</small>{formatCompactNumber(group.cachedInputTokens, i18n.language)}</span><span title={`${t("usage.cacheWriteInputTokens")}: ${formatFullNumber(group.cacheWriteInputTokens, i18n.language)}`}><small>{t("usage.cacheWriteShort")}</small>{formatCompactNumber(group.cacheWriteInputTokens, i18n.language)}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div></td><td><CompactNumber value={group.tokens} locale={i18n.language} /></td><td>{formatTokenSpeed(group.speed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</td><td>{formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests))}</td></tr>)}</tbody></table></div>;
+  return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table"><thead><tr><th>{field === "model" ? t("common.model") : t("usage.poolMember")}</th><th>{t("usage.requests")}</th><th>{t("common.success")}</th><th>{t("usage.tokens")}</th><th>{t("usage.totalTokens")}</th><th>{t("usage.generationSpeed")}</th><th>{t("usage.timing")}</th></tr></thead><tbody>{aggregateRows.map((group) => <tr key={group.name}><td><code>{group.name}</code></td><td><CompactNumber value={group.requests} locale={i18n.language} /></td><td>{Math.round(group.success / group.requests * 100)}%</td><td><div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.cacheWriteInputTokens")}: ${group.cacheWriteInputSamples ? formatFullNumber(group.cacheWriteInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cacheWriteShort")}</small>{group.cacheWriteInputSamples ? formatCompactNumber(group.cacheWriteInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div></td><td><CompactNumber value={group.tokens} locale={i18n.language} /></td><td>{formatTokenSpeed(group.generationSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</td><td>{formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests))}</td></tr>)}</tbody></table></div>;
 }
 
 function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
@@ -218,9 +222,20 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
       totals.ttftMs += row.ttft;
       totals.ttftSamples += 1;
     }
+    if (row.generationDurationMs != null && row.generationDurationMs > 0) {
+      totals.generationMs += row.generationDurationMs;
+      totals.generationSamples += 1;
+      if (row.success && (row.outputTokens ?? 0) > 0) totals.generationOutputTokens += row.outputTokens ?? 0;
+    }
     totals.inputTokens += row.inputTokens ?? 0;
-    totals.cachedInputTokens += row.cachedInputTokens ?? 0;
-    totals.cacheWriteInputTokens += row.cacheWriteInputTokens ?? 0;
+    if (row.cachedInputTokens != null) {
+      totals.cachedInputTokens += row.cachedInputTokens;
+      totals.cachedInputSamples += 1;
+    }
+    if (row.cacheWriteInputTokens != null) {
+      totals.cacheWriteInputTokens += row.cacheWriteInputTokens;
+      totals.cacheWriteInputSamples += 1;
+    }
     totals.reasoningTokens += row.reasoningTokens ?? 0;
     totals.outputTokens += row.outputTokens ?? 0;
     totals.totalTokens += row.tokens ?? 0;
@@ -236,7 +251,9 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
 function emptyTotals(): UsageTotals {
   return {
     requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0,
+    generationMs: 0, generationSamples: 0, generationOutputTokens: 0,
     inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningTokens: 0, outputTokens: 0,
+    cachedInputSamples: 0, cacheWriteInputSamples: 0,
     totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0,
     apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 },
   };
@@ -258,7 +275,9 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
     success: totals.successfulRequests,
     inputTokens: totals.inputTokens,
     cachedInputTokens: totals.cachedInputTokens,
+    cachedInputSamples: totals.cachedInputSamples,
     cacheWriteInputTokens: totals.cacheWriteInputTokens ?? 0,
+    cacheWriteInputSamples: totals.cacheWriteInputSamples,
     reasoningTokens: totals.reasoningTokens,
     outputTokens: totals.outputTokens,
     tokens: totals.totalTokens,
@@ -266,6 +285,7 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
     ttftCount: totals.ttftSamples,
     duration: totals.latencyMs,
     speed: totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null,
+    generationSpeed: totals.generationMs ? totals.generationOutputTokens * 1_000 / totals.generationMs : null,
   };
 }
 

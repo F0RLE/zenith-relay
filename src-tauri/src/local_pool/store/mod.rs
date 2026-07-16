@@ -20,6 +20,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use zenith_relay_core::normalize_image_base_model;
 
 pub struct LocalPoolStore {
     root: PathBuf,
@@ -288,6 +289,8 @@ impl LocalPoolStore {
 
     pub fn replace_gateway(&mut self, mut gateway: GatewaySettings) -> Result<()> {
         gateway.hidden_models = crate::local_pool::models::normalized_values(gateway.hidden_models);
+        gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
+            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
         if gateway == self.gateway {
             return Ok(());
         }
@@ -478,6 +481,7 @@ mod tests {
         gateway.quota_request_timeout_seconds = 10;
         gateway.use_free_accounts = true;
         gateway.routing_strategy = RoutingStrategy::OldestAccount;
+        gateway.image_base_model = Some("gpt-5.4-mini".into());
         store.replace_gateway(gateway).unwrap();
         drop(store);
 
@@ -488,6 +492,10 @@ mod tests {
         assert_eq!(
             reopened.gateway().routing_strategy,
             RoutingStrategy::OldestAccount
+        );
+        assert_eq!(
+            reopened.gateway().image_base_model.as_deref(),
+            Some("gpt-5.4-mini")
         );
         fs::remove_dir_all(root).unwrap();
     }

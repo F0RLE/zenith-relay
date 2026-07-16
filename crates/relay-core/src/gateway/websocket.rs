@@ -90,7 +90,7 @@ async fn handle_connection(
         }
     };
 
-    let connected = match connect_upstream(&runtime, &key, &headers, request, true).await {
+    let connected = match connect_upstream(&runtime, &key, &headers, request, true, 0).await {
         Ok(connected) => connected,
         Err(failure) => {
             send_gateway_error(&mut downstream, &failure).await;
@@ -136,6 +136,7 @@ async fn read_initial_request(
 
 #[derive(Clone)]
 struct ClientRequest {
+    request_id: String,
     value: Value,
     requested_model: String,
     resolved_model: String,
@@ -193,6 +194,7 @@ impl ClientRequest {
         let response_affinity_key = runtime
             .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
         Ok(Self {
+            request_id: super::request_id(),
             value,
             requested_model,
             resolved_model,
@@ -266,13 +268,18 @@ async fn connect_upstream(
     client_headers: &HeaderMap,
     request: ClientRequest,
     allow_previous_response_reset: bool,
+    attempt_offset: u16,
 ) -> Result<Connected, GatewayFailure> {
     let mut tried = HashSet::new();
-    let mut attempt = 0_u16;
+    let mut attempt = attempt_offset;
+    let mut attempts_this_run = 0_usize;
+    let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
     let mut last_failure = None;
 
-    while usize::from(attempt) < runtime.max_retry_candidates() {
+    while attempts_this_run
+        < super::retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+    {
         let selected = runtime.select_and_reserve(
             key,
             &request.resolved_model,
@@ -291,11 +298,13 @@ async fn connect_upstream(
         else {
             continue;
         };
+        route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         if route.wire_api != WireApi::Responses {
             continue;
         }
         attempt = attempt.saturating_add(1);
+        attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
         let prepared = match runtime
             .prepare_authorization(&route.candidate_id, now_ms())
@@ -404,6 +413,7 @@ async fn connect_upstream(
                     let failure = GatewayFailure::upstream_status(status);
                     if affinity_miss {
                         confirmed_response_missing |= terminal.previous_response_not_found;
+                        owner_recovery_confirmed |= !response_affinity_hit;
                         runtime
                             .invalidate_response_affinity(request.response_affinity_key.as_deref());
                         record_connect_affinity_miss(
@@ -456,6 +466,7 @@ async fn connect_upstream(
                 client_headers,
                 reset_request,
                 false,
+                attempt,
             ))
             .await;
         }
@@ -572,11 +583,18 @@ fn record_connect_failure(
             &route.source_model,
             failure.status,
             headers,
+            route.half_open_probe,
         ),
-        None => apply_cooldown(runtime, &route.candidate_id, "*", failure.cooldown_ms),
+        None => apply_cooldown(
+            runtime,
+            &route.candidate_id,
+            "*",
+            failure.cooldown_ms,
+            route.half_open_probe,
+        ),
     };
     let mut event = usage_event(
-        &super::request_id(),
+        &request.request_id,
         attempt,
         &key.id,
         route,
@@ -602,7 +620,7 @@ fn record_connect_affinity_miss(
     emit_usage(
         runtime,
         usage_event(
-            &super::request_id(),
+            &request.request_id,
             attempt,
             &key.id,
             route,
@@ -694,7 +712,7 @@ async fn bridge(
 ) {
     let mut upstream = connected.upstream;
     let initial_event = usage_event(
-        &super::request_id(),
+        &connected.request.request_id,
         connected.attempt,
         &key.id,
         &connected.route,
@@ -884,6 +902,7 @@ async fn start_next_request(
         let mut route = runtime
             .executor_route(&selected.candidate_id, &request.resolved_model)
             .ok_or_else(GatewayFailure::unavailable)?;
+        route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let started = Instant::now();
         if let Err(failure) = send_request(upstream, request.payload_for(&route)?).await {
@@ -891,7 +910,7 @@ async fn start_next_request(
             return Err(failure);
         }
         let event = usage_event(
-            &super::request_id(),
+            &request.request_id,
             1,
             &key.id,
             &route,
@@ -910,7 +929,7 @@ async fn start_next_request(
         });
         return Ok(true);
     }
-    let connected = connect_upstream(runtime, key, headers, request, true).await?;
+    let connected = connect_upstream(runtime, key, headers, request, true, 0).await?;
     let Connected {
         upstream: next_upstream,
         initial_messages,
@@ -921,7 +940,7 @@ async fn start_next_request(
         started,
     } = connected;
     let event = usage_event(
-        &super::request_id(),
+        &request.request_id,
         attempt,
         &key.id,
         &route,
@@ -1054,6 +1073,11 @@ fn finish_terminal(
         return true;
     };
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
+    in_flight.event.generation_ms = in_flight
+        .event
+        .ttft_ms
+        .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
+        .filter(|duration| *duration > 0);
     in_flight.event.success = success;
     if success {
         state.last_response_id = in_flight.response_id.clone();
@@ -1062,7 +1086,10 @@ fn finish_terminal(
             &in_flight.route.source_model,
             now_ms(),
             in_flight.event.output_tokens,
-            in_flight.event.latency_ms,
+            in_flight
+                .event
+                .generation_ms
+                .unwrap_or(in_flight.event.latency_ms),
         );
         runtime.bind_response_affinity(
             in_flight.response_id.as_deref(),
@@ -1080,6 +1107,7 @@ fn finish_terminal(
             &in_flight.route.source_model,
             status,
             &terminal.headers,
+            in_flight.route.half_open_probe,
         );
         apply_failure_state(&mut in_flight.event, failure_state);
     }
@@ -1096,12 +1124,18 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     in_flight.event.success = false;
     in_flight.event.error_category = Some(category.to_string());
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
+    in_flight.event.generation_ms = in_flight
+        .event
+        .ttft_ms
+        .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
+        .filter(|duration| *duration > 0);
     if incomplete_requires_cooldown(category) {
         let failure_state = apply_cooldown(
             runtime,
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
             TRANSIENT_COOLDOWN_MS,
+            in_flight.route.half_open_probe,
         );
         apply_failure_state(&mut in_flight.event, failure_state);
     }

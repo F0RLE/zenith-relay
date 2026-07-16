@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity, ArrowRightLeft, ArrowUpDown, CheckCheck, Clock3, Gauge, KeyRound, LayoutGrid, List, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Rows3, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, DefaultServiceTier, KeySummary, LocalUsage, ModelSummary, RemoteUsage, RoutingStrategy, SourceSummary } from "../../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, DefaultServiceTier, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
 import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -76,7 +76,7 @@ export function PoolPage() {
 
 function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onQuotaPolicy: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsage, remoteUsage, perform, busy, codexPoolOauthSelection } = useRelayState();
+  const { mode, runtime, localUsage, perform, busy, codexPoolOauthSelection } = useRelayState();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -90,9 +90,19 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
     ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
     ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const, health: item.enabled ? "healthy" : "disabled", quota: null })),
   ];
-  const currentMemberKey = latestPoolMemberKey(mode, localUsage, remoteUsage, poolMembers);
-  const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, currentMemberKey));
-  const currentMember = members.find((member) => memberKey(member) === currentMemberKey && poolMemberReady(member)) ?? null;
+  const runtimeOrder = runtime?.gateway.routingOrder ?? [];
+  const runtimeByMember = new Map(runtimeOrder.map((candidate) => [runtimeMemberKey(candidate), candidate]));
+  const orderByMember = new Map(runtimeOrder.map((candidate, index) => [runtimeMemberKey(candidate), index]));
+  const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
+  const activeMembers = members.filter((member) => (runtimeByMember.get(memberKey(member))?.inFlight ?? 0) > 0);
+  const nextMember = members.find((member) => runtimeByMember.get(memberKey(member))?.available) ?? null;
+  const routingSummary = activeMembers.length === 1
+    ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
+    : activeMembers.length > 1
+      ? t("pool.activeRoutes", { count: activeMembers.length })
+      : nextMember
+        ? `${t("pool.nextRoute")}: ${memberName(nextMember)}`
+        : t("pool.priorityEmpty");
   const selected = members.find((member) => `${member.kind}:${member.id}` === selectedId) ?? null;
   const remove = async (member: Member) => {
     const ok = await perform(`pool-remove-${member.id}`, () => mode === "local"
@@ -105,7 +115,7 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
     ? relayCommands.refreshPoolAccountQuotas()
     : relayCommands.remoteAction({ type: "refresh_pool_quotas" }), "feedback.refreshed");
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
-  const statuses = members.map(poolMemberStatus);
+  const statuses = members.map((member) => poolMemberStatus(member, runtimeByMember.get(memberKey(member))));
   const counts = {
     rotation: statuses.filter((status) => status === "rotation").length,
     quotaWait: statuses.filter((status) => status === "quotaWait").length,
@@ -115,7 +125,7 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{currentMember ? `${t("pool.currentRoute")}: ${memberName(currentMember)}` : t("pool.priorityEmpty")}</small></span></div>
+        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small></span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <IconButton className="pool-routing-settings-button" label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
@@ -136,8 +146,9 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
     <div className="pool-member-list" role="list" aria-label={t("pool.members")} data-layout={layout}>
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
+        const runtimeState = runtimeByMember.get(memberId);
         const excludedByFreePolicy = member.kind === "account" && member.routingExclusion === "free_plan_policy";
-        const statusKey = poolMemberStatus(member);
+        const statusKey = poolMemberStatus(member, runtimeState);
         const statusTone = statusKey === "rotation" ? "ready" : statusKey === "disabled" ? "disabled" : statusKey === "quotaWait" ? "warning" : "error";
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
@@ -146,11 +157,16 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
           : [member.label, formatAccountPlan(member.subscription.planType, t("common.unknown"))].join(" · ");
         const quota = memberQuota(member);
         const latestSpeed = member.kind === "account" ? accountSpeeds.get(member.id) : null;
-        const isCurrent = currentMemberKey === memberKey(member) && poolMemberReady(member);
+        const isCurrent = (runtimeState?.inFlight ?? 0) > 0;
+        const runtimeHint = runtimeState?.halfOpen
+          ? t("pool.recoveryProbe")
+          : runtimeState?.nextRetryAtMs
+            ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleTimeString(i18n.language) })
+            : excludedByFreePolicy ? t("pool.freePolicyHint") : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"}>
           <div className="pool-member-card-main">
-            <div className="pool-member-state" title={excludedByFreePolicy ? t("pool.freePolicyHint") : undefined}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} />{isCurrent ? <small className="pool-member-current"><Activity aria-hidden />{t("pool.currentRoute")}</small> : <small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small>}</div>
+            <div className="pool-member-state" title={runtimeHint}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} />{isCurrent ? <small className="pool-member-current"><Activity aria-hidden />{runtimeState?.halfOpen ? t("pool.recoveryProbe") : runtimeState && runtimeState.inFlight > 1 ? t("pool.activeRequests", { count: runtimeState.inFlight }) : t("pool.currentRoute")}</small> : <small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small>}</div>
             <div className="pool-member-identity"><strong title={identity}>{identity}</strong><small title={detail}>{detail}</small></div>
             <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div>{member.kind === "account" ? <div><dt>{t("usage.latestSpeed")}</dt><dd>{formatTokenSpeed(latestSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div> : null}</dl>
@@ -197,18 +213,35 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { mode, runtime, perform, busy } = useRelayState();
   const supportsRoutingStrategy = mode !== "remote" || runtime?.gateway.routingStrategy != null;
   const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
+  const supportsImageBaseModel = mode !== "remote" || runtime?.gateway.imageBaseModel !== undefined;
   const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(runtime?.gateway.routingStrategy ?? "adaptive");
   const [defaultServiceTier, setDefaultServiceTier] = useState<DefaultServiceTier>(runtime?.gateway.defaultServiceTier ?? "standard");
+  const [imageBaseModel, setImageBaseModel] = useState(runtime?.gateway.imageBaseModel ?? "auto");
   const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
+  const imageModelOptions = useMemo(() => {
+    const ids = new Map<string, string>();
+    const models = [...(runtime?.gateway.models ?? [])]
+      .filter((model) => model.enabled && !model.id.toLowerCase().includes("image"))
+      .sort((left, right) => compareModels(left, right, "price_asc"));
+    for (const model of models) {
+      ids.set(model.id.toLowerCase(), model.id);
+    }
+    if (imageBaseModel !== "auto" && imageBaseModel.trim()) ids.set(imageBaseModel.toLowerCase(), imageBaseModel);
+    return [
+      { value: "auto", label: t("pool.imageBaseModels.auto") },
+      ...[...ids.values()].sort((left, right) => left.localeCompare(right)).map((model) => ({ value: model, label: model })),
+    ];
+  }, [imageBaseModel, runtime?.gateway.models, t]);
   const save = async () => {
     const payload = {
       maxRetryCandidates,
       ...(supportsRoutingStrategy ? { routingStrategy } : {}),
       ...(supportsServiceTier ? { defaultServiceTier } : {}),
+      ...(supportsImageBaseModel ? { imageBaseModel: imageBaseModel === "auto" ? null : imageBaseModel } : {}),
     };
     const ok = await perform("routing-policy", async () => {
       if (mode === "local") {
-        return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier);
+        return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel === "auto" ? null : imageBaseModel);
       }
       const snapshot = await relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
       if (supportsServiceTier) await relayCommands.syncCodexDefaultServiceTier(defaultServiceTier);
@@ -225,6 +258,10 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
       <div className="pool-policy-row">
         <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div>
         <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} />
+      </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.imageBaseModel")}</strong><small>{supportsImageBaseModel ? t("pool.imageBaseModelHint") : t("remote.capabilityUnavailable")}</small></div>
+        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.imageBaseModel")} value={imageBaseModel} disabled={!supportsImageBaseModel} onChange={setImageBaseModel} options={imageModelOptions} />
       </div>
     </div>
   </Dialog>;
@@ -456,44 +493,12 @@ function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1
   return direction * (left.outputMicroUsdPerMillion! - right.outputMicroUsdPerMillion!)
     || direction * (left.inputMicroUsdPerMillion! - right.inputMicroUsdPerMillion!);
 }
-function comparePoolMembers(left: Member, right: Member, currentKey: string | null) {
-  return Number(memberKey(right) === currentKey && poolMemberReady(right)) - Number(memberKey(left) === currentKey && poolMemberReady(left))
-    || Number(poolMemberReady(right)) - Number(poolMemberReady(left))
-    || Number(memberRoutingExcluded(left)) - Number(memberRoutingExcluded(right))
-    || memberRoutingTier(right) - memberRoutingTier(left)
-    || comparePoolQuota(right, left)
+function comparePoolMembers(left: Member, right: Member, order: Map<string, number>) {
+  return (order.get(memberKey(left)) ?? Number.MAX_SAFE_INTEGER) - (order.get(memberKey(right)) ?? Number.MAX_SAFE_INTEGER)
     || memberName(left).localeCompare(memberName(right));
 }
 function memberKey(member: Member) { return `${member.kind}:${member.id}`; }
-function latestPoolMemberKey(mode: "local" | "remote" | "zenith", localUsage: LocalUsage[], remoteUsage: RemoteUsage[], members: Member[]) {
-  const eligibleKeys = new Set(members.filter(poolMemberReady).map(memberKey));
-  if (mode === "local") {
-    return [...localUsage]
-      .filter((event) => event.success && (event.accountId || event.sourceId))
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-      .map((event) => `${event.accountId ? "account" : "source"}:${event.accountId ?? event.sourceId}`)
-      .find((key) => eligibleKeys.has(key)) ?? null;
-  }
-  if (mode !== "remote") return null;
-  const latest = [...remoteUsage]
-    .filter((event) => event.success)
-    .sort((left, right) => right.createdAtMs - left.createdAtMs)
-    .map((event) => {
-      const kind = event.candidateKind === "source" ? "source" : "account";
-      const member = members.find((item) => item.kind === kind && (item.id === event.candidateHint || (item.kind === "account" ? item.label === event.candidateLabel || item.identityHint === event.candidateHint : item.name === event.candidateLabel)));
-      return member && eligibleKeys.has(memberKey(member)) ? memberKey(member) : null;
-    })
-    .find((key): key is string => key != null);
-  return latest ?? null;
-}
-function comparePoolQuota(left: Member, right: Member) {
-  const leftQuota = memberQuota(left);
-  const rightQuota = memberQuota(right);
-  if (leftQuota == null && rightQuota == null) return 0;
-  if (leftQuota == null) return -1;
-  if (rightQuota == null) return 1;
-  return leftQuota - rightQuota;
-}
+function runtimeMemberKey(candidate: CandidateRuntimeSnapshot) { return `${candidate.kind === "api_source" ? "source" : "account"}:${candidate.candidateId}`; }
 function memberQuota(member: Member) {
   if (member.kind === "source") return null;
   const values = [member.quota.primary, member.quota.secondary]
@@ -502,14 +507,10 @@ function memberQuota(member: Member) {
   return values.length ? Math.min(...values) : null;
 }
 function memberName(member: Member) { return member.kind === "source" ? member.name : member.label; }
-function memberRoutingTier(member: Member) {
-  if (member.kind !== "source") return 0;
-  const role = apiSourceRole(member.priority);
-  return role === "primary" ? 1 : role === "reserve" ? -1 : 0;
-}
 function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
-function poolMemberStatus(member: Member): "rotation" | "quotaWait" | "unavailable" | "disabled" {
+function poolMemberStatus(member: Member, runtimeState?: CandidateRuntimeSnapshot): "rotation" | "quotaWait" | "unavailable" | "disabled" {
   if (!member.enabled) return "disabled";
+  if (runtimeState && (runtimeState.available || runtimeState.inFlight > 0)) return "rotation";
   if (member.kind === "account" && (memberRoutingExcluded(member) || [member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0))) return "quotaWait";
   return poolMemberReady(member) ? "rotation" : "unavailable";
 }

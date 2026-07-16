@@ -82,12 +82,14 @@ enum WebSocketBehavior {
     Success,
     Events(Arc<Vec<Value>>),
     Sequence(Arc<Mutex<VecDeque<Vec<Value>>>>),
+    Hold(Arc<Notify>),
     Close,
 }
 
 struct TestServer {
     base_url: String,
     task: JoinHandle<()>,
+    runtime: Option<Arc<GatewayRuntime>>,
 }
 
 impl Drop for TestServer {
@@ -199,6 +201,62 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("provider-account-private"));
     assert!(!serialized.contains("account-access"));
+}
+
+#[tokio::test]
+async fn image_generation_uses_cheapest_account_model_and_translates_response() {
+    let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
+        StreamChunk::Data(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"image_generation_call\",\"result\":\"aW1hZ2U=\",\"output_format\":\"png\"}}\n\n",
+        ),
+        StreamChunk::Data(
+            "data: {\"type\":\"response.completed\",\"response\":{\"created_at\":7,\"output\":[],\"tool_usage\":{\"image_gen\":{\"image_tokens\":4}}}}\n\n",
+        ),
+    ])])
+    .await;
+    let authority = ready_authority("relay-image-account", "image-access").await;
+    let mut image_account = account(
+        "relay-image-account",
+        "provider-image-account",
+        &upstream,
+        10,
+    );
+    image_account.models.push("gpt-5.6-terra".to_string());
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![image_account],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/images/generations", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-image-2","prompt":"draw a test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["data"][0]["b64_json"], "aW1hZ2U=");
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/responses");
+    assert_eq!(requests[0].body["model"], "gpt-5.6-terra");
+    assert_eq!(requests[0].body["tools"][0]["type"], "image_generation");
+    assert_eq!(requests[0].body["tools"][0]["model"], "gpt-image-2");
+    assert!(requests[0].body["tools"][0].get("size").is_none());
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+    assert_eq!(events[0].requested_model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(events[0].resolved_model.as_deref(), Some("gpt-5.6-terra"));
 }
 
 #[tokio::test]
@@ -1083,6 +1141,14 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 4);
     assert_eq!(
+        events.iter().map(|event| event.attempt).collect::<Vec<_>>(),
+        [1, 2, 3, 1]
+    );
+    assert!(events[..3]
+        .iter()
+        .all(|event| event.request_id == events[0].request_id));
+    assert_ne!(events[0].request_id, events[3].request_id);
+    assert_eq!(
         events[0].http_status,
         StatusCode::TOO_MANY_REQUESTS.as_u16()
     );
@@ -1172,6 +1238,69 @@ async fn account_websocket_does_not_retry_after_output_begins() {
 }
 
 #[tokio::test]
+async fn abrupt_websocket_disconnect_releases_its_lease_without_retrying() {
+    let release = Arc::new(Notify::new());
+    let (upstream, state) =
+        spawn_websocket_upstream_with_behavior(WebSocketBehavior::Hold(release.clone())).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "cancel me"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["type"],
+        "response.output_text.delta"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight,
+        1
+    );
+    drop(socket);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let idle =
+                gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight == 0;
+            if idle && !events.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnected websocket lease was not released");
+    release.notify_waiters();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("client_websocket")
+    );
+    assert_eq!(events[0].retry_at_ms, None);
+}
+
+#[tokio::test]
 async fn account_websocket_reselects_for_each_independent_request() {
     let (first_upstream, first_state) = spawn_websocket_upstream().await;
     let (second_upstream, second_state) = spawn_websocket_upstream().await;
@@ -1222,6 +1351,81 @@ async fn account_websocket_reselects_for_each_independent_request() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
     assert_ne!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_websocket_chats_are_balanced_and_release_all_leases() {
+    const REQUESTS: usize = 200;
+    let (first_upstream, first_state) = spawn_websocket_upstream().await;
+    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/responses", gateway.base_url);
+    let completed = tokio::time::timeout(
+        Duration::from_secs(20),
+        join_all((0..REQUESTS).map(|index| {
+            let client = client.clone();
+            let url = url.clone();
+            async move {
+                let upgraded = client
+                    .get(url)
+                    .bearer_auth(LOCAL_KEY)
+                    .upgrade()
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(upgraded.status(), StatusCode::SWITCHING_PROTOCOLS);
+                let mut socket = upgraded.into_websocket().await.unwrap();
+                socket
+                    .send(ClientWsMessage::Text(
+                        json!({
+                            "type": "response.create",
+                            "model": MODEL,
+                            "input": format!("parallel chat {index}")
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .unwrap();
+                receive_websocket_completion(&mut socket).await["type"] == "response.completed"
+            }
+        })),
+    )
+    .await
+    .expect("parallel websocket requests timed out");
+
+    assert!(completed.into_iter().all(|completed| completed));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.lock().unwrap().len() != REQUESTS {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("websocket usage events did not finish");
+    assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
+    assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
+    assert!(gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| candidate.in_flight == 0));
 }
 
 #[tokio::test]
@@ -2168,6 +2372,13 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
         .all(|response| response.status() == StatusCode::OK));
     assert_eq!(first_state.requests.lock().unwrap().len(), REQUESTS / 2);
     assert_eq!(second_state.requests.lock().unwrap().len(), REQUESTS / 2);
+    assert!(gateway
+        .runtime
+        .as_ref()
+        .unwrap()
+        .candidate_runtime_order()
+        .iter()
+        .all(|candidate| candidate.in_flight == 0));
 }
 
 #[tokio::test]
@@ -2208,6 +2419,50 @@ async fn independent_chat_uses_a_free_account_while_an_sse_stream_is_open() {
     assert!(events
         .iter()
         .any(|event| event.account_id.as_deref() == Some("free-account")));
+}
+
+#[tokio::test]
+async fn cancelled_sse_releases_its_lease_without_cooling_the_account() {
+    let (upstream, state) = spawn_held_stream_upstream().await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight,
+        1
+    );
+    drop(response);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let idle =
+                gateway.runtime.as_ref().unwrap().candidate_runtime_order()[0].in_flight == 0;
+            if idle && !events.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled SSE lease was not released");
+    state.release.notify_waiters();
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("client_cancelled")
+    );
+    assert_eq!(events[0].retry_at_ms, None);
 }
 
 #[tokio::test]
@@ -2382,26 +2637,25 @@ async fn spawn_mixed_gateway_with_options(
 ) {
     let events = Arc::new(Mutex::new(Vec::new()));
     let captured = events.clone();
-    let runtime = GatewayRuntime::from_mixed_pool(
-        sources,
-        accounts,
-        keys,
-        RuntimeAccountAuth {
-            token_authority: authority,
-            refresh_adapter: refresh.clone(),
-            persistence_adapter: persistence.clone(),
-            refresh_skew_ms: 0,
-        },
-        options,
-        Arc::new(move |event| captured.lock().unwrap().push(event)),
-    )
-    .unwrap();
-    (
-        spawn(gateway::router(Arc::new(runtime))).await,
-        events,
-        refresh,
-        persistence,
-    )
+    let runtime = Arc::new(
+        GatewayRuntime::from_mixed_pool(
+            sources,
+            accounts,
+            keys,
+            RuntimeAccountAuth {
+                token_authority: authority,
+                refresh_adapter: refresh.clone(),
+                persistence_adapter: persistence.clone(),
+                refresh_skew_ms: 0,
+            },
+            options,
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+        )
+        .unwrap(),
+    );
+    let mut server = spawn(gateway::router(runtime.clone())).await;
+    server.runtime = Some(runtime);
+    (server, events, refresh, persistence)
 }
 
 async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
@@ -2465,6 +2719,7 @@ async fn spawn(app: Router) -> TestServer {
     TestServer {
         base_url: format!("http://{address}"),
         task,
+        runtime: None,
     }
 }
 
@@ -2600,6 +2855,27 @@ async fn upstream_websocket(
                 WebSocketBehavior::Events(events) => events.as_ref().clone(),
                 WebSocketBehavior::Sequence(events) => {
                     events.lock().unwrap().pop_front().unwrap_or_default()
+                }
+                WebSocketBehavior::Hold(release) => {
+                    if socket
+                        .send(AxumWsMessage::Text(
+                            json!({"type": "response.output_text.delta", "delta": "held"})
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    release.notified().await;
+                    vec![json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "ws-held-response",
+                            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                        }
+                    })]
                 }
                 WebSocketBehavior::Close => {
                     let _ = socket.send(AxumWsMessage::Close(None)).await;

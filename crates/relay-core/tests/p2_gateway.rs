@@ -799,6 +799,8 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             routing_strategy: Default::default(),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
+            image_base_model: None,
+            response_affinity_store: None,
         },
     )
     .await;
@@ -876,6 +878,8 @@ async fn spawn_gateway(
             routing_strategy: Default::default(),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
+            image_base_model: None,
+            response_affinity_store: None,
         },
     )
     .await

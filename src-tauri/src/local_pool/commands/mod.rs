@@ -172,6 +172,8 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             routing_strategy: settings.routing_strategy,
             hidden_models: settings.hidden_models,
             default_service_tier: settings.default_service_tier,
+            image_base_model: settings.image_base_model.clone(),
+            response_affinity_store: Some(state.response_affinity_store()),
         },
         state.usage_callback(),
     )

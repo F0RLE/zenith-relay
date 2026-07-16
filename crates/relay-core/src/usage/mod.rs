@@ -31,6 +31,7 @@ pub struct UsageEvent {
     pub consecutive_failures: Option<u32>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
+    pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
@@ -103,34 +104,43 @@ pub fn estimate_api_equivalent(
         };
     };
     let input_tokens = input_tokens.unwrap_or_default();
-    let cached_input_tokens = cached_input_tokens.unwrap_or_default().min(input_tokens);
-    let cache_write_input_tokens = cache_write_input_tokens
+    let cached_input_tokens = cached_input_tokens.map(|tokens| tokens.min(input_tokens));
+    let cache_write_input_tokens = cache_write_input_tokens.map(|tokens| {
+        tokens.min(input_tokens.saturating_sub(cached_input_tokens.unwrap_or_default()))
+    });
+    let classified_input_tokens = cached_input_tokens
         .unwrap_or_default()
-        .min(input_tokens.saturating_sub(cached_input_tokens));
-    let uncached_input_tokens = input_tokens
-        .saturating_sub(cached_input_tokens)
-        .saturating_sub(cache_write_input_tokens);
+        .saturating_add(cache_write_input_tokens.unwrap_or_default());
+    let uncached_input_tokens = cached_input_tokens
+        .zip(cache_write_input_tokens)
+        .map(|(cached, written)| input_tokens.saturating_sub(cached).saturating_sub(written));
     let output_tokens = output_tokens.unwrap_or_default();
+    let priced_input_tokens =
+        classified_input_tokens.saturating_add(uncached_input_tokens.unwrap_or_default());
     ApiEquivalentSummary {
-        micro_usd: token_cost(uncached_input_tokens, price.input_micro_usd_per_million)
-            .saturating_add(token_cost(
-                cached_input_tokens,
-                price
-                    .cached_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            ))
-            .saturating_add(token_cost(
-                cache_write_input_tokens,
-                price
-                    .cache_write_input_micro_usd_per_million
-                    .unwrap_or(price.input_micro_usd_per_million),
-            ))
-            .saturating_add(token_cost(
-                output_tokens,
-                price.output_micro_usd_per_million,
-            )),
-        priced_tokens: measured_tokens,
-        unpriced_tokens: total_tokens.saturating_sub(measured_tokens),
+        micro_usd: token_cost(
+            uncached_input_tokens.unwrap_or_default(),
+            price.input_micro_usd_per_million,
+        )
+        .saturating_add(token_cost(
+            cached_input_tokens.unwrap_or_default(),
+            price
+                .cached_input_micro_usd_per_million
+                .unwrap_or(price.input_micro_usd_per_million),
+        ))
+        .saturating_add(token_cost(
+            cache_write_input_tokens.unwrap_or_default(),
+            price
+                .cache_write_input_micro_usd_per_million
+                .unwrap_or(price.input_micro_usd_per_million),
+        ))
+        .saturating_add(token_cost(
+            output_tokens,
+            price.output_micro_usd_per_million,
+        )),
+        priced_tokens: priced_input_tokens.saturating_add(output_tokens),
+        unpriced_tokens: total_tokens
+            .saturating_sub(priced_input_tokens.saturating_add(output_tokens)),
     }
 }
 
@@ -199,7 +209,7 @@ mod pricing_tests {
             Some("gpt-5.4"),
             Some(1_000_000),
             Some(400_000),
-            None,
+            Some(0),
             Some(100_000),
             Some(1_100_000),
         );
@@ -263,7 +273,7 @@ mod pricing_tests {
                 Some("gpt-5.4"),
                 Some(10),
                 Some(100),
-                None,
+                Some(0),
                 Some(0),
                 Some(10)
             )

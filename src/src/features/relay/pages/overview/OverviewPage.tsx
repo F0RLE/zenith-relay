@@ -6,13 +6,14 @@ import { useRelayState } from "../../state/RelayStateProvider";
 
 export function OverviewPage() {
   const { t } = useTranslation();
-  const { mode, runtime, readyState, readyStats, localUsage, remoteUsage, readyUsage, setPage, perform, busy } = useRelayState();
+  const { mode, runtime, readyState, readyStats, localUsage, localUsagePage, remoteUsage, remoteUsagePage, readyUsage, setPage, perform, busy } = useRelayState();
   const running = mode === "zenith" ? Boolean(readyState?.providerActive) : Boolean(runtime?.gateway.running);
   const poolUsage = mode === "remote" ? remoteUsage : localUsage;
-  const requests = mode === "zenith" ? readyUsage.length : poolUsage.length;
+  const usageTotals = mode === "local" ? localUsagePage?.totals : mode === "remote" ? remoteUsagePage?.totals : null;
+  const requests = mode === "zenith" ? readyUsage.length : usageTotals?.requests ?? poolUsage.length;
   const models = mode === "zenith" ? 0 : runtime?.gateway.visibleModelIds.length ?? 0;
   const healthy = mode === "zenith" ? (running ? 1 : 0) : [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
-  const errors = mode === "zenith" ? 0 : poolUsage.filter((item) => !item.success).length;
+  const errors = mode === "zenith" ? 0 : Math.max(0, (usageTotals?.requests ?? poolUsage.length) - (usageTotals?.successfulRequests ?? poolUsage.filter((item) => item.success).length));
   const activity = mode === "zenith"
     ? readyUsage.slice(0, 5).map((item) => ({ id: item.id, success: item.status === "success", model: item.model, latency: item.responseTimeDisplay }))
     : poolUsage.slice(0, 5).map((item) => ({ id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latency: `${item.latencyMs} ms` }));

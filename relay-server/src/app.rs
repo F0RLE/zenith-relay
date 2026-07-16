@@ -69,7 +69,7 @@ impl AppState {
         let key_records = self.store.keys()?;
         let hidden_models = self.store.hidden_models()?;
         let use_free_accounts = self.store.quota_policy()?.2;
-        let (max_retry_candidates, routing_strategy, default_service_tier) =
+        let (max_retry_candidates, routing_strategy, default_service_tier, image_base_model) =
             self.store.routing_policy()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
@@ -168,6 +168,8 @@ impl AppState {
                 routing_strategy,
                 hidden_models,
                 default_service_tier,
+                image_base_model,
+                response_affinity_store: Some(self.store.clone()),
             },
             usage,
         )
@@ -220,7 +222,7 @@ impl AppState {
         let account_proxy_required = self.store.account_proxy_required()?;
         let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
             self.store.quota_policy()?;
-        let (max_retry_candidates, routing_strategy, default_service_tier) =
+        let (max_retry_candidates, routing_strategy, default_service_tier, image_base_model) =
             self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let equivalents = self.store.api_equivalents()?;
@@ -289,7 +291,12 @@ impl AppState {
             .filter(|model| model.enabled)
             .map(|model| model.id.clone())
             .collect::<Vec<_>>();
-        let running = self.store.gateway_enabled()? && self.runtime()?.is_some();
+        let runtime = self.runtime()?;
+        let running = self.store.gateway_enabled()? && runtime.is_some();
+        let routing_order = runtime
+            .as_ref()
+            .map(|runtime| runtime.candidate_runtime_order())
+            .unwrap_or_default();
         Ok(RuntimeStateSnapshot {
             schema_version: SERVER_SCHEMA_VERSION,
             runtime_target: RuntimeTargetSummary {
@@ -329,6 +336,7 @@ impl AppState {
                 max_retry_candidates: Some(max_retry_candidates),
                 routing_strategy: Some(routing_strategy),
                 default_service_tier: Some(default_service_tier),
+                image_base_model,
                 models,
                 common_proxy_configured,
                 common_proxy_available,
@@ -336,6 +344,7 @@ impl AppState {
                 quota_refresh_interval_seconds,
                 quota_request_timeout_seconds,
                 use_free_accounts,
+                routing_order,
             },
             platform: std::env::consts::OS.to_string(),
             capabilities: self.capabilities.clone(),

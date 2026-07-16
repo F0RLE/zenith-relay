@@ -161,6 +161,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       authAvailable: true,
     }];
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null };
+    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; nextRetryAtMs: number | null; effectiveWeight: number; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { catalogRank: 6, inputMicroUsdPerMillion: 750_000, outputMicroUsdPerMillion: 4_500_000 },
@@ -182,9 +183,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     const localRuntime = {
       schemaVersion: 14,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.0.5" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "oldest_account", defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "oldest_account", defaultServiceTier: "standard" as "standard" | "fast", imageBaseModel: null as string | null, models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy", "runtime_routing"] },
       sources: populated ? [source] : [],
       accounts: populated ? accounts : [],
       keys: populated && input.poolKeyPresent !== false ? [key] : [],
@@ -193,6 +194,25 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       warnings: [],
     };
     refreshGatewayModels(localRuntime);
+    const usageAccount = accounts[Math.max(0, Math.min(input.usageAccountIndex ?? 0, accounts.length - 1))];
+    const orderedMembers = [
+      usageAccount,
+      accounts.find((item) => item.label === "Business Workspace"),
+      source,
+      ...accounts,
+    ].filter((item, index, items): item is typeof source | typeof account => Boolean(item) && items.findIndex((candidate) => candidate?.id === item?.id) === index);
+    localRuntime.gateway.routingOrder = orderedMembers
+      .filter((item) => populated && item.inPool)
+      .map((item, index) => ({
+        candidateId: item.id,
+        kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
+        available: item.enabled && !item.draining && !("routingExclusion" in item && item.routingExclusion),
+        inFlight: item.id === usageAccount.id ? 1 : 0,
+        nextRetryAtMs: null,
+        effectiveWeight: Math.max(1, item.weight) * 100,
+        halfOpen: false,
+        dispatches: index,
+      }));
     const remoteRuntime = structuredClone(localRuntime);
     remoteRuntime.schemaVersion = 15;
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.0.5" };
@@ -200,9 +220,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     if (input.legacyRemoteRouting) {
       delete (remoteRuntime.gateway as { routingStrategy?: "adaptive" | "oldest_account" }).routingStrategy;
       delete (remoteRuntime.gateway as { defaultServiceTier?: "standard" | "fast" }).defaultServiceTier;
+      delete (remoteRuntime.gateway as { imageBaseModel?: string | null }).imageBaseModel;
     }
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy", "runtime_routing"] };
 
     function sourceFromPayload(payload: Record<string, unknown>, id: string) {
       return {
@@ -222,7 +243,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
 
     const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, effectiveWeight: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
-    const usageAccount = accounts[Math.max(0, Math.min(input.usageAccountIndex ?? 0, accounts.length - 1))];
     let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 428, ttftMs: 128, inputTokens: 20, cachedInputTokens: 12, cacheWriteInputTokens: 4, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
     let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: usageAccount.identityHint, candidateLabel: usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, inputTokens: 18, cachedInputTokens: 10, cacheWriteInputTokens: 3, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; cacheWriteInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
@@ -275,7 +295,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "reset_key": readyKey = ""; return "reset";
           case "prepare_top_up_amount": return { amountCents: 1000, amountUsd: 10, valid: true };
           case "get_local_runtime_state": return structuredClone(localRuntime);
+          case "get_local_runtime_order": return structuredClone(localRuntime.gateway.routingOrder);
           case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
+          case "get_remote_runtime_order": return input.remoteConnected === false ? null : structuredClone(remoteRuntime.gateway.routingOrder);
           case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
@@ -362,10 +384,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "update_local_routing": {
-            const request = args.input as { maxRetryCandidates: number; routingStrategy: "adaptive" | "oldest_account"; defaultServiceTier: "standard" | "fast" };
+            const request = args.input as { maxRetryCandidates: number; routingStrategy: "adaptive" | "oldest_account"; defaultServiceTier: "standard" | "fast"; imageBaseModel: string | null };
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
             localRuntime.gateway.routingStrategy = request.routingStrategy;
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
+            localRuntime.gateway.imageBaseModel = request.imageBaseModel;
             return structuredClone(localRuntime);
           }
           case "sync_codex_default_service_tier": return null;
@@ -654,6 +677,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
         if (input.payload?.routingStrategy) remoteRuntime.gateway.routingStrategy = input.payload.routingStrategy as "adaptive" | "oldest_account";
         if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast";
+        if (input.payload && Object.prototype.hasOwnProperty.call(input.payload, "imageBaseModel")) remoteRuntime.gateway.imageBaseModel = (input.payload.imageBaseModel as string | null) ?? null;
         return structuredClone(remoteRuntime);
       }
       if (type === "refresh_pool_quotas") return { refreshed: remoteRuntime.accounts.filter((item) => item.inPool && item.enabled).length, failed: 0, snapshot: structuredClone(remoteRuntime) };

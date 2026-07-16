@@ -71,6 +71,37 @@ impl AffinityCache {
         );
     }
 
+    pub fn restore(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: impl Into<String>,
+        expires_at: u64,
+        now_ms: u64,
+    ) {
+        if self.max_entries == 0 || expires_at <= now_ms {
+            return;
+        }
+        self.prune(now_ms);
+        let key = key.into();
+        if !self.bindings.contains_key(&key) && self.bindings.len() >= self.max_entries {
+            self.evict_oldest();
+        }
+        self.bindings.insert(
+            key,
+            Binding {
+                candidate_id: candidate_id.into(),
+                ttl_ms: self.ttl_ms,
+                expires_at,
+                last_touched_at: now_ms,
+            },
+        );
+    }
+
+    pub fn contains(&mut self, key: &str, now_ms: u64) -> bool {
+        self.prune(now_ms);
+        self.bindings.contains_key(key)
+    }
+
     pub fn invalidate(&mut self, key: &str) -> bool {
         self.bindings.remove(key).is_some()
     }
@@ -139,5 +170,12 @@ mod tests {
         disabled_default.bind_for("response", "a", 20, 5);
         assert_eq!(disabled_default.get("response", 24), Some("a"));
         assert_eq!(disabled_default.get("response", 25), None);
+
+        let mut restored = AffinityCache::new(1, 10);
+        restored.restore("response", "a", 25, 20);
+        assert_eq!(restored.get("response", 24), Some("a"));
+        assert!(restored.refresh("response", 24));
+        assert_eq!(restored.get("response", 33), Some("a"));
+        assert_eq!(restored.get("response", 34), None);
     }
 }

@@ -5,15 +5,17 @@ use crate::accounts::{
 use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
-    CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey,
-    ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result, RoutingDiagnostics,
-    RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest, UsageCallback, WireApi,
+    api_model_price, CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error,
+    LocalGatewayKey, ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result,
+    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest,
+    UsageCallback, WireApi, RESPONSE_AFFINITY_TTL_MS,
 };
 use futures_util::StreamExt;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +26,7 @@ use url::Url;
 
 pub(crate) const MAX_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 
 #[derive(Clone, Debug)]
@@ -173,12 +176,51 @@ impl DefaultServiceTier {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseAffinityBinding {
+    pub key: String,
+    pub candidate_id: String,
+    pub expires_at_ms: u64,
+}
+
+pub trait ResponseAffinityStore: Send + Sync {
+    fn load(&self, now_ms: u64) -> std::result::Result<Vec<ResponseAffinityBinding>, String>;
+    fn find(
+        &self,
+        key: &str,
+        now_ms: u64,
+    ) -> std::result::Result<Option<ResponseAffinityBinding>, String>;
+    fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String>;
+    fn delete(&self, key: &str) -> std::result::Result<(), String>;
+}
+
+#[derive(Clone)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
     pub routing_strategy: RoutingStrategy,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
+    /// Optional text model used as the Responses image-generation bridge.
+    /// `None` selects the cheapest known compatible model per account.
+    pub image_base_model: Option<String>,
+    pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+}
+
+impl fmt::Debug for GatewayRuntimeOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GatewayRuntimeOptions")
+            .field("max_retry_candidates", &self.max_retry_candidates)
+            .field("routing_strategy", &self.routing_strategy)
+            .field("hidden_models", &self.hidden_models)
+            .field("default_service_tier", &self.default_service_tier)
+            .field("image_base_model", &self.image_base_model)
+            .field(
+                "response_affinity_store",
+                &self.response_affinity_store.as_ref().map(|_| "configured"),
+            )
+            .finish()
+    }
 }
 
 impl Default for GatewayRuntimeOptions {
@@ -188,6 +230,8 @@ impl Default for GatewayRuntimeOptions {
             routing_strategy: RoutingStrategy::Adaptive,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
+            image_base_model: None,
+            response_affinity_store: None,
         }
     }
 }
@@ -205,13 +249,22 @@ pub struct GatewayRuntime {
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
     max_retry_candidates: usize,
     default_service_tier: DefaultServiceTier,
+    response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     pub(crate) usage: UsageCallback,
 }
 
 pub(crate) struct CandidateLease {
     scheduler: Arc<Mutex<PoolScheduler>>,
     candidate_id: String,
+    model: String,
+    lane: CandidateLeaseLane,
     released: AtomicBool,
+}
+
+#[derive(Clone, Copy)]
+enum CandidateLeaseLane {
+    Text,
+    Image,
 }
 
 impl CandidateLease {
@@ -219,10 +272,18 @@ impl CandidateLease {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.scheduler
+        let mut scheduler = self
+            .scheduler
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release(&self.candidate_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match self.lane {
+            CandidateLeaseLane::Text => {
+                scheduler.release_for(&self.candidate_id, Some(&self.model));
+            }
+            CandidateLeaseLane::Image => {
+                scheduler.release_image_for(&self.candidate_id, Some(&self.model));
+            }
+        }
     }
 }
 
@@ -256,6 +317,7 @@ struct AccountExecutor {
     chatgpt_account_id: HeaderValue,
     responses_url: Url,
     configured_models: BTreeSet<String>,
+    image_main_model: Option<String>,
     token_authority: Arc<TokenAuthority>,
     refresh_adapter: Arc<dyn TokenRefreshAdapter>,
     persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
@@ -273,6 +335,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) wire_api: WireApi,
     pub(crate) upstream_url: Url,
     pub(crate) source_model: String,
+    pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
 }
 
@@ -404,6 +467,7 @@ impl GatewayRuntime {
         }
 
         let mut account_executors = BTreeMap::new();
+        let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
         if !accounts.is_empty() && account_auth.is_none() {
             return Err(Error::Validation(
                 "OAuth accounts require token authority adapters".to_string(),
@@ -449,6 +513,11 @@ impl GatewayRuntime {
                 })?;
             chatgpt_account_id.set_sensitive(true);
             let models = normalized_set(account.models.iter());
+            let image_main_model = select_image_main_model(&models, image_base_model.as_deref());
+            let mut candidate_models = models.clone();
+            if image_main_model.is_some() {
+                candidate_models.insert(IMAGE_API_MODEL.to_string());
+            }
             let candidate = RuntimeCandidate {
                 id: account.id.clone(),
                 kind: CandidateKind::OAuthAccount,
@@ -459,7 +528,7 @@ impl GatewayRuntime {
                 draining: account.draining,
                 priority: account.priority,
                 weight: account.weight,
-                models: models.clone(),
+                models: candidate_models.clone(),
                 model_rules: model_rules(account.allowed_models, account.excluded_models),
                 health: account.health,
                 quota: account.quota,
@@ -471,7 +540,7 @@ impl GatewayRuntime {
             let auth = account_auth
                 .as_ref()
                 .expect("account auth was validated above");
-            registry.replace(candidate.id.clone(), models.iter());
+            registry.replace(candidate.id.clone(), candidate_models.iter());
             let candidate_id = candidate.id.clone();
             scheduler.upsert(candidate);
             scheduler.set_candidate_created_at(&candidate_id, account.created_at_ms);
@@ -483,6 +552,7 @@ impl GatewayRuntime {
                     chatgpt_account_id,
                     responses_url,
                     configured_models: models,
+                    image_main_model,
                     token_authority: auth.token_authority.clone(),
                     refresh_adapter: auth.refresh_adapter.clone(),
                     persistence_adapter: auth.persistence_adapter.clone(),
@@ -555,6 +625,23 @@ impl GatewayRuntime {
             ));
         }
 
+        let affinity_store = options.response_affinity_store.clone();
+        if let Some(store) = affinity_store.as_ref() {
+            let now_ms = runtime_now_ms();
+            if let Ok(bindings) = store.load(now_ms) {
+                for binding in bindings {
+                    if !scheduler.restore_response_affinity(
+                        binding.key.clone(),
+                        &binding.candidate_id,
+                        binding.expires_at_ms,
+                        now_ms,
+                    ) {
+                        let _ = store.delete(&binding.key);
+                    }
+                }
+            }
+        }
+
         Ok(Self {
             client,
             bounded_client,
@@ -568,6 +655,7 @@ impl GatewayRuntime {
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             max_retry_candidates: options.max_retry_candidates,
             default_service_tier: options.default_service_tier,
+            response_affinity_store: affinity_store,
             usage,
         })
     }
@@ -770,6 +858,10 @@ impl GatewayRuntime {
             .update_candidate_availability(candidate_id, enabled, health, quota)
     }
 
+    pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
+        self.lock_scheduler().runtime_order(runtime_now_ms())
+    }
+
     pub fn set_protected_candidate(
         &self,
         candidate_id: Option<&str>,
@@ -788,23 +880,100 @@ impl GatewayRuntime {
         response_affinity_key: Option<&str>,
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
+        self.select_and_reserve_for(
+            key,
+            model,
+            allowed_protocols,
+            tried,
+            response_affinity_key,
+            now_ms,
+            CandidateLeaseLane::Text,
+        )
+    }
+
+    pub(crate) fn select_and_reserve_image(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        tried: &HashSet<String>,
+        now_ms: u64,
+    ) -> Option<(Selection, CandidateLease)> {
+        self.select_and_reserve_for(
+            key,
+            model,
+            allowed_protocols,
+            tried,
+            None,
+            now_ms,
+            CandidateLeaseLane::Image,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_and_reserve_for(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        tried: &HashSet<String>,
+        response_affinity_key: Option<&str>,
+        now_ms: u64,
+        lane: CandidateLeaseLane,
+    ) -> Option<(Selection, CandidateLease)> {
+        if let (Some(key), Some(store)) =
+            (response_affinity_key, self.response_affinity_store.as_ref())
+        {
+            let cached = self.lock_scheduler().has_response_affinity(key, now_ms);
+            if !cached {
+                if let Ok(Some(binding)) = store.find(key, now_ms) {
+                    self.lock_scheduler().restore_response_affinity(
+                        binding.key,
+                        &binding.candidate_id,
+                        binding.expires_at_ms,
+                        now_ms,
+                    );
+                }
+            }
+        }
         let mut scheduler = self.lock_scheduler();
-        let selection = scheduler.select(SelectionRequest {
+        let request = SelectionRequest {
             model,
             allowed_protocols,
             scope: &key.scope,
             tried,
             response_affinity_key,
             now_ms,
-        })?;
-        scheduler.reserve(&selection.candidate_id).then(|| {
+        };
+        let selection = match lane {
+            CandidateLeaseLane::Text => scheduler.select(request),
+            CandidateLeaseLane::Image => scheduler.select_image(request),
+        }?;
+        let reserved = match lane {
+            CandidateLeaseLane::Text => {
+                scheduler.reserve_for(&selection.candidate_id, model, now_ms)
+            }
+            CandidateLeaseLane::Image => {
+                scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
+            }
+        }
+        .then(|| {
             let lease = CandidateLease {
                 scheduler: self.scheduler.clone(),
                 candidate_id: selection.candidate_id.clone(),
+                model: model.to_string(),
+                lane,
                 released: AtomicBool::new(false),
             };
             (selection, lease)
-        })
+        });
+        drop(scheduler);
+        if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
+            if selection.response_affinity_hit {
+                self.persist_response_affinity(key, &selection.candidate_id, now_ms);
+            }
+        }
+        reserved
     }
 
     pub(crate) fn earliest_retry_at(
@@ -835,6 +1004,7 @@ impl GatewayRuntime {
                 wire_api: source.wire_api,
                 upstream_url: source.endpoint(source.wire_api)?.clone(),
                 source_model,
+                half_open_probe: false,
                 routing: None,
             });
         }
@@ -847,6 +1017,34 @@ impl GatewayRuntime {
             wire_api: WireApi::Responses,
             upstream_url: account.responses_url.clone(),
             source_model,
+            half_open_probe: false,
+            routing: None,
+        })
+    }
+
+    pub(crate) fn image_executor_route(&self, candidate_id: &str) -> Option<ExecutorRoute> {
+        if let Some(source) = self.sources.get(candidate_id) {
+            let source_model = source.canonical_model(IMAGE_API_MODEL)?;
+            return Some(ExecutorRoute {
+                candidate_id: source.id.clone(),
+                source_id: source.id.clone(),
+                account_id: None,
+                wire_api: source.wire_api,
+                upstream_url: source.responses_url.clone(),
+                source_model,
+                half_open_probe: false,
+                routing: None,
+            });
+        }
+        let account = self.accounts.get(candidate_id)?;
+        Some(ExecutorRoute {
+            candidate_id: account.id.clone(),
+            source_id: account.source_id.clone(),
+            account_id: Some(account.id.clone()),
+            wire_api: WireApi::Responses,
+            upstream_url: account.responses_url.clone(),
+            source_model: account.image_main_model.clone()?,
+            half_open_probe: false,
             routing: None,
         })
     }
@@ -944,13 +1142,35 @@ impl GatewayRuntime {
         now_ms: u64,
     ) {
         if let Some(key) = self.response_affinity_key(response_id) {
-            self.lock_scheduler()
-                .bind_response_affinity(key, candidate_id, now_ms);
+            if self
+                .lock_scheduler()
+                .bind_response_affinity(key.clone(), candidate_id, now_ms)
+            {
+                self.persist_response_affinity(&key, candidate_id, now_ms);
+            }
         }
     }
 
     pub(crate) fn invalidate_response_affinity(&self, key: Option<&str>) -> bool {
-        key.is_some_and(|key| self.lock_scheduler().invalidate_response_affinity(key))
+        key.is_some_and(|key| {
+            let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
+            if invalidated {
+                if let Some(store) = self.response_affinity_store.as_ref() {
+                    let _ = store.delete(key);
+                }
+            }
+            invalidated
+        })
+    }
+
+    fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
+        if let Some(store) = self.response_affinity_store.as_ref() {
+            let _ = store.upsert(&ResponseAffinityBinding {
+                key: key.to_string(),
+                candidate_id: candidate_id.to_string(),
+                expires_at_ms: now_ms.saturating_add(RESPONSE_AFFINITY_TTL_MS),
+            });
+        }
     }
 
     pub(crate) fn record_success_with_metrics(
@@ -986,6 +1206,14 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn runtime_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 impl SourceExecutor {
@@ -1156,6 +1384,97 @@ fn normalized_set<'a>(values: impl IntoIterator<Item = &'a String>) -> BTreeSet<
     normalized.into_values().collect()
 }
 
+pub fn normalize_image_base_model(value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    if value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(Error::Validation(
+            "image base model id is invalid".to_string(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn select_image_main_model(models: &BTreeSet<String>, preferred: Option<&str>) -> Option<String> {
+    match preferred
+        .map(str::trim)
+        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
+    {
+        Some(preferred) => models
+            .iter()
+            .find(|model| {
+                model.eq_ignore_ascii_case(preferred)
+                    && !model.eq_ignore_ascii_case(IMAGE_API_MODEL)
+            })
+            .cloned(),
+        None => cheapest_image_main_model(models),
+    }
+}
+
+fn cheapest_image_main_model(models: &BTreeSet<String>) -> Option<String> {
+    models
+        .iter()
+        .filter(|model| image_auto_model_is_supported(model))
+        .min_by(|left, right| compare_image_main_models(left, right))
+        .cloned()
+}
+
+fn image_main_model_is_compatible(model: &str) -> bool {
+    let lower = model.trim().to_ascii_lowercase();
+    !lower.is_empty()
+        && lower != IMAGE_API_MODEL
+        && [
+            "image",
+            "embedding",
+            "moderation",
+            "realtime",
+            "transcribe",
+            "tts",
+            "audio",
+        ]
+        .iter()
+        .all(|excluded| !lower.contains(excluded))
+}
+
+fn image_auto_model_is_supported(model: &str) -> bool {
+    // OpenAI's image-generation guide currently requires GPT-5 or newer for the Responses tool.
+    let lower = model.trim().to_ascii_lowercase();
+    let Some(version) = lower.strip_prefix("gpt-") else {
+        return false;
+    };
+    let major = version
+        .split(|character: char| !character.is_ascii_digit())
+        .next()
+        .and_then(|value| value.parse::<u32>().ok());
+    major.is_some_and(|major| major >= 5)
+        && image_main_model_is_compatible(model)
+        && api_model_price(model).is_some()
+}
+
+fn compare_image_main_models(left: &str, right: &str) -> CmpOrdering {
+    match (api_model_price(left), api_model_price(right)) {
+        (Some(left_price), Some(right_price)) => left_price
+            .input_micro_usd_per_million
+            .cmp(&right_price.input_micro_usd_per_million)
+            .then_with(|| {
+                left_price
+                    .output_micro_usd_per_million
+                    .cmp(&right_price.output_micro_usd_per_million)
+            })
+            .then_with(|| left_price.catalog_rank.cmp(&right_price.catalog_rank)),
+        (Some(_), None) => CmpOrdering::Less,
+        (None, Some(_)) => CmpOrdering::Greater,
+        (None, None) => CmpOrdering::Equal,
+    }
+    .then_with(|| left.len().cmp(&right.len()))
+    .then_with(|| left.cmp(right))
+}
+
 fn model_rules(allowed: Vec<String>, excluded: Vec<String>) -> ModelRules {
     ModelRules {
         allowed: normalized_set(allowed.iter()),
@@ -1308,6 +1627,56 @@ mod tests {
             id: id.to_string(),
             secret: secret.to_string(),
         }
+    }
+
+    #[test]
+    fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
+        let models = normalized_set(
+            [
+                "gpt-5.6-terra".to_string(),
+                "gpt-5.6-sol".to_string(),
+                "gpt-5.4-mini".to_string(),
+            ]
+            .iter()
+            .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            cheapest_image_main_model(&models).as_deref(),
+            Some("gpt-5.4-mini")
+        );
+        let terra = normalized_set(["gpt-5.6-terra".to_string()].iter());
+        assert_eq!(
+            cheapest_image_main_model(&terra).as_deref(),
+            Some("gpt-5.6-terra")
+        );
+        let image = normalized_set([IMAGE_API_MODEL.to_string()].iter());
+        assert!(cheapest_image_main_model(&image).is_none());
+    }
+
+    #[test]
+    fn explicit_image_base_model_is_used_only_when_available() {
+        let models = normalized_set(
+            ["gpt-5.4-mini".to_string(), "gpt-5.6-sol".to_string()]
+                .iter()
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            select_image_main_model(&models, Some("gpt-5.6-sol")).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(select_image_main_model(&models, Some("future-model")), None);
+        let future = normalized_set(["gpt-future".to_string()].iter());
+        assert!(cheapest_image_main_model(&future).is_none());
+        assert_eq!(
+            select_image_main_model(&future, Some("gpt-future")).as_deref(),
+            Some("gpt-future")
+        );
+        let legacy = normalized_set(["gpt-4.1-mini".to_string()].iter());
+        assert!(cheapest_image_main_model(&legacy).is_none());
+        assert_eq!(
+            normalize_image_base_model(Some(" auto ".into())).unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ use zenith_relay_core::{
         WakeTask,
     },
     quota::{QuotaRefreshPermit, QuotaRefreshQueue, QuotaTransition},
-    UsageCallback, UsageEvent,
+    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent,
 };
 
 const MAX_QUOTA_REFRESH_ENTRIES: usize = crate::local_pool::models::MAX_LOCAL_ACCOUNTS;
@@ -61,6 +61,7 @@ pub struct DesktopState {
     oauth_flow: OAuthFlowManager<NativeSecretBackend, DesktopOAuthEvents>,
     oauth_events: DesktopOAuthEvents,
     failed_usage_writes: Arc<AtomicU64>,
+    failed_affinity_writes: Arc<AtomicU64>,
     setup_lock: tokio::sync::Mutex<()>,
 }
 
@@ -92,6 +93,7 @@ impl DesktopState {
         }
         let telemetry = Arc::new(TelemetryDb::open(&root.join("data").join("usage.sqlite"))?);
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
+        let failed_affinity_writes = Arc::new(AtomicU64::new(0));
         let token_authority = Arc::new(
             TokenAuthority::new(crate::local_pool::models::MAX_LOCAL_ACCOUNTS)
                 .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?,
@@ -115,6 +117,7 @@ impl DesktopState {
             oauth_flow,
             oauth_events,
             failed_usage_writes,
+            failed_affinity_writes,
             setup_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -451,6 +454,13 @@ impl DesktopState {
         })
     }
 
+    pub(crate) fn response_affinity_store(&self) -> Arc<dyn ResponseAffinityStore> {
+        Arc::new(DesktopResponseAffinityStore {
+            telemetry: self.telemetry.clone(),
+            failed_writes: self.failed_affinity_writes.clone(),
+        })
+    }
+
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.setup_lock.lock().await
     }
@@ -475,6 +485,9 @@ impl DesktopState {
         let mut warnings = Vec::new();
         if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
             warnings.push("usage_persistence_failed".to_string());
+        }
+        if self.failed_affinity_writes.load(Ordering::Relaxed) > 0 {
+            warnings.push("response_affinity_persistence_failed".to_string());
         }
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
@@ -597,6 +610,42 @@ impl DesktopState {
     #[allow(dead_code)]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+}
+
+struct DesktopResponseAffinityStore {
+    telemetry: Arc<TelemetryDb>,
+    failed_writes: Arc<AtomicU64>,
+}
+
+impl DesktopResponseAffinityStore {
+    fn finish<T>(&self, result: Result<T>) -> std::result::Result<T, String> {
+        result.map_err(|error| {
+            self.failed_writes.fetch_add(1, Ordering::Relaxed);
+            error.to_string()
+        })
+    }
+}
+
+impl ResponseAffinityStore for DesktopResponseAffinityStore {
+    fn load(&self, now_ms: u64) -> std::result::Result<Vec<ResponseAffinityBinding>, String> {
+        self.finish(self.telemetry.affinity_bindings(now_ms))
+    }
+
+    fn find(
+        &self,
+        key: &str,
+        now_ms: u64,
+    ) -> std::result::Result<Option<ResponseAffinityBinding>, String> {
+        self.finish(self.telemetry.find_affinity(key, now_ms))
+    }
+
+    fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String> {
+        self.finish(self.telemetry.upsert_affinity(binding, now_ms()))
+    }
+
+    fn delete(&self, key: &str) -> std::result::Result<(), String> {
+        self.finish(self.telemetry.delete_affinity(key))
     }
 }
 
@@ -885,6 +934,7 @@ mod tests {
             consecutive_failures: Some(0),
             latency_ms: 7,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: Some(2),
             cached_input_tokens: None,
             cache_write_input_tokens: None,
@@ -1520,6 +1570,7 @@ mod tests {
             consecutive_failures: Some(u32::from(!success)),
             latency_ms: 7,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: success.then_some(2),
             cached_input_tokens: None,
             cache_write_input_tokens: None,
@@ -1555,6 +1606,7 @@ mod tests {
             consecutive_failures: Some(consecutive_failures),
             latency_ms: 7,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,

@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import type {
   AccountExportInput,
   AccountExportResult,
+  CandidateRuntimeSnapshot,
   ConfirmAccountImportResponse,
   DefaultServiceTier,
   GatewayDiagnostic,
@@ -34,7 +35,9 @@ import type {
 
 export const relayCommands = {
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
+  localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
+  remoteRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[] | null>("get_remote_runtime_order"),
   remoteUsage: (input: RemoteUsageQuery = {}) => invoke<RemoteUsagePage | null>("get_remote_server_usage", { input }),
   localUsage: (limit = 100) => invoke<LocalUsage[]>("get_local_usage", { limit }),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
@@ -82,7 +85,7 @@ export const relayCommands = {
   deleteKey: (keyId: string) => invoke("delete_local_gateway_key", { keyId }),
   setPoolMembership: (accountIds: string[], sourceIds: string[], inPool: boolean) => invoke("set_local_pool_membership", { input: { accountIds, sourceIds, inPool } }),
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
-  updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, defaultServiceTier } }),
+  updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, imageBaseModel: string | null) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel } }),
   syncCodexDefaultServiceTier: (defaultServiceTier: DefaultServiceTier) => invoke("sync_codex_default_service_tier", { defaultServiceTier }),
   updateQuotaPolicy: (refreshIntervalSeconds: number, requestTimeoutSeconds: number, useFreeAccounts: boolean) => invoke("update_local_quota_policy", { input: { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts } }),
   startGateway: () => invoke("start_local_gateway"),

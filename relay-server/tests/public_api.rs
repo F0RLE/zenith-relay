@@ -793,7 +793,8 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
             "maxRetryCandidates": 5,
-            "routingStrategy": "oldest_account"
+            "routingStrategy": "oldest_account",
+            "imageBaseModel": "gpt-5.4-mini"
         }))
         .send()
         .await
@@ -807,6 +808,22 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .get("sessionAffinityTtlSeconds")
         .is_none());
     assert_eq!(routing["gateway"]["routingStrategy"], "oldest_account");
+    assert_eq!(routing["gateway"]["imageBaseModel"], "gpt-5.4-mini");
+    assert!(routing["capabilities"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "runtime_routing"));
+    let runtime_order: Value = client
+        .get(format!("{}/routing/runtime", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(runtime_order.is_array());
 
     let free_enabled: Value = client
         .post(format!("{}/quota/settings", server.origin))

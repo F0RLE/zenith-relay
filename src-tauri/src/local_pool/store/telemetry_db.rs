@@ -1,11 +1,11 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::Serialize;
 use std::{collections::HashMap, path::Path, sync::Mutex};
 use zenith_relay_core::{
     estimate_api_equivalent,
     protocol::{UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, RoutingDiagnostics, UsageEvent, WireApi,
+    ApiEquivalentSummary, ResponseAffinityBinding, RoutingDiagnostics, UsageEvent, WireApi,
 };
 
 const MIGRATION_001: &str = r#"
@@ -93,7 +93,27 @@ PRAGMA user_version = 8;
 COMMIT;
 "#;
 
-const USAGE_SCHEMA_VERSION: u32 = 8;
+const MIGRATION_009: &str = r#"
+BEGIN IMMEDIATE;
+CREATE TABLE response_affinity (
+    response_key TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL,
+    expires_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX response_affinity_expires_idx ON response_affinity(expires_at_ms);
+PRAGMA user_version = 9;
+COMMIT;
+"#;
+
+const MIGRATION_010: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN generation_ms INTEGER;
+PRAGMA user_version = 10;
+COMMIT;
+"#;
+
+const USAGE_SCHEMA_VERSION: u32 = 10;
 const PRUNE_USAGE_SQL: &str =
     "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
 
@@ -121,6 +141,7 @@ pub struct UsageLog {
     pub error_category: Option<String>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
+    pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     pub cache_write_input_tokens: Option<u64>,
@@ -189,6 +210,12 @@ impl TelemetryDb {
         if version <= 7 {
             connection.execute_batch(MIGRATION_008).map_err(db_error)?;
         }
+        if version <= 8 {
+            connection.execute_batch(MIGRATION_009).map_err(db_error)?;
+        }
+        if version <= 9 {
+            connection.execute_batch(MIGRATION_010).map_err(db_error)?;
+        }
         connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -220,9 +247,9 @@ impl TelemetryDb {
                 "INSERT OR IGNORE INTO request_logs (
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
-                    error_category, latency_ms, ttft_ms, input_tokens, cached_input_tokens,
+                    error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     event.request_id,
                     event.attempt,
@@ -238,6 +265,7 @@ impl TelemetryDb {
                     event.error_category,
                     sql_u64(event.latency_ms),
                     event.ttft_ms.map(sql_u64),
+                    event.generation_ms.map(sql_u64),
                     event.input_tokens.map(sql_u64),
                     event.cached_input_tokens.map(sql_u64),
                     event.cache_write_input_tokens.map(sql_u64),
@@ -261,7 +289,7 @@ impl TelemetryDb {
                 "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
+                    ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
                     reasoning_tokens, output_tokens, total_tokens, routing_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
@@ -297,8 +325,9 @@ impl TelemetryDb {
             group.totals.api_equivalent = estimate_api_equivalent(
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
-                Some(group.totals.cached_input_tokens),
-                Some(group.totals.cache_write_input_tokens),
+                (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
+                (group.totals.cache_write_input_samples > 0)
+                    .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
             );
@@ -316,7 +345,7 @@ impl TelemetryDb {
             "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
                 local_key_id, source_id, candidate_id, account_id, requested_model,
                 resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                ttft_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
+                ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens,
                 reasoning_tokens, output_tokens, total_tokens, routing_json
              FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
@@ -356,7 +385,8 @@ impl TelemetryDb {
                 "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
                     COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model),
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(output_tokens), SUM(total_tokens)
+                    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
+                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
                  FROM request_logs
                  GROUP BY 1, 2, 3",
             )
@@ -368,14 +398,21 @@ impl TelemetryDb {
                 let cache_write_input_tokens: Option<i64> = row.get(5)?;
                 let output_tokens: Option<i64> = row.get(6)?;
                 let total_tokens: Option<i64> = row.get(7)?;
+                let input_samples: i64 = row.get(8)?;
+                let cached_samples: i64 = row.get(9)?;
+                let cache_write_samples: i64 = row.get(10)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     estimate_api_equivalent(
                         row.get::<_, Option<String>>(2)?.as_deref(),
                         input_tokens.map(rust_u64),
-                        cached_input_tokens.map(rust_u64),
-                        cache_write_input_tokens.map(rust_u64),
+                        (input_samples > 0 && cached_samples == input_samples)
+                            .then(|| cached_input_tokens.map(rust_u64))
+                            .flatten(),
+                        (input_samples > 0 && cache_write_samples == input_samples)
+                            .then(|| cache_write_input_tokens.map(rust_u64))
+                            .flatten(),
                         output_tokens.map(rust_u64),
                         total_tokens.map(rust_u64),
                     ),
@@ -403,13 +440,99 @@ impl TelemetryDb {
             .map(|_| ())
             .map_err(db_error)
     }
+
+    pub fn affinity_bindings(&self, now_ms: u64) -> Result<Vec<ResponseAffinityBinding>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        connection
+            .execute(
+                "DELETE FROM response_affinity WHERE expires_at_ms <= ?1",
+                [sql_u64(now_ms)],
+            )
+            .map_err(db_error)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT response_key, candidate_id, expires_at_ms
+                 FROM response_affinity ORDER BY updated_at_ms DESC",
+            )
+            .map_err(db_error)?;
+        let bindings = statement
+            .query_map([], affinity_binding_from_row)
+            .map_err(db_error)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(bindings)
+    }
+
+    pub fn find_affinity(&self, key: &str, now_ms: u64) -> Result<Option<ResponseAffinityBinding>> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .query_row(
+                "SELECT response_key, candidate_id, expires_at_ms
+                 FROM response_affinity WHERE response_key = ?1 AND expires_at_ms > ?2",
+                params![key, sql_u64(now_ms)],
+                affinity_binding_from_row,
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
+    pub fn upsert_affinity(&self, binding: &ResponseAffinityBinding, now_ms: u64) -> Result<()> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .execute(
+                "INSERT INTO response_affinity(response_key, candidate_id, expires_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(response_key) DO UPDATE SET
+                    candidate_id = excluded.candidate_id,
+                    expires_at_ms = excluded.expires_at_ms,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    binding.key,
+                    binding.candidate_id,
+                    sql_u64(binding.expires_at_ms),
+                    sql_u64(now_ms),
+                ],
+            )
+            .map(|_| ())
+            .map_err(db_error)
+    }
+
+    pub fn delete_affinity(&self, key: &str) -> Result<()> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .execute(
+                "DELETE FROM response_affinity WHERE response_key = ?1",
+                [key],
+            )
+            .map(|_| ())
+            .map_err(db_error)
+    }
+}
+
+fn affinity_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResponseAffinityBinding> {
+    let expires_at_ms: i64 = row.get(2)?;
+    Ok(ResponseAffinityBinding {
+        key: row.get(0)?,
+        candidate_id: row.get(1)?,
+        expires_at_ms: rust_u64(expires_at_ms),
+    })
 }
 
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
+    COALESCE(SUM(generation_ms), 0), COUNT(generation_ms), \
+    COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
+        THEN COALESCE(output_tokens, 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(reasoning_tokens), 0), \
+    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
+    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
     COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
@@ -521,14 +644,19 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         latency_ms: rust_u64(row.get(offset + 2)?),
         ttft_ms: rust_u64(row.get(offset + 3)?),
         ttft_samples: rust_u64(row.get(offset + 4)?),
-        input_tokens: rust_u64(row.get(offset + 5)?),
-        cached_input_tokens: rust_u64(row.get(offset + 6)?),
-        cache_write_input_tokens: rust_u64(row.get(offset + 7)?),
-        reasoning_tokens: rust_u64(row.get(offset + 8)?),
-        output_tokens: rust_u64(row.get(offset + 9)?),
-        total_tokens: rust_u64(row.get(offset + 10)?),
-        speed_output_tokens: rust_u64(row.get(offset + 11)?),
-        speed_duration_ms: rust_u64(row.get(offset + 12)?),
+        generation_ms: rust_u64(row.get(offset + 5)?),
+        generation_samples: rust_u64(row.get(offset + 6)?),
+        generation_output_tokens: rust_u64(row.get(offset + 7)?),
+        input_tokens: rust_u64(row.get(offset + 8)?),
+        cached_input_tokens: rust_u64(row.get(offset + 9)?),
+        cached_input_samples: rust_u64(row.get(offset + 10)?),
+        cache_write_input_tokens: rust_u64(row.get(offset + 11)?),
+        cache_write_input_samples: rust_u64(row.get(offset + 12)?),
+        reasoning_tokens: rust_u64(row.get(offset + 13)?),
+        output_tokens: rust_u64(row.get(offset + 14)?),
+        total_tokens: rust_u64(row.get(offset + 15)?),
+        speed_output_tokens: rust_u64(row.get(offset + 16)?),
+        speed_duration_ms: rust_u64(row.get(offset + 17)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -536,13 +664,14 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
 fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
     let latency_ms: i64 = row.get(14)?;
     let ttft_ms: Option<i64> = row.get(15)?;
-    let input_tokens: Option<i64> = row.get(16)?;
-    let cached_input_tokens: Option<i64> = row.get(17)?;
-    let cache_write_input_tokens: Option<i64> = row.get(18)?;
-    let reasoning_tokens: Option<i64> = row.get(19)?;
-    let output_tokens: Option<i64> = row.get(20)?;
-    let total_tokens: Option<i64> = row.get(21)?;
-    let routing_json: Option<String> = row.get(22)?;
+    let generation_ms: Option<i64> = row.get(16)?;
+    let input_tokens: Option<i64> = row.get(17)?;
+    let cached_input_tokens: Option<i64> = row.get(18)?;
+    let cache_write_input_tokens: Option<i64> = row.get(19)?;
+    let reasoning_tokens: Option<i64> = row.get(20)?;
+    let output_tokens: Option<i64> = row.get(21)?;
+    let total_tokens: Option<i64> = row.get(22)?;
+    let routing_json: Option<String> = row.get(23)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -563,6 +692,7 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         error_category: row.get(13)?,
         latency_ms: rust_u64(latency_ms),
         ttft_ms: ttft_ms.map(rust_u64),
+        generation_ms: generation_ms.map(rust_u64),
         input_tokens: input_tokens.map(rust_u64),
         cached_input_tokens: cached_input_tokens.map(rust_u64),
         cache_write_input_tokens: cache_write_input_tokens.map(rust_u64),
@@ -653,6 +783,7 @@ mod tests {
             consecutive_failures: Some(0),
             latency_ms: 12,
             ttft_ms: Some(4),
+            generation_ms: Some(8),
             input_tokens: Some(2),
             cached_input_tokens: Some(1),
             cache_write_input_tokens: Some(1),
@@ -682,6 +813,30 @@ mod tests {
     }
 
     #[test]
+    fn response_affinity_survives_reopen_and_expires() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-relay-affinity-{}", uuid::Uuid::new_v4()));
+        let path = root.join("usage.sqlite");
+        let binding = ResponseAffinityBinding {
+            key: "hashed-response".into(),
+            candidate_id: "account-1".into(),
+            expires_at_ms: 200,
+        };
+        TelemetryDb::open(&path)
+            .unwrap()
+            .upsert_affinity(&binding, 100)
+            .unwrap();
+        let database = TelemetryDb::open(&path).unwrap();
+        assert_eq!(
+            database.find_affinity(&binding.key, 199).unwrap(),
+            Some(binding)
+        );
+        assert!(database.affinity_bindings(200).unwrap().is_empty());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn usage_page_aggregates_the_full_filtered_range_not_only_the_page() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
@@ -705,6 +860,7 @@ mod tests {
             consecutive_failures: Some(0),
             latency_ms: 428,
             ttft_ms: Some(128),
+            generation_ms: Some(300),
             input_tokens: Some(20),
             cached_input_tokens: Some(12),
             cache_write_input_tokens: Some(4),
@@ -785,6 +941,7 @@ mod tests {
             consecutive_failures: Some(1),
             latency_ms: 5,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,
@@ -837,6 +994,7 @@ mod tests {
             consecutive_failures: Some(0),
             latency_ms: 12,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: Some(20),
             cached_input_tokens: Some(10),
             cache_write_input_tokens: Some(5),
@@ -930,7 +1088,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        connection.pragma_update(None, "user_version", 9).unwrap();
+        let future_version = USAGE_SCHEMA_VERSION + 1;
+        connection
+            .pragma_update(None, "user_version", future_version)
+            .unwrap();
         drop(connection);
 
         assert!(matches!(
@@ -941,7 +1102,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, future_version);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1002,6 +1163,7 @@ mod tests {
                 consecutive_failures: None,
                 latency_ms: 1,
                 ttft_ms: None,
+                generation_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
                 cache_write_input_tokens: None,

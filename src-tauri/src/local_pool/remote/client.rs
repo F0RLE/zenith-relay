@@ -8,6 +8,7 @@ use zenith_relay_core::protocol::{
     NegotiatedProtocol, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
     UsageRange,
 };
+use zenith_relay_core::CandidateRuntimeSnapshot;
 use zenith_relay_core::WireApi;
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -101,6 +102,11 @@ impl RemoteClient {
 
     pub async fn state(&self) -> Result<RuntimeStateSnapshot, RemoteClientError> {
         self.request(Method::GET, "/state", Option::<&()>::None, true)
+            .await
+    }
+
+    pub async fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, RemoteClientError> {
+        self.request(Method::GET, "/routing/runtime", Option::<&()>::None, true)
             .await
     }
 

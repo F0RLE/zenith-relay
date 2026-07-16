@@ -9,6 +9,7 @@ type Feedback = { kind: "success" | "error"; key: string } | null;
 type PendingProfileRepair = { preview: HistoryRepairPreview; launchAfter: boolean };
 
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
+const ROUTING_REFRESH_INTERVAL_MS = 2_000;
 const SUCCESS_FEEDBACK_TIMEOUT_MS = 4_000;
 const ERROR_FEEDBACK_TIMEOUT_MS = 8_000;
 
@@ -76,12 +77,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
 
   const refresh = useCallback(async () => {
     if (mode === "local") {
-      const [snapshot, usage] = await Promise.all([
+      const [snapshot, usagePage] = await Promise.all([
         relayCommands.localState(),
-        relayCommands.localUsage(100).catch(() => []),
+        relayCommands.localUsagePage({ page: 1, pageSize: 100, range: "daily" }).catch(() => null),
       ]);
       setRuntime(snapshot);
-      setLocalUsage(usage);
+      setLocalUsage(usagePage?.events ?? []);
+      setLocalUsagePage(usagePage);
       setRemoteUsage([]);
       setRemoteUsagePage(null);
       return;
@@ -89,7 +91,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (mode === "remote") {
       const [snapshot, usage] = await Promise.all([
         relayCommands.remoteState(),
-        relayCommands.remoteUsage({ page: 1, pageSize: 50 }).catch(() => null),
+        relayCommands.remoteUsage({ page: 1, pageSize: 50, range: "daily" }).catch(() => null),
       ]);
       setRuntime(snapshot);
       setLocalUsage([]);
@@ -142,6 +144,37 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       active = false;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    if (page !== "pool" || !runtime?.gateway.running || mode === "zenith") return;
+    if (mode === "remote" && !runtime.capabilities.features.includes("runtime_routing")) return;
+    let active = true;
+    let pending = false;
+    const refreshRouting = async () => {
+      if (!active || pending || document.visibilityState !== "visible") return;
+      pending = true;
+      try {
+        const routingOrder = mode === "local"
+          ? await relayCommands.localRuntimeOrder()
+          : await relayCommands.remoteRuntimeOrder();
+        if (!active || routingOrder == null) return;
+        setRuntime((snapshot) => snapshot ? {
+          ...snapshot,
+          gateway: { ...snapshot.gateway, routingOrder },
+        } : snapshot);
+      } catch {
+        // The full refresh keeps the last known order if the lightweight probe fails.
+      } finally {
+        pending = false;
+      }
+    };
+    void refreshRouting();
+    const interval = window.setInterval(() => void refreshRouting(), ROUTING_REFRESH_INTERVAL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [mode, page, runtime?.gateway.running, runtime?.capabilities.features]);
 
   useEffect(() => {
     const refreshVisibleRuntime = () => {

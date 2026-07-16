@@ -12,10 +12,10 @@ use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
     protocol::Capabilities,
     quota::{QuotaSnapshot, Subscription},
-    GatewayRuntime, WireApi,
+    CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 15;
+pub const SERVER_SCHEMA_VERSION: u32 = 18;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 
@@ -157,6 +157,13 @@ impl AppState {
             .write()
             .map_err(|_| "runtime lock poisoned".to_string())? = runtime;
         Ok(())
+    }
+
+    pub fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, String> {
+        Ok(self
+            .runtime()?
+            .map(|runtime| runtime.candidate_runtime_order())
+            .unwrap_or_default())
     }
 }
 

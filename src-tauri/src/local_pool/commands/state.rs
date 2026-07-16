@@ -16,6 +16,7 @@ use zenith_relay_core::protocol::{
     KeySummary, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::ApiEquivalentSummary;
+use zenith_relay_core::CandidateRuntimeSnapshot;
 
 #[tauri::command]
 pub async fn get_local_pool_state(
@@ -30,6 +31,12 @@ pub async fn get_local_runtime_state(
 ) -> Result<RuntimeStateSnapshot, CommandError> {
     let snapshot = state.snapshot().await?;
     let running = snapshot.runtime_target.connected;
+    let routing_order = state
+        .gateway
+        .runtime()
+        .await
+        .map(|runtime| runtime.candidate_runtime_order())
+        .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
     let equivalents = state.telemetry.api_equivalents()?;
     let source_summaries = snapshot
@@ -113,6 +120,7 @@ pub async fn get_local_runtime_state(
             max_retry_candidates: Some(snapshot.gateway.max_retry_candidates),
             routing_strategy: Some(snapshot.gateway.routing_strategy),
             default_service_tier: Some(snapshot.gateway.default_service_tier),
+            image_base_model: snapshot.gateway.image_base_model.clone(),
             models,
             common_proxy_configured: snapshot.gateway.common_proxy_configured,
             common_proxy_available,
@@ -120,6 +128,7 @@ pub async fn get_local_runtime_state(
             quota_refresh_interval_seconds: snapshot.gateway.quota_refresh_interval_seconds,
             quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
             use_free_accounts: snapshot.gateway.use_free_accounts,
+            routing_order,
         },
         platform: snapshot.platform.to_string(),
         capabilities: Capabilities::desktop_local(),
@@ -130,6 +139,18 @@ pub async fn get_local_runtime_state(
         wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
     })
+}
+
+#[tauri::command]
+pub async fn get_local_runtime_order(
+    state: State<'_, DesktopState>,
+) -> Result<Vec<CandidateRuntimeSnapshot>, CommandError> {
+    Ok(state
+        .gateway
+        .runtime()
+        .await
+        .map(|runtime| runtime.candidate_runtime_order())
+        .unwrap_or_default())
 }
 
 fn local_source_summary(
@@ -258,6 +279,7 @@ mod parity_tests {
                 max_retry_candidates: Some(3),
                 routing_strategy: Some(Default::default()),
                 default_service_tier: Some(Default::default()),
+                image_base_model: None,
                 models: Vec::new(),
                 common_proxy_configured: false,
                 common_proxy_available: false,
@@ -265,6 +287,7 @@ mod parity_tests {
                 quota_refresh_interval_seconds: 300,
                 quota_request_timeout_seconds: 20,
                 use_free_accounts: false,
+                routing_order: Vec::new(),
             },
             platform: "test".into(),
             capabilities: Capabilities::desktop_local(),

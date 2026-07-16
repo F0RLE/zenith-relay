@@ -4,8 +4,8 @@ use crate::{
     api_model_price,
     automations::{WakeHistory, WakeTask},
     quota::{QuotaSnapshot, Subscription},
-    ApiEquivalentSummary, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
-    WireApi,
+    ApiEquivalentSummary, CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules,
+    RoutingDiagnostics, RoutingStrategy, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -46,6 +46,8 @@ pub struct GatewaySummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_service_tier: Option<DefaultServiceTier>,
     #[serde(default)]
+    pub image_base_model: Option<String>,
+    #[serde(default)]
     pub models: Vec<ModelSummary>,
     #[serde(default)]
     pub common_proxy_configured: bool,
@@ -59,6 +61,8 @@ pub struct GatewaySummary {
     pub quota_request_timeout_seconds: u64,
     #[serde(default = "legacy_use_free_accounts")]
     pub use_free_accounts: bool,
+    #[serde(default)]
+    pub routing_order: Vec<CandidateRuntimeSnapshot>,
 }
 
 fn legacy_use_free_accounts() -> bool {
@@ -298,6 +302,8 @@ pub struct UsageSummary {
     pub latency_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,10 +323,16 @@ pub struct UsageTotals {
     pub latency_ms: u64,
     pub ttft_ms: u64,
     pub ttft_samples: u64,
+    pub generation_ms: u64,
+    pub generation_samples: u64,
+    pub generation_output_tokens: u64,
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
+    pub cached_input_samples: u64,
     #[serde(default)]
     pub cache_write_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_input_samples: u64,
     pub reasoning_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -473,6 +485,7 @@ mod tests {
         .unwrap();
         assert!(gateway.use_free_accounts);
         assert_eq!(gateway.max_retry_candidates, None);
+        assert!(gateway.routing_order.is_empty());
 
         let account = AccountSummary {
             id: "account_1".into(),

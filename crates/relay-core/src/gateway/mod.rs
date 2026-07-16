@@ -1,5 +1,7 @@
 use crate::accounts::CODEX_MODELS_CLIENT_VERSION;
-use crate::runtime::{AuthenticatedKey, DefaultServiceTier, ExecutorPrepareError, ExecutorRoute};
+use crate::runtime::{
+    AuthenticatedKey, DefaultServiceTier, ExecutorPrepareError, ExecutorRoute, IMAGE_API_MODEL,
+};
 use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
 use axum::extract::State;
@@ -21,6 +23,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod images;
 mod websocket;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -30,6 +33,7 @@ const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
+const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
@@ -48,6 +52,8 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/v1/alpha/search", post(alpha_search))
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/images/generations", post(images::generations))
+        .route("/v1/images/edits", post(images::edits))
         .with_state(runtime)
 }
 
@@ -172,7 +178,7 @@ fn filter_codex_models_response(
         })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
-    let models = models
+    let mut models = models
         .iter()
         .filter_map(|model| {
             let mut model = model.as_object()?.clone();
@@ -208,6 +214,17 @@ fn filter_codex_models_response(
             Some(Value::Object(model))
         })
         .collect::<Vec<_>>();
+    if let Some(display_id) = visible.get(IMAGE_API_MODEL.to_ascii_lowercase().as_str()) {
+        if seen.insert(IMAGE_API_MODEL.to_string()) {
+            models.push(json!({
+                "slug": display_id,
+                "display_name": "GPT Image 2",
+                "visibility": "list",
+                "supported_in_api": true,
+                "supports_parallel_tool_calls": false
+            }));
+        }
+    }
     (!models.is_empty()).then(|| json!({ "models": models }))
 }
 
@@ -468,9 +485,12 @@ async fn execute_account_endpoint(
     let account_only_exclusions = runtime.api_source_candidate_ids();
     let mut tried = account_only_exclusions.clone();
     let mut attempt = 0_u16;
+    let mut owner_recovery_confirmed = false;
     let mut last_failure = None;
 
-    while usize::from(attempt) < runtime.max_retry_candidates() {
+    while usize::from(attempt)
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+    {
         let Some((selected, lease)) = runtime.select_and_reserve(
             &key,
             &resolved_model,
@@ -490,6 +510,7 @@ async fn execute_account_endpoint(
         if route.account_id.is_none() {
             continue;
         }
+        route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint) else {
             last_failure = Some(AttemptFailure::invalid_request());
@@ -522,7 +543,13 @@ async fn execute_account_endpoint(
             Ok(prepared) => prepared,
             Err(error) => {
                 let failure = AttemptFailure::prepare(error);
-                let state = apply_cooldown(&runtime, &route.candidate_id, "*", failure.cooldown_ms);
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    failure.cooldown_ms,
+                    route.half_open_probe,
+                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -576,8 +603,13 @@ async fn execute_account_endpoint(
             Ok(upstream) => upstream,
             Err(_) => {
                 let failure = AttemptFailure::transport();
-                let state =
-                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    TRANSIENT_COOLDOWN_MS,
+                    route.half_open_probe,
+                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -602,8 +634,13 @@ async fn execute_account_endpoint(
             Ok(bytes) => bytes,
             Err(_) => {
                 let failure = AttemptFailure::body();
-                let state =
-                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    TRANSIENT_COOLDOWN_MS,
+                    route.half_open_probe,
+                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -641,6 +678,7 @@ async fn execute_account_endpoint(
             );
             if affinity_miss || retryable_status(status, has_previous_response_id) {
                 if affinity_miss {
+                    owner_recovery_confirmed |= !response_affinity_hit;
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
@@ -650,6 +688,7 @@ async fn execute_account_endpoint(
                         &route.source_model,
                         status,
                         &response_headers,
+                        route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
                 }
@@ -679,7 +718,7 @@ async fn execute_account_endpoint(
             &route.source_model,
             now_ms(),
             event.output_tokens,
-            event.latency_ms,
+            event.generation_ms.unwrap_or(event.latency_ms),
         );
         emit_usage(&runtime, event);
         drop(lease);
@@ -819,6 +858,7 @@ async fn execute_client_request(
         wire_api,
         responses_lite,
         true,
+        0,
     )
     .await
 }
@@ -836,9 +876,12 @@ async fn execute_request(
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
     allow_previous_response_reset: bool,
+    attempt_offset: u16,
 ) -> Response<Body> {
     let mut tried = HashSet::new();
-    let mut attempt = 0_u16;
+    let mut attempt = attempt_offset;
+    let mut attempts_this_run = 0_usize;
+    let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
     let mut last_failure = None;
     let has_previous_response_id = request
@@ -846,7 +889,9 @@ async fn execute_request(
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
 
-    while usize::from(attempt) < runtime.max_retry_candidates() {
+    while attempts_this_run
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+    {
         let selected = runtime.select_and_reserve(
             &key,
             &resolved_model,
@@ -875,6 +920,7 @@ async fn execute_request(
         else {
             continue;
         };
+        route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let source_model = route.source_model.clone();
         let responses_via_chat =
@@ -931,6 +977,7 @@ async fn execute_request(
         // ponytail: cross-protocol streams are buffered into one terminal SSE sequence; add delta translation when adapter TTFT matters.
         let upstream_stream = stream && !responses_via_chat && !chat_via_responses;
         attempt = attempt.saturating_add(1);
+        attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
         let prepared = match runtime
             .prepare_authorization(&route.candidate_id, now_ms())
@@ -939,7 +986,13 @@ async fn execute_request(
             Ok(prepared) => prepared,
             Err(error) => {
                 let failure = AttemptFailure::prepare(error);
-                let state = apply_cooldown(&runtime, &route.candidate_id, "*", failure.cooldown_ms);
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    failure.cooldown_ms,
+                    route.half_open_probe,
+                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -978,8 +1031,13 @@ async fn execute_request(
             Ok(upstream) => upstream,
             Err(_) => {
                 let failure = AttemptFailure::transport();
-                let state =
-                    apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    TRANSIENT_COOLDOWN_MS,
+                    route.half_open_probe,
+                );
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1034,6 +1092,7 @@ async fn execute_request(
                     response_missing,
                 ) {
                     confirmed_response_missing |= response_missing;
+                    owner_recovery_confirmed |= !response_affinity_hit;
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                     emit_usage(&runtime, event);
@@ -1081,6 +1140,7 @@ async fn execute_request(
                         &source_model,
                         status,
                         &response_headers,
+                        route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
                 }
@@ -1118,8 +1178,13 @@ async fn execute_request(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-                    let state =
-                        apply_cooldown(&runtime, &route.candidate_id, "*", TRANSIENT_COOLDOWN_MS);
+                    let state = apply_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        "*",
+                        TRANSIENT_COOLDOWN_MS,
+                        route.half_open_probe,
+                    );
                     let mut event = usage_event(
                         &request_id,
                         attempt,
@@ -1150,6 +1215,7 @@ async fn execute_request(
                             &route.candidate_id,
                             &source_model,
                             TRANSIENT_COOLDOWN_MS,
+                            route.half_open_probe,
                         );
                         let mut event = usage_event(
                             &request_id,
@@ -1180,6 +1246,7 @@ async fn execute_request(
                             &route.candidate_id,
                             &source_model,
                             TRANSIENT_COOLDOWN_MS,
+                            route.half_open_probe,
                         );
                         let mut event = usage_event(
                             &request_id,
@@ -1207,6 +1274,7 @@ async fn execute_request(
                             &route.candidate_id,
                             &source_model,
                             TRANSIENT_COOLDOWN_MS,
+                            route.half_open_probe,
                         );
                         let mut event = usage_event(
                             &request_id,
@@ -1246,7 +1314,7 @@ async fn execute_request(
                 &source_model,
                 now_ms(),
                 event.output_tokens,
-                event.latency_ms,
+                event.generation_ms.unwrap_or(event.latency_ms),
             );
             emit_usage(&runtime, event);
             let completed_response_id = response_id_from_bytes(&bytes);
@@ -1274,6 +1342,7 @@ async fn execute_request(
                 let completion_runtime = runtime.clone();
                 let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
+                let completion_half_open_probe = route.half_open_probe;
                 let completion: CompletionCallback = Arc::new(move |event, response_id| {
                     lease.release();
                     if event.success {
@@ -1282,7 +1351,7 @@ async fn execute_request(
                             &completion_model,
                             now_ms(),
                             event.output_tokens,
-                            event.latency_ms,
+                            event.generation_ms.unwrap_or(event.latency_ms),
                         );
                         event.consecutive_failures = Some(0);
                         completion_runtime.bind_response_affinity(
@@ -1296,6 +1365,7 @@ async fn execute_request(
                             &completion_source,
                             &completion_model,
                             TRANSIENT_COOLDOWN_MS,
+                            completion_half_open_probe,
                         );
                         apply_failure_state(event, state);
                     }
@@ -1327,6 +1397,7 @@ async fn execute_request(
                     &route.candidate_id,
                     &source_model,
                     TRANSIENT_COOLDOWN_MS,
+                    route.half_open_probe,
                 );
                 let mut event = usage_event(
                     &request_id,
@@ -1361,11 +1432,12 @@ async fn execute_request(
                 requested_model,
                 resolved_model,
                 stream,
-                crate::gateway::request_id(),
+                request_id,
                 None,
                 wire_api,
                 responses_lite,
                 false,
+                attempt,
             ))
             .await;
         }
@@ -2230,13 +2302,20 @@ fn retryable_status(status: StatusCode, has_previous_response_id: bool) -> bool 
 fn recoverable_response_affinity_miss(
     status: StatusCode,
     has_previous_response_id: bool,
-    response_affinity_hit: bool,
+    _response_affinity_hit: bool,
     previous_response_not_found: bool,
 ) -> bool {
     has_previous_response_id
-        && ((status == StatusCode::NOT_FOUND
-            && (!response_affinity_hit || previous_response_not_found))
-            || (status == StatusCode::BAD_REQUEST && previous_response_not_found))
+        && previous_response_not_found
+        && matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
+}
+
+fn retry_candidate_limit(max_retry_candidates: usize, owner_recovery_confirmed: bool) -> usize {
+    if owner_recovery_confirmed {
+        MAX_RESPONSE_OWNER_CANDIDATES
+    } else {
+        max_retry_candidates
+    }
 }
 
 fn previous_response_not_found(payload: &[u8]) -> bool {
@@ -2289,6 +2368,7 @@ fn apply_status_cooldown(
     model: &str,
     status: StatusCode,
     headers: &reqwest::header::HeaderMap,
+    half_open_probe: bool,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
     let now_system = SystemTime::now();
@@ -2309,6 +2389,7 @@ fn apply_status_cooldown(
         ),
         _ => ("*", TRANSIENT_COOLDOWN_MS),
     };
+    let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now.saturating_add(duration_ms);
     runtime.set_cooldown(candidate_id, scope, retry_at_ms);
     FailureState {
@@ -2323,8 +2404,10 @@ fn apply_cooldown(
     candidate_id: &str,
     scope: &str,
     duration_ms: u64,
+    half_open_probe: bool,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
+    let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now_ms().saturating_add(duration_ms);
     runtime.set_cooldown(candidate_id, scope, retry_at_ms);
     FailureState {
@@ -2360,6 +2443,16 @@ fn exponential_backoff_ms(consecutive_failures: u32) -> u64 {
     1_000_u64
         .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
         .min(MAX_RATE_LIMIT_COOLDOWN_MS)
+}
+
+fn half_open_backoff_ms(duration_ms: u64, consecutive_failures: u32, half_open_probe: bool) -> u64 {
+    if !half_open_probe {
+        return duration_ms;
+    }
+    let exponent = consecutive_failures.saturating_sub(1).min(31);
+    duration_ms
+        .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
+        .min(duration_ms.max(MAX_RATE_LIMIT_COOLDOWN_MS))
 }
 
 fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
@@ -2512,6 +2605,7 @@ fn usage_event(
         consecutive_failures: None,
         latency_ms,
         ttft_ms: None,
+        generation_ms: None,
         input_tokens: None,
         cached_input_tokens: None,
         cache_write_input_tokens: None,
@@ -2592,6 +2686,10 @@ impl<S> UsageStream<S> {
             event.error_category = Some(category.to_string());
         }
         event.latency_ms = self.started.elapsed().as_millis() as u64;
+        event.generation_ms = event
+            .ttft_ms
+            .map(|ttft_ms| event.latency_ms.saturating_sub(ttft_ms))
+            .filter(|duration| *duration > 0);
         (self.completion)(&mut event, self.response_id.as_deref());
         emit_callback(&self.callback, event);
     }
@@ -3111,6 +3209,7 @@ mod tests {
                 consecutive_failures: Some(0),
                 latency_ms: 0,
                 ttft_ms: None,
+                generation_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
                 cache_write_input_tokens: None,
@@ -3232,6 +3331,21 @@ mod tests {
         assert_eq!(exponential_backoff_ms(32), MAX_RATE_LIMIT_COOLDOWN_MS);
     }
 
+    #[test]
+    fn failed_half_open_probes_back_off_without_shortening_retry_after() {
+        assert_eq!(half_open_backoff_ms(60_000, 2, false), 60_000);
+        assert_eq!(half_open_backoff_ms(60_000, 2, true), 120_000);
+        assert_eq!(half_open_backoff_ms(60_000, 3, true), 240_000);
+        assert_eq!(
+            half_open_backoff_ms(60_000, 32, true),
+            MAX_RATE_LIMIT_COOLDOWN_MS
+        );
+        assert_eq!(
+            half_open_backoff_ms(MAX_RATE_LIMIT_RETRY_HINT_MS, 2, true),
+            MAX_RATE_LIMIT_RETRY_HINT_MS
+        );
+    }
+
     fn test_usage_event() -> UsageEvent {
         UsageEvent {
             request_id: "request".into(),
@@ -3252,6 +3366,7 @@ mod tests {
             consecutive_failures: Some(0),
             latency_ms: 0,
             ttft_ms: None,
+            generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
             cache_write_input_tokens: None,

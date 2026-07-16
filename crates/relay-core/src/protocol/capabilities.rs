@@ -23,6 +23,8 @@ pub enum Feature {
     Backups,
     AccountProxies,
     FreeAccountPolicy,
+    RuntimeRouting,
+    Images,
 }
 
 impl Feature {
@@ -45,6 +47,8 @@ impl Feature {
             Self::Backups => "backups",
             Self::AccountProxies => "account_proxies",
             Self::FreeAccountPolicy => "free_account_policy",
+            Self::RuntimeRouting => "runtime_routing",
+            Self::Images => "images",
         }
     }
 }
@@ -102,6 +106,8 @@ impl Capabilities {
             Feature::Backups,
             Feature::AccountProxies,
             Feature::FreeAccountPolicy,
+            Feature::RuntimeRouting,
+            Feature::Images,
         ]
         .into_iter()
         .map(|feature| feature.as_str().to_string())

@@ -101,6 +101,17 @@ export type ModelSummary = {
   outputMicroUsdPerMillion: number | null;
 };
 
+export type CandidateRuntimeSnapshot = {
+  candidateId: string;
+  kind: "api_source" | "oauth_account";
+  available: boolean;
+  inFlight: number;
+  nextRetryAtMs: number | null;
+  effectiveWeight: number;
+  halfOpen: boolean;
+  dispatches: number;
+};
+
 export type WakeTask = {
   id: string;
   name: string;
@@ -138,6 +149,7 @@ export type RuntimeSnapshot = {
     maxRetryCandidates?: number | null;
     routingStrategy?: RoutingStrategy | null;
     defaultServiceTier?: DefaultServiceTier | null;
+    imageBaseModel?: string | null;
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
@@ -145,6 +157,7 @@ export type RuntimeSnapshot = {
     quotaRefreshIntervalSeconds?: number;
     quotaRequestTimeoutSeconds?: number;
     useFreeAccounts?: boolean;
+    routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
   capabilities: { features: string[]; [key: string]: unknown };
@@ -205,6 +218,7 @@ export type LocalUsage = {
   errorCategory: string | null;
   latencyMs: number;
   ttftMs: number | null;
+  generationMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens: number | null;
@@ -219,9 +233,14 @@ export type UsageTotals = {
   latencyMs: number;
   ttftMs: number;
   ttftSamples: number;
+  generationMs: number;
+  generationSamples: number;
+  generationOutputTokens: number;
   inputTokens: number;
   cachedInputTokens: number;
+  cachedInputSamples: number;
   cacheWriteInputTokens: number;
+  cacheWriteInputSamples: number;
   reasoningTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -300,6 +319,7 @@ export type RemoteUsage = {
   errorCategory: string | null;
   latencyMs: number;
   ttftMs?: number | null;
+  generationMs?: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheWriteInputTokens?: number | null;

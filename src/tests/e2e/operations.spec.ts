@@ -738,12 +738,12 @@ test("the active ChatGPT pool key stays out of client access management", async 
   await expect(page.getByText("ChatGPT", { exact: true })).toHaveCount(0);
 });
 
-test("pool priority follows the current eligible route without manual display sorting", async ({ page }) => {
+test("pool priority follows the backend scheduler order without display heuristics", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-  await expect(page.locator(".pool-priority-label")).toHaveText("RoutingLatest request: Pro account");
+  await expect(page.locator(".pool-priority-label")).toHaveText("RoutingActive now: Pro account");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
@@ -833,11 +833,12 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await dialog.getByRole("button", { name: "Fast (1.5x)", exact: true }).click();
   await expect(dialog.getByRole("button", { name: /^How to choose an account:/ })).toHaveAttribute("data-value", "adaptive");
   await chooseOption(page, dialog, "How to choose an account", "oldest_account");
+  await chooseOption(page, dialog, "Minimum image model", "gpt-5.4-mini");
   await expect(dialog).toContainText("Uses accounts added earlier first and skips those that are busy.");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 3, defaultServiceTier: "fast" } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "oldest_account", maxRetryCandidates: 3, defaultServiceTier: "fast", imageBaseModel: "gpt-5.4-mini" } });
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
@@ -854,7 +855,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", defaultServiceTier: "fast" },
+    payload: { maxRetryCandidates: 3, routingStrategy: "oldest_account", defaultServiceTier: "fast", imageBaseModel: null },
   });
   expect(calls.findLast((call) => call.command === "sync_codex_default_service_tier")?.args).toEqual({ defaultServiceTier: "fast" });
 });
