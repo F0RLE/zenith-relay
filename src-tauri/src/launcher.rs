@@ -368,6 +368,7 @@ fn is_codex_process_identity(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn wait_for_codex_state(running: bool, timeout: Duration) -> bool {
     let started = Instant::now();
     loop {
