@@ -102,6 +102,8 @@ pub struct LocalGatewayKeyRecord {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub system: bool,
     pub secret_ref: String,
     #[serde(default)]
     pub source_ids: Option<Vec<String>>,
@@ -332,6 +334,7 @@ mod tests {
             id: "key_1".into(),
             label: "  Scoped  ".into(),
             enabled: true,
+            system: false,
             secret_ref: "key:key_1".into(),
             source_ids: Some(vec![" source_1 ".into(), "SOURCE_1".into()]),
             account_ids: Some(vec![" account_1 ".into(), "ACCOUNT_1".into()]),

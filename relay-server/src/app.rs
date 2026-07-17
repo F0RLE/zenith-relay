@@ -673,6 +673,7 @@ fn key_summary(record: &GatewayKeyRecord) -> KeySummary {
         id: record.id.clone(),
         label: record.label.clone(),
         enabled: record.enabled,
+        system: false,
         source_ids: record.source_ids.clone(),
         account_ids: record.account_ids.clone(),
         allowed_models: record.allowed_models.clone(),

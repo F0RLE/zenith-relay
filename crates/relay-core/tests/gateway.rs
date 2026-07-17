@@ -411,15 +411,17 @@ async fn truncated_success_stream_is_recorded_as_incomplete() {
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
-            "model": "gpt-test",
-            "input": "truncated-stream",
-            "stream": true
+                "model": "gpt-test",
+                "input": "truncated-stream",
+                "stream": true
         }))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let _ = response.bytes().await.unwrap();
+    let body = response.text().await.unwrap();
+    assert!(body.contains("event: response.failed"));
+    assert!(body.contains("stream_incomplete"));
 
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);

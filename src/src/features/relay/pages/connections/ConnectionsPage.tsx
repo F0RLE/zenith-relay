@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, Check, Clock3, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
+import { CalendarDays, Check, Clock3, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
@@ -25,6 +25,7 @@ import {
   apiSourcePriority,
   apiSourceRole,
   compareAccountPlans,
+  useConfirm,
 } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
@@ -33,9 +34,6 @@ import { formatTokenSpeed, latestLocalAccountSpeeds } from "../../usageSpeed";
 
 type View = "sources" | "accounts" | "automations" | "remote" | "api";
 type DialogKind = "source" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
-type AccountSort = "pool" | "participation" | "primary" | "secondary" | "primary_reset" | "secondary_reset" | "plan" | "name";
-type AccountLayout = "compact" | "list" | "grid";
-type SortDirection = "asc" | "desc";
 type ParticipationFilter = "all" | "included" | "excluded";
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
 
@@ -188,6 +186,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: SourceSummary) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const confirm = useConfirm();
   const canTest = mode !== "remote" || runtime?.capabilities.features.includes("diagnostics");
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
@@ -218,7 +217,7 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
               <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <ActionMenu>
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => mode === "local" ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
-                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("sources.deleteConfirm"))) void perform(`delete-${source.id}`, () => mode === "local" ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"); }}>{t("common.delete")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => mode === "local" ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
             </td>
           </tr>
@@ -231,15 +230,10 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
 function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, canRevealIdentity, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; canRevealIdentity: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, localUsage, perform, activateCodexProfile, busy } = useRelayState();
+  const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [planFilter, setPlanFilter] = useState("all");
   const [participationFilter, setParticipationFilter] = useState<ParticipationFilter>("all");
-  const [sortBy, setSortBy] = useState<AccountSort>("pool");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-  const [layout, setLayout] = useState<AccountLayout>(() => {
-    const saved = localStorage.getItem("relay.connections.accountLayout");
-    return saved === "compact" || saved === "grid" ? saved : "list";
-  });
   const [revealedIdentities, setRevealedIdentities] = useState<Record<string, string>>({});
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
   const allAccounts = runtime?.accounts ?? [];
@@ -261,9 +255,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   const plans = [...planOptions.values()].sort(compareAccountPlans);
   const errorCount = allAccounts.filter((account) => accountErrorCode(account)).length;
   const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
-  const planOrder = new Map(plans.map((plan, index) => [plan.id, index]));
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
-  useEffect(() => localStorage.setItem("relay.connections.accountLayout", layout), [layout]);
   useEffect(() => { setRevealedIdentities({}); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   if (!runtime?.accounts.length) {
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
@@ -272,7 +264,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     .filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models))
     .filter((account) => activePlan === "all" || (activePlan === "errors" ? Boolean(accountErrorCode(account)) : accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan))
     .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
-    .sort((left, right) => compareAccounts(left, right, sortBy, sortDirection, planOrder, plans.length));
+    .sort(compareAccounts);
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const exportIds = selected.length ? selected : allAccounts.map((account) => account.id);
@@ -310,10 +302,10 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
     return ok;
   };
-  const deleteSelected = () => {
+  const deleteSelected = async () => {
     const accountIds = allAccounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
-    if (accountIds.length && window.confirm(t("accounts.deleteSelectedConfirm", { count: accountIds.length }))) {
-      void deleteAccounts(accountIds, "delete-selected-accounts");
+    if (accountIds.length && await confirm(t("accounts.deleteSelectedConfirm", { count: accountIds.length }), { danger: true })) {
+      await deleteAccounts(accountIds, "delete-selected-accounts");
     }
   };
   const refreshAndDeleteNonWorking = async () => {
@@ -324,7 +316,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     }, "feedback.refreshed");
     if (!refreshed || !refreshedSnapshot.current) return;
     const accountIds = refreshedSnapshot.current.accounts.filter(accountIsTerminallyUnusable).map((account) => account.id);
-    if (accountIds.length && window.confirm(t("accounts.deleteNonWorkingConfirm", { count: accountIds.length }))) {
+    if (accountIds.length && await confirm(t("accounts.deleteNonWorkingConfirm", { count: accountIds.length }), { danger: true })) {
       await deleteAccounts(accountIds, "delete-non-working-accounts");
     }
   };
@@ -357,11 +349,6 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           <IconButton className="danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
-          <div className="account-sort-controls">
-            <OptionMenu className="account-sort-select" label={t("accounts.sort.label")} value={sortBy} onChange={(value) => setSortBy(value as AccountSort)} icon={<ArrowUpDown aria-hidden />} options={[{ value: "pool", label: t("accounts.sort.pool") }, { value: "participation", label: t("accounts.sort.participation") }, { value: "primary", label: t("accounts.sort.primary") }, { value: "secondary", label: t("accounts.sort.secondary") }, { value: "primary_reset", label: t("accounts.sort.primaryReset") }, { value: "secondary_reset", label: t("accounts.sort.secondaryReset") }, { value: "plan", label: t("accounts.sort.plan") }, { value: "name", label: t("accounts.sort.name") }]} />
-            {sortBy !== "pool" ? <IconButton label={sortDirection === "desc" ? t("accounts.sort.descending") : t("accounts.sort.ascending")} icon={sortDirection === "desc" ? <ArrowDown aria-hidden /> : <ArrowUp aria-hidden />} onClick={() => setSortDirection((value) => value === "desc" ? "asc" : "desc")} /> : null}
-          </div>
-          <div className="view-layout-switcher" role="group" aria-label={t("accounts.layout.label")}><IconButton label={t("accounts.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")} icon={<Rows3 aria-hidden />} /><IconButton label={t("accounts.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")} icon={<List aria-hidden />} /><IconButton label={t("accounts.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")} icon={<LayoutGrid aria-hidden />} /></div>
           {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={<RefreshCw className={busy === "quota-all" ? "spin" : undefined} aria-hidden />} disabled={busy === "quota-all"} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")} /> : null}
           {mode === "local" ? <IconButton className="danger" label={t("accounts.deleteNonWorking")} icon={busy === "refresh-non-working-accounts" || busy === "delete-non-working-accounts" ? <Loader2 className="spin" aria-hidden /> : <UserRoundX aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAndDeleteNonWorking()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
@@ -387,7 +374,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     </div> : null}
     </div>
     {filtersHideAccounts ? <div className="account-filter-summary" role="status" aria-live="polite"><span>{t("accounts.filterSummary", { visible: accounts.length, total: allAccounts.length })}</span><button type="button" onClick={() => { onQuery(""); setPlanFilter("all"); setParticipationFilter("all"); }}><X aria-hidden /><span>{t("accounts.clearFilters")}</span></button></div> : null}
-    {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")} data-layout={layout}>
+    {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")} data-layout="list">
       {accounts.map((account) => {
         const errorCode = accountErrorCode(account);
         const participates = accountParticipates(account);
@@ -415,7 +402,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
               <ActionMenu className="account-row-menu">
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved"); }}>{account.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
-                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("accounts.deleteConfirm"))) void perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"); }}>{t("common.delete")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("accounts.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
               {canRevealIdentity ? <IconButton label={revealedIdentities[account.id] ? t("accounts.hideIdentity") : t("accounts.revealIdentity")} icon={revealedIdentities[account.id] ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={!account.secretAvailable || busy === `identity-${account.id}`} title={!account.secretAvailable ? t("accounts.credentialsUnavailable") : revealedIdentities[account.id] ? t("accounts.hideIdentity") : t("accounts.revealIdentity")} onClick={() => void toggleIdentity(account)} /> : null}
               <IconButton label={t("accounts.refreshQuota")} icon={<RefreshCw className={busy === `quota-${account.id}` ? "spin" : undefined} aria-hidden />} disabled={busy === `quota-${account.id}`} onClick={() => void perform(`quota-${account.id}`, () => mode === "local" ? relayCommands.refreshAccountQuota(account.id) : relayCommands.remoteAction({ type: "refresh_account", id: account.id }), "feedback.refreshed")} />
@@ -516,6 +503,7 @@ function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClos
 function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: WakeTask) => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const confirm = useConfirm();
   if (!runtime?.automations.length) {
     return <EmptyState title={t("automations.emptyTitle")} description={t("automations.emptyDescription")} />;
   }
@@ -536,7 +524,7 @@ function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: Wak
                 <td>{task.windowKinds.map((item) => t(`quota.${item}`)).join(", ")}</td>
                 <td>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</td>
                 <td>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</td>
-                <td className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")} /><ActionMenu><ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("automations.deleteConfirm"))) void perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"); }}>{t("common.delete")}</ActionMenuItem></ActionMenu></td>
+                <td className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")} /><ActionMenu><ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem></ActionMenu></td>
               </tr>
             );
           })}</tbody>
@@ -548,14 +536,16 @@ function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: Wak
 function RemoteView({ onConnect, onDeploy }: { onConnect: () => void; onDeploy: () => void }) {
   const { t } = useTranslation();
   const { runtime, perform } = useRelayState();
+  const confirm = useConfirm();
   if (!runtime) return <EmptyState title={t("remote.emptyTitle")} description={t("remote.emptyDescription")} action={<div className="inline-actions"><Button variant="primary" onClick={onConnect}>{t("remote.connectExisting")}</Button><Button variant="secondary" onClick={onDeploy}>{t("remote.deployNew")}</Button></div>} />;
-  return <section className="remote-summary"><div className="remote-status"><StatusBadge status={runtime.gateway.running ? "ready" : "warning"} label={runtime.gateway.running ? t("common.online") : t("common.offline")} /><div><strong>{runtime.runtimeTarget.origin}</strong><small>{runtime.runtimeTarget.serverId}</small></div></div><dl className="detail-list"><div><dt>{t("remote.version")}</dt><dd>{runtime.runtimeTarget.version}</dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code>{runtime.gateway.baseUrl}</code></dd></div><div><dt>{t("remote.capabilities")}</dt><dd>{runtime.capabilities.features.length}</dd></div></dl><div className="inline-actions"><Button variant="danger" onClick={() => { if (window.confirm(t("remote.disconnectConfirm"))) void perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected"); }}>{t("remote.disconnect")}</Button></div></section>;
+  return <section className="remote-summary"><div className="remote-status"><StatusBadge status={runtime.gateway.running ? "ready" : "warning"} label={runtime.gateway.running ? t("common.online") : t("common.offline")} /><div><strong>{runtime.runtimeTarget.origin}</strong><small>{runtime.runtimeTarget.serverId}</small></div></div><dl className="detail-list"><div><dt>{t("remote.version")}</dt><dd>{runtime.runtimeTarget.version}</dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code>{runtime.gateway.baseUrl}</code></dd></div><div><dt>{t("remote.capabilities")}</dt><dd>{runtime.capabilities.features.length}</dd></div></dl><div className="inline-actions"><Button variant="danger" onClick={() => void confirm(t("remote.disconnectConfirm"), { danger: true }).then((accepted) => accepted && perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected"))}>{t("remote.disconnect")}</Button></div></section>;
 }
 
 function ReadyApiView({ connected, onConnect, onTopUp }: { connected: boolean; onConnect: () => void; onTopUp: () => void }) {
   const { t } = useTranslation();
   const { readyStats, perform } = useRelayState();
-  return <section className="ready-api-connection"><div className="recommended-line"><div><strong>Zenith API</strong><small>https://api.zenithmarket.dev/v1</small></div><span>{t("common.recommended")}</span></div><StatusBadge status={connected ? "ready" : "warning"} label={connected ? t("common.connected") : t("common.notConfigured")} /><p>{t("readyApi.connectionHint")}</p>{connected ? <><dl className="detail-list"><div><dt>{t("readyApi.balance")}</dt><dd>{readyStats?.balance ?? "-"}</dd></div><div><dt>{t("usage.requests")}</dt><dd>{readyStats?.requestsDisplay ?? readyStats?.requests ?? "-"}</dd></div></dl><div className="inline-actions"><Button variant="secondary" onClick={onTopUp}>{t("readyApi.topUp")}</Button><Button variant="secondary" onClick={onConnect}>{t("readyApi.updateKey")}</Button><Button variant="danger" onClick={() => { if (window.confirm(t("readyApi.disconnectConfirm"))) void perform("ready-disconnect", resetKey, "feedback.disconnected"); }}>{t("remote.disconnect")}</Button></div></> : <Button variant="primary" onClick={onConnect}>{t("readyApi.connect")}</Button>}</section>;
+  const confirm = useConfirm();
+  return <section className="ready-api-connection"><div className="recommended-line"><div><strong>Zenith API</strong><small>https://api.zenithmarket.dev/v1</small></div><span>{t("common.recommended")}</span></div><StatusBadge status={connected ? "ready" : "warning"} label={connected ? t("common.connected") : t("common.notConfigured")} /><p>{t("readyApi.connectionHint")}</p>{connected ? <><dl className="detail-list"><div><dt>{t("readyApi.balance")}</dt><dd>{readyStats?.balance ?? "-"}</dd></div><div><dt>{t("usage.requests")}</dt><dd>{readyStats?.requestsDisplay ?? readyStats?.requests ?? "-"}</dd></div></dl><div className="inline-actions"><Button variant="secondary" onClick={onTopUp}>{t("readyApi.topUp")}</Button><Button variant="secondary" onClick={onConnect}>{t("readyApi.updateKey")}</Button><Button variant="danger" onClick={() => void confirm(t("readyApi.disconnectConfirm"), { danger: true }).then((accepted) => accepted && perform("ready-disconnect", resetKey, "feedback.disconnected"))}>{t("remote.disconnect")}</Button></div></> : <Button variant="primary" onClick={onConnect}>{t("readyApi.connect")}</Button>}</section>;
 }
 
 export function SourceDialog({ source, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
@@ -876,43 +866,17 @@ function accountHealthTone(health: string) {
   return "warning";
 }
 
-function compareAccounts(
-  left: AccountSummary,
-  right: AccountSummary,
-  sortBy: AccountSort,
-  direction: SortDirection,
-  planOrder: Map<string, number>,
-  unknownPlanRank: number,
-) {
-  if (sortBy === "pool") {
-    return Number(accountPoolReady(right)) - Number(accountPoolReady(left))
-      || Number(accountRouted(right)) - Number(accountRouted(left))
-      || compareOptional(quotaFloor(left), quotaFloor(right), "desc")
-      || right.priority - left.priority
-      || right.weight - left.weight
-      || left.label.localeCompare(right.label);
-  }
-  if (sortBy === "participation") {
-    const comparison = Number(accountParticipates(left)) - Number(accountParticipates(right));
-    return (direction === "desc" ? -comparison : comparison)
-      || left.label.localeCompare(right.label);
-  }
-  if (sortBy === "primary" || sortBy === "secondary") {
-    return compareOptional(left.quota[sortBy]?.availableBasisPoints ?? null, right.quota[sortBy]?.availableBasisPoints ?? null, direction)
-      || left.label.localeCompare(right.label);
-  }
-  if (sortBy === "primary_reset" || sortBy === "secondary_reset") {
-    const kind = sortBy === "primary_reset" ? "primary" : "secondary";
-    return compareOptional(left.quota[kind]?.resetAtMs ?? null, right.quota[kind]?.resetAtMs ?? null, direction)
-      || left.label.localeCompare(right.label);
-  }
-  if (sortBy === "plan") {
-    const leftRank = planOrder.get(accountPlanOption(left.subscription.planType, "").id) ?? unknownPlanRank;
-    const rightRank = planOrder.get(accountPlanOption(right.subscription.planType, "").id) ?? unknownPlanRank;
-    return (direction === "desc" ? rightRank - leftRank : leftRank - rightRank)
-      || left.label.localeCompare(right.label);
-  }
-  return (direction === "desc" ? right.label.localeCompare(left.label) : left.label.localeCompare(right.label));
+function compareAccounts(left: AccountSummary, right: AccountSummary) {
+  return automaticAccountTier(left) - automaticAccountTier(right)
+    || compareQuotaDescending(quotaFloor(left), quotaFloor(right))
+    || left.label.localeCompare(right.label);
+}
+
+function automaticAccountTier(account: AccountSummary) {
+  if (accountErrorCode(account)) return 4;
+  if (account.routingExclusion === "free_plan_policy") return 3;
+  if (!accountPoolReady(account)) return 2;
+  return quotaFloor(account) == null ? 1 : 0;
 }
 
 function accountParticipates(account: AccountSummary) {
@@ -940,11 +904,11 @@ function quotaFloor(account: AccountSummary) {
   return values.length ? Math.min(...values) : null;
 }
 
-function compareOptional(left: number | null, right: number | null, direction: SortDirection) {
+function compareQuotaDescending(left: number | null, right: number | null) {
   if (left == null && right == null) return 0;
   if (left == null) return 1;
   if (right == null) return -1;
-  return direction === "desc" ? right - left : left - right;
+  return right - left;
 }
 
 function accountErrorCode(account: AccountSummary) {

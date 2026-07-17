@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRight, CircleAlert, Gauge, Play, Server, Square, Timer, Users } from "lucide-react";
+import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, Server, Square, Timer, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { UsageLogEntry } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
@@ -22,6 +22,7 @@ type UsageSample = {
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  apiEquivalentMicroUsd?: number | null;
 };
 
 const HOUR_MS = 60 * 60 * 1_000;
@@ -81,10 +82,7 @@ export function OverviewPage() {
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime && mode !== "zenith" ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-      <div className="overview-summary">
-        <div className="overview-status-band"><StatusBadge status={running ? "ready" : "warning"} label={running ? t("common.ready") : t("common.offline")} /><div><span>{t("common.mode")}</span><strong>{t(`modes.${mode}`)}</strong></div></div>
-        <div className="metric-band"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>
-      </div>
+      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>
       <AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} />
       <section className="activity-section"><header><h2>{t("overview.activity")}</h2><Button variant="ghost" onClick={() => setPage("usage")}>{t("overview.viewUsage")}</Button></header>{activity.length ? <ul>{activity.map((item) => <li key={item.id}><StatusBadge status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /><code>{item.model ?? "-"}</code><span>{item.latency}</span></li>)}</ul> : <p className="muted">{t("usage.empty")}</p>}</section>
     </>}
@@ -96,11 +94,13 @@ function AnalyticsPanel({ range, setRange, windows, analytics, loading, error }:
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(() => emptyTotals());
   const tokenValues = buckets.map((totals) => totals.totalTokens || null);
+  const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
   const responseValues = buckets.map((totals) => totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null);
   const speedValues = buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null);
   const totals = analytics?.totals ?? emptyTotals();
   const averageResponse = totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null;
   const averageSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
+  const apiTotal = totals.apiEquivalent;
   const rangeTabs = [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }];
 
   return <section className={`overview-analytics ${loading ? "loading" : ""}`} aria-busy={loading}>
@@ -108,6 +108,7 @@ function AnalyticsPanel({ range, setRange, windows, analytics, loading, error }:
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
     <div className="overview-chart-stack">
       <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading} />
+      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint")} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale, apiTotal.unpricedTokens > 0)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading} />
       <OverviewChart icon={<Timer aria-hidden />} title={t("overview.responseSpeed")} hint={t("overview.responseSpeedHint")} summary={formatDuration(averageResponse, locale)} values={responseValues} windows={windows} variant="line" tone="latency" formatValue={(value) => formatDuration(value, locale)} formatAxis={(value) => formatDuration(value, locale)} loading={loading} />
       <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.generationSpeed")} hint={t("overview.generationSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading} />
     </div>
@@ -117,7 +118,7 @@ function AnalyticsPanel({ range, setRange, windows, analytics, loading, error }:
 function OverviewChart({ icon, title, hint, summary, values, windows, variant, tone, formatValue, formatAxis, loading }: { icon: ReactNode; title: string; hint: string; summary: string; values: Array<number | null>; windows: WindowBucket[]; variant: "bars" | "line"; tone: string; formatValue: (value: number) => string; formatAxis: (value: number) => string; loading: boolean }) {
   const { t } = useTranslation();
   const measured = values.filter((value): value is number => value != null);
-  const max = Math.max(1, ...measured);
+  const max = Math.max(0, ...measured) || 1;
   const hasData = measured.some((value) => value > 0);
   const segments = lineSegments(values, max);
   return <article className={`overview-chart ${tone}`}>
@@ -211,6 +212,12 @@ function totalsFromSamples(samples: UsageSample[]) {
     totals.reasoningTokens += sample.reasoningTokens ?? 0;
     totals.outputTokens += sample.outputTokens ?? 0;
     totals.totalTokens += sample.totalTokens ?? 0;
+    if (sample.apiEquivalentMicroUsd != null) {
+      totals.apiEquivalent.microUsd += sample.apiEquivalentMicroUsd;
+      totals.apiEquivalent.pricedTokens += sample.totalTokens ?? 0;
+    } else {
+      totals.apiEquivalent.unpricedTokens += sample.totalTokens ?? 0;
+    }
     if (visibleOutput > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += visibleOutput; totals.speedDurationMs += sample.latencyMs; }
     return totals;
   }, emptyTotals());
@@ -225,7 +232,7 @@ function remoteSamples(events: RemoteUsage[]): UsageSample[] {
 }
 
 function readySamples(events: UsageLogEntry[]): UsageSample[] {
-  return events.map((item) => ({ createdAtMs: Date.parse(item.createdAt), success: item.status === "success", latencyMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, ttftMs: item.timeToFirstByteMs ?? null, generationMs: item.streamDurationMs ?? null, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, totalTokens: item.totalTokens }));
+  return events.map((item) => ({ createdAtMs: Date.parse(item.createdAt), success: item.status === "success", latencyMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, ttftMs: item.timeToFirstByteMs ?? null, generationMs: item.streamDurationMs ?? null, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, totalTokens: item.totalTokens, apiEquivalentMicroUsd: item.displayCostMicrousd ?? item.costMicrousd ?? (Number.isFinite(item.costCents) ? item.costCents * 10_000 : null) }));
 }
 
 function emptyTotals(): UsageTotals {
@@ -243,4 +250,12 @@ function formatFullNumber(value: number, locale: string) {
 function formatDuration(value: number | null, locale: string) {
   if (value == null) return "—";
   return new Intl.NumberFormat(locale, { style: "unit", unit: value >= 1_000 ? "second" : "millisecond", unitDisplay: "short", maximumFractionDigits: 1 }).format(value >= 1_000 ? value / 1_000 : value);
+}
+
+function formatApiEquivalent(value: number | null, locale: string, partial = false) {
+  return value == null ? "—" : `≈${formatUsd(value, locale)}${partial ? "*" : ""}`;
+}
+
+function formatUsd(value: number, locale: string) {
+  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: value < 0.01 ? 6 : value < 1 ? 4 : 2 }).format(value);
 }

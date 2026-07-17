@@ -4406,6 +4406,7 @@ mod tests {
             id: "key_1".into(),
             label: "Scoped".into(),
             enabled: true,
+            system: false,
             secret_ref: "key:key_1".into(),
             source_ids: None,
             account_ids: Some(vec!["account_1".into()]),

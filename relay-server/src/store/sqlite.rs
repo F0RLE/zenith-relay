@@ -1100,22 +1100,62 @@ fn usage_buckets(
     let start_ms = query.from_ms.unwrap_or_default();
     let start = SqlValue::Integer(start_ms.min(i64::MAX as u64) as i64);
     let bucket = SqlValue::Integer(bucket_ms.min(i64::MAX as u64) as i64);
+    let bucket_sql = "? + ((created_at_ms - ?) / ?) * ?";
     let sql = format!(
-        "SELECT ? + ((created_at_ms - ?) / ?) * ?, {USAGE_TOTAL_COLUMNS} \
+        "SELECT {bucket_sql}, {USAGE_TOTAL_COLUMNS} \
          FROM usage_events{where_sql} GROUP BY 1 ORDER BY 1"
     );
     let mut parameters = vec![start.clone(), start, bucket.clone(), bucket];
     parameters.extend_from_slice(values);
-    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let mut buckets = {
+        let mut statement = connection.prepare(&sql).map_err(db_error)?;
+        let rows = statement
+            .query_map(params_from_iter(parameters.iter()), |row| {
+                Ok(UsageBucket {
+                    start_ms: nonnegative_u64(row.get(0)?),
+                    totals: usage_totals_from_row(row, 1)?,
+                })
+            })
+            .map_err(db_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?
+    };
+    let price_sql = format!(
+        "SELECT {bucket_sql}, COALESCE(resolved_model, requested_model), \
+            SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens), \
+            SUM(total_tokens), COUNT(cached_input_tokens) \
+         FROM usage_events{where_sql} GROUP BY 1, 2"
+    );
+    let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(parameters.iter()), |row| {
-            Ok(UsageBucket {
-                start_ms: nonnegative_u64(row.get(0)?),
-                totals: usage_totals_from_row(row, 1)?,
-            })
+            let input_tokens: Option<i64> = row.get(2)?;
+            let cached_input_tokens: Option<i64> = row.get(3)?;
+            let output_tokens: Option<i64> = row.get(4)?;
+            let total_tokens: Option<i64> = row.get(5)?;
+            let cached_samples: i64 = row.get(6)?;
+            Ok((
+                nonnegative_u64(row.get(0)?),
+                estimate_api_equivalent(
+                    row.get::<_, Option<String>>(1)?.as_deref(),
+                    optional_u64(input_tokens),
+                    (cached_samples > 0)
+                        .then(|| optional_u64(cached_input_tokens))
+                        .flatten(),
+                    optional_u64(output_tokens),
+                    optional_u64(total_tokens),
+                ),
+            ))
         })
         .map_err(db_error)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+    let mut equivalents = HashMap::<u64, ApiEquivalentSummary>::new();
+    for row in rows {
+        let (start_ms, estimate) = row.map_err(db_error)?;
+        equivalents.entry(start_ms).or_default().merge(estimate);
+    }
+    for bucket in &mut buckets {
+        bucket.totals.api_equivalent = equivalents.remove(&bucket.start_ms).unwrap_or_default();
+    }
+    Ok(buckets)
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
@@ -1873,6 +1913,10 @@ mod tests {
         assert_eq!(page.buckets.len(), 1);
         assert_eq!(page.buckets[0].start_ms, 2_000);
         assert_eq!(page.buckets[0].totals.total_tokens, 2);
+        assert_eq!(
+            page.buckets[0].totals.api_equivalent,
+            page.totals.api_equivalent
+        );
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
         assert_eq!(

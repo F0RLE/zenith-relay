@@ -1,6 +1,6 @@
 use axum::body::{Body, Bytes};
 use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::routing::{get, post};
@@ -10,8 +10,9 @@ use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message as ClientWsMessage, RequestBuilderExt};
 use serde_json::{json, Value};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -67,6 +68,12 @@ struct UpstreamState {
 struct HeldStreamState {
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     release: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct ConnectionAffinityState {
+    owners: Arc<Mutex<HashMap<SocketAddr, String>>>,
+    account_ids: Arc<Mutex<Vec<String>>>,
 }
 
 #[derive(Clone, Default)]
@@ -2649,6 +2656,39 @@ async fn independent_chat_uses_a_free_account_while_an_sse_stream_is_open() {
 }
 
 #[tokio::test]
+async fn oauth_accounts_use_independent_upstream_connection_pools() {
+    let (upstream, state) = spawn_connection_affinity_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &upstream, 100),
+            account("second-account", "provider-second", &upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            max_retry_candidates: 1,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+
+    let account_ids = state.account_ids.lock().unwrap();
+    assert_eq!(account_ids.len(), 2);
+    assert_ne!(account_ids[0], account_ids[1]);
+    assert_eq!(state.owners.lock().unwrap().len(), 2);
+    assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn cancelled_sse_releases_its_lease_without_cooling_the_account() {
     let (upstream, state) = spawn_held_stream_upstream().await;
     let authority = ready_authority("relay-account", "account-access").await;
@@ -2941,6 +2981,31 @@ async fn spawn_held_stream_upstream() -> (TestServer, HeldStreamState) {
     (spawn(app).await, state)
 }
 
+async fn spawn_connection_affinity_upstream() -> (TestServer, ConnectionAffinityState) {
+    let state = ConnectionAffinityState::default();
+    let app = Router::new()
+        .route("/v1/responses", post(connection_affinity_upstream))
+        .with_state(state.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    (
+        TestServer {
+            base_url: format!("http://{address}"),
+            task,
+            runtime: None,
+        },
+        state,
+    )
+}
+
 async fn spawn(app: Router) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -3039,6 +3104,47 @@ async fn held_stream_upstream(
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/event-stream")
         .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+async fn connection_affinity_upstream(
+    State(state): State<ConnectionAffinityState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    let account_id = header(&headers, "chatgpt-account-id").unwrap_or_default();
+    state.account_ids.lock().unwrap().push(account_id.clone());
+    let conflict = {
+        let mut owners = state.owners.lock().unwrap();
+        match owners.entry(peer) {
+            std::collections::hash_map::Entry::Occupied(owner) => owner.get() != &account_id,
+            std::collections::hash_map::Entry::Vacant(owner) => {
+                owner.insert(account_id);
+                false
+            }
+        }
+    };
+    let (status, body) = if conflict {
+        (
+            StatusCode::BAD_GATEWAY,
+            json!({"error": {"code": "connection_identity_conflict"}}),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            json!({
+                "id": "isolated-response",
+                "object": "response",
+                "model": MODEL,
+                "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+            }),
+        )
+    };
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
         .unwrap()
 }
 

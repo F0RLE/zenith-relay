@@ -83,6 +83,7 @@ export type KeySummary = {
   id: string;
   label: string;
   enabled: boolean;
+  system: boolean;
   sourceIds: string[] | null;
   accountIds: string[] | null;
   allowedModels: string[];

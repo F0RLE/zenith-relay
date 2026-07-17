@@ -33,6 +33,7 @@ const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
+const TRANSPORT_COOLDOWN_MS: u64 = 5_000;
 const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
@@ -599,13 +600,13 @@ async fn execute_account_endpoint(
         let upstream = upstream_request.body(request_body).send().await;
         let upstream = match upstream {
             Ok(upstream) => upstream,
-            Err(_) => {
-                let failure = AttemptFailure::transport();
+            Err(error) => {
+                let failure = AttemptFailure::transport(&error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
                     "*",
-                    TRANSIENT_COOLDOWN_MS,
+                    failure.cooldown_ms,
                     route.half_open_probe,
                 );
                 let mut event = usage_event(
@@ -1016,6 +1017,9 @@ async fn execute_request(
             .post(route.upstream_url.clone())
             .header(AUTHORIZATION, prepared.authorization)
             .header(CONTENT_TYPE, "application/json");
+        if upstream_stream {
+            upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
+        }
         if let Some(account_id) = prepared.chatgpt_account_id {
             upstream_request = upstream_request.header("ChatGPT-Account-Id", account_id);
         }
@@ -1030,13 +1034,13 @@ async fn execute_request(
         let upstream = upstream_request.body(request_body).send().await;
         let upstream = match upstream {
             Ok(upstream) => upstream,
-            Err(_) => {
-                let failure = AttemptFailure::transport();
+            Err(error) => {
+                let failure = AttemptFailure::transport(&error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
                     "*",
-                    TRANSIENT_COOLDOWN_MS,
+                    failure.cooldown_ms,
                     route.half_open_probe,
                 );
                 let mut event = usage_event(
@@ -1537,7 +1541,7 @@ async fn bootstrap_stream(
                     inspected = absolute_end;
                 }
             }
-            Some(Err(_)) => return Err(AttemptFailure::stream("upstream_stream")),
+            Some(Err(error)) => return Err(AttemptFailure::transport(&error)),
             None => return Err(AttemptFailure::stream("stream_incomplete")),
         }
     }
@@ -2224,12 +2228,29 @@ struct FailureState {
 }
 
 impl AttemptFailure {
-    fn transport() -> Self {
+    fn transport(error: &reqwest::Error) -> Self {
+        let (category, message) = if error.is_timeout() {
+            ("upstream_transport_timeout", "upstream request timed out")
+        } else if error.is_connect() {
+            (
+                "upstream_transport_connect",
+                "upstream connection could not be established",
+            )
+        } else if error.is_body() {
+            (
+                "upstream_transport_body",
+                "upstream request or response body failed",
+            )
+        } else if error.is_request() {
+            ("upstream_transport_request", "upstream request failed")
+        } else {
+            ("upstream_transport", "upstream transport failed")
+        };
         Self {
             status: StatusCode::BAD_GATEWAY,
-            category: "upstream_transport",
-            message: "upstream request failed",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            category,
+            message,
+            cooldown_ms: TRANSPORT_COOLDOWN_MS,
         }
     }
 
@@ -2853,30 +2874,81 @@ impl<S> UsageStream<S> {
         emit_callback(&self.callback, event);
     }
 
+    fn queue_responses_failure(&mut self, category: &str) -> bool {
+        let Some(event) = self.event.as_ref() else {
+            return false;
+        };
+        if event.wire_api != WireApi::Responses {
+            return false;
+        }
+        let response_id = self.response_id.clone().unwrap_or_else(|| {
+            let suffix = event
+                .request_id
+                .chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>();
+            format!("resp_{suffix}")
+        });
+        let message = match category {
+            "stream_invalid" => "Upstream returned an invalid streaming event",
+            "stream_event_too_large" => "Upstream streaming event exceeded the size limit",
+            "stream_incomplete" => "Upstream stream ended before response.completed",
+            _ => "Upstream stream disconnected before completion",
+        };
+        let payload = json!({
+            "type": "response.failed",
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "model": event.requested_model.clone().unwrap_or_default(),
+                "status": "failed",
+                "output": [],
+                "error": {
+                    "type": "stream_error",
+                    "code": category,
+                    "message": message,
+                }
+            }
+        });
+        let Ok(payload) = serde_json::to_vec(&payload) else {
+            return false;
+        };
+        let mut frame = Vec::with_capacity(payload.len() + 44);
+        frame.extend_from_slice(b"event: response.failed\ndata: ");
+        frame.extend_from_slice(&payload);
+        frame.extend_from_slice(b"\n\n");
+        self.output_pending.push_back(Bytes::from(frame));
+        true
+    }
+
+    fn fail_stream(&mut self, category: &str) -> bool {
+        let framed = self.queue_responses_failure(category);
+        self.finish(Some(false), Some(category));
+        self.terminated = true;
+        framed
+    }
+
     fn ingest_sse(&mut self, bytes: &[u8]) {
         if self.terminated {
             return;
         }
         if self.sse_pending.len().saturating_add(bytes.len()) > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
-            self.finish(Some(false), Some("stream_event_too_large"));
-            self.terminated = true;
+            self.fail_stream("stream_event_too_large");
             return;
         }
         self.sse_pending.extend_from_slice(bytes);
         while let Some(end) = sse_event_end(&self.sse_pending) {
             if end > MAX_SSE_EVENT_BYTES {
                 self.sse_pending.clear();
-                self.finish(Some(false), Some("stream_event_too_large"));
-                self.terminated = true;
+                self.fail_stream("stream_event_too_large");
                 return;
             }
             let event = self.sse_pending.drain(..end).collect::<Vec<_>>();
             let terminal = parse_sse_event(&event);
             if terminal.has_data && !terminal.valid {
                 self.sse_pending.clear();
-                self.finish(Some(false), Some("stream_invalid"));
-                self.terminated = true;
+                self.fail_stream("stream_invalid");
                 return;
             }
             if terminal.has_output_delta
@@ -2914,8 +2986,7 @@ impl<S> UsageStream<S> {
         }
         if self.sse_pending.len() > MAX_SSE_EVENT_BYTES {
             self.sse_pending.clear();
-            self.finish(Some(false), Some("stream_event_too_large"));
-            self.terminated = true;
+            self.fail_stream("stream_event_too_large");
         }
     }
 }
@@ -2938,13 +3009,16 @@ where
             match this.inner.as_mut().poll_next(context) {
                 Poll::Ready(Some(Ok(bytes))) => this.ingest_sse(&bytes),
                 Poll::Ready(Some(Err(error))) => {
-                    this.finish(Some(false), Some("upstream_stream"));
-                    this.terminated = true;
+                    if this.fail_stream("upstream_stream") {
+                        continue;
+                    }
                     return Poll::Ready(Some(Err(error)));
                 }
                 Poll::Ready(None) => {
                     if this.event.as_ref().is_some_and(|event| event.success) {
-                        this.finish(Some(false), Some("stream_incomplete"));
+                        if this.fail_stream("stream_incomplete") {
+                            continue;
+                        }
                     } else {
                         this.finish(None, None);
                     }
@@ -3446,6 +3520,10 @@ mod tests {
         stream.ingest_sse(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
         assert!(stream.terminated);
         assert!(stream.sse_pending.is_empty());
+        let failure =
+            String::from_utf8(stream.output_pending.pop_front().unwrap().to_vec()).unwrap();
+        assert!(failure.starts_with("event: response.failed\ndata: "));
+        assert!(failure.contains("\"code\":\"stream_event_too_large\""));
         assert!(stream.output_pending.is_empty());
         drop(stream);
 

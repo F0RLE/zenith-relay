@@ -232,6 +232,7 @@ pub async fn set_local_pool_membership(
 #[tauri::command]
 pub async fn create_local_gateway_key(
     label: String,
+    system: Option<bool>,
     source_ids: Option<Vec<String>>,
     account_ids: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
@@ -251,6 +252,7 @@ pub async fn create_local_gateway_key(
             label
         },
         enabled: true,
+        system: system.unwrap_or_default(),
         secret_ref: secret_ref.clone(),
         source_ids,
         account_ids,
@@ -296,6 +298,7 @@ pub async fn update_local_gateway_key(
         id: current.id,
         label: input.label,
         enabled: current.enabled,
+        system: current.system,
         secret_ref: current.secret_ref,
         source_ids: input.source_ids,
         account_ids: input.account_ids,

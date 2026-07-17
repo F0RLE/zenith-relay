@@ -4,7 +4,7 @@ use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::routing::{get, post};
 use axum::Router;
-use futures_util::{stream, StreamExt};
+use futures_util::stream;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io;
@@ -525,10 +525,11 @@ async fn stream_never_falls_back_after_the_first_complete_event() {
 
     let response = request(&gateway, true).await;
     assert_eq!(response.headers()[CACHE_CONTROL], "first");
-    let mut chunks = response.bytes_stream();
-    let first = chunks.next().await.unwrap().unwrap();
-    assert!(String::from_utf8_lossy(&first).contains("response.created"));
-    let _ = chunks.next().await;
+    let body = response.text().await.unwrap();
+    assert!(body.contains("response.created"));
+    assert!(body.contains("event: response.failed"));
+    assert!(body.contains("upstream_stream"));
+    assert!(!body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
     assert!(state_b.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();

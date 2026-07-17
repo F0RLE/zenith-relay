@@ -171,6 +171,8 @@ pub struct KeySummary {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub system: bool,
     pub source_ids: Option<Vec<String>>,
     pub account_ids: Option<Vec<String>>,
     pub allowed_models: Vec<String>,

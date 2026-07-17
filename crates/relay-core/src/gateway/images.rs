@@ -522,13 +522,13 @@ async fn execute_prepared(
         }
         let upstream = match upstream.send().await {
             Ok(upstream) => upstream,
-            Err(_) => {
-                let failure = AttemptFailure::transport();
+            Err(error) => {
+                let failure = AttemptFailure::transport(&error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
                     "*",
-                    TRANSIENT_COOLDOWN_MS,
+                    failure.cooldown_ms,
                     route.half_open_probe,
                 );
                 let mut event = image_usage_event(

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { APP_VERSION, restartApplication } from "../../../../tauri";
 import { relayCommands } from "../../api/commands";
 import type { RelayStorageInfo } from "../../api/types";
-import { Button, OptionMenu, PageHeader, StatusBadge } from "../../components/Ui";
+import { Button, OptionMenu, PageHeader, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
@@ -12,6 +12,7 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
   const { theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, resetOnboarding, perform, busy } = useRelayState();
+  const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
   useEffect(() => {
@@ -21,8 +22,8 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       .catch(() => { if (active) setStorageUnavailable(true); });
     return () => { active = false; };
   }, []);
-  const restore = () => { if (window.confirm(t("profiles.restoreConfirm"))) void perform("recovery-restore", relayCommands.restoreCodex, "feedback.restored"); };
-  const reset = () => { if (window.confirm(t("settings.resetDataConfirm"))) void perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
+  const restore = async () => { if (await confirm(t("profiles.restoreConfirm"))) await perform("recovery-restore", relayCommands.restoreCodex, "feedback.restored"); };
+  const reset = async () => { if (await confirm(t("settings.resetDataConfirm"), { danger: true })) await perform("recovery-reset", async () => { await relayCommands.resetLocalData(); resetOnboarding(); await restartApplication(); }, "feedback.reset"); };
   const updateStatus = updateCheckState === "available" ? { status: "info" as const, label: t("updates.availableVersion", { version: updateVersion }) }
     : updateCheckState === "error" ? { status: "error" as const, label: t("updates.checkFailed") }
       : updateCheckState === "skipped" ? { status: "warning" as const, label: t("updates.skipped") }

@@ -3,12 +3,13 @@ import { Camera, FolderOpen, Play, Plus, RotateCcw, Trash2, Wrench } from "lucid
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { HistoryRepairPreview, HistoryRepairResult, ProfileBinding, ProfileSnapshot } from "../../api/types";
-import { Button, EmptyState, IconButton, OptionMenu, PageHeader, StatusBadge, Tabs } from "../../components/Ui";
+import { Button, EmptyState, IconButton, OptionMenu, PageHeader, StatusBadge, Tabs, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
   const { mode, runtime, busy, perform, activateCodexProfile, launchCodexProfile } = useRelayState();
+  const confirm = useConfirm();
   const [view, setView] = useState("profiles");
   const [bindings, setBindings] = useState<ProfileBinding[]>([]);
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
@@ -35,7 +36,7 @@ export function ProfilesPage() {
     if (work && await activateCodexProfile("profile-attach", work)) loadProfiles();
   };
   const restore = async (work: () => Promise<unknown>, id: string) => {
-    if (window.confirm(t("profiles.restoreConfirm")) && await perform(id, work, "feedback.restored")) loadProfiles();
+    if (await confirm(t("profiles.restoreConfirm")) && await perform(id, work, "feedback.restored")) loadProfiles();
   };
   const createSnapshot = async () => {
     const name = snapshotName.trim();
@@ -44,10 +45,10 @@ export function ProfilesPage() {
     }
   };
   const restoreSnapshot = async (snapshot: ProfileSnapshot) => {
-    if (window.confirm(t("profiles.snapshotRestoreConfirm", { name: snapshot.name })) && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, t("profiles.safetySnapshotName", { name: snapshot.name })), "feedback.snapshotRestored")) loadProfiles();
+    if (await confirm(t("profiles.snapshotRestoreConfirm", { name: snapshot.name })) && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, t("profiles.safetySnapshotName", { name: snapshot.name })), "feedback.snapshotRestored")) loadProfiles();
   };
   const deleteSnapshot = async (snapshot: ProfileSnapshot) => {
-    if (window.confirm(t("profiles.snapshotDeleteConfirm", { name: snapshot.name })) && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) loadProfiles();
+    if (await confirm(t("profiles.snapshotDeleteConfirm", { name: snapshot.name }), { danger: true }) && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) loadProfiles();
   };
   const snapshotDate = (value: number) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
   const hasProfiles = bindings.length > 0;
@@ -61,13 +62,13 @@ export function ProfilesPage() {
     if (ok) { setRepairPreview(result.current); setRepairResult(null); }
   };
   const applyRepair = async () => {
-    if (!repairPreview || !window.confirm(t("profiles.repairConfirm"))) return;
+    if (!repairPreview || !await confirm(t("profiles.repairConfirm"))) return;
     const result: { current: HistoryRepairResult | null } = { current: null };
     const ok = await perform("history-repair-apply", async () => { result.current = await relayCommands.applyHistoryRepair(repairPreview.sessionId); }, "feedback.saved");
     if (ok) { setRepairResult(result.current); setRepairPreview(null); }
   };
   const rollbackRepair = async () => {
-    if (!repairResult || !window.confirm(t("profiles.rollbackConfirm"))) return;
+    if (!repairResult || !await confirm(t("profiles.rollbackConfirm"))) return;
     const ok = await perform("history-repair-rollback", () => relayCommands.rollbackHistoryRepair(repairResult.backupId), "feedback.restored");
     if (ok) setRepairResult(null);
   };

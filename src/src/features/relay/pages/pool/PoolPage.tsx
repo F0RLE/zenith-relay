@@ -1,15 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, LayoutGrid, List, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Rows3, Trash2, X, Zap } from "lucide-react";
+import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
-import { AccountPlanBadge, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, isCodexOauthAccountEligible } from "../../components/Ui";
+import { AccountPlanBadge, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, isCodexOauthAccountEligible, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { SourceDialog } from "../connections/ConnectionsPage";
 
 type View = "members" | "keys" | "models";
-type MemberLayout = "compact" | "list" | "grid";
 type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source"; health: string; quota: null });
 
 export function PoolPage() {
@@ -29,14 +28,9 @@ export function PoolPage() {
     if ((view === "keys" && !supportsKeys) || (view === "models" && !supportsModels)) setView("members");
   }, [view, supportsKeys, supportsModels]);
   const viewAction = view === "keys"
-    ? <Button variant="primary" icon={<KeyRound aria-hidden />} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : undefined} onClick={() => setCreateKey(true)}>{t("keys.create")}</Button>
+    ? <Button variant="secondary" icon={<KeyRound aria-hidden />} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : undefined} onClick={() => setCreateKey(true)}>{t("keys.create")}</Button>
     : view === "members"
       ? <Button variant="secondary" icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</Button>
-      : null;
-  const viewMenuAction = view === "keys"
-    ? <ActionMenuItem icon={<KeyRound aria-hidden />} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : undefined} onClick={() => setCreateKey(true)}>{t("keys.create")}</ActionMenuItem>
-    : view === "members"
-      ? <ActionMenuItem icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</ActionMenuItem>
       : null;
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
@@ -45,28 +39,18 @@ export function PoolPage() {
     : null;
   const switchCodexToPool = () => activateCodexProfile("pool-switch", async () => {
     const snapshot = await relayCommands.localState();
-    const key = snapshot.keys.find((candidate) => candidate.enabled
-      && !candidate.sourceIds?.length
-      && !candidate.accountIds?.length
-      && !candidate.allowedModels.length
-      && !candidate.excludedModels.length
-      && !candidate.modelPrefix)
-      ?? (await relayCommands.createKey(t("pool.codexKeyLabel"))).key;
+    const key = snapshot.keys.find((candidate) => candidate.system && candidate.enabled)
+      ?? (await relayCommands.createKey(t("pool.codexKeyLabel"), true)).key;
     return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId, codexPoolOauthSelection === "none");
   }, true);
   const running = Boolean(runtime?.gateway.running);
-  const hasHeaderMenu = viewMenuAction != null || (mode === "local" && running);
-  const action = mode === "local" ? <div className="pool-header-actions">
-    {hasHeaderMenu ? <ActionMenu label={t("common.actions")}>
-      {viewMenuAction}
-      {running ? <ActionMenuItem icon={<Power aria-hidden />} disabled={busy === "pool-toggle"} onClick={() => void perform("pool-toggle", relayCommands.stopGateway, "feedback.stopped")}>{t("pool.stop")}</ActionMenuItem> : null}
-    </ActionMenu> : null}
-    {running
-      ? <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPT")}</Button>
-      : <Button data-action="pool-toggle" variant="primary" icon={<Play aria-hidden />} busy={busy === "pool-toggle"} disabled={!poolReady} title={!poolReady ? t("pool.startUnavailable") : t("pool.start")} onClick={() => void perform("pool-toggle", relayCommands.startGateway, "feedback.started")}>{t("pool.start")}</Button>}
-  </div> : <div className="pool-header-actions">
-    {viewMenuAction ? <ActionMenu label={t("common.actions")}>{viewMenuAction}</ActionMenu> : null}
+  const poolToggleLabel = running ? t("pool.stop") : t("pool.start");
+  const action = <div className="pool-header-actions">
     {viewAction}
+    {mode === "local" ? <>
+      <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} disabled={!running && !poolReady} title={!running && !poolReady ? t("pool.startUnavailable") : poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleLabel}</Button>
+      <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !running ? t("pool.start") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPT")}</Button>
+    </> : null}
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
   return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} onRoutingPolicy={() => setRoutingPolicy(true)} supportsRoutingSettings={supportsRoutingSettings} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
@@ -80,11 +64,6 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
   const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [layout, setLayout] = useState<MemberLayout>(() => {
-    const saved = localStorage.getItem("relay.pool.memberLayout");
-    return saved === "compact" || saved === "grid" ? saved : "list";
-  });
-  useEffect(() => localStorage.setItem("relay.pool.memberLayout", layout), [layout]);
   const poolMembers: Member[] = [
     ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
     ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const, health: item.enabled ? "healthy" : "disabled", quota: null })),
@@ -151,19 +130,14 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
             <IconButton className="pool-routing-settings-button" label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
             <IconButton label={t("pool.refreshPolicy")} icon={<Clock3 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} />
           </div>
-          <div className="pool-control-group" data-toolbar-group="refresh-and-view">
+          <div className="pool-control-group" data-toolbar-group="refresh">
             <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
-            <div className="view-layout-switcher" role="group" aria-label={t("pool.layout.label")}>
-              <IconButton label={t("pool.layout.compact")} aria-pressed={layout === "compact"} onClick={() => setLayout("compact")} icon={<Rows3 aria-hidden />} />
-              <IconButton label={t("pool.layout.list")} aria-pressed={layout === "list"} onClick={() => setLayout("list")} icon={<List aria-hidden />} />
-              <IconButton label={t("pool.layout.grid")} aria-pressed={layout === "grid"} onClick={() => setLayout("grid")} icon={<LayoutGrid aria-hidden />} />
-            </div>
           </div>
         </div>
       </div>
       <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><strong>{counts.quotaWait}</strong></div><div><span>{t("pool.memberStatus.unavailable")}</span><strong>{counts.unavailable}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><strong>{counts.disabled}</strong></div></div>
     </div>
-    <div className="pool-member-list" role="list" aria-label={t("pool.members")} data-layout={layout}>
+    <div className="pool-member-list" role="list" aria-label={t("pool.members")} data-layout="list">
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(memberId);
@@ -367,21 +341,11 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
 function KeysView({ onCreate }: { onCreate: () => void }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const confirm = useConfirm();
   const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
   const [revealed, setRevealed] = useState("");
   const [editing, setEditing] = useState<KeySummary | null>(null);
-  const [managedKeyIds, setManagedKeyIds] = useState<string[] | null>(mode === "local" ? null : []);
-  useEffect(() => {
-    let active = true;
-    if (mode !== "local") { setManagedKeyIds([]); return () => { active = false; }; }
-    setManagedKeyIds(null);
-    void relayCommands.profileBindings()
-      .then((bindings) => { if (active) setManagedKeyIds(bindings.filter((binding) => binding.credentialKind === "local_gateway").map((binding) => binding.credentialId)); })
-      .catch(() => { if (active) setManagedKeyIds([]); });
-    return () => { active = false; };
-  }, [mode, runtime?.keys]);
-  if (managedKeyIds === null) return <div className="relay-loading">{t("common.loading")}</div>;
-  const keys = (runtime?.keys ?? []).filter((key) => !managedKeyIds.includes(key.id));
+  const keys = (runtime?.keys ?? []).filter((key) => !key.system);
   if (!keys.length) return <EmptyState title={t("keys.emptyTitle")} description={t("keys.emptyDescription")} action={<Button variant="primary" disabled={!canManage} title={!canManage ? t("remote.capabilityUnavailable") : undefined} onClick={onCreate}>{t("keys.create")}</Button>} />;
   const formatLastUsed = new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" });
   return <>
@@ -395,12 +359,12 @@ function KeysView({ onCreate }: { onCreate: () => void }) {
       <td className="row-actions"><IconButton label={t("keys.editPolicy")} icon={<Pencil aria-hidden />} onClick={() => setEditing(key)} /><ActionMenu>
         <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`enable-${key.id}`, () => mode === "local" ? relayCommands.setKeyEnabled(key.id, !key.enabled) : relayCommands.remoteAction({ type: "update_key", id: key.id }, { enabled: !key.enabled }), "feedback.saved")}>{key.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
         <ActionMenuItem icon={<RotateCcw aria-hidden />} disabled={busy === `rotate-${key.id}`} onClick={async () => {
-          if (!window.confirm(t("keys.rotateConfirm"))) return;
+          if (!await confirm(t("keys.rotateConfirm"))) return;
           const result: { current: { secret: string } | null } = { current: null };
           await perform(`rotate-${key.id}`, async () => { result.current = mode === "local" ? await relayCommands.rotateKey(key.id) : await relayCommands.remoteAction({ type: "rotate_key", id: key.id }) as { secret: string }; }, "feedback.keyRotated");
           if (result.current) setRevealed(result.current.secret);
         }}>{t("keys.rotate")}</ActionMenuItem>
-        <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => { if (window.confirm(t("keys.deleteConfirm"))) void perform(`delete-${key.id}`, () => mode === "local" ? relayCommands.deleteKey(key.id) : relayCommands.remoteAction({ type: "delete_key", id: key.id }), "feedback.deleted"); }}>{t("keys.delete")}</ActionMenuItem>
+        <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("keys.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${key.id}`, () => mode === "local" ? relayCommands.deleteKey(key.id) : relayCommands.remoteAction({ type: "delete_key", id: key.id }), "feedback.deleted"))}>{t("keys.delete")}</ActionMenuItem>
       </ActionMenu></td>
     </tr>)}</tbody></table></div>
     {revealed ? <div className="one-time-secret" role="status"><strong>{t("keys.copyNow")}</strong><code>{revealed}</code><Button variant="secondary" onClick={() => navigator.clipboard.writeText(revealed)}>{t("common.copy")}</Button></div> : null}
@@ -411,6 +375,7 @@ function KeysView({ onCreate }: { onCreate: () => void }) {
 function KeyPolicyDialog({ value, onClose }: { value: KeySummary; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const confirm = useConfirm();
   const [label, setLabel] = useState(value.label);
   const [sourceIds, setSourceIds] = useState(value.sourceIds ?? []);
   const [accountIds, setAccountIds] = useState(value.accountIds ?? []);
@@ -423,7 +388,7 @@ function KeyPolicyDialog({ value, onClose }: { value: KeySummary; onClose: () =>
     if (ok) onClose();
   };
   const remove = async () => {
-    if (!window.confirm(t("keys.deleteConfirm"))) return;
+    if (!await confirm(t("keys.deleteConfirm"), { danger: true })) return;
     const ok = await perform(`delete-${value.id}`, () => mode === "local" ? relayCommands.deleteKey(value.id) : relayCommands.remoteAction({ type: "delete_key", id: value.id }), "feedback.deleted");
     if (ok) onClose();
   };

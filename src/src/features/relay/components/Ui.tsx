@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
@@ -70,6 +70,44 @@ export function PageHeader({ title, subtitle, actions }: { title: string; subtit
       {actions ? <div className="relay-page-actions">{actions}</div> : null}
     </header>
   );
+}
+
+type ConfirmOptions = { title?: string; confirmLabel?: string; danger?: boolean };
+type ConfirmRequest = ConfirmOptions & { message: string };
+type ConfirmHandler = (message: string, options?: ConfirmOptions) => Promise<boolean>;
+
+const ConfirmContext = createContext<ConfirmHandler | null>(null);
+
+export function ConfirmProvider({ children }: { children: ReactNode }) {
+  const { t } = useTranslation();
+  const [request, setRequest] = useState<ConfirmRequest | null>(null);
+  const resolver = useRef<((accepted: boolean) => void) | null>(null);
+  const confirm = useCallback<ConfirmHandler>((message, options = {}) => new Promise((resolve) => {
+    resolver.current?.(false);
+    resolver.current = resolve;
+    setRequest({ message, ...options });
+  }), []);
+  const settle = useCallback((accepted: boolean) => {
+    const resolve = resolver.current;
+    resolver.current = null;
+    setRequest(null);
+    resolve?.(accepted);
+  }, []);
+  useEffect(() => () => resolver.current?.(false), []);
+  return <ConfirmContext.Provider value={confirm}>
+    {children}
+    {request ? <Dialog
+      title={request.title ?? t("common.confirmationTitle")}
+      onClose={() => settle(false)}
+      footer={<><Button variant="secondary" onClick={() => settle(false)}>{t("common.cancel")}</Button><Button variant={request.danger ? "danger" : "primary"} onClick={() => settle(true)}>{request.confirmLabel ?? t("common.confirm")}</Button></>}
+    ><p className="confirm-dialog-message">{request.message}</p></Dialog> : null}
+  </ConfirmContext.Provider>;
+}
+
+export function useConfirm() {
+  const confirm = useContext(ConfirmContext);
+  if (!confirm) throw new Error("ConfirmProvider is missing");
+  return confirm;
 }
 
 export function Button({ children, icon, variant = "secondary", busy, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
@@ -344,6 +382,7 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
 export function Dialog({ title, children, onClose, footer, wide = false }: { title: string; children: ReactNode; onClose: () => void; footer: ReactNode; wide?: boolean }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
@@ -361,7 +400,7 @@ export function Dialog({ title, children, onClose, footer, wide = false }: { tit
     window.addEventListener("keydown", onKey);
     return () => { window.removeEventListener("keydown", onKey); previouslyFocused?.focus(); };
   }, [onClose]);
-  return <div className="relay-modal-backdrop" role="presentation"><section ref={dialogRef} className={`relay-dialog ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby="relay-dialog-title"><header><h2 id="relay-dialog-title">{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div><footer>{footer}</footer></section></div>;
+  return <div className="relay-modal-backdrop" role="presentation"><section ref={dialogRef} className={`relay-dialog ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div><footer>{footer}</footer></section></div>;
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {

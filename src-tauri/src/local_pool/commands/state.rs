@@ -7,9 +7,11 @@ use crate::local_pool::{
     },
     error::CommandError,
     models::{LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
+    profiles::codex,
     state::DesktopState,
     store::secret_store,
 };
+use std::collections::BTreeSet;
 use tauri::State;
 use zenith_relay_core::protocol::{
     pool_model_summaries, AccountRoutingExclusion, AccountSummary, Capabilities, GatewaySummary,
@@ -39,6 +41,15 @@ pub async fn get_local_runtime_state(
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
     let equivalents = state.telemetry.api_equivalents()?;
+    let managed_key_ids = codex::profile_bindings(
+        &crate::platform::default_codex_home(),
+        &state.profile_backup_root(),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|binding| binding.credential_kind == codex::ProfileCredentialKind::LocalGateway)
+    .map(|binding| binding.credential_id)
+    .collect::<BTreeSet<_>>();
     let source_summaries = snapshot
         .sources
         .iter()
@@ -136,7 +147,11 @@ pub async fn get_local_runtime_state(
         capabilities: Capabilities::desktop_local(),
         sources: source_summaries,
         accounts: account_summaries,
-        keys: snapshot.keys.iter().map(local_key_summary).collect(),
+        keys: snapshot
+            .keys
+            .iter()
+            .map(|record| local_key_summary(record, managed_key_ids.contains(&record.id)))
+            .collect(),
         automations: snapshot.automations,
         wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
@@ -252,11 +267,12 @@ fn local_account_summary(
     })
 }
 
-fn local_key_summary(record: &LocalGatewayKeyRecord) -> KeySummary {
+fn local_key_summary(record: &LocalGatewayKeyRecord, managed_by_chatgpt: bool) -> KeySummary {
     KeySummary {
         id: record.id.clone(),
         label: record.label.clone(),
         enabled: record.enabled,
+        system: record.system || managed_by_chatgpt,
         source_ids: record.source_ids.clone(),
         account_ids: record.account_ids.clone(),
         allowed_models: record.allowed_models.clone(),

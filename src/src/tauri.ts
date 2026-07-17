@@ -61,8 +61,10 @@ export type LocalGatewayKeyRecord = {
   id: string;
   label: string;
   enabled: boolean;
+  system: boolean;
   secretRef: string;
   sourceIds: string[] | null;
+  accountIds: string[] | null;
   allowedModels: string[];
   excludedModels: string[];
   modelPrefix: string | null;
@@ -170,6 +172,7 @@ export type UsageLogEntry = {
   totalTokens: number;
   costCents: number;
   costMicrousd?: number | null;
+  displayCostMicrousd?: number | null;
   timeToFirstByteMs?: number | null;
   streamDurationMs?: number | null;
   status: string;

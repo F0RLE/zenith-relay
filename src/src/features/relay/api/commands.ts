@@ -78,7 +78,7 @@ export const relayCommands = {
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
   cancelOAuth: (loginId: string) => invoke("cancel_codex_oauth", { loginId }),
 
-  createKey: (label: string) => invoke<{ key: KeySummary; secret: string }>("create_local_gateway_key", { label }),
+  createKey: (label: string, system = false) => invoke<{ key: KeySummary; secret: string }>("create_local_gateway_key", { label, system }),
   updateKey: (input: Record<string, unknown>) => invoke("update_local_gateway_key", { input }),
   rotateKey: (keyId: string) => invoke<{ key: unknown; secret: string }>("rotate_local_gateway_key", { keyId }),
   setKeyEnabled: (keyId: string, enabled: boolean) => invoke("set_local_gateway_key_enabled", { keyId, enabled }),

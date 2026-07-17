@@ -31,6 +31,7 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("button", { name: "ChatGPT" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("dialog", { name: "Confirm action" }).getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByRole("heading", { name: "Relay is ready" })).toBeVisible();
   await expect(page.getByText("http://127.0.0.1:14998/v1")).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);

@@ -318,9 +318,9 @@ struct AccountExecutor {
     refresh_adapter: Arc<dyn TokenRefreshAdapter>,
     persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
     refresh_skew_ms: u64,
-    client: Option<reqwest::Client>,
-    bounded_client: Option<reqwest::Client>,
-    websocket_client: Option<reqwest::Client>,
+    client: reqwest::Client,
+    bounded_client: reqwest::Client,
+    websocket_client: reqwest::Client,
 }
 
 #[derive(Clone)]
@@ -488,21 +488,11 @@ impl GatewayRuntime {
                 ));
             }
             let responses_url = normalized_responses_url(&account.responses_url)?;
-            let client = account
-                .proxy
-                .as_ref()
-                .map(|proxy| runtime_client(Some(proxy), false))
-                .transpose()?;
-            let bounded_client = account
-                .proxy
-                .as_ref()
-                .map(|proxy| runtime_client(Some(proxy), true))
-                .transpose()?;
-            let websocket_client = account
-                .proxy
-                .as_ref()
-                .map(|proxy| runtime_websocket_client(Some(proxy)))
-                .transpose()?;
+            // OAuth identities must not share an HTTP/2 connection pool. A connection-level
+            // failure for one account would otherwise abort concurrent streams on other accounts.
+            let client = runtime_client(account.proxy.as_ref(), false)?;
+            let bounded_client = runtime_client(account.proxy.as_ref(), true)?;
+            let websocket_client = runtime_websocket_client(account.proxy.as_ref())?;
             let mut chatgpt_account_id = HeaderValue::from_str(&account.chatgpt_account_id)
                 .map_err(|_| {
                     Error::Validation(
@@ -1128,14 +1118,11 @@ impl GatewayRuntime {
         upstream_stream: bool,
     ) -> &reqwest::Client {
         if let Some(account) = self.accounts.get(candidate_id) {
-            let client = if upstream_stream {
-                account.client.as_ref()
+            return if upstream_stream {
+                &account.client
             } else {
-                account.bounded_client.as_ref()
+                &account.bounded_client
             };
-            if let Some(client) = client {
-                return client;
-            }
         }
         if upstream_stream {
             &self.client
@@ -1147,7 +1134,7 @@ impl GatewayRuntime {
     pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
         self.accounts
             .get(candidate_id)
-            .and_then(|account| account.websocket_client.as_ref())
+            .map(|account| &account.websocket_client)
             .unwrap_or(&self.websocket_client)
     }
 

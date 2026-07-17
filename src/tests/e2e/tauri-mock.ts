@@ -19,6 +19,7 @@ export type MockOptions = {
   profileSnapshotsEmpty?: boolean;
   historyRepairChanges?: boolean;
   historyRepairError?: boolean;
+  historyRepairCodexRunning?: boolean;
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
@@ -114,6 +115,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       { label: "Business Workspace", plan: "team", activeUntilMs: Date.now() + 203 * dayMs, proxyMode: "account", models: ["gpt-5.4", "gpt-5.4-mini", "o3"], primary: 3800, primaryMinutes: 50_400, secondary: null, priority: 30, health: "healthy", error: null },
       { label: "Backup account", plan: "free", activeUntilMs: null, proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 9500, primaryMinutes: 43_200, secondary: null, priority: 10, health: "degraded", error: "quota_transport" },
       { label: "Pro account", plan: "pro", activeUntilMs: Date.now() + 172 * dayMs, proxyMode: "common", models: ["gpt-5.4", "gpt-5.4-mini", "o3"], primary: 7600, primaryMinutes: 300, secondary: 8200, priority: 25, health: "healthy", error: null },
+      { label: "Quota pending", plan: "plus", activeUntilMs: Date.now() + 46 * dayMs, proxyMode: "common", models: ["gpt-5.4-mini"], primary: null, primaryMinutes: 300, secondary: null, priority: 1, health: "healthy", error: null },
+      { label: "Free reserve", plan: "free", activeUntilMs: null, proxyMode: "direct", models: ["gpt-5.4-mini"], primary: 8800, primaryMinutes: 43_200, secondary: null, priority: 1, health: "healthy", error: null },
     ] as const;
     const accounts = Array.from({ length: accountCount }, (_, index) => {
       if (index === 0) return account;
@@ -135,7 +138,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.routingExclusion = variant.plan === "free" ? "free_plan_policy" : null;
       item.lastErrorCode = healthyFree ? null : variant.error;
       item.quota.error = healthyFree ? null : variant.error ? { code: variant.error, observedAtMs: Date.now() } : null;
-      if (item.quota.primary) {
+      if (variant.primary === null) item.quota.primary = null;
+      else if (item.quota.primary) {
         item.quota.primary.availableBasisPoints = variant.primary;
         item.quota.primary.windowMinutes = variant.primaryMinutes;
       }
@@ -147,6 +151,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       id: "key_synthetic",
       label: "ChatGPT",
       enabled: true,
+      system: (input.mode ?? "local") === "local" && input.codexBindings !== false,
       sourceIds: null,
       accountIds: null,
       allowedModels: [],
@@ -292,8 +297,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_key_stats": return { balance: 42.5, spent: 7.5, requests: 18, totalTokens: 2500, inputTokens: 1700, cachedTokens: 300, reasoningTokens: 100, outputTokens: 400 };
           case "get_saved_key_stats": return { balance: 42.5, spent: 7.5, requests: 18, totalTokens: 2500, inputTokens: 1700, cachedTokens: 300, reasoningTokens: 100, outputTokens: 400 };
           case "get_saved_key_models": return ["gpt-5.4", "gpt-5.4-mini"];
-          case "get_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
-          case "get_saved_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
+          case "get_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
+          case "get_saved_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "create_saved_top_up_intent_and_open": return null;
           case "save_key": readyKey = String(args.apiKey ?? ""); return readyKey;
           case "reset_key": readyKey = ""; return "reset";
@@ -304,16 +309,22 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_remote_runtime_order": return input.remoteConnected === false ? null : structuredClone(remoteRuntime.gateway.routingOrder);
           case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
             const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: account.id, label: account.label, totals }] : [] };
+            const createdAtMs = events[0] ? Date.parse(events[0].createdAt) : 0;
+            const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
+            const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: account.id, label: account.label, totals }] : [] };
           }
           case "get_remote_server_usage": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
             const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.candidateHint.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: "a1b2c3d4e5f6", label: account.label, totals }] : [] };
+            const createdAtMs = events[0]?.createdAtMs ?? 0;
+            const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
+            const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: "a1b2c3d4e5f6", label: account.label, totals }] : [] };
           }
           case "create_local_source": {
             const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);
@@ -440,7 +451,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "submit_codex_oauth_callback":
           case "cancel_codex_oauth": return null;
           case "complete_codex_oauth": return { account: { id: "account_synthetic" } };
-          case "create_local_gateway_key": localRuntime.keys = [key]; return { key: structuredClone(key), secret: "zlr_synthetic_local_key" };
+          case "create_local_gateway_key": key.system = Boolean(args.system); localRuntime.keys = [key]; return { key: structuredClone(key), secret: "zlr_synthetic_local_key" };
           case "update_local_gateway_key": {
             const request = args.input as Record<string, unknown> & { keyId?: string };
             const target = localRuntime.keys.find((item) => item.id === request.keyId);
@@ -506,7 +517,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.keyId), boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null, active: true }, previousCredentialKind: input.profileRepairRecommended ? "oauth_account" : null, repairRecommended: input.profileRepairRecommended ?? false, stoppedRunningClient: true };
           case "attach_codex_to_account":
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null, active: true }, previousCredentialKind: input.profileRepairRecommended === false ? "oauth_account" : "local_gateway", repairRecommended: input.profileRepairRecommended ?? true, stoppedRunningClient: true };
-          case "preview_codex_history_repair": { if (input.historyRepairError) throw { code: "recovery_required", message: "Synthetic history preview failure" }; const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: false, expiresAtMs: Date.now() + 60_000 }; }
+          case "preview_codex_history_repair": { if (input.historyRepairError) throw { code: "recovery_required", message: "Synthetic history preview failure" }; const changes = input.historyRepairChanges ?? true; const request = args.input as { targetProvider: "openai" | "zenith_relay_local" }; return { sessionId: "repair_0123456789abcdef0123456789abcdef", targetProvider: request.targetProvider, profileCount: 1, rolloutFileCount: changes ? 2 : 0, rolloutRecordCount: changes ? 2 : 0, sqliteRowCount: changes ? 1 : 0, codexRunning: input.historyRepairCodexRunning ?? false, expiresAtMs: Date.now() + 60_000 }; }
           case "apply_codex_history_repair": return { backupId: "history_repair_0123456789abcdef0123456789abcdef", backupPath: "C:\\Temp\\history-repair-backup", rolloutRecordsChanged: 2, sqliteRowsChanged: 1 };
           case "rollback_codex_history_repair": return { backupId: String(args.backupId), filesRestored: 3 };
           case "get_relay_storage_info": return { rootPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay", dataPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data", recoveryPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\recovery", cachePath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\cache", logsPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\logs", chatgptProfilePath: "C:\\Users\\Test\\.codex", legacyDataPath: null };

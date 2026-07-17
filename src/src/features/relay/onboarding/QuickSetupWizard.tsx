@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Cloud, Laptop, Layers3, Loader2, LogIn, Server, ShieldCheck, SkipForward, Upload } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, Cloud, Laptop, Loader2, LogIn, Server, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getSavedKeyModels, getSavedKeyStats, saveKey } from "../../../tauri";
 import { relayCommands } from "../api/commands";
@@ -49,9 +49,9 @@ export function QuickSetupWizard() {
         let snapshot = await relayCommands.localState();
         if (!snapshot.accounts.length && !snapshot.sources.length) throw new Error("missing local connection");
         mark(active, "success"); active = "endpoint"; mark(active, "running");
-        let key = snapshot.keys.find((candidate) => candidate.enabled);
+        let key = snapshot.keys.find((candidate) => candidate.system && candidate.enabled);
         if (!key) {
-          const created = await relayCommands.createKey(t("onboarding.defaultKey"));
+          const created = await relayCommands.createKey(t("onboarding.defaultKey"), true);
           key = created.key;
         }
         setLocalKeyId(key.id);
@@ -99,12 +99,6 @@ export function QuickSetupWizard() {
       <section className="product-intro">
         <div className="intro-mark"><img src="/icons/zenith-sword.png" alt="" /></div>
         <div className="intro-copy"><h1>Zenith Relay</h1><p>{t("onboarding.intro")}</p></div>
-        <div className="intro-routes">
-          <article><div className="intro-route-title"><Laptop aria-hidden /><strong>{t("modes.local")}</strong></div><p>{t("onboarding.factLocal")}</p></article>
-          <article><div className="intro-route-title"><Cloud aria-hidden /><strong>{t("modes.zenith")}</strong></div><p>{t("onboarding.factReady")}</p></article>
-          <article><div className="intro-route-title"><Server aria-hidden /><strong>{t("modes.remote")}</strong></div><p>{t("onboarding.factRemote")}</p></article>
-        </div>
-        <div className="intro-assurance"><ShieldCheck aria-hidden /><span>{t("onboarding.privateByDefault")}</span><Layers3 aria-hidden /><span>{t("onboarding.oneEndpoint")}</span></div>
         <div className="intro-actions"><Button variant="primary" onClick={() => setIntro(false)}>{t("onboarding.start")}</Button><Button variant="ghost" icon={<SkipForward aria-hidden />} onClick={() => finishOnboarding(mode)}>{t("onboarding.skip")}</Button></div>
       </section>
     </main>;
