@@ -1,5 +1,5 @@
 use super::{
-    current_time_ms, restart_or_rollback, sync_accounts_or_rollback, sync_records_or_rollback,
+    current_time_ms, sync_accounts_or_rollback, sync_records_or_rollback,
     sync_refreshed_account_or_rollback,
 };
 use crate::local_pool::{
@@ -138,20 +138,6 @@ pub struct UpdateAccountInput {
 pub struct SetAccountProxyInput {
     account_id: String,
     proxy_url: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssignAccountProxiesInput {
-    account_ids: Vec<String>,
-    proxy_urls: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProxyAssignmentResult {
-    assigned: usize,
-    unused: usize,
 }
 
 #[tauri::command]
@@ -893,98 +879,8 @@ pub async fn set_local_account_proxy(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
-    if state.store()?.account(&input.account_id).is_none() {
-        return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
-    }
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let old = credentials
-        .require(&input.account_id)
-        .map_err(credential_local_error)?;
-    let updated = old
-        .clone()
-        .with_proxy_url(input.proxy_url)
-        .map_err(credential_local_error)?;
-    if old.proxy_url() == updated.proxy_url() {
-        return state.snapshot().await.map_err(Into::into);
-    }
-    state.mark_quota_refresh(&input.account_id, current_time_ms())?;
-    credentials.save(&updated).map_err(credential_local_error)?;
-    restart_or_rollback(&state, || {
-        credentials.save(&old).map_err(credential_local_error)
-    })
-    .await?;
+    super::proxies::set_account_proxy_inner(input.account_id, input.proxy_url, &state).await?;
     state.snapshot().await.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn assign_local_account_proxies(
-    input: AssignAccountProxiesInput,
-    state: State<'_, DesktopState>,
-) -> CommandResult<ProxyAssignmentResult> {
-    let _mutation = state.setup_guard().await;
-    if input.account_ids.is_empty() || input.proxy_urls.len() < input.account_ids.len() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "proxy list must contain at least one URL per selected account",
-        )
-        .into());
-    }
-    let mut seen = HashSet::new();
-    if input
-        .account_ids
-        .iter()
-        .any(|account_id| !seen.insert(account_id.clone()))
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "account proxy assignment contains duplicate account ids",
-        )
-        .into());
-    }
-    let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let mut updates = Vec::with_capacity(input.account_ids.len());
-    for (account_id, proxy_url) in input.account_ids.iter().zip(&input.proxy_urls) {
-        if state.store()?.account(account_id).is_none() {
-            return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
-        }
-        let old = credentials
-            .require(account_id)
-            .map_err(credential_local_error)?;
-        let updated = old
-            .clone()
-            .with_proxy_url(Some(proxy_url.clone()))
-            .map_err(credential_local_error)?;
-        updates.push((old, updated));
-        state.mark_quota_refresh(account_id, current_time_ms())?;
-    }
-    for index in 0..updates.len() {
-        if let Err(error) = credentials
-            .save(&updates[index].1)
-            .map_err(credential_local_error)
-        {
-            restore_proxy_credentials(&credentials, &updates[..index])?;
-            return Err(error.into());
-        }
-    }
-    let rollback = updates.clone();
-    restart_or_rollback(&state, || {
-        restore_proxy_credentials(&credentials, &rollback)
-    })
-    .await?;
-    Ok(ProxyAssignmentResult {
-        assigned: updates.len(),
-        unused: input.proxy_urls.len().saturating_sub(updates.len()),
-    })
-}
-
-fn restore_proxy_credentials(
-    credentials: &CredentialStore<NativeSecretBackend>,
-    updates: &[(StoredCodexCredentials, StoredCodexCredentials)],
-) -> LocalResult<()> {
-    for (old, _) in updates {
-        credentials.save(old).map_err(credential_local_error)?;
-    }
-    Ok(())
 }
 
 #[tauri::command]

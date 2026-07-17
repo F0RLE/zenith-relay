@@ -177,6 +177,33 @@ export type ProxyAssignmentResult = {
   unused: number;
 };
 
+export type ProxyPoolEntry = {
+  id: string;
+  endpoint: string;
+  assignedAccountId: string | null;
+  createdAtMs: number;
+};
+
+export type ProxyPoolSummary = {
+  entries: ProxyPoolEntry[];
+  total: number;
+  free: number;
+  assigned: number;
+};
+
+export type ProxyPoolImportResult = {
+  added: number;
+  duplicates: number;
+  pool: ProxyPoolSummary;
+};
+
+export type StoredProxyAssignmentResult = {
+  assigned: number;
+  unchanged: number;
+  unavailable: number;
+  pool: ProxyPoolSummary;
+};
+
 export type AccountExportFormat = "cpa" | "sub2api" | "cockpit" | "9router" | "codex" | "axon_hub" | "codex_manager";
 
 export type AccountExportInput = {
@@ -394,6 +421,7 @@ export type ConfirmAccountImportResponse = {
   results: Array<{
     itemId: string;
     status: "succeeded" | "failed";
+    account?: { account: { id: string } };
     error?: { code: string; message: string };
   }>;
 };

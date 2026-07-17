@@ -1,6 +1,10 @@
 use crate::files::atomic_write;
 use crate::local_pool::{
-    accounts::{credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend},
+    accounts::{
+        credentials::CredentialStore,
+        proxy::{COMMON_PROXY_SECRET_REF, PROXY_POOL_SECRET_REF},
+        NativeSecretBackend,
+    },
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
     store::{secret_store, settings_store::save_json},
@@ -179,6 +183,7 @@ pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(),
         failed |= credentials.delete(&account_id).is_err();
     }
     failed |= secret_store::delete(COMMON_PROXY_SECRET_REF).is_err();
+    failed |= secret_store::delete(PROXY_POOL_SECRET_REF).is_err();
     remove_transient_dir(state.transient_root().join("imports"), &mut failed);
     remove_transient_dir(state.transient_root().join("oauth_pending"), &mut failed);
     if failed {

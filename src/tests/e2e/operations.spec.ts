@@ -50,6 +50,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(secondImported).toBeChecked();
   await expect(existing).not.toBeChecked();
   await importDialog.getByLabel("Add selected to pool after import").check();
+  await expect(importDialog.getByLabel("Assign a free proxy")).toBeChecked();
   await importDialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(importDialog).toBeHidden();
   const importCalls = await page.evaluate(() => {
@@ -59,6 +60,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
       filePreviewCalls: calls.filter((call) => call.command === "preview_local_account_import_files").length,
       selected: confirmation?.selectedItemIds,
       addToPool: confirmation?.addToPool,
+      assignedFree: calls.filter((call) => call.command === "assign_free_local_account_proxies").length,
     };
   });
   expect(importCalls.filePreviewCalls).toBe(1);
@@ -67,6 +69,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
     "import_1111222233334444",
   ]);
   expect(importCalls.addToPool).toBe(true);
+  expect(importCalls.assignedFree).toBe(1);
 
   await page.getByRole("tab", { name: "Automations" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
@@ -131,8 +134,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(policyCalls.update_local_gateway_key).toMatchObject({ input: { modelPrefix: "team" } });
 });
 
-test("OAuth callback completes sign-in and reports the added account automatically", async ({ page }) => {
-  await installTauriMock(page, { locale: "en", mode: "local", populated: false });
+test("OAuth callback offers pool and stored proxy setup for the added account", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: false, proxyCount: 1 });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
@@ -143,8 +146,40 @@ test("OAuth callback completes sign-in and reports the added account automatical
 
   await expect(dialog).toHaveCount(0);
   await expect(page.locator(".global-feedback.success")).toHaveText("Account added.");
+  const setup = page.getByRole("dialog", { name: "Account added" });
+  await expect(setup.getByLabel("Add account to pool")).toBeChecked();
+  await expect(setup.getByLabel("Assign a free proxy")).toBeChecked();
+  await setup.getByRole("button", { name: "Done" }).click();
+  await expect(setup).toHaveCount(0);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.map((call) => call.command)).toContain("complete_codex_oauth");
+  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining(["complete_codex_oauth", "set_local_pool_membership", "assign_free_local_account_proxies"]));
+});
+
+test("local proxy storage imports, redacts, releases, and deletes endpoints", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", populated: true, accountCount: 3, proxyCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Proxies" }).click();
+
+  const summary = page.locator(".proxy-storage-summary");
+  await expect(summary).toContainText("Total3");
+  await expect(summary).toContainText("Free2");
+  await expect(summary).toContainText("Assigned1");
+  await expect(page.locator(".proxy-storage-list")).not.toContainText("secret");
+
+  await page.getByRole("button", { name: "Import", exact: true }).click();
+  const importDialog = page.getByRole("dialog", { name: "Import proxies" });
+  await importDialog.getByLabel("Proxy list").fill("new-proxy.example.test:12000:user:secret\nsecond-proxy.example.test:12001:user:secret");
+  await importDialog.getByRole("button", { name: "Import 2" }).click();
+  await expect(importDialog.getByText("Added 2; skipped 0 duplicate(s).", { exact: true })).toBeVisible();
+  await importDialog.getByRole("button", { name: "Done" }).click();
+  await expect(summary).toContainText("Total5");
+
+  await page.getByRole("button", { name: "Release proxy" }).click();
+  await expect(summary).toContainText("Assigned0");
+  await page.getByRole("button", { name: "Delete" }).first().click();
+  await settleConfirmation(page);
+  await expect(summary).toContainText("Total4");
 });
 
 test("OAuth callback is not lost when the browser redirects before start returns", async ({ page }) => {
@@ -261,7 +296,8 @@ test("missing import session keeps the dialog open with recovery guidance", asyn
   await dialog.getByRole("button", { name: "Preview import" }).click();
   await dialog.getByRole("button", { name: "Import 2 account(s)" }).click();
   await expect(dialog.getByRole("alert")).toContainText("Start a fresh preview");
-  await expect(dialog.getByLabel("Resume import session ID")).toHaveValue("11111111-2222-4333-8444-555555555555");
+  await expect(dialog.getByRole("button", { name: "Choose JSON files" })).toBeVisible();
+  await expect(dialog.getByLabel("Resume import session ID")).toHaveCount(0);
   await expect(page.locator(".global-feedback.error")).toBeVisible();
   const layers = await page.evaluate(() => ({
     feedback: Number.parseInt(getComputedStyle(document.querySelector(".global-feedback")!).zIndex, 10),
@@ -1521,7 +1557,7 @@ test("remote account export uses the capability-gated server command", async ({ 
   expect(call?.args.input).toEqual({ accountIds: ["account_synthetic"], format: "sub2api", destination: "download" });
 });
 
-test("common, account, and bulk proxy controls keep saved addresses hidden", async ({ page }) => {
+test("common and stored account proxy controls keep saved addresses hidden", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
 
@@ -1537,7 +1573,8 @@ test("common, account, and bulk proxy controls keep saved addresses hidden", asy
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Direct access blocked", exact: true }).click();
   const accountProxy = "account-user:account-pass@us-account.example:8081";
-  const accountDialog = page.getByRole("dialog", { name: "Proxy for Personal Plus" });
+  const accountDialog = page.getByRole("dialog", { name: "Account proxy" });
+  await accountDialog.getByRole("radio", { name: /Add a new proxy/ }).check();
   await accountDialog.getByLabel("HTTP(S) proxy").fill(accountProxy);
   await accountDialog.getByRole("button", { name: "Save" }).click();
   await expect(page.getByText(accountProxy)).toHaveCount(0);
@@ -1546,18 +1583,15 @@ test("common, account, and bulk proxy controls keep saved addresses hidden", asy
   await page.locator(".account-bulk-menu summary").click();
   await page.getByRole("menuitem", { name: "Assign proxies" }).click();
   const bulkDialog = page.getByRole("dialog", { name: "Assign account proxies" });
-  const bulkList = "bulk-user:bulk-pass@us-01.example:9001\nspare-user:spare-pass@us-02.example:9002";
-  await bulkDialog.getByLabel("Proxy list").fill(bulkList);
-  await bulkDialog.getByRole("button", { name: "Assign", exact: true }).click();
-  await expect(bulkDialog.getByRole("status")).toContainText("Assigned 1 account(s); 1 address(es) were not used.");
-  await expect(bulkDialog.getByLabel("Proxy list")).toHaveValue("");
-  await expect(page.getByText("bulk-pass")).toHaveCount(0);
+  await bulkDialog.getByRole("button", { name: "Assign automatically" }).click();
+  await expect(bulkDialog.getByRole("status")).toContainText("Assigned 0; unchanged 1; unavailable 0.");
+  await expect(page.getByText("account-pass")).toHaveCount(0);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.filter((call) => call.command === "set_local_common_proxy").map((call) => call.args)).toEqual([{ input: { proxyUrl: commonProxy } }, { input: { proxyUrl: null } }]);
   expect(calls.findLast((call) => call.command === "set_local_account_proxy_required")?.args).toEqual({ input: { required: true } });
   expect(calls.findLast((call) => call.command === "set_local_account_proxy")?.args).toEqual({ input: { accountId: "account_synthetic", proxyUrl: accountProxy } });
-  expect(calls.findLast((call) => call.command === "assign_local_account_proxies")?.args).toEqual({ input: { accountIds: ["account_synthetic"], proxyUrls: bulkList.split("\n") } });
+  expect(calls.findLast((call) => call.command === "assign_free_local_account_proxies")?.args).toEqual({ input: { accountIds: ["account_synthetic"] } });
 });
 
 test("remote proxy controls use the capability-gated management actions", async ({ page }) => {
@@ -1571,7 +1605,7 @@ test("remote proxy controls use the capability-gated management actions", async 
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Common", exact: true }).click();
-  const accountDialog = page.getByRole("dialog", { name: "Proxy for Personal Plus" });
+  const accountDialog = page.getByRole("dialog", { name: "Account proxy" });
   await accountDialog.getByLabel("HTTP(S) proxy").fill("remote-account:secret@us-account.example:8081");
   await accountDialog.getByRole("button", { name: "Save" }).click();
   await page.locator(".account-bulk-menu summary").click();

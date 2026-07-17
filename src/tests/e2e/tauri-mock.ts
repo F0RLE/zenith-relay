@@ -28,6 +28,7 @@ export type MockOptions = {
   gatewayRunning?: boolean;
   poolKeyPresent?: boolean;
   poolMembers?: boolean;
+  proxyCount?: number;
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
   importPreviewDelayMs?: number;
@@ -233,6 +234,19 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     }
     remoteRuntime.platform = "linux";
     remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "usage", "local_gateway", "keys", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy", "runtime_routing"] };
+    const assignedProxyAccount = localRuntime.accounts.find((item) => item.proxyMode === "account");
+    let proxyEntries = Array.from({ length: input.proxyCount ?? (populated ? 3 : 0) }, (_, index) => ({
+      id: `proxy_synthetic_${index + 1}`,
+      endpoint: `http://proxy-${index + 1}.example.test:${10_000 + index}`,
+      assignedAccountId: index === 0 ? assignedProxyAccount?.id ?? null : null,
+      createdAtMs: Date.now() - index * 60_000,
+    }));
+    const proxyPool = () => ({
+      entries: structuredClone(proxyEntries),
+      total: proxyEntries.length,
+      free: proxyEntries.filter((entry) => !entry.assignedAccountId).length,
+      assigned: proxyEntries.filter((entry) => entry.assignedAccountId).length,
+    });
 
     function sourceFromPayload(payload: Record<string, unknown>, id: string) {
       return {
@@ -418,15 +432,68 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "set_local_account_proxy": {
             const request = args.input as { accountId: string; proxyUrl: string | null };
-            account.proxyMode = request.proxyUrl ? "account" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
-            account.proxyAvailable = true;
+            const target = localRuntime.accounts.find((item) => item.id === request.accountId);
+            for (const entry of proxyEntries) if (entry.assignedAccountId === request.accountId) entry.assignedAccountId = null;
+            if (request.proxyUrl) {
+              proxyEntries.push({ id: `proxy_synthetic_${proxyEntries.length + 1}`, endpoint: `http://custom-proxy.example.test:1080`, assignedAccountId: request.accountId, createdAtMs: Date.now() });
+            }
+            if (target) {
+              target.proxyMode = request.proxyUrl ? "account" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
+              target.proxyAvailable = true;
+            }
             return structuredClone(localRuntime);
           }
-          case "assign_local_account_proxies": {
-            const request = args.input as { accountIds: string[]; proxyUrls: string[] };
-            account.proxyMode = "account";
-            account.proxyAvailable = true;
-            return { assigned: request.accountIds.length, unused: request.proxyUrls.length - request.accountIds.length };
+          case "get_local_proxy_pool": return proxyPool();
+          case "import_local_proxy_pool": {
+            const values = (args.input as { proxyUrls?: string[] })?.proxyUrls ?? [];
+            let added = 0;
+            let duplicates = 0;
+            for (const value of values) {
+              const match = value.match(/^(?:https?:\/\/)?([^:@]+):(\d+)/);
+              const endpoint = match ? `http://${match[1]}:${match[2]}` : `http://imported-${proxyEntries.length + 1}.example.test:8080`;
+              if (proxyEntries.some((entry) => entry.endpoint === endpoint)) {
+                duplicates += 1;
+                continue;
+              }
+              proxyEntries.push({ id: `proxy_synthetic_${proxyEntries.length + 1}`, endpoint, assignedAccountId: null, createdAtMs: Date.now() });
+              added += 1;
+            }
+            return { added, duplicates, pool: proxyPool() };
+          }
+          case "delete_local_stored_proxy": {
+            proxyEntries = proxyEntries.filter((entry) => entry.id !== String(args.proxyId));
+            return proxyPool();
+          }
+          case "assign_local_stored_proxy": {
+            const request = args.input as { accountId: string; proxyId: string };
+            for (const entry of proxyEntries) if (entry.assignedAccountId === request.accountId) entry.assignedAccountId = null;
+            const targetProxy = proxyEntries.find((entry) => entry.id === request.proxyId && !entry.assignedAccountId);
+            if (targetProxy) targetProxy.assignedAccountId = request.accountId;
+            const targetAccount = localRuntime.accounts.find((item) => item.id === request.accountId);
+            if (targetAccount && targetProxy) targetAccount.proxyMode = "account";
+            return { assigned: targetProxy ? 1 : 0, unchanged: 0, unavailable: targetProxy ? 0 : 1, pool: proxyPool() };
+          }
+          case "assign_free_local_account_proxies": {
+            const accountIds = (args.input as { accountIds?: string[] })?.accountIds ?? [];
+            let assigned = 0;
+            let unchanged = 0;
+            let unavailable = 0;
+            for (const accountId of accountIds) {
+              if (proxyEntries.some((entry) => entry.assignedAccountId === accountId)) {
+                unchanged += 1;
+                continue;
+              }
+              const free = proxyEntries.find((entry) => !entry.assignedAccountId);
+              if (!free) {
+                unavailable += 1;
+                continue;
+              }
+              free.assignedAccountId = accountId;
+              const target = localRuntime.accounts.find((item) => item.id === accountId);
+              if (target) target.proxyMode = "account";
+              assigned += 1;
+            }
+            return { assigned, unchanged, unavailable, pool: proxyPool() };
           }
           case "export_local_accounts":
           case "export_remote_accounts": {
@@ -569,7 +636,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         sessionId,
         results: itemIds.map((itemId, index) => input.importResult === "item_failure" && index === 0
           ? { itemId, status: "failed", error: { code: input.importFailureCode ?? "provider_account_id_missing", message: "secret=synthetic-access-token provider=raw-provider-id" } }
-          : { itemId, status: "succeeded" }),
+          : { itemId, status: "succeeded", account: { account: { id: `account_imported_${index + 1}` } } }),
       };
     }
 

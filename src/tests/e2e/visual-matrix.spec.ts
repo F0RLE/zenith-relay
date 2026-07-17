@@ -328,9 +328,23 @@ for (const viewport of viewports) {
 
     await page.getByRole("button", { name: "Connections", exact: true }).click();
     await page.getByRole("button", { name: "Common", exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Proxy for Personal Plus" })).toBeVisible();
+    const accountProxy = page.getByRole("dialog", { name: "Account proxy" });
+    await expect(accountProxy).toBeVisible();
+    await expect(accountProxy.getByRole("radio", { name: /Assign automatically/ })).toBeVisible();
+    await expect(accountProxy.getByRole("radio", { name: /Choose from storage/ })).toBeVisible();
     await page.screenshot({ path: `output/playwright/proxy-account-${viewport.width}x${viewport.height}.png` });
-    await page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
+    await accountProxy.getByRole("button", { name: "Cancel" }).click();
+
+    await page.getByRole("tab", { name: "Proxies" }).click();
+    await expect(page.locator(".proxy-storage-summary")).toContainText("Total3");
+    await page.screenshot({ path: `output/playwright/proxy-storage-${viewport.width}x${viewport.height}.png` });
+    await page.getByRole("button", { name: "Import", exact: true }).click();
+    const proxyImport = page.getByRole("dialog", { name: "Import proxies" });
+    await expect(proxyImport.getByLabel("Proxy list")).toBeVisible();
+    await page.screenshot({ path: `output/playwright/proxy-import-${viewport.width}x${viewport.height}.png` });
+    await proxyImport.getByRole("button", { name: "Cancel" }).click();
+
+    await page.getByRole("tab", { name: "Accounts" }).click();
     await page.locator(".account-bulk-menu summary").click();
     await page.getByRole("menuitem", { name: "Assign proxies" }).click();
     await expect(page.getByRole("dialog", { name: "Assign account proxies" })).toBeVisible();

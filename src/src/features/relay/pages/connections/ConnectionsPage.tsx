@@ -1,10 +1,10 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { CalendarDays, Check, Clock3, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
+import { CalendarDays, Check, Clock3, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, ShieldAlert, Trash2, Unlink, Upload, UserRoundX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, RelayMode, RuntimeSnapshot, SourceSummary, WakeTask } from "../../api/types";
+import type { AccountExportFormat, AccountSummary, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
   Button,
@@ -32,8 +32,8 @@ import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { formatTokenSpeed, latestLocalAccountSpeeds } from "../../usageSpeed";
 
-type View = "sources" | "accounts" | "automations" | "remote" | "api";
-type DialogKind = "source" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "accountExport" | null;
+type View = "sources" | "accounts" | "proxies" | "automations" | "remote" | "api";
+type DialogKind = "source" | "automation" | "remote" | "deploy" | "ready" | "topup" | "accountProxy" | "bulkProxies" | "proxyImport" | "oauthSetup" | "accountExport" | null;
 type ParticipationFilter = "all" | "included" | "excluded";
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
 
@@ -58,7 +58,12 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const [proxyAccount, setProxyAccount] = useState<AccountSummary | null>(null);
   const [bulkProxyAccountIds, setBulkProxyAccountIds] = useState<string[]>([]);
   const [exportAccountIds, setExportAccountIds] = useState<string[]>([]);
-  const oauth = useOAuthSignIn();
+  const [oauthAccountId, setOauthAccountId] = useState<string | null>(null);
+  const [proxyRevision, setProxyRevision] = useState(0);
+  const oauth = useOAuthSignIn((result) => {
+    setOauthAccountId(result.account.id);
+    setDialog("oauthSetup");
+  });
   const remoteFeatures = new Set(runtime?.capabilities.features ?? []);
   const supports = (feature: string) => mode !== "remote" || remoteFeatures.has(feature);
   const canImportAccounts = mode !== "remote" || supports("account_batch_import");
@@ -77,6 +82,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     setProxyAccount(null);
     setBulkProxyAccountIds([]);
     setExportAccountIds([]);
+    setOauthAccountId(null);
   }, [mode]);
 
   useEffect(() => setQuery(""), [mode, view]);
@@ -91,6 +97,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     ? [{ id: "api", label: t("connections.api") }]
     : [
         ...(supports("accounts") ? [{ id: "accounts", label: t("connections.accounts") }] : []),
+        ...(mode === "local" ? [{ id: "proxies", label: t("proxies.storage") }] : []),
         ...(supports("sources") ? [{ id: "sources", label: t("connections.sources") }] : []),
         ...(supports("wake_tasks") ? [{ id: "automations", label: t("connections.automations") }] : []),
         ...(mode === "remote" ? [{ id: "remote", label: t("connections.remoteServer") }] : []),
@@ -98,6 +105,8 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 
   const primaryLabel = view === "accounts"
     ? mode === "local" ? t("accounts.signIn") : t("connections.import")
+    : view === "proxies"
+      ? t("proxies.import")
     : view === "sources"
       ? t("sources.add")
       : view === "automations"
@@ -114,6 +123,10 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
     }
     if (view === "accounts" && mode === "remote") {
       onImport();
+      return;
+    }
+    if (view === "proxies") {
+      setDialog("proxyImport");
       return;
     }
     if (view === "remote" && runtime) {
@@ -146,7 +159,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
                 {t("connections.import")}
               </Button>
             ) : null}
-            <Button variant="primary" icon={view === "accounts" ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden /> : view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} busy={view === "accounts" && mode === "local" && busy === "oauth-start"} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
+            <Button variant="primary" icon={view === "accounts" ? mode === "local" ? <LogIn aria-hidden /> : <Upload aria-hidden /> : view === "proxies" ? <Upload aria-hidden /> : view === "remote" && runtime ? <RefreshCw aria-hidden /> : <Plus aria-hidden />} busy={view === "accounts" && mode === "local" && busy === "oauth-start"} disabled={view === "accounts" && !canImportAccounts} title={view === "accounts" && !canImportAccounts ? t("remote.capabilityUnavailable") : undefined} onClick={primaryAction}>
               {primaryLabel}
             </Button>
           </>
@@ -164,6 +177,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 
       {view === "sources" ? <SourcesTable query={query} onEdit={(source) => { setEditingSource(source); setDialog("source"); }} /> : null}
       {view === "accounts" ? <AccountsTable query={query} onQuery={setQuery} canImport={canImportAccounts} canManageProxies={canManageProxies} canExport={canExportAccounts} canRevealIdentity={canRevealAccountIdentity} onImport={onImport} onSignIn={() => void oauth.start()} onProxy={(account) => { setProxyAccount(account); setDialog("accountProxy"); }} onBulkProxies={(accountIds) => { setBulkProxyAccountIds(accountIds); setDialog("bulkProxies"); }} onExport={(accountIds) => { setExportAccountIds(accountIds); setDialog("accountExport"); }} /> : null}
+      {view === "proxies" ? <ProxyStorageView revision={proxyRevision} onImport={() => setDialog("proxyImport")} /> : null}
       {view === "automations" ? <AutomationsTable query={query} onEdit={(task) => { setEditingAutomation(task); setDialog("automation"); }} /> : null}
       {view === "remote" ? <RemoteView onConnect={() => setDialog("remote")} onDeploy={() => setDialog("deploy")} /> : null}
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
@@ -177,6 +191,8 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       {dialog === "topup" ? <TopUpDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "accountProxy" && proxyAccount ? <AccountProxyDialog account={proxyAccount} onClose={() => { setDialog(null); setProxyAccount(null); }} /> : null}
       {dialog === "bulkProxies" ? <BulkProxyDialog accountIds={bulkProxyAccountIds} onClose={() => setDialog(null)} /> : null}
+      {dialog === "proxyImport" ? <ProxyImportDialog onImported={() => setProxyRevision((value) => value + 1)} onClose={() => setDialog(null)} /> : null}
+      {dialog === "oauthSetup" && oauthAccountId ? <OAuthAccountSetupDialog accountId={oauthAccountId} onClose={() => { setDialog(null); setOauthAccountId(null); }} /> : null}
       {dialog === "accountExport" ? <AccountExportDialog accountIds={exportAccountIds} onClose={() => { setDialog(null); setExportAccountIds([]); }} /> : null}
       {busy ? <span className="sr-only" aria-live="polite">{t("common.working")}</span> : null}
     </section>
@@ -462,22 +478,165 @@ function AccountExportDialog({ accountIds, onClose }: { accountIds: string[]; on
   return <Dialog title={t("accounts.exportTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="secondary" icon={<Copy aria-hidden />} busy={busy === "account-export-copy"} disabled={!confirmed} onClick={() => run("copy")}>{t("accounts.copyExport")}</Button><Button variant="primary" icon={<Download aria-hidden />} busy={busy === "account-export-download"} disabled={!confirmed} onClick={() => run("download")}>{t("accounts.downloadExport")}</Button></>}><div className="relay-form account-export-form"><div className="account-export-heading"><span>{t("accounts.exportFormat")}</span><strong>{t("accounts.exportCount", { count: accountIds.length })}</strong></div><div className="account-export-formats" role="radiogroup" aria-label={t("accounts.exportFormat")}>{accountExportFormats.map((option) => <button type="button" role="radio" aria-checked={format === option.value} key={option.value} onClick={() => setFormat(option.value)}><span className="account-export-radio" aria-hidden /><span>{option.label}</span></button>)}</div><div role="alert" className="account-export-warning"><ShieldAlert aria-hidden /><div><strong>{t("accounts.exportSensitiveTitle")}</strong><span>{t("accounts.exportWarning")}</span></div></div><label className="account-export-confirm"><input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} /><span>{t("accounts.confirmExport")}</span></label></div></Dialog>;
 }
 
-function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+function useProxyPool(enabled = true, revision = 0) {
+  const [pool, setPool] = useState<ProxyPoolSummary | null>(null);
+  const [failed, setFailed] = useState(false);
+  const load = useCallback(async () => {
+    if (!enabled) return;
+    try {
+      setPool(await relayCommands.getProxyPool());
+      setFailed(false);
+    } catch {
+      setFailed(true);
+    }
+  }, [enabled]);
+  useEffect(() => { void load(); }, [load, revision]);
+  return { pool, setPool, failed, load };
+}
+
+function ProxyStorageView({ revision, onImport }: { revision: number; onImport: () => void }) {
   const { t } = useTranslation();
-  const { mode, busy, perform } = useRelayState();
+  const { runtime, busy, perform } = useRelayState();
+  const confirm = useConfirm();
+  const { pool, setPool, failed, load } = useProxyPool(true, revision);
+  const [query, setQuery] = useState("");
+  const accounts = new Map((runtime?.accounts ?? []).map((account) => [account.id, account]));
+  const entries = (pool?.entries ?? []).filter((entry) => matchesQuery(query, entry.endpoint, entry.assignedAccountId ? accounts.get(entry.assignedAccountId)?.label ?? entry.assignedAccountId : ""));
+  const remove = async (proxyId: string) => {
+    if (!await confirm(t("proxies.deleteConfirm"), { danger: true })) return;
+    let next: ProxyPoolSummary | null = null;
+    const ok = await perform(`proxy-delete-${proxyId}`, async () => { next = await relayCommands.deleteStoredProxy(proxyId); }, "feedback.saved");
+    if (ok && next) setPool(next);
+  };
+  const release = async (accountId: string) => {
+    const ok = await perform(`proxy-release-${accountId}`, () => relayCommands.setAccountProxy(accountId, null), "feedback.saved");
+    if (ok) await load();
+  };
+  if (failed) return <EmptyState title={t("proxies.storageUnavailable")} description={t("proxies.storageUnavailableHint")} action={<Button variant="primary" icon={<RefreshCw aria-hidden />} onClick={() => void load()}>{t("common.retry")}</Button>} />;
+  if (!pool) return <div className="center-loading" role="status"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div>;
+  return <div className="proxy-storage">
+    <div className="proxy-storage-summary" aria-label={t("proxies.storageSummary")}>
+      <div><span>{t("proxies.total")}</span><strong>{pool.total}</strong></div>
+      <div><span>{t("proxies.free")}</span><strong>{pool.free}</strong></div>
+      <div><span>{t("proxies.assigned")}</span><strong>{pool.assigned}</strong></div>
+    </div>
+    {pool.total ? <div className="table-toolbar proxy-storage-toolbar"><label className="search-field"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("proxies.search")} /></label><Button variant="secondary" icon={<RefreshCw aria-hidden />} onClick={() => void load()}>{t("common.refresh")}</Button></div> : null}
+    {!pool.total ? <EmptyState title={t("proxies.emptyTitle")} description={t("proxies.emptyDescription")} action={<Button variant="primary" icon={<Upload aria-hidden />} onClick={onImport}>{t("proxies.import")}</Button>} />
+      : !entries.length ? <NoResults />
+        : <div className="proxy-storage-list" role="list">{entries.map((entry) => {
+          const account = entry.assignedAccountId ? accounts.get(entry.assignedAccountId) : null;
+          return <div className="proxy-storage-row" role="listitem" key={entry.id}><Network aria-hidden /><div><strong>{entry.endpoint}</strong><small>{account?.label ?? (entry.assignedAccountId || t("proxies.readyForAssignment"))}</small></div><StatusBadge status={entry.assignedAccountId ? "info" : "ready"} label={t(entry.assignedAccountId ? "proxies.assigned" : "proxies.free")} />{entry.assignedAccountId ? <IconButton label={t("proxies.release")} icon={<Unlink aria-hidden />} disabled={busy === `proxy-release-${entry.assignedAccountId}`} onClick={() => void release(entry.assignedAccountId!)} /> : <IconButton label={t("common.delete")} icon={<Trash2 aria-hidden />} disabled={busy === `proxy-delete-${entry.id}`} onClick={() => void remove(entry.id)} />}</div>;
+        })}</div>}
+  </div>;
+}
+
+function ProxyImportDialog({ onImported, onClose }: { onImported: () => void; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
+  const [content, setContent] = useState("");
+  const [revealed, setRevealed] = useState(false);
+  const [result, setResult] = useState<{ added: number; duplicates: number } | null>(null);
+  const proxyUrls = content.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const importProxies = async () => {
+    let next: Awaited<ReturnType<typeof relayCommands.importProxyPool>> | null = null;
+    const ok = await perform("proxy-import", async () => { next = await relayCommands.importProxyPool(proxyUrls); }, "feedback.saved");
+    if (!ok || !next) return;
+    setResult(next);
+    setContent("");
+    onImported();
+  };
+  return <Dialog wide title={t("proxies.importTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{result ? t("common.done") : t("common.cancel")}</Button><Button variant="primary" icon={<Upload aria-hidden />} busy={busy === "proxy-import"} disabled={!proxyUrls.length} onClick={() => void importProxies()}>{t("proxies.importCount", { count: proxyUrls.length })}</Button></>}><div className="relay-form proxy-import-form"><div className="proxy-import-intro"><Network aria-hidden /><div><strong>{t("proxies.importIntro")}</strong><p>{t("proxies.importHint")}</p></div></div><label className="relay-field"><span>{t("proxies.proxyList")}</span><div className="proxy-list-field"><textarea className={revealed ? "" : "secret-textarea"} value={content} onChange={(event) => { setContent(event.target.value); setResult(null); }} placeholder={t("proxies.proxyListPlaceholder")} autoComplete="off" spellCheck={false} /><IconButton type="button" label={revealed ? t("common.hide") : t("common.reveal")} icon={revealed ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setRevealed((value) => !value)} /></div></label><div className="proxy-format-line"><span>{t("proxies.supportedFormats")}</span><code>host:port:user:pass</code><code>user:pass@host:port</code><code>http(s)://...</code></div>{result ? <p className="form-note success-text" role="status">{t("proxies.importResult", result)}</p> : <p className="form-note">{t("proxies.credentialsProtected")}</p>}</div></Dialog>;
+}
+
+function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+  const { mode } = useRelayState();
+  return mode === "local" ? <LocalAccountProxyDialog account={account} onClose={onClose} /> : <RemoteAccountProxyDialog account={account} onClose={onClose} />;
+}
+
+function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
+  const { pool } = useProxyPool();
+  const [choice, setChoice] = useState<"free" | "stored" | "custom" | "inherited">("inherited");
+  const [proxyId, setProxyId] = useState("");
+  const [proxyUrl, setProxyUrl] = useState("");
+  const [unavailable, setUnavailable] = useState(false);
+  const initialized = useRef(false);
+  const current = pool?.entries.find((entry) => entry.assignedAccountId === account.id);
+  const available = pool?.entries.filter((entry) => !entry.assignedAccountId || entry.assignedAccountId === account.id) ?? [];
+  useEffect(() => {
+    if (!pool || initialized.current) return;
+    initialized.current = true;
+    if (current) {
+      setChoice("stored");
+      setProxyId(current.id);
+    } else if (pool.free > 0) {
+      setChoice("free");
+    }
+  }, [current, pool]);
+  const apply = async () => {
+    const result: { current: StoredProxyAssignmentResult | null } = { current: null };
+    const ok = await perform(`proxy-${account.id}`, async () => {
+      if (choice === "inherited") await relayCommands.setAccountProxy(account.id, null);
+      else if (choice === "free") result.current = await relayCommands.assignFreeProxies([account.id]);
+      else if (choice === "stored") result.current = await relayCommands.assignStoredProxy(account.id, proxyId);
+      else await relayCommands.setAccountProxy(account.id, proxyUrl.trim());
+    }, "feedback.saved");
+    if (!ok) return;
+    if (result.current?.unavailable) {
+      setUnavailable(true);
+      return;
+    }
+    onClose();
+  };
+  const valid = Boolean(pool) && (choice !== "stored" || proxyId) && (choice !== "custom" || proxyUrl.trim()) && (choice !== "free" || pool!.free > 0 || Boolean(current));
+  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div>{!pool ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : <div className="proxy-choice-list" role="radiogroup" aria-label={t("proxies.accountRoute")}>
+    <label className={choice === "free" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "free"} disabled={pool.free === 0 && !current} onChange={() => { setChoice("free"); setUnavailable(false); }} /><span><strong>{t("proxies.assignAutomatically")}</strong><small>{t("proxies.freeAvailable", { count: pool.free })}</small></span></label>
+    <label className={choice === "stored" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "stored"} disabled={!available.length} onChange={() => { setChoice("stored"); setProxyId((value) => value || available[0]?.id || ""); setUnavailable(false); }} /><span><strong>{t("proxies.chooseStored")}</strong><small>{t("proxies.chooseStoredHint")}</small></span></label>
+    {choice === "stored" && available.length ? <OptionMenu className="field-option-menu proxy-choice-control" label={t("proxies.chooseStored")} value={proxyId || available[0].id} onChange={setProxyId} options={available.map((entry) => ({ value: entry.id, label: entry.endpoint }))} /> : null}
+    <label className={choice === "custom" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "custom"} onChange={() => { setChoice("custom"); setUnavailable(false); }} /><span><strong>{t("proxies.addCustom")}</strong><small>{t("proxies.addCustomHint")}</small></span></label>
+    {choice === "custom" ? <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /> : null}
+    <label className={choice === "inherited" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "inherited"} onChange={() => { setChoice("inherited"); setUnavailable(false); }} /><span><strong>{t("proxies.useInherited")}</strong><small>{t("proxies.useInheritedHint")}</small></span></label>
+  </div>}{unavailable ? <p role="alert" className="form-note error-text">{t("proxies.noFreeProxy")}</p> : null}</div></Dialog>;
+}
+
+function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
   const [proxyUrl, setProxyUrl] = useState("");
   const apply = async (value: string | null) => {
-    const ok = await perform(`proxy-${account.id}`, () => mode === "local"
-      ? relayCommands.setAccountProxy(account.id, value)
-      : relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: value }), "feedback.saved");
+    const ok = await perform(`proxy-${account.id}`, () => relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: value }), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("proxies.accountTitle", { name: account.label })} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
+  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => void apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => void apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
 }
 
 function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
+  const { mode } = useRelayState();
+  return mode === "local" ? <LocalBulkProxyDialog accountIds={accountIds} onClose={onClose} /> : <RemoteBulkProxyDialog accountIds={accountIds} onClose={onClose} />;
+}
+
+function LocalBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
   const { t } = useTranslation();
-  const { mode, runtime, busy, perform } = useRelayState();
+  const { runtime, busy, perform } = useRelayState();
+  const { pool, setPool } = useProxyPool();
+  const [result, setResult] = useState<StoredProxyAssignmentResult | null>(null);
+  const accounts = (runtime?.accounts ?? []).filter((account) => accountIds.includes(account.id));
+  const needProxy = accounts.filter((account) => account.proxyMode !== "account").length;
+  const assign = async () => {
+    const next: { current: StoredProxyAssignmentResult | null } = { current: null };
+    const ok = await perform("proxy-bulk", async () => { next.current = await relayCommands.assignFreeProxies(accounts.map((account) => account.id)); }, "feedback.saved");
+    if (ok && next.current) {
+      setResult(next.current);
+      setPool(next.current.pool);
+    }
+  };
+  return <Dialog title={t("proxies.bulkTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{result ? t("common.done") : t("common.cancel")}</Button><Button variant="primary" busy={busy === "proxy-bulk"} disabled={!pool || !accounts.length || (needProxy > 0 && pool.free === 0)} onClick={() => void assign()}>{t("proxies.assignAutomatically")}</Button></>}><div className="relay-form"><div className="proxy-assignment-summary"><div><span>{t("connections.accounts")}</span><strong>{accounts.length}</strong></div><div><span>{t("proxies.needProxy")}</span><strong>{needProxy}</strong></div><div><span>{t("proxies.free")}</span><strong>{pool?.free ?? "-"}</strong></div></div><p className="form-note">{t("proxies.bulkStoredHint")}</p>{pool && pool.free < needProxy ? <p className="form-note warning-text">{t("proxies.notEnoughFree", { count: needProxy - pool.free })}</p> : null}{result ? <p role="status" className="form-note success-text">{t("proxies.bulkStoredResult", result)}</p> : null}</div></Dialog>;
+}
+
+function RemoteBulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { runtime, busy, perform } = useRelayState();
   const accountById = new Map((runtime?.accounts ?? []).map((account) => [account.id, account]));
   const accounts = accountIds.map((accountId) => accountById.get(accountId)).filter((account): account is AccountSummary => Boolean(account));
   const [selected, setSelected] = useState(() => accounts.map((account) => account.id));
@@ -491,9 +650,7 @@ function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClos
   const assign = async () => {
     let response: ProxyAssignmentResult | null = null;
     const ok = await perform("proxy-bulk", async () => {
-      response = mode === "local"
-        ? await relayCommands.assignAccountProxies(selectedAccountIds, proxyUrls)
-        : await relayCommands.remoteAction({ type: "assign_account_proxies" }, { accountIds: selectedAccountIds, proxyUrls }) as ProxyAssignmentResult;
+      response = await relayCommands.remoteAction({ type: "assign_account_proxies" }, { accountIds: selectedAccountIds, proxyUrls }) as ProxyAssignmentResult;
     }, "feedback.saved");
     if (ok) {
       setResult(response);
@@ -631,6 +788,33 @@ function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Prom
   </Dialog>;
 }
 
+function OAuthAccountSetupDialog({ accountId, onClose }: { accountId: string; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { runtime, busy, perform } = useRelayState();
+  const { pool } = useProxyPool();
+  const [addToPool, setAddToPool] = useState(true);
+  const [assignProxy, setAssignProxy] = useState(false);
+  const initialized = useRef(false);
+  const account = runtime?.accounts.find((item) => item.id === accountId);
+  useEffect(() => {
+    if (!pool || initialized.current) return;
+    initialized.current = true;
+    setAssignProxy(pool.free > 0);
+  }, [pool]);
+  const apply = async () => {
+    if (!addToPool && !assignProxy) {
+      onClose();
+      return;
+    }
+    const ok = await perform("oauth-setup", async () => {
+      if (addToPool) await relayCommands.setPoolMembership([accountId], [], true);
+      if (assignProxy) await relayCommands.assignFreeProxies([accountId]);
+    }, "feedback.saved");
+    if (ok) onClose();
+  };
+  return <Dialog title={t("accounts.accountAdded")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("accounts.configureLater")}</Button><Button variant="primary" busy={busy === "oauth-setup"} onClick={() => void apply()}>{t("common.done")}</Button></>}><div className="relay-form oauth-account-setup"><div className="oauth-account-added"><Check aria-hidden /><div><strong>{account?.identityHint ?? t("accounts.accountReady")}</strong><p>{t("accounts.accountAddedHint")}</p></div></div><div className="post-import-options"><label><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span><strong>{t("accounts.addAccountToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span></label><label><input type="checkbox" checked={assignProxy} disabled={!pool || pool.free === 0} onChange={(event) => setAssignProxy(event.target.checked)} /><span><strong>{t("proxies.assignFreeAfterAdd")}</strong><small>{pool ? t(pool.free ? "proxies.freeAvailable" : "proxies.noFreeStored", { count: pool.free }) : t("common.loading")}</small></span></label></div></div></Dialog>;
+}
+
 function formatCountdown(seconds: number) {
   const hours = Math.floor(seconds / 3_600);
   const minutes = Math.floor((seconds % 3_600) / 60);
@@ -644,18 +828,25 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
   const { t } = useTranslation();
   const { mode: currentMode, runtime, perform, busy } = useRelayState();
   const mode = modeOverride ?? currentMode;
+  const { pool: proxyPool } = useProxyPool(mode === "local");
   const [content, setContent] = useState("");
   const [session, setSession] = useState<ImportSession | null>(null);
-  const [resumeId, setResumeId] = useState("");
   const [ownedSessionId, setOwnedSessionId] = useState<string | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
   const [commandFailed, setCommandFailed] = useState(false);
   const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
   const [addToPool, setAddToPool] = useState(defaultAddToPool);
+  const [assignProxy, setAssignProxy] = useState(false);
   const [fileLoading, setFileLoading] = useState(Boolean(initialPaths?.length));
   const activeSessionId = useRef<string | null>(null);
   const initialPreviewStarted = useRef(false);
+  const proxyDefaultSet = useRef(false);
   const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
+  useEffect(() => {
+    if (!proxyPool || proxyDefaultSet.current) return;
+    proxyDefaultSet.current = true;
+    setAssignProxy(proxyPool.free > 0);
+  }, [proxyPool]);
   const acceptSession = (next: ImportSession) => {
     setSession(next);
     setOwnedSessionId(next.sessionId);
@@ -677,7 +868,6 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
       const result: { current: ImportSession | null } = { current: null };
       const ok = await perform("import-preview", async () => {
         const started = await relayCommands.startImport(content);
-        setResumeId(started.sessionId);
         setOwnedSessionId(started.sessionId);
         result.current = await relayCommands.prepareImport(started.sessionId, true);
       });
@@ -707,17 +897,16 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
       setFileLoading(false);
     }
   };
-  const resume = async () => {
-    const result: { current: ImportSession | null } = { current: null };
-    const ok = await perform("import-resume", async () => { result.current = await relayCommands.resumeImport(resumeId.trim()); });
-    if (ok && result.current) acceptSession(result.current);
-    else if (!ok) setCommandFailed(true);
-  };
   const confirm = async () => {
     if (!session) return;
     if (mode === "local") {
       const result: { current: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null } = { current: null };
-      const ok = await perform("import-confirm", async () => { result.current = await relayCommands.confirmImport(session.sessionId, selected, addToPool); });
+      const ok = await perform("import-confirm", async () => {
+        result.current = await relayCommands.confirmImport(session.sessionId, selected, addToPool);
+        if (!assignProxy) return;
+        const accountIds = result.current.results.flatMap((item) => item.status === "succeeded" && item.account ? [item.account.account.id] : []);
+        if (accountIds.length) await relayCommands.assignFreeProxies(accountIds);
+      });
       if (!ok) {
         setSession(null);
         setSelected([]);
@@ -765,13 +954,15 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
   const toggle = (itemId: string) => setSelected((current) => current.includes(itemId)
     ? current.filter((id) => id !== itemId)
     : [...current, itemId]);
+  const selectedAccountCount = session?.preview.rows.filter((row) => selected.includes(row.itemId) && row.authMode !== "api_key").length ?? 0;
+  const localProxyOptions = mode === "local";
   const footer = completed
     ? <Button variant="primary" onClick={cancel}>{t("common.close")}</Button>
-    : <>{session && canImportToPool ? <label className="toggle-row import-pool-option"><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span>{t("accounts.addImportedToPool")}</span></label> : null}<Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{fileLoading ? null : session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
-  const body = completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
+    : <><Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{fileLoading ? null : session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
+  const body = completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><div className="import-preview-heading"><div><strong>{t("accounts.importReady")}</strong><span>{t("accounts.importReadyHint", { selected: selected.length, total: session.preview.rows.length })}</span></div><StatusBadge status={selected.length ? "ready" : "warning"} label={t("accounts.selectedCount", { count: selected.length })} /></div><div className="relay-table-wrap"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
     return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td><AccountPlanBadge planType={row.plan ?? null} unknown="-" /></td></tr>;
-  })}</tbody></table></div> : fileLoading ? <div className="import-file-loading" role="status" aria-live="polite"><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.readingImportFiles")}</strong><p>{t("accounts.readingImportFilesHint")}</p></div></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={() => chooseFiles()}>{t("accounts.chooseImportFiles")}</Button><span>{t("accounts.importFileHint")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <details className="import-resume"><summary>{t("accounts.resumeExistingImport")}</summary><label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label></details> : null}</div>;
+  })}</tbody></table></div>{canImportToPool || localProxyOptions ? <div className="post-import-options"><span>{t("accounts.afterImport")}</span>{canImportToPool ? <label><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span><strong>{t("accounts.addImportedToPool")}</strong><small>{t("accounts.addToPoolHint")}</small></span></label> : null}{localProxyOptions ? <label><input type="checkbox" checked={assignProxy} disabled={!proxyPool || proxyPool.free === 0 || selectedAccountCount === 0} onChange={(event) => setAssignProxy(event.target.checked)} /><span><strong>{t("proxies.assignFreeAfterAdd")}</strong><small>{proxyPool ? t(proxyPool.free ? "proxies.importAssignmentHint" : "proxies.noFreeStored", { free: proxyPool.free, selected: selectedAccountCount, count: proxyPool.free }) : t("common.loading")}</small></span></label> : null}</div> : null}</div> : fileLoading ? <div className="import-file-loading" role="status" aria-live="polite"><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.readingImportFiles")}</strong><p>{t("accounts.readingImportFilesHint")}</p></div></div> : <div className="relay-form import-start"><button type="button" className="import-file-source" disabled={busy === "import-files"} onClick={() => void chooseFiles()}><span>{busy === "import-files" ? <Loader2 className="spin" aria-hidden /> : <Upload aria-hidden />}</span><strong>{t("accounts.chooseImportFiles")}</strong><small>{t("accounts.importFileHint")}</small></button><div className="import-source-divider"><span>{t("accounts.orPaste")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label><p className="form-note">{t("accounts.importFormatsHint")}</p></div>;
   return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }
 

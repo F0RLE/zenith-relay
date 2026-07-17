@@ -50,27 +50,37 @@ pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
 }
 
 fn normalize_proxy_authority(value: &str) -> String {
-    if let Some((left, right)) = value.rsplit_once('@') {
-        if is_proxy_endpoint(right) {
-            return value.to_string();
-        }
-        if is_proxy_endpoint(left) && has_proxy_credentials(right) {
-            return format!("{right}@{left}");
+    if value
+        .rsplit_once('@')
+        .is_some_and(|(_, endpoint)| is_proxy_endpoint(endpoint))
+    {
+        return value.to_string();
+    }
+    if let Some((endpoint, credentials)) = value.split_once('@') {
+        if is_proxy_endpoint(endpoint) && has_proxy_credentials(credentials) {
+            return format!("{credentials}@{endpoint}");
         }
     }
 
-    let mut parts = value.splitn(4, ':');
-    let (Some(host), Some(port), Some(username), Some(password)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return value.to_string();
-    };
-    let endpoint = format!("{host}:{port}");
-    if is_proxy_endpoint(&endpoint) && !username.is_empty() && !password.is_empty() {
-        format!("{username}:{password}@{endpoint}")
-    } else {
-        value.to_string()
+    let mut leading = value.splitn(3, ':');
+    if let (Some(host), Some(port), Some(credentials)) =
+        (leading.next(), leading.next(), leading.next())
+    {
+        let endpoint = format!("{host}:{port}");
+        if is_proxy_endpoint(&endpoint) && has_proxy_credentials(credentials) {
+            return format!("{credentials}@{endpoint}");
+        }
     }
+    let mut trailing = value.rsplitn(3, ':');
+    if let (Some(port), Some(host), Some(credentials)) =
+        (trailing.next(), trailing.next(), trailing.next())
+    {
+        let endpoint = format!("{host}:{port}");
+        if is_proxy_endpoint(&endpoint) && has_proxy_credentials(credentials) {
+            return format!("{credentials}@{endpoint}");
+        }
+    }
+    value.to_string()
 }
 
 fn is_proxy_endpoint(value: &str) -> bool {
@@ -94,7 +104,11 @@ fn has_proxy_credentials(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{http::StatusCode, routing::any, Router};
+    use axum::{
+        http::{header::PROXY_AUTHORIZATION, HeaderMap, StatusCode},
+        routing::any,
+        Router,
+    };
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -102,8 +116,16 @@ mod tests {
 
     #[test]
     fn proxy_url_accepts_popular_http_shape_and_redacts_debug() {
-        let normalized = normalize_proxy_url("user:pass@proxy.example:8080").unwrap();
-        assert_eq!(normalized, "http://user:pass@proxy.example:8080/");
+        let expected = "http://user:pass@proxy.example:8080/";
+        for value in [
+            "user:pass@proxy.example:8080",
+            "proxy.example:8080:user:pass",
+            "proxy.example:8080@user:pass",
+            "user:pass:proxy.example:8080",
+            "http://user:pass@proxy.example:8080",
+        ] {
+            assert_eq!(normalize_proxy_url(value).unwrap(), expected);
+        }
         let provider_style = "proxy.example:8080:user__cr.us;anon.1;sessttl.5:pass";
         assert_eq!(
             normalize_proxy_url(provider_style).unwrap(),
@@ -113,7 +135,7 @@ mod tests {
             normalize_proxy_url("proxy.example:8080@user__cr.us;anon.1;sessttl.5:pass").unwrap(),
             "http://user__cr.us%3Banon.1%3Bsessttl.5:pass@proxy.example:8080/"
         );
-        let proxy = ProxyConfig::parse(&normalized).unwrap();
+        let proxy = ProxyConfig::parse(expected).unwrap();
         let rendered = format!("{proxy:?}");
         assert!(!rendered.contains("user"));
         assert!(!rendered.contains("pass"));
@@ -130,18 +152,25 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
-                Router::new().fallback(any(move || {
+                Router::new().fallback(any(move |headers: HeaderMap| {
                     let marker = marker.clone();
                     async move {
-                        marker.store(true, Ordering::SeqCst);
-                        StatusCode::NO_CONTENT
+                        if headers
+                            .get(PROXY_AUTHORIZATION)
+                            .is_some_and(|value| value == "Basic dXNlcjpwYXNz")
+                        {
+                            marker.store(true, Ordering::SeqCst);
+                            StatusCode::NO_CONTENT
+                        } else {
+                            StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                        }
                     }
                 })),
             )
             .await
             .unwrap();
         });
-        let proxy = ProxyConfig::parse(&format!("http://{address}")).unwrap();
+        let proxy = ProxyConfig::parse(&format!("http://user:pass@{address}")).unwrap();
         let client = proxy.apply(reqwest::Client::builder()).build().unwrap();
         let response = client
             .get("http://direct-target.invalid/proxy-check")

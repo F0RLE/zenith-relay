@@ -8,11 +8,13 @@ use crate::local_pool::{
     models::GatewaySettings,
     store::secret_store,
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
 };
+use url::Url;
 use zenith_relay_core::{
     accounts::{TokenRefreshFailure, TokenRefreshFailureKind},
     protocol::ProxyMode,
@@ -20,6 +22,342 @@ use zenith_relay_core::{
 };
 
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
+pub const PROXY_POOL_SECRET_REF: &str = "proxy:pool";
+const PROXY_POOL_VERSION: u32 = 1;
+const MAX_PROXY_POOL_ENTRIES: usize = 1_000;
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProxyPool {
+    version: u32,
+    entries: Vec<StoredProxy>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredProxy {
+    id: String,
+    url: String,
+    assigned_account_id: Option<String>,
+    created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPoolEntrySummary {
+    pub id: String,
+    pub endpoint: String,
+    pub assigned_account_id: Option<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPoolSummary {
+    pub entries: Vec<ProxyPoolEntrySummary>,
+    pub total: usize,
+    pub free: usize,
+    pub assigned: usize,
+}
+
+impl Default for ProxyPool {
+    fn default() -> Self {
+        Self {
+            version: PROXY_POOL_VERSION,
+            entries: Vec::new(),
+        }
+    }
+}
+
+impl ProxyPool {
+    pub(crate) fn load() -> Result<Self> {
+        let Some(content) = secret_store::load(PROXY_POOL_SECRET_REF)? else {
+            return Ok(Self::default());
+        };
+        let pool: Self = serde_json::from_str(&content).map_err(|_| {
+            LocalPoolError::new(ErrorCode::RecoveryRequired, "stored proxy pool is invalid")
+        })?;
+        pool.validate()?;
+        Ok(pool)
+    }
+
+    pub(crate) fn save(&self) -> Result<()> {
+        self.validate()?;
+        if self.entries.is_empty() {
+            return secret_store::delete(PROXY_POOL_SECRET_REF);
+        }
+        let content = serde_json::to_string(self).map_err(|_| {
+            LocalPoolError::new(ErrorCode::InvalidState, "proxy pool serialization failed")
+        })?;
+        secret_store::save(PROXY_POOL_SECRET_REF, &content)
+    }
+
+    pub(crate) fn import(&mut self, values: &[String], now_ms: u64) -> Result<(usize, usize)> {
+        if values.is_empty() || values.len() > MAX_PROXY_POOL_ENTRIES {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "proxy import must contain between 1 and 1000 entries",
+            ));
+        }
+        let mut known = self
+            .entries
+            .iter()
+            .map(|entry| entry.url.clone())
+            .collect::<HashSet<_>>();
+        let mut added = 0;
+        let mut duplicates = 0;
+        for value in values {
+            let url = zenith_relay_core::normalize_proxy_url(value)
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+            if !known.insert(url.clone()) {
+                duplicates += 1;
+                continue;
+            }
+            if self.entries.len() >= MAX_PROXY_POOL_ENTRIES {
+                return Err(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "proxy pool limit of 1000 entries is reached",
+                ));
+            }
+            self.entries.push(StoredProxy {
+                id: format!("proxy_{}", uuid::Uuid::new_v4().simple()),
+                url,
+                assigned_account_id: None,
+                created_at_ms: now_ms,
+            });
+            added += 1;
+        }
+        Ok((added, duplicates))
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        account_proxies: &[(String, Option<String>)],
+        now_ms: u64,
+    ) -> bool {
+        let before = self.entries.clone();
+        let current = account_proxies
+            .iter()
+            .map(|(account_id, proxy)| (account_id.as_str(), proxy.as_deref()))
+            .collect::<HashMap<_, _>>();
+        for entry in &mut self.entries {
+            if entry
+                .assigned_account_id
+                .as_deref()
+                .is_some_and(|account_id| {
+                    current.get(account_id).copied().flatten() != Some(entry.url.as_str())
+                })
+            {
+                entry.assigned_account_id = None;
+            }
+        }
+        for (account_id, proxy_url) in account_proxies {
+            let Some(proxy_url) = proxy_url else { continue };
+            if self
+                .entries
+                .iter()
+                .any(|entry| entry.assigned_account_id.as_deref() == Some(account_id))
+            {
+                continue;
+            }
+            if let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|entry| entry.url == *proxy_url)
+            {
+                if entry.assigned_account_id.is_none() {
+                    entry.assigned_account_id = Some(account_id.clone());
+                }
+            } else if self.entries.len() < MAX_PROXY_POOL_ENTRIES {
+                self.entries.push(StoredProxy {
+                    id: format!("proxy_{}", uuid::Uuid::new_v4().simple()),
+                    url: proxy_url.clone(),
+                    assigned_account_id: Some(account_id.clone()),
+                    created_at_ms: now_ms,
+                });
+            }
+        }
+        self.entries != before
+    }
+
+    pub(crate) fn assign_free(&mut self, account_id: &str) -> Option<String> {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.assigned_account_id.as_deref() == Some(account_id))
+        {
+            return Some(entry.url.clone());
+        }
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.assigned_account_id.is_none())?;
+        self.assign_index(index, account_id)
+    }
+
+    pub(crate) fn assign_id(&mut self, proxy_id: &str, account_id: &str) -> Result<String> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        if self.entries[index]
+            .assigned_account_id
+            .as_deref()
+            .is_some_and(|assigned| assigned != account_id)
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "stored proxy is already assigned to another account",
+            ));
+        }
+        self.assign_index(index, account_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "stored proxy is invalid"))
+    }
+
+    pub(crate) fn assign_url(
+        &mut self,
+        value: &str,
+        account_id: &str,
+        now_ms: u64,
+    ) -> Result<String> {
+        let url = zenith_relay_core::normalize_proxy_url(value)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        let index = match self.entries.iter().position(|entry| entry.url == url) {
+            Some(index) => index,
+            None if self.entries.len() < MAX_PROXY_POOL_ENTRIES => {
+                self.entries.push(StoredProxy {
+                    id: format!("proxy_{}", uuid::Uuid::new_v4().simple()),
+                    url,
+                    assigned_account_id: None,
+                    created_at_ms: now_ms,
+                });
+                self.entries.len() - 1
+            }
+            None => {
+                return Err(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "proxy pool limit of 1000 entries is reached",
+                ))
+            }
+        };
+        if self.entries[index]
+            .assigned_account_id
+            .as_deref()
+            .is_some_and(|assigned| assigned != account_id)
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "proxy is already assigned to another account",
+            ));
+        }
+        Ok(self
+            .assign_index(index, account_id)
+            .expect("stored proxy URL was validated"))
+    }
+
+    pub(crate) fn release(&mut self, account_id: &str) {
+        for entry in &mut self.entries {
+            if entry.assigned_account_id.as_deref() == Some(account_id) {
+                entry.assigned_account_id = None;
+            }
+        }
+    }
+
+    pub(crate) fn delete(&mut self, proxy_id: &str) -> Result<()> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.id == proxy_id)
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "stored proxy not found"))?;
+        if self.entries[index].assigned_account_id.is_some() {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "release the proxy from its account before deleting it",
+            ));
+        }
+        self.entries.remove(index);
+        Ok(())
+    }
+
+    pub(crate) fn summary(&self) -> ProxyPoolSummary {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| ProxyPoolEntrySummary {
+                id: entry.id.clone(),
+                endpoint: proxy_endpoint(&entry.url),
+                assigned_account_id: entry.assigned_account_id.clone(),
+                created_at_ms: entry.created_at_ms,
+            })
+            .collect::<Vec<_>>();
+        let free = entries
+            .iter()
+            .filter(|entry| entry.assigned_account_id.is_none())
+            .count();
+        ProxyPoolSummary {
+            total: entries.len(),
+            assigned: entries.len() - free,
+            free,
+            entries,
+        }
+    }
+
+    fn assign_index(&mut self, index: usize, account_id: &str) -> Option<String> {
+        let url = self.entries.get(index)?.url.clone();
+        self.release(account_id);
+        self.entries[index].assigned_account_id = Some(account_id.to_string());
+        Some(url)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != PROXY_POOL_VERSION || self.entries.len() > MAX_PROXY_POOL_ENTRIES {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "stored proxy pool has unsupported metadata",
+            ));
+        }
+        let mut ids = HashSet::new();
+        let mut urls = HashSet::new();
+        let mut accounts = HashSet::new();
+        for entry in &self.entries {
+            let valid = !entry.id.is_empty()
+                && ids.insert(entry.id.as_str())
+                && zenith_relay_core::normalize_proxy_url(&entry.url)
+                    .is_ok_and(|url| url == entry.url)
+                && urls.insert(entry.url.as_str())
+                && entry
+                    .assigned_account_id
+                    .as_deref()
+                    .is_none_or(|account_id| !account_id.is_empty() && accounts.insert(account_id));
+            if !valid {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "stored proxy pool contains invalid or duplicate entries",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn proxy_endpoint(value: &str) -> String {
+    let Ok(url) = Url::parse(value) else {
+        return "invalid".to_string();
+    };
+    let host = url.host_str().unwrap_or("invalid");
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    format!(
+        "{}://{}:{}",
+        url.scheme(),
+        host,
+        url.port_or_known_default().unwrap_or_default()
+    )
+}
 
 pub fn effective_proxy_url(
     settings: &GatewaySettings,
@@ -229,6 +567,26 @@ mod tests {
             proxy_status(&settings, &credentials_without_proxy(), false),
             (ProxyMode::Direct, false)
         );
+    }
+
+    #[test]
+    fn stored_proxy_is_deduplicated_redacted_and_exclusive() {
+        let mut pool = ProxyPool::default();
+        let values = vec![
+            "host.example:8080:user:secret".to_string(),
+            "http://user:secret@host.example:8080".to_string(),
+        ];
+        assert_eq!(pool.import(&values, 1).unwrap(), (1, 1));
+
+        assert!(pool.assign_free("account-a").is_some());
+        assert_eq!(pool.assign_free("account-b"), None);
+        let summary = pool.summary();
+        assert_eq!(summary.assigned, 1);
+        assert_eq!(summary.entries[0].endpoint, "http://host.example:8080");
+        assert!(!summary.entries[0].endpoint.contains("secret"));
+
+        pool.release("account-a");
+        assert!(pool.assign_free("account-b").is_some());
     }
 
     fn credentials_without_proxy() -> StoredCodexCredentials {

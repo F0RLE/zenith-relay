@@ -5,6 +5,7 @@ pub(crate) mod gateway;
 pub(crate) mod oauth;
 pub(crate) mod pool;
 pub(crate) mod profiles;
+pub(crate) mod proxies;
 pub(crate) mod recovery;
 pub(crate) mod remote_server;
 pub(crate) mod state;
