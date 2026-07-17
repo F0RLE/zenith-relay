@@ -258,6 +258,23 @@ pub async fn restore_codex_profile(state: State<'_, DesktopState>) -> Result<(),
     result
 }
 
+pub(crate) async fn prepare_ready_api_profile(state: &DesktopState) -> Result<bool, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let profile_dir = default_codex_home();
+    if codex::credential_kind(&profile_dir, &state.profile_backup_root())?
+        != Some(codex::ProfileCredentialKind::LocalGateway)
+    {
+        return Ok(false);
+    }
+    let stopped = stop_codex_and_sync_account(state).await?;
+    let result = codex::restore(&profile_dir, &state.profile_backup_root()).map_err(Into::into);
+    let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);
+    if result.is_ok() {
+        set_runtime_pool_interface_reserve(state, None).await;
+    }
+    result.map(|()| stopped)
+}
+
 #[tauri::command]
 pub async fn stop_managed_codex_profile(
     state: State<'_, DesktopState>,

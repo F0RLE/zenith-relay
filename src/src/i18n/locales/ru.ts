@@ -343,27 +343,23 @@ const relayRu = {
     connectAction: "Подключить",
     choose: "Провайдер API",
     hint: "Выберите готовый сервис или укажите свой совместимый адрес.",
-    selectHint: "Выберите сервис. Для готовых вариантов адрес и протокол настроятся автоматически.",
     custom: "Свой API",
+    getKey: "Получить API-ключ",
+    responsesBeta: "Responses API (бета)",
     descriptions: {
       zenith: "Готовый API с балансом и статистикой.",
       openai: "Официальный API OpenAI.",
-      openrouter: "Каталог моделей OpenRouter.",
+      openrouter: "OpenRouter с выбором протокола.",
       custom: "Совместимый API по вашему адресу.",
     },
     protocols: {
-      title: "Какой протокол выбрать",
       responses: {
         label: "Responses API",
-        hint: "Современный протокол OpenAI для потоковых ответов и инструментов. Выбирайте, если сервис поддерживает /v1/responses.",
       },
       chatCompletions: {
         label: "Chat Completions",
-        hint: "Распространённый совместимый протокол. Нужен сервисам, которые принимают запросы через /v1/chat/completions.",
       },
     },
-    zenithHint: "Ключ сохранится в защищённом хранилище приложения.",
-    localPoolHint: "Relay проверит подключение и добавит источник в локальный пул.",
   },
   clients: {
     codex: "ChatGPT",
@@ -440,10 +436,7 @@ const relayRu = {
     removeFromPool: "Убрать {{name}} из пула",
     modelListPlaceholder: "model-id, другая-модель",
     connection: "Подключение",
-    connectionHint: "Укажите адрес, протокол и ключ, выданные вашим сервисом.",
     advanced: "Модели и маршрутизация",
-    advancedHint: "Необязательные настройки источника",
-    modelsHint: "Оставьте поля пустыми, чтобы использовать модели, найденные Relay.",
     poolRole: "Роль API-источника",
     roles: {
       primary: "API сначала",

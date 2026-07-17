@@ -3946,7 +3946,6 @@ textarea {
   flex: 1;
 }
 
-.ready-api-empty,
 .ready-api-connected-heading {
   display: flex;
   align-items: center;
@@ -3955,33 +3954,12 @@ textarea {
   border-bottom: 1px solid var(--relay-border);
 }
 
-.ready-api-empty > svg {
-  width: 38px;
-  height: 38px;
-  flex: 0 0 auto;
-  padding: 9px;
-  border-radius: 7px;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-}
-
-.ready-api-empty > div,
 .ready-api-connected-heading > div {
   min-width: 0;
   display: grid;
   gap: 2px;
 }
 
-.ready-api-empty h2,
-.ready-api-empty p {
-  margin: 0;
-}
-
-.ready-api-empty h2 {
-  font-size: 15px;
-}
-
-.ready-api-empty p,
 .ready-api-connected-heading small {
   color: var(--relay-muted);
   font-size: 12px;
@@ -3996,39 +3974,6 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.api-protocol-guide {
-  display: grid;
-}
-
-.api-protocol-guide h3 {
-  margin: 0 0 4px;
-  font-size: 13px;
-}
-
-.api-protocol-guide > div {
-  display: grid;
-  grid-template-columns: 170px minmax(0, 1fr);
-  gap: 16px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.api-protocol-guide code {
-  color: var(--relay-secondary);
-  font-size: 12px;
-}
-
-.api-protocol-guide span {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.api-protocol-guide small {
-  color: var(--relay-muted);
-  line-height: 1.45;
 }
 
 .pool-summary {
@@ -7355,13 +7300,6 @@ textarea {
   font-weight: 650;
 }
 
-.api-provider-prompt {
-  margin: 0;
-  padding: 4px 0;
-  color: var(--relay-muted);
-  font-size: 12px;
-}
-
 .api-provider-endpoint {
   min-width: 0;
   display: flex;
@@ -7370,6 +7308,11 @@ textarea {
   gap: 12px;
   padding: 10px 0;
   border-bottom: 1px solid var(--relay-border);
+}
+
+.api-provider-protocol-menu .relay-option-trigger {
+  width: 190px;
+  min-width: 190px;
 }
 
 .api-provider-endpoint code {
@@ -7388,20 +7331,27 @@ textarea {
   font-weight: 600;
 }
 
-.api-protocol-help {
-  display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
-  gap: 12px;
-  padding: 10px 12px;
-  border-left: 3px solid var(--relay-border-strong);
-  border-radius: 0 5px 5px 0;
-  background: var(--relay-subtle);
+.api-key-link {
+  width: max-content;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--relay-accent-hover);
   font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
-.api-protocol-help span {
-  color: var(--relay-muted);
-  line-height: 1.45;
+.api-key-link:hover {
+  text-decoration: underline;
+}
+
+.api-key-link svg {
+  width: 14px;
+  height: 14px;
 }
 
 .api-provider-fields {
@@ -7420,19 +7370,12 @@ textarea {
   border-bottom: 1px solid var(--relay-border);
 }
 
-.source-form-section h3,
-.source-form-section p {
+.source-form-section h3 {
   margin: 0;
 }
 
 .source-form-section h3 {
   font-size: 13px;
-}
-
-.source-form-section header p {
-  margin-top: 3px;
-  color: var(--relay-muted);
-  font-size: 12px;
 }
 
 .source-identity-grid,
@@ -7489,19 +7432,10 @@ textarea {
   gap: 1px;
 }
 
-.source-advanced summary small {
-  color: var(--relay-muted);
-  font-size: 11px;
-}
-
 .source-advanced > div {
   display: grid;
   gap: 14px;
   padding: 4px 0 2px;
-}
-
-.source-advanced .form-note {
-  margin: -8px 0 0;
 }
 
 .relay-dialog .api-provider-options {
@@ -7914,9 +7848,7 @@ input[type="password"] {
 
 @media (max-width: 700px) {
   .source-identity-grid,
-  .source-access-grid,
-  .api-protocol-help,
-  .api-protocol-guide > div {
+  .source-access-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 5px;
   }
@@ -7925,6 +7857,12 @@ input[type="password"] {
     align-items: flex-start;
     flex-direction: column;
     gap: 4px;
+  }
+
+  .api-provider-protocol-menu,
+  .api-provider-protocol-menu .relay-option-trigger {
+    width: 100%;
+    min-width: 0;
   }
 
   .pool-member-toolbar .pool-priority-label,
@@ -7984,6 +7922,15 @@ input[type="password"] {
 }
 
 @media (max-height: 620px) {
+  .relay-dialog .api-provider-setup {
+    gap: 10px;
+  }
+
+  .relay-dialog .api-provider-endpoint {
+    padding-top: 7px;
+    padding-bottom: 7px;
+  }
+
   .product-intro {
     gap: 10px;
     padding-top: 12px;

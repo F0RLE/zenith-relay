@@ -1,5 +1,6 @@
-import { Cloud, Route, Settings2, Sparkles } from "lucide-react";
+import { Cloud, ExternalLink, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { openApiKeyPage } from "../../../tauri";
 import { OptionMenu, SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
@@ -16,7 +17,7 @@ const providerOrder: ApiProviderKind[] = ["openai", "openrouter", "zenith", "cus
 const providerDefaults: Record<ApiProviderKind, Omit<ApiProviderValue, "apiKey">> = {
   zenith: { kind: "zenith", name: "Zenith API", baseUrl: "https://api.zenithmarket.dev/v1", wireApi: "responses" },
   openai: { kind: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", wireApi: "responses" },
-  openrouter: { kind: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "chat_completions" },
+  openrouter: { kind: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "responses" },
   custom: { kind: "custom", name: "", baseUrl: "", wireApi: "responses" },
 };
 
@@ -54,6 +55,7 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
   const { t } = useTranslation();
   const select = (kind: ApiProviderKind) => onChange({ ...providerDefaults[kind], apiKey: value.apiKey });
   const protocol = value.wireApi === "responses" ? "responses" : "chatCompletions";
+  const protocolOptions = [{ value: "responses", label: value.kind === "openrouter" ? t("apiProviders.responsesBeta") : "Responses API" }, { value: "chat_completions", label: "Chat Completions" }];
 
   return <div className="api-provider-setup">
     <div className="api-provider-options" role="radiogroup" aria-label={t("apiProviders.choose")}>
@@ -65,15 +67,14 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         </button>;
       })}
     </div>
-    {!value.kind ? <p className="api-provider-prompt">{t("apiProviders.selectHint")}</p> : <>
+    {value.kind ? <>
       {value.kind === "custom" ? <div className="api-provider-fields">
         <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
-        <div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div>
-      </div> : <div className="api-provider-endpoint"><code>{value.baseUrl}</code><span>{t(`apiProviders.protocols.${protocol}.label`)}</span></div>}
-      <div className="api-protocol-help"><strong>{t(`apiProviders.protocols.${protocol}.label`)}</strong><span>{t(`apiProviders.protocols.${protocol}.hint`)}</span></div>
+        <div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={protocolOptions} /></div>
+      </div> : <div className="api-provider-endpoint"><code>{value.baseUrl}</code>{value.kind === "openrouter" ? <OptionMenu className="api-provider-protocol-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={protocolOptions} /> : <span>{t(`apiProviders.protocols.${protocol}.label`)}</span>}</div>}
       <SecretField label={value.kind === "zenith" ? t("readyApi.key") : t("sources.apiKey")} value={value.apiKey} onChange={(apiKey) => onChange({ ...value, apiKey })} />
-      <p className="form-note">{t(value.kind === "zenith" ? "apiProviders.zenithHint" : "apiProviders.localPoolHint")}</p>
-    </>}
+      {value.kind !== "custom" ? <button type="button" className="api-key-link" onClick={() => void openApiKeyPage(value.kind as "zenith" | "openai" | "openrouter")}><ExternalLink aria-hidden />{t("apiProviders.getKey")}</button> : null}
+    </> : null}
   </div>;
 }

@@ -95,7 +95,7 @@ for (const scenario of [
     await page.setViewportSize(scenario.viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Подключения", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "API пока не подключён" })).toBeVisible();
+    await expect(page.getByText("API пока не подключён", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Подключить API", exact: true })).toHaveCount(1);
     await page.screenshot({ path: `output/playwright/api-empty-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
@@ -108,6 +108,14 @@ for (const scenario of [
     })).toBe(true);
     expect(await dialog.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
     await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+
+    await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
+    await expect(dialog.getByRole("button", { name: /^Протокол:/ })).toHaveAttribute("data-value", "responses");
+    const getKey = dialog.getByRole("button", { name: "Получить API-ключ" });
+    await expect(getKey).toBeVisible();
+    expect(await getKey.evaluate((button) => button.getBoundingClientRect().bottom <= button.closest("section")!.querySelector("footer")!.getBoundingClientRect().top)).toBe(true);
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await page.screenshot({ path: `output/playwright/api-openrouter-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
     await dialog.getByRole("radio", { name: /Свой API/ }).click();
     const key = dialog.getByLabel("Ключ внешнего API");

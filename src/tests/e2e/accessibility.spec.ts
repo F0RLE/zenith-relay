@@ -9,6 +9,8 @@ test("interactive controls have names and dialogs trap focus", async ({ page }) 
   await page.getByRole("button", { name: "Sign in" }).first().click();
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible();
+  await expect(dialog).toBeFocused();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
   await page.keyboard.press("Shift+Tab");
   await expect(dialog.locator(":focus")).toBeVisible();
   await page.keyboard.press("Escape");

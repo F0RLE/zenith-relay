@@ -322,7 +322,7 @@ test("empty Ready API has one action and an unbiased provider picker", async ({ 
   await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "No API connected yet" })).toBeVisible();
+  await expect(page.getByText("No API connected yet", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Connect API", exact: true })).toHaveCount(1);
   await expect(page.getByText("Zenith API", { exact: true })).toHaveCount(0);
 
@@ -334,13 +334,25 @@ test("empty Ready API has one action and an unbiased provider picker", async ({ 
   await expect(dialog.getByRole("button", { name: "Connect", exact: true })).toBeDisabled();
 
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-  await expect(dialog.getByText("A widely supported compatibility protocol", { exact: false })).toBeVisible();
+  const protocol = dialog.getByRole("button", { name: /^Protocol:/ });
+  await expect(protocol).toHaveAttribute("data-value", "responses");
+  await chooseOption(page, dialog, "Protocol", "chat_completions");
+  await expect(protocol).toHaveAttribute("data-value", "chat_completions");
+  await chooseOption(page, dialog, "Protocol", "responses");
+  await dialog.getByRole("button", { name: "Get API key", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "open_api_key_page"))).toBe(true);
   const key = dialog.getByLabel("Upstream API key");
   await key.focus();
   expect(await key.evaluate((input) => {
     const field = input.closest<HTMLElement>(".secret-field")!;
     return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineWidth };
   })).toEqual({ inputOutline: "none", fieldOutline: "2px" });
+
+  await dialog.getByRole("radio", { name: /Zenith API/ }).click();
+  await dialog.getByLabel("Ready API key").fill("zrk_synthetic_ready_key");
+  await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+  await expect(page.getByText("Connected.", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "save_key"))).toBe(true);
 });
 
 test("Ready API connection dialog can switch to a custom local source", async ({ page }) => {

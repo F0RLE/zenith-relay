@@ -30,6 +30,8 @@ use crate::{
 const DEFAULT_API_BASE_URL: &str = "https://api.zenithmarket.dev/v1";
 const TOP_UP_BOT_URL: &str = "https://t.me/zenith_service_bot";
 const TOP_UP_BOT_DOMAIN: &str = "zenith_service_bot";
+const OPENAI_API_KEYS_URL: &str = "https://platform.openai.com/api-keys";
+const OPENROUTER_API_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
 const MAX_TOP_UP_AMOUNT_CENTS: i64 = 1_000_000;
 const USAGE_HISTORY_LIMIT: u8 = 8;
 const STATS_WATCH_INTERVAL: Duration = Duration::from_secs(15);
@@ -498,16 +500,46 @@ async fn create_top_up_intent(
 }
 
 #[tauri::command]
-fn save_key(
+async fn save_key(
     api_key: String,
     app: AppHandle,
     state: tauri::State<'_, local_pool::DesktopState>,
 ) -> Result<String, String> {
-    enable_provider(api_key.trim(), &state.ready_api_backup_root())?;
-    save_app_key(api_key.trim())?;
-    let message = restart_codex_if_running().unwrap_or_else(|| "Ключ сохранен.".to_string());
+    let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
+        .await
+        .map_err(|error| error.message)?;
+    let result = enable_provider(api_key.trim(), &state.ready_api_backup_root())
+        .and_then(|()| save_app_key(api_key.trim()));
+    if let Err(error) = result {
+        if stopped {
+            let _ = launch_codex();
+        }
+        return Err(error);
+    }
+    let message = if stopped {
+        launch_codex()
+    } else {
+        restart_codex_if_running().unwrap_or_else(|| "Ключ сохранен.".to_string())
+    };
     let _ = app.emit("zenith-state-changed", ());
     Ok(message)
+}
+
+#[tauri::command]
+fn open_api_key_page(provider: String, app: AppHandle) -> Result<(), String> {
+    let url = api_key_page_url(&provider).ok_or_else(|| "Unsupported API provider.".to_string())?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
+}
+
+fn api_key_page_url(provider: &str) -> Option<&'static str> {
+    match provider {
+        "zenith" => Some(TOP_UP_BOT_URL),
+        "openai" => Some(OPENAI_API_KEYS_URL),
+        "openrouter" => Some(OPENROUTER_API_KEYS_URL),
+        _ => None,
+    }
 }
 
 #[tauri::command]
@@ -1011,10 +1043,10 @@ fn is_valid_top_up_start(start: &str) -> bool {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        extract_top_up_start, extract_top_up_start_from_url, fallback_api_date, format_api_date,
-        format_money_microusd, is_allowed_top_up_url, key_stats_from_value, parse_model_ids,
-        sanitize_api_error_message, telegram_start_url, validate_top_up_amount_cents,
-        TopUpIntentData, UiState, MAX_TOP_UP_AMOUNT_CENTS,
+        api_key_page_url, extract_top_up_start, extract_top_up_start_from_url, fallback_api_date,
+        format_api_date, format_money_microusd, is_allowed_top_up_url, key_stats_from_value,
+        parse_model_ids, sanitize_api_error_message, telegram_start_url,
+        validate_top_up_amount_cents, TopUpIntentData, UiState, MAX_TOP_UP_AMOUNT_CENTS,
     };
     use serde_json::json;
 
@@ -1029,6 +1061,23 @@ mod tests {
         assert!(!is_allowed_top_up_url(
             "tg://resolve?domain=other_bot&start=ztu_0123456789abcdef0123456789abcdef0123"
         ));
+    }
+
+    #[test]
+    fn api_key_pages_are_fixed_to_known_providers() {
+        assert_eq!(
+            api_key_page_url("zenith"),
+            Some("https://t.me/zenith_service_bot")
+        );
+        assert_eq!(
+            api_key_page_url("openai"),
+            Some("https://platform.openai.com/api-keys")
+        );
+        assert_eq!(
+            api_key_page_url("openrouter"),
+            Some("https://openrouter.ai/settings/keys")
+        );
+        assert_eq!(api_key_page_url("custom"), None);
     }
 
     #[test]
@@ -1278,6 +1327,7 @@ fn main() {
             save_key,
             reset_key,
             launch_saved_codex,
+            open_api_key_page,
             open_top_up_url,
             local_pool::commands::state::get_local_pool_state,
             local_pool::commands::state::get_local_runtime_state,

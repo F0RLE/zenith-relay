@@ -316,6 +316,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "get_saved_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "create_saved_top_up_intent_and_open": return null;
+          case "open_api_key_page": return null;
           case "save_key": readyKey = String(args.apiKey ?? ""); return readyKey;
           case "reset_key": readyKey = ""; return "reset";
           case "prepare_top_up_amount": return { amountCents: 1000, amountUsd: 10, valid: true };

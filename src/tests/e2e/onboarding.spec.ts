@@ -66,7 +66,7 @@ test("ready API step can add OpenRouter as a checked local source", async ({ pag
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".check-stages strong")).toHaveText(["Ready", "Ready", "Ready", "Ready"]);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "chat_completions" });
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "responses" });
   expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_2"], inPool: true } });
 });
 

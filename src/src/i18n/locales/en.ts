@@ -343,27 +343,23 @@ const relayEn = {
     connectAction: "Connect",
     choose: "API provider",
     hint: "Choose a hosted service or enter your own compatible endpoint.",
-    selectHint: "Choose a service. Ready-made options configure their endpoint and protocol automatically.",
     custom: "Custom API",
+    getKey: "Get API key",
+    responsesBeta: "Responses API (beta)",
     descriptions: {
       zenith: "Hosted API with balance and usage statistics.",
       openai: "The official OpenAI API.",
-      openrouter: "The OpenRouter model catalog.",
+      openrouter: "OpenRouter with a protocol choice.",
       custom: "A compatible API at your own endpoint.",
     },
     protocols: {
-      title: "Which protocol to choose",
       responses: {
         label: "Responses API",
-        hint: "OpenAI's modern protocol for streaming responses and tools. Choose it when the service supports /v1/responses.",
       },
       chatCompletions: {
         label: "Chat Completions",
-        hint: "A widely supported compatibility protocol for services that accept requests at /v1/chat/completions.",
       },
     },
-    zenithHint: "The key is stored in the app's protected storage.",
-    localPoolHint: "Relay verifies the connection and adds the source to your local pool.",
   },
   clients: {
     codex: "ChatGPT",
@@ -440,10 +436,7 @@ const relayEn = {
     removeFromPool: "Remove {{name}} from the pool",
     modelListPlaceholder: "model-id, another-model",
     connection: "Connection",
-    connectionHint: "Enter the endpoint, protocol, and key issued by your service.",
     advanced: "Models and routing",
-    advancedHint: "Optional source settings",
-    modelsHint: "Leave these fields empty to use the models discovered by Relay.",
     poolRole: "API source role",
     roles: {
       primary: "API first",

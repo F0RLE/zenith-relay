@@ -331,6 +331,10 @@ export function saveKey(apiKey: string) {
   return invoke<string>("save_key", { apiKey });
 }
 
+export function openApiKeyPage(provider: "zenith" | "openai" | "openrouter") {
+  return invoke<void>("open_api_key_page", { provider });
+}
+
 export function getSavedKeyModels() {
   return invoke<string[]>("get_saved_key_models");
 }
