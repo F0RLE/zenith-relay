@@ -74,6 +74,7 @@ const QUOTA_COMMAND_TIMEOUT_OVERHEAD: Duration = Duration::from_secs(5);
 const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
 const QUOTA_REFRESH_RETRY_MS: u64 = 60_000;
 const QUOTA_REFRESH_LEAD_MS: u64 = 60_000;
+const QUOTA_REFRESH_MIN_DELAY_MS: u64 = 30_000;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 type ItemResult<T> = std::result::Result<T, ImportItemError>;
@@ -1462,6 +1463,8 @@ pub(crate) async fn refresh_account_quota_once(
     account_id: &str,
     force_subscription_refresh: bool,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
+    let quota_lock = state.quota_account_lock(account_id)?;
+    let _quota_guard = quota_lock.lock().await;
     let prepared = prepare_account_credentials(state, account_id).await?;
     let now_ms = current_time_ms();
     let request_timeout =
@@ -1615,7 +1618,7 @@ pub(crate) fn next_quota_refresh_at(
                 .map(|reset_at_ms| {
                     reset_at_ms
                         .saturating_sub(QUOTA_REFRESH_LEAD_MS)
-                        .max(now_ms.saturating_add(1_000))
+                        .max(now_ms.saturating_add(QUOTA_REFRESH_MIN_DELAY_MS))
                 })
                 .min();
             Some(reset_due.map_or(fallback, |due_at_ms| due_at_ms.min(fallback)))
@@ -4467,6 +4470,17 @@ mod tests {
         assert_eq!(
             next_quota_refresh_at(&updated, now_ms, 300),
             Some(now_ms + 300_000 - QUOTA_REFRESH_LEAD_MS)
+        );
+        account.account.quota.primary.as_mut().unwrap().reset_at_ms = Some(now_ms + 10_000);
+        let short_reset = AccountQuotaRefreshResponse {
+            account: account.clone(),
+            quota: AccountQuotaOutcome::Updated {
+                transitions: Vec::new(),
+            },
+        };
+        assert_eq!(
+            next_quota_refresh_at(&short_reset, now_ms, 300),
+            Some(now_ms + QUOTA_REFRESH_MIN_DELAY_MS)
         );
         account.account.quota.primary.as_mut().unwrap().reset_at_ms =
             Some(now_ms + 5 * 60 * 60_000);

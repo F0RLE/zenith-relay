@@ -527,7 +527,7 @@ Core scheduler state:
 ```text
 PoolScheduler
   candidates: candidate_id -> RuntimeCandidate
-  response_affinity: bounded response id -> creating candidate id (24h TTL)
+  response_affinity: bounded response id -> creating candidate id (30-day TTL)
   in_flight: candidate_id -> active request count
   dispatches: candidate_id -> committed request count
 
@@ -1006,7 +1006,7 @@ Two protocol constraints remain mandatory:
   upstream account for continuation messages on that connection. A new
   independent SSE or WebSocket request is scheduled normally.
 
-Response ownership uses a bounded 24-hour cache and is invalidated when its
+Response ownership uses a bounded 30-day cache and is invalidated when its
 candidate is removed. This cache is protocol correctness, not an optional
 routing preference.
 

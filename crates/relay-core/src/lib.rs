@@ -22,7 +22,7 @@ pub use runtime::{
 pub use scheduler::{
     CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
     PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
-    SelectionReason, SelectionRequest, RESPONSE_AFFINITY_TTL_MS,
+    SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{source_points_to_gateway, LocalGatewayKey, ProviderSource, WireApi};
 pub use usage::{

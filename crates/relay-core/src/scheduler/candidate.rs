@@ -72,6 +72,7 @@ pub struct RuntimeCandidate {
     pub model_rules: ModelRules,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
+    pub quota_updated_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub last_used_at: Option<u64>,
     pub consecutive_failures: u32,
@@ -124,14 +125,14 @@ impl RuntimeCandidate {
             && scope.model_rules.allows(model)
     }
 
-    pub fn retry_at_if_visible(
+    pub fn retry_at_if_configured(
         &self,
         model: &str,
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
         now_ms: u64,
     ) -> Option<u64> {
-        self.is_visible(model, allowed_protocols, scope)
+        self.is_catalog_visible(model, allowed_protocols, scope)
             .then(|| active_retry_at(&self.cooldowns, model, now_ms))
             .flatten()
     }

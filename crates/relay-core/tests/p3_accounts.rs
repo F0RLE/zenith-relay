@@ -1158,6 +1158,7 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
         events[0].error_category.as_deref(),
         Some("upstream_rate_limited")
     );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
     assert!(events[0]
         .retry_at_ms
         .is_some_and(|retry_at| retry_at > current_time_ms() + 5 * 24 * 60 * 60_000));
@@ -2404,6 +2405,62 @@ async fn persisted_account_cooldown_and_failure_count_seed_the_rebuilt_runtime()
 }
 
 #[tokio::test]
+async fn http_usage_limit_body_cools_the_whole_account_until_reset() {
+    let reset_at = current_time_ms() / 1_000 + 60 * 60;
+    let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": {
+            "type": "usage_limit_reached",
+            "message": "Usage limit reached",
+            "resets_at": reset_at
+        }}),
+    )])
+    .await;
+    let (fallback_upstream, fallback_state) = spawn_upstream(vec![
+        success_reply("fallback-1"),
+        success_reply("fallback-2"),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "limited-account", "limited-access").await;
+    register_ready(&authority, "fallback-account", "fallback-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account(
+                "limited-account",
+                "provider-limited",
+                &limited_upstream,
+                200,
+            ),
+            account(
+                "fallback-account",
+                "provider-fallback",
+                &fallback_upstream,
+                100,
+            ),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(fallback_state.requests.lock().unwrap().len(), 2);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events[0].candidate_id.as_deref(), Some("limited-account"));
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[0]
+        .retry_at_ms
+        .is_some_and(|retry_at_ms| retry_at_ms >= reset_at.saturating_mul(1_000)));
+}
+
+#[tokio::test]
 async fn local_key_account_scope_uses_relay_ids_not_provider_header_ids() {
     let (allowed_upstream, allowed_state) = spawn_upstream(vec![success_reply("allowed")]).await;
     let (denied_upstream, denied_state) = spawn_upstream(vec![success_reply("denied")]).await;
@@ -2698,6 +2755,7 @@ fn account(
             .ok()
             .filter(|remaining| *remaining > 0)
             .map_or(CandidateQuota::Unknown, CandidateQuota::Available),
+        quota_updated_at_ms: None,
         created_at_ms: 1,
         last_used_at_ms: None,
         cooldowns: Default::default(),

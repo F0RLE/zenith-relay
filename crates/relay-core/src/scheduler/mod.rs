@@ -9,5 +9,5 @@ pub use candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandi
 pub use capacity::CandidateQuota;
 pub use selection::{
     CandidateRuntimeSnapshot, PoolScheduler, RoutingDiagnostics, RoutingStrategy, Selection,
-    SelectionReason, SelectionRequest, RESPONSE_AFFINITY_TTL_MS,
+    SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };

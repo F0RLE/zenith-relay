@@ -79,7 +79,7 @@ pub async fn get_local_runtime_state(
         .filter(|model| model.enabled)
         .map(|model| model.id.clone())
         .collect();
-    let candidate_count = source_summaries
+    let configured_candidate_count = source_summaries
         .iter()
         .filter(|record| {
             record.enabled && record.in_pool && !record.draining && record.secret_available
@@ -96,6 +96,8 @@ pub async fn get_local_runtime_state(
                     && record.routing_exclusion.is_none()
             })
             .count();
+    let candidate_count =
+        effective_candidate_count(running, configured_candidate_count, &routing_order);
     let base_url = format!(
         "http://{}:{}/v1",
         snapshot.gateway.client_host, snapshot.gateway.port
@@ -139,6 +141,21 @@ pub async fn get_local_runtime_state(
         wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
     })
+}
+
+fn effective_candidate_count(
+    running: bool,
+    configured_count: usize,
+    routing_order: &[CandidateRuntimeSnapshot],
+) -> usize {
+    if running {
+        routing_order
+            .iter()
+            .filter(|candidate| candidate.available)
+            .count()
+    } else {
+        configured_count
+    }
 }
 
 #[tauri::command]
@@ -259,6 +276,34 @@ fn timestamp_ms(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod parity_tests {
     use super::*;
+
+    #[test]
+    fn running_candidate_count_uses_live_scheduler_availability() {
+        let candidates = [
+            CandidateRuntimeSnapshot {
+                candidate_id: "ready".into(),
+                kind: zenith_relay_core::CandidateKind::OAuthAccount,
+                available: true,
+                in_flight: 0,
+                last_used_at_ms: None,
+                next_retry_at_ms: None,
+                half_open: false,
+                dispatches: 0,
+            },
+            CandidateRuntimeSnapshot {
+                candidate_id: "limited".into(),
+                kind: zenith_relay_core::CandidateKind::OAuthAccount,
+                available: false,
+                in_flight: 0,
+                last_used_at_ms: None,
+                next_retry_at_ms: None,
+                half_open: false,
+                dispatches: 0,
+            },
+        ];
+        assert_eq!(effective_candidate_count(true, 2, &candidates), 1);
+        assert_eq!(effective_candidate_count(false, 2, &candidates), 2);
+    }
 
     #[test]
     fn local_and_remote_snapshots_share_the_same_top_level_contract() {

@@ -144,10 +144,25 @@ pub async fn update_local_quota_policy(
     if gateway == old_gateway {
         return state.snapshot().await.map_err(Into::into);
     }
-    let routing_changed = gateway.use_free_accounts != old_gateway.use_free_accounts;
+    let refresh_earlier =
+        gateway.quota_refresh_interval_seconds < old_gateway.quota_refresh_interval_seconds;
+    let runtime_policy_changed = gateway.use_free_accounts != old_gateway.use_free_accounts
+        || gateway.quota_refresh_interval_seconds != old_gateway.quota_refresh_interval_seconds;
     state.store()?.replace_gateway(gateway)?;
-    if routing_changed {
+    if runtime_policy_changed {
         sync_gateway_or_rollback(&state, old_gateway).await?;
+    }
+    if refresh_earlier {
+        let account_ids = state
+            .store()?
+            .accounts()
+            .iter()
+            .map(|account| account.account.id.clone())
+            .collect::<Vec<_>>();
+        let now_ms = super::current_time_ms();
+        for account_id in account_ids {
+            state.mark_quota_refresh(&account_id, now_ms)?;
+        }
     }
     state.snapshot().await.map_err(Into::into)
 }

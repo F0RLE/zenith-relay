@@ -88,6 +88,7 @@ mod tests {
             model_rules: ModelRules::default(),
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,
+            quota_updated_at_ms: None,
             cooldowns: BTreeMap::new(),
             last_used_at: None,
             consecutive_failures: 0,

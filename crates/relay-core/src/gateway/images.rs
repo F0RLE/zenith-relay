@@ -592,12 +592,13 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 } else {
-                    apply_status_cooldown(
+                    apply_status_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         status,
                         &response_headers,
+                        Some(&bytes),
                         route.half_open_probe,
                     )
                 };
@@ -649,15 +650,15 @@ async fn execute_prepared(
                 None,
                 started,
             );
-            event.consecutive_failures = Some(0);
             populate_tokens(&mut event, &bytes);
-            runtime.record_success_with_metrics(
+            let recovered = runtime.record_success_with_metrics(
                 &route.candidate_id,
                 IMAGE_API_MODEL,
                 now_ms(),
                 None,
                 event.latency_ms,
             );
+            event.consecutive_failures = recovered.then_some(0);
             emit_usage(&runtime, event);
             drop(lease);
             return if prepared.stream {
@@ -683,12 +684,13 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 } else {
-                    apply_status_cooldown(
+                    apply_status_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         failure.status,
                         &response_headers,
+                        Some(&bytes),
                         route.half_open_probe,
                     )
                 };
@@ -735,17 +737,17 @@ async fn execute_prepared(
             None,
             started,
         );
-        event.consecutive_failures = Some(0);
         if let Some(usage) = translated.usage.as_ref() {
             apply_usage(&mut event, usage);
         }
-        runtime.record_success_with_metrics(
+        let recovered = runtime.record_success_with_metrics(
             &route.candidate_id,
             IMAGE_API_MODEL,
             now_ms(),
             None,
             event.latency_ms,
         );
+        event.consecutive_failures = recovered.then_some(0);
         emit_usage(&runtime, event);
         drop(lease);
         return if prepared.stream {
@@ -762,6 +764,7 @@ async fn execute_prepared(
             &prepared.resolved_model,
             IMAGE_PROTOCOLS,
             &HashSet::new(),
+            None,
             now_ms(),
         ) {
             return cooldown_error(retry_at);

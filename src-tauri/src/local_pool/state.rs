@@ -13,7 +13,7 @@ use super::{
 };
 use crate::platform;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -23,7 +23,7 @@ use std::{
     },
 };
 use tauri::{Emitter, Manager, UserAttentionType};
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, AccountRecord, TokenAuthority},
     automations::{
@@ -62,6 +62,7 @@ pub struct DesktopState {
     oauth_events: DesktopOAuthEvents,
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
+    quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     setup_lock: tokio::sync::Mutex<()>,
 }
 
@@ -118,6 +119,7 @@ impl DesktopState {
             oauth_events,
             failed_usage_writes,
             failed_affinity_writes,
+            quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
             setup_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -465,6 +467,17 @@ impl DesktopState {
         self.setup_lock.lock().await
     }
 
+    pub(crate) fn quota_account_lock(&self, account_id: &str) -> Result<Arc<AsyncMutex<()>>> {
+        let mut locks = self
+            .quota_account_locks
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota account lock poisoned"))?;
+        Ok(locks
+            .entry(account_id.to_string())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone())
+    }
+
     pub async fn snapshot(&self) -> Result<LocalPoolSnapshot> {
         self.snapshot_with(&OsSecretLookup).await
     }
@@ -683,6 +696,9 @@ fn apply_account_usage_state(
 ) -> bool {
     if event.success {
         account.account.last_used_at_ms = Some(observed_at_ms);
+        if event.consecutive_failures != Some(0) {
+            return false;
+        }
         account.cooldowns.retain(|scope, _| {
             scope != "*"
                 && event
@@ -704,14 +720,32 @@ fn apply_account_usage_state(
         return false;
     }
 
+    if event.cooldown_scope.is_none()
+        && event.retry_at_ms.is_none()
+        && event.consecutive_failures.is_none()
+    {
+        return false;
+    }
+
     if let (Some(scope), Some(retry_at_ms)) = (event.cooldown_scope.as_deref(), event.retry_at_ms) {
         if valid_cooldown_scope(scope) {
-            account.cooldowns.insert(scope.to_string(), retry_at_ms);
+            let scope = if scope == "*" {
+                "*".to_string()
+            } else {
+                scope.to_ascii_lowercase()
+            };
+            account
+                .cooldowns
+                .entry(scope)
+                .and_modify(|current| *current = (*current).max(retry_at_ms))
+                .or_insert(retry_at_ms);
         }
     }
-    account.consecutive_failures = event
-        .consecutive_failures
-        .unwrap_or_else(|| account.consecutive_failures.saturating_add(1));
+    account.consecutive_failures = account.consecutive_failures.max(
+        event
+            .consecutive_failures
+            .unwrap_or_else(|| account.consecutive_failures.saturating_add(1)),
+    );
 
     let explicit_state = matches!(
         account.account.auth_state,
@@ -868,6 +902,20 @@ mod tests {
         quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
         UsageEvent, WireApi,
     };
+
+    #[test]
+    fn quota_refreshes_share_one_lock_per_account() {
+        let root = temp_root("quota-locks");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let first = state.quota_account_lock("account-1").unwrap();
+        let same = state.quota_account_lock("account-1").unwrap();
+        let other = state.quota_account_lock("account-2").unwrap();
+
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn usage_callback_persists_before_returning() {
@@ -1108,6 +1156,65 @@ mod tests {
         drop(store);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn late_success_and_older_failure_cannot_regress_persisted_cooldown_state() {
+        let mut account = account_record("account-race");
+        let failure = account_status_event("account-race", 429, Some("*"), Some(500), 2);
+        assert!(apply_account_usage_state(
+            &mut account,
+            &failure,
+            100,
+            true,
+            None,
+        ));
+
+        let mut late_success = account_success_event("account-race");
+        late_success.consecutive_failures = None;
+        assert!(!apply_account_usage_state(
+            &mut account,
+            &late_success,
+            200,
+            true,
+            Some(AccountAuthState::Active),
+        ));
+        let older_failure = account_status_event("account-race", 429, Some("*"), Some(300), 1);
+        assert!(apply_account_usage_state(
+            &mut account,
+            &older_failure,
+            250,
+            true,
+            None,
+        ));
+
+        assert_eq!(account.cooldowns.get("*"), Some(&500));
+        assert_eq!(account.consecutive_failures, 2);
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("upstream_rate_limited")
+        );
+    }
+
+    #[test]
+    fn neutral_request_failure_does_not_degrade_the_account() {
+        let mut account = account_record("account-neutral");
+        let mut event = account_status_event("account-neutral", 400, None, None, 0);
+        event.consecutive_failures = None;
+        event.error_category = Some("response_affinity_miss".into());
+
+        assert!(!apply_account_usage_state(
+            &mut account,
+            &event,
+            100,
+            true,
+            None,
+        ));
+        assert_eq!(account.account.health, AccountHealthState::Healthy);
+        assert_eq!(account.account.last_error_code, None);
+        assert!(account.cooldowns.is_empty());
+        assert_eq!(account.consecutive_failures, 0);
     }
 
     #[test]

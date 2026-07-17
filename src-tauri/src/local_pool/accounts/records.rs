@@ -15,7 +15,7 @@ use zenith_relay_core::{
 
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
+const QUOTA_STALE_GRACE_MS: u64 = 5 * 60 * 1_000;
 
 pub fn new_account_record(
     credentials: &StoredCodexCredentials,
@@ -151,10 +151,14 @@ pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {
     }
 }
 
-pub fn candidate_quota(quota: &QuotaSnapshot, now_ms: u64) -> CandidateQuota {
+pub fn candidate_quota_with_stale_after(
+    quota: &QuotaSnapshot,
+    now_ms: u64,
+    stale_after_ms: u64,
+) -> CandidateQuota {
     if quota
         .updated_at_ms
-        .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > QUOTA_STALE_AFTER_MS)
+        .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > stale_after_ms)
     {
         return CandidateQuota::Stale;
     }
@@ -170,6 +174,14 @@ pub fn candidate_quota(quota: &QuotaSnapshot, now_ms: u64) -> CandidateQuota {
         Some(remaining) => CandidateQuota::Available(remaining),
         None => CandidateQuota::Unknown,
     }
+}
+
+pub fn quota_stale_after_ms_for_interval(refresh_interval_seconds: u64) -> u64 {
+    zenith_relay_core::QUOTA_STALE_AFTER_MS.max(
+        refresh_interval_seconds
+            .saturating_mul(1_000)
+            .saturating_add(QUOTA_STALE_GRACE_MS),
+    )
 }
 
 fn hash(value: &[u8]) -> String {
@@ -301,10 +313,26 @@ mod tests {
             updated_at_ms: Some(1),
             error: None,
         };
-        assert_eq!(candidate_quota(&quota, 2), CandidateQuota::Available(2_000));
         assert_eq!(
-            candidate_quota(&quota, QUOTA_STALE_AFTER_MS + 2),
+            candidate_quota_with_stale_after(&quota, 2, zenith_relay_core::QUOTA_STALE_AFTER_MS),
+            CandidateQuota::Available(2_000)
+        );
+        assert_eq!(
+            candidate_quota_with_stale_after(
+                &quota,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS + 2,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            ),
             CandidateQuota::Stale
         );
+    }
+
+    #[test]
+    fn quota_stale_grace_tracks_a_longer_refresh_interval() {
+        assert_eq!(
+            quota_stale_after_ms_for_interval(120),
+            zenith_relay_core::QUOTA_STALE_AFTER_MS
+        );
+        assert_eq!(quota_stale_after_ms_for_interval(3_600), 65 * 60 * 1_000);
     }
 }

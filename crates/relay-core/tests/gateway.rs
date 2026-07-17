@@ -400,6 +400,7 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
         events[0].error_category.as_deref(),
         Some("upstream_terminal")
     );
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
 }
 
 #[tokio::test]
@@ -427,6 +428,7 @@ async fn truncated_success_stream_is_recorded_as_incomplete() {
         events[0].error_category.as_deref(),
         Some("stream_incomplete")
     );
+    assert_eq!(events[0].http_status, StatusCode::BAD_GATEWAY.as_u16());
 }
 
 #[tokio::test]

@@ -71,6 +71,7 @@ pub struct RuntimeAccount {
     pub excluded_models: Vec<String>,
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
+    pub quota_updated_at_ms: Option<u64>,
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
@@ -95,6 +96,7 @@ impl fmt::Debug for RuntimeAccount {
             .field("excluded_models", &self.excluded_models)
             .field("health", &self.health)
             .field("quota", &self.quota)
+            .field("quota_updated_at_ms", &self.quota_updated_at_ms)
             .field("created_at_ms", &self.created_at_ms)
             .field("last_used_at_ms", &self.last_used_at_ms)
             .field("cooldowns", &self.cooldowns)
@@ -191,6 +193,7 @@ pub struct GatewayRuntimeOptions {
     pub routing_strategy: RoutingStrategy,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
+    pub quota_stale_after_ms: u64,
     /// Optional text model used as the Responses image-generation bridge.
     /// `None` selects the cheapest known compatible model per account.
     pub image_base_model: Option<String>,
@@ -205,6 +208,7 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("routing_strategy", &self.routing_strategy)
             .field("hidden_models", &self.hidden_models)
             .field("default_service_tier", &self.default_service_tier)
+            .field("quota_stale_after_ms", &self.quota_stale_after_ms)
             .field("image_base_model", &self.image_base_model)
             .field(
                 "response_affinity_store",
@@ -221,6 +225,7 @@ impl Default for GatewayRuntimeOptions {
             routing_strategy: RoutingStrategy::Adaptive,
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
+            quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             response_affinity_store: None,
         }
@@ -419,6 +424,7 @@ impl GatewayRuntime {
 
         let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(options.routing_strategy);
+        scheduler.set_quota_stale_after_ms(options.quota_stale_after_ms);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
         for source in sources {
@@ -447,6 +453,7 @@ impl GatewayRuntime {
                 model_rules: model_rules(source.allowed_models, source.excluded_models),
                 health: CandidateHealth::Healthy,
                 quota: CandidateQuota::Unknown,
+                quota_updated_at_ms: None,
                 cooldowns: BTreeMap::new(),
                 last_used_at: source.last_used_at_ms,
                 consecutive_failures: 0,
@@ -523,6 +530,7 @@ impl GatewayRuntime {
                 model_rules: model_rules(account.allowed_models, account.excluded_models),
                 health: account.health,
                 quota: account.quota,
+                quota_updated_at_ms: account.quota_updated_at_ms,
                 cooldowns: account.cooldowns,
                 last_used_at: account.last_used_at_ms,
                 consecutive_failures: account.consecutive_failures,
@@ -849,6 +857,23 @@ impl GatewayRuntime {
             .update_candidate_availability(candidate_id, enabled, health, quota)
     }
 
+    pub fn update_candidate_availability_at(
+        &self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota: CandidateQuota,
+        quota_updated_at_ms: Option<u64>,
+    ) -> bool {
+        self.lock_scheduler().update_candidate_availability_at(
+            candidate_id,
+            enabled,
+            health,
+            quota,
+            quota_updated_at_ms,
+        )
+    }
+
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
         self.lock_scheduler().runtime_order(runtime_now_ms())
     }
@@ -860,6 +885,24 @@ impl GatewayRuntime {
     ) -> bool {
         self.lock_scheduler()
             .set_protected_candidate(candidate_id, reserve_basis_points)
+    }
+
+    pub fn clear_candidate_cooldown(&self, candidate_id: &str, model: &str) -> bool {
+        self.lock_scheduler().clear_cooldown(candidate_id, model)
+    }
+
+    pub fn set_candidate_cooldown(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        retry_at_ms: u64,
+    ) -> bool {
+        self.lock_scheduler()
+            .set_cooldown(candidate_id, model, retry_at_ms)
+    }
+
+    pub fn reset_candidate_failures(&self, candidate_id: &str) -> bool {
+        self.lock_scheduler().reset_failures(candidate_id)
     }
 
     pub(crate) fn select_and_reserve(
@@ -973,6 +1016,7 @@ impl GatewayRuntime {
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
+        response_affinity_key: Option<&str>,
         now_ms: u64,
     ) -> Option<u64> {
         self.lock_scheduler().earliest_retry_at(SelectionRequest {
@@ -980,7 +1024,7 @@ impl GatewayRuntime {
             allowed_protocols,
             scope: &key.scope,
             tried,
-            response_affinity_key: None,
+            response_affinity_key,
             now_ms,
         })
     }
@@ -1171,14 +1215,14 @@ impl GatewayRuntime {
         now_ms: u64,
         output_tokens: Option<u64>,
         latency_ms: u64,
-    ) {
+    ) -> bool {
         self.lock_scheduler().record_success_with_metrics(
             candidate_id,
             model,
             now_ms,
             output_tokens,
             latency_ms,
-        );
+        )
     }
 
     pub(crate) fn record_failure(&self, candidate_id: &str) -> u32 {

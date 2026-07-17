@@ -27,6 +27,7 @@ pub struct GatewayManager {
 impl GatewayManager {
     pub async fn start(&self, runtime: Arc<GatewayRuntime>, port: u16) -> Result<SocketAddr> {
         let mut running = self.running.lock().await;
+        prune_finished(&mut running);
         if let Some(current) = running.as_ref() {
             return Ok(current.address);
         }
@@ -72,19 +73,24 @@ impl GatewayManager {
     }
 
     pub async fn address(&self) -> Option<SocketAddr> {
-        self.running
-            .lock()
-            .await
-            .as_ref()
-            .map(|running| running.address)
+        let mut running = self.running.lock().await;
+        prune_finished(&mut running);
+        running.as_ref().map(|running| running.address)
     }
 
     pub async fn runtime(&self) -> Option<Arc<GatewayRuntime>> {
-        self.running
-            .lock()
-            .await
-            .as_ref()
-            .map(|running| running.runtime.clone())
+        let mut running = self.running.lock().await;
+        prune_finished(&mut running);
+        running.as_ref().map(|running| running.runtime.clone())
+    }
+}
+
+fn prune_finished(running: &mut Option<RunningGateway>) {
+    if running
+        .as_ref()
+        .is_some_and(|gateway| gateway.task.inner().is_finished())
+    {
+        running.take();
     }
 }
 
@@ -225,6 +231,32 @@ mod tests {
             .await
             .unwrap()
             .contains("model"));
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn finished_gateway_task_does_not_block_a_fresh_start() {
+        let manager = GatewayManager::default();
+        let runtime = test_runtime("source", "model", "key");
+        let (shutdown, _receiver) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async {});
+        timeout(Duration::from_secs(1), async {
+            while !task.inner().is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        *manager.running.lock().await = Some(RunningGateway {
+            address: "127.0.0.1:9".parse().unwrap(),
+            runtime: runtime.clone(),
+            shutdown,
+            task,
+        });
+
+        assert_eq!(manager.address().await, None);
+        let address = manager.start(runtime, 0).await.unwrap();
+        assert_ne!(address.port(), 9);
         manager.stop().await;
     }
 

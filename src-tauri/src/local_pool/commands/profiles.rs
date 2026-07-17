@@ -1,7 +1,7 @@
 use crate::{
     launcher::{launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
-        accounts::records::candidate_quota,
+        accounts::records::{candidate_quota_with_stale_after, quota_stale_after_ms_for_interval},
         commands::accounts::{
             prepare_account_credentials, sync_managed_account_profile, PreparedAccountCredentials,
         },
@@ -170,13 +170,16 @@ async fn resolve_gateway_oauth_binding(
                 }
             }
             if secrets_available {
-                let remaining =
-                    match candidate_quota(&account.account.quota, super::current_time_ms()) {
-                        CandidateQuota::Available(remaining) => remaining,
-                        CandidateQuota::Unknown
-                        | CandidateQuota::Exhausted
-                        | CandidateQuota::Stale => 0,
-                    };
+                let remaining = match candidate_quota_with_stale_after(
+                    &account.account.quota,
+                    super::current_time_ms(),
+                    quota_stale_after_ms_for_interval(gateway.quota_refresh_interval_seconds),
+                ) {
+                    CandidateQuota::Available(remaining) => remaining,
+                    CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => {
+                        0
+                    }
+                };
                 candidates.push((account.account.id.clone(), remaining));
             }
         }

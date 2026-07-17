@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
 const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
+pub const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
-pub const RESPONSE_AFFINITY_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
+pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -97,6 +98,7 @@ pub struct PoolScheduler {
     dispatches: BTreeMap<String, u64>,
     image_dispatches: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
+    quota_stale_after_ms: u64,
     created_at_ms: BTreeMap<String, u64>,
     protected_candidate: Option<(String, u64)>,
 }
@@ -121,6 +123,7 @@ impl PoolScheduler {
             dispatches: BTreeMap::new(),
             image_dispatches: BTreeMap::new(),
             routing_strategy: RoutingStrategy::Adaptive,
+            quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             created_at_ms: BTreeMap::new(),
             protected_candidate: None,
         }
@@ -132,6 +135,10 @@ impl PoolScheduler {
             self.dispatches.clear();
             self.image_dispatches.clear();
         }
+    }
+
+    pub fn set_quota_stale_after_ms(&mut self, stale_after_ms: u64) {
+        self.quota_stale_after_ms = stale_after_ms.max(1);
     }
 
     pub fn set_candidate_created_at(&mut self, candidate_id: &str, created_at_ms: u64) -> bool {
@@ -258,13 +265,29 @@ impl PoolScheduler {
         health: CandidateHealth,
         quota: CandidateQuota,
     ) -> bool {
+        self.update_candidate_availability_at(candidate_id, enabled, health, quota, None)
+    }
+
+    pub fn update_candidate_availability_at(
+        &mut self,
+        candidate_id: &str,
+        enabled: bool,
+        health: CandidateHealth,
+        quota: CandidateQuota,
+        quota_updated_at_ms: Option<u64>,
+    ) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
         let quota_changed = candidate.quota != quota;
+        let quota_timestamp_changed =
+            quota_updated_at_ms.is_some() && candidate.quota_updated_at_ms != quota_updated_at_ms;
         candidate.enabled = enabled;
         candidate.health = health;
         candidate.quota = quota;
+        if quota_changed || quota_timestamp_changed {
+            candidate.quota_updated_at_ms = quota_updated_at_ms;
+        }
         if quota_changed {
             self.dispatches.clear();
             self.image_dispatches.clear();
@@ -374,7 +397,7 @@ impl PoolScheduler {
     fn is_half_open_probe(&self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
         self.candidates
             .get(candidate_id)
-            .is_some_and(|candidate| has_expired_cooldown(&candidate.cooldowns, model, now_ms))
+            .is_some_and(|candidate| half_open_scope(candidate, model, now_ms).is_some())
     }
 
     fn diagnostics(
@@ -414,13 +437,34 @@ impl PoolScheduler {
             .count()
     }
 
-    pub fn earliest_retry_at(&self, request: SelectionRequest<'_>) -> Option<u64> {
+    pub fn earliest_retry_at(&mut self, request: SelectionRequest<'_>) -> Option<u64> {
+        if let Some(key) = request.response_affinity_key {
+            let candidate_id = self
+                .response_affinity
+                .get(key, request.now_ms)
+                .map(str::to_string)?;
+            if request.tried.contains(&candidate_id) {
+                return None;
+            }
+            let candidate = self.candidates.get(&candidate_id)?;
+            return self
+                .quota_reserve_allows(candidate, request.now_ms)
+                .then(|| {
+                    candidate.retry_at_if_configured(
+                        request.model,
+                        request.allowed_protocols,
+                        request.scope,
+                        request.now_ms,
+                    )
+                })
+                .flatten();
+        }
         self.candidates
             .values()
             .filter(|candidate| !request.tried.contains(&candidate.id))
-            .filter(|candidate| self.quota_reserve_allows(candidate))
+            .filter(|candidate| self.quota_reserve_allows(candidate, request.now_ms))
             .filter_map(|candidate| {
-                candidate.retry_at_if_visible(
+                candidate.retry_at_if_configured(
                     request.model,
                     request.allowed_protocols,
                     request.scope,
@@ -438,11 +482,10 @@ impl PoolScheduler {
         scope: &CandidateScope,
         now_ms: u64,
     ) -> bool {
-        self.quota_reserve_allows(candidate)
+        self.quota_reserve_allows(candidate, now_ms)
             && candidate.is_eligible(model, allowed_protocols, scope, now_ms)
-            && !self
-                .half_open
-                .contains(&(candidate.id.clone(), model.to_ascii_lowercase()))
+            && half_open_scope(candidate, model, now_ms)
+                .is_none_or(|scope| !self.half_open.contains(&(candidate.id.clone(), scope)))
     }
 
     pub fn bind_response_affinity(
@@ -516,15 +559,15 @@ impl PoolScheduler {
         {
             return false;
         }
-        let half_open_key = (candidate_id.to_string(), model.to_ascii_lowercase());
-        if !model.is_empty()
-            && self
+        if !model.is_empty() {
+            let half_open_key = self
                 .candidates
                 .get(candidate_id)
-                .is_some_and(|candidate| has_expired_cooldown(&candidate.cooldowns, model, now_ms))
-            && !self.half_open.insert(half_open_key)
-        {
-            return false;
+                .and_then(|candidate| half_open_scope(candidate, model, now_ms))
+                .map(|scope| (candidate_id.to_string(), scope));
+            if half_open_key.is_some_and(|key| !self.half_open.insert(key)) {
+                return false;
+            }
         }
         let in_flight = self
             .in_flight_map_mut(lane)
@@ -561,6 +604,8 @@ impl PoolScheduler {
         if let Some(model) = model {
             self.half_open
                 .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
+            self.half_open
+                .remove(&(candidate_id.to_string(), "*".to_string()));
         } else {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
@@ -594,13 +639,20 @@ impl PoolScheduler {
         };
         self.half_open
             .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
-        candidate.cooldowns.retain(|candidate_model, _| {
-            candidate_model != "*" && !candidate_model.eq_ignore_ascii_case(model)
+        candidate.cooldowns.retain(|candidate_model, retry_at_ms| {
+            let applies = candidate_model == "*" || candidate_model.eq_ignore_ascii_case(model);
+            !applies || *retry_at_ms > now_ms
         });
-        candidate.health = CandidateHealth::Healthy;
         candidate.last_used_at = Some(now_ms);
-        candidate.consecutive_failures = 0;
-        true
+        let recovered = !candidate
+            .cooldowns
+            .values()
+            .any(|retry_at_ms| *retry_at_ms > now_ms);
+        if recovered {
+            candidate.health = CandidateHealth::Healthy;
+            candidate.consecutive_failures = 0;
+        }
+        recovered
     }
 
     pub fn record_failure(&mut self, candidate_id: &str) -> Option<u32> {
@@ -609,17 +661,33 @@ impl PoolScheduler {
         Some(candidate.consecutive_failures)
     }
 
+    pub fn reset_failures(&mut self, candidate_id: &str) -> bool {
+        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+            return false;
+        };
+        candidate.consecutive_failures = 0;
+        true
+    }
+
     pub fn set_cooldown(&mut self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
-        candidate.cooldowns.insert(model.to_string(), retry_at_ms);
-        if model == "*" {
+        let scope = if model == "*" {
+            "*".to_string()
+        } else {
+            model.to_ascii_lowercase()
+        };
+        candidate
+            .cooldowns
+            .entry(scope.clone())
+            .and_modify(|current| *current = (*current).max(retry_at_ms))
+            .or_insert(retry_at_ms);
+        if scope == "*" {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
         } else {
-            self.half_open
-                .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
+            self.half_open.remove(&(candidate_id.to_string(), scope));
         }
         true
     }
@@ -786,7 +854,14 @@ impl PoolScheduler {
         right_dispatches.cmp(&left_dispatches)
     }
 
-    fn quota_reserve_allows(&self, candidate: &RuntimeCandidate) -> bool {
+    fn quota_reserve_allows(&self, candidate: &RuntimeCandidate, now_ms: u64) -> bool {
+        if matches!(candidate.quota, CandidateQuota::Available(_))
+            && candidate.quota_updated_at_ms.is_some_and(|updated_at_ms| {
+                now_ms.saturating_sub(updated_at_ms) > self.quota_stale_after_ms
+            })
+        {
+            return false;
+        }
         let Some((_, reserve)) = self
             .protected_candidate
             .as_ref()
@@ -833,6 +908,18 @@ impl PoolScheduler {
             (None, None) => Ordering::Equal,
         }
     }
+}
+
+fn half_open_scope(candidate: &RuntimeCandidate, model: &str, now_ms: u64) -> Option<String> {
+    candidate
+        .cooldowns
+        .get("*")
+        .filter(|retry_at_ms| **retry_at_ms <= now_ms)
+        .map(|_| "*".to_string())
+        .or_else(|| {
+            has_expired_cooldown(&candidate.cooldowns, model, now_ms)
+                .then(|| model.to_ascii_lowercase())
+        })
 }
 
 fn routing_tier(candidate: &RuntimeCandidate) -> i8 {
@@ -902,6 +989,7 @@ mod tests {
             model_rules: ModelRules::default(),
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,
+            quota_updated_at_ms: None,
             cooldowns: BTreeMap::new(),
             last_used_at: None,
             consecutive_failures: 0,
@@ -999,6 +1087,42 @@ mod tests {
             CandidateHealth::Healthy,
             CandidateQuota::Unknown,
         ));
+    }
+
+    #[test]
+    fn available_quota_expires_and_refreshes_without_rebuilding_the_scheduler() {
+        let mut scheduler = PoolScheduler::new();
+        let mut account = oauth_candidate("account");
+        account.quota = CandidateQuota::Available(5_000);
+        account.quota_updated_at_ms = Some(100);
+        scheduler.upsert(account);
+        let scope = CandidateScope::default();
+        let tried = HashSet::new();
+        let request = |now_ms| SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            now_ms,
+        };
+
+        assert!(scheduler
+            .select(request(100 + QUOTA_STALE_AFTER_MS))
+            .is_some());
+        assert!(scheduler
+            .select(request(101 + QUOTA_STALE_AFTER_MS))
+            .is_none());
+        assert!(scheduler.update_candidate_availability_at(
+            "account",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Available(5_000),
+            Some(101 + QUOTA_STALE_AFTER_MS),
+        ));
+        assert!(scheduler
+            .select(request(101 + QUOTA_STALE_AFTER_MS))
+            .is_some());
     }
 
     #[test]
@@ -1540,11 +1664,20 @@ mod tests {
         scheduler.upsert(candidate);
         assert_eq!(select(&mut scheduler, &HashSet::new()), None);
 
-        assert!(scheduler.record_success("candidate", "GPT-5", 90));
+        assert!(!scheduler.record_success("candidate", "GPT-5", 90));
         assert_eq!(
             scheduler.candidate("candidate").unwrap().last_used_at,
             Some(90)
         );
+        assert_eq!(
+            scheduler
+                .candidate("candidate")
+                .unwrap()
+                .cooldowns
+                .get("gpt-5"),
+            Some(&101)
+        );
+        assert!(scheduler.record_success("candidate", "GPT-5", 102));
         assert!(scheduler
             .candidate("candidate")
             .unwrap()
@@ -1576,6 +1709,56 @@ mod tests {
     }
 
     #[test]
+    fn cooldown_updates_never_shorten_an_existing_retry_window() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("candidate"));
+        assert!(scheduler.set_cooldown("candidate", "gpt-5", 10_000));
+        assert!(scheduler.set_cooldown("candidate", "GPT-5", 2_000));
+        assert_eq!(
+            scheduler
+                .candidate("candidate")
+                .unwrap()
+                .cooldowns
+                .get("gpt-5"),
+            Some(&10_000)
+        );
+        assert_eq!(scheduler.record_failure("candidate"), Some(1));
+        assert!(scheduler.reset_failures("candidate"));
+        assert_eq!(
+            scheduler
+                .candidate("candidate")
+                .unwrap()
+                .consecutive_failures,
+            0
+        );
+    }
+
+    #[test]
+    fn affinity_retry_time_uses_only_the_response_owner() {
+        let mut scheduler = PoolScheduler::new();
+        let mut owner = candidate("owner");
+        owner.cooldowns.insert("gpt-5".into(), 300);
+        scheduler.upsert(owner);
+        let mut other = candidate("other");
+        other.cooldowns.insert("gpt-5".into(), 200);
+        scheduler.upsert(other);
+        assert!(scheduler.bind_response_affinity("response", "owner", 100));
+
+        let scope = CandidateScope::default();
+        assert_eq!(
+            scheduler.earliest_retry_at(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: Some("response"),
+                now_ms: 100,
+            }),
+            Some(300)
+        );
+    }
+
+    #[test]
     fn expired_cooldown_allows_only_one_half_open_probe_per_model() {
         let mut scheduler = PoolScheduler::new();
         let mut recovering = candidate("recovering");
@@ -1598,6 +1781,32 @@ mod tests {
         assert!(scheduler.select(request()).is_none());
         assert!(scheduler.release_for(&first.candidate_id, Some("gpt-5")));
         assert!(scheduler.select(request()).unwrap().half_open_probe);
+    }
+
+    #[test]
+    fn expired_global_cooldown_allows_only_one_probe_across_models() {
+        let mut scheduler = PoolScheduler::new();
+        let mut recovering = candidate("recovering");
+        recovering.models.insert("gpt-6".to_string());
+        recovering.cooldowns.insert("*".to_string(), 100);
+        scheduler.upsert(recovering);
+        let scope = CandidateScope::default();
+        let tried = HashSet::new();
+        let request = |model| SelectionRequest {
+            model,
+            allowed_protocols: &[WireApi::Responses],
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            now_ms: 101,
+        };
+
+        let first = scheduler.select(request("gpt-5")).unwrap();
+        assert!(first.half_open_probe);
+        assert!(scheduler.reserve_for(&first.candidate_id, "gpt-5", 101));
+        assert!(scheduler.select(request("gpt-6")).is_none());
+        assert!(scheduler.release_for(&first.candidate_id, Some("gpt-5")));
+        assert!(scheduler.select(request("gpt-6")).unwrap().half_open_probe);
     }
 
     #[test]
@@ -1676,6 +1885,22 @@ mod tests {
                 now_ms: 100,
             }),
             Some(200)
+        );
+
+        let mut exhausted = candidate("exhausted");
+        exhausted.quota = CandidateQuota::Exhausted;
+        exhausted.cooldowns.insert("*".to_string(), 250);
+        scheduler.upsert(exhausted);
+        assert_eq!(
+            scheduler.earliest_retry_at(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::from(["sooner".to_string()]),
+                response_affinity_key: None,
+                now_ms: 100,
+            }),
+            Some(250)
         );
     }
 

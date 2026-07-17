@@ -15,7 +15,10 @@ use super::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
         credentials::CredentialStore,
         proxy::{effective_proxy_config, ProxyRefreshClient},
-        records::{candidate_health, candidate_quota, CODEX_RESPONSES_URL},
+        records::{
+            candidate_health, candidate_quota_with_stale_after, quota_stale_after_ms_for_interval,
+            CODEX_RESPONSES_URL,
+        },
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
@@ -50,6 +53,8 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             store.gateway().clone(),
         )
     };
+    let quota_stale_after_ms =
+        quota_stale_after_ms_for_interval(settings.quota_refresh_interval_seconds);
     let mut sources = Vec::new();
     for source in source_records {
         let Some(api_key) = secret_store::load(&source.secret_ref)? else {
@@ -101,7 +106,11 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             .await
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
         let health = candidate_health(&account.account);
-        let quota = candidate_quota(&account.account.quota, current_time_ms());
+        let quota = candidate_quota_with_stale_after(
+            &account.account.quota,
+            current_time_ms(),
+            quota_stale_after_ms,
+        );
         accounts.push(RuntimeAccount {
             id: account_id.clone(),
             source_id: account.account.source_id,
@@ -116,6 +125,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             excluded_models: account.excluded_models,
             health,
             quota,
+            quota_updated_at_ms: account.account.quota.updated_at_ms,
             created_at_ms: account.account.created_at_ms,
             last_used_at_ms: account.account.last_used_at_ms,
             cooldowns: account.cooldowns,
@@ -172,6 +182,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             routing_strategy: settings.routing_strategy,
             hidden_models: settings.hidden_models,
             default_service_tier: settings.default_service_tier,
+            quota_stale_after_ms,
             image_base_model: settings.image_base_model.clone(),
             response_affinity_store: Some(state.response_affinity_store()),
         },
@@ -245,7 +256,7 @@ async fn sync_refreshed_account_or_rollback(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let (enabled, health, quota) = {
+    let (enabled, health, quota, quota_updated_at_ms, global_cooldown, consecutive_failures) = {
         let store = state.store()?;
         let account = store
             .account(account_id)
@@ -255,10 +266,31 @@ async fn sync_refreshed_account_or_rollback(
                 && account.account.in_pool
                 && account_routing_allowed(store.gateway(), &account.account.subscription),
             candidate_health(&account.account),
-            candidate_quota(&account.account.quota, current_time_ms()),
+            candidate_quota_with_stale_after(
+                &account.account.quota,
+                current_time_ms(),
+                quota_stale_after_ms_for_interval(store.gateway().quota_refresh_interval_seconds),
+            ),
+            account.account.quota.updated_at_ms,
+            account.cooldowns.get("*").copied(),
+            account.consecutive_failures,
         )
     };
-    if runtime.update_candidate_availability(account_id, enabled, health, quota) {
+    if runtime.update_candidate_availability_at(
+        account_id,
+        enabled,
+        health,
+        quota,
+        quota_updated_at_ms,
+    ) {
+        if let Some(retry_at_ms) = global_cooldown {
+            runtime.set_candidate_cooldown(account_id, "*", retry_at_ms);
+        } else {
+            runtime.clear_candidate_cooldown(account_id, "*");
+        }
+        if consecutive_failures == 0 {
+            runtime.reset_candidate_failures(account_id);
+        }
         return Ok(());
     }
     sync_accounts_or_rollback(state, old_accounts, old_keys).await

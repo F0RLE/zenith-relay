@@ -680,12 +680,13 @@ async fn execute_account_endpoint(
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
-                    let state = apply_status_cooldown(
+                    let state = apply_status_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         &route.source_model,
                         status,
                         &response_headers,
+                        Some(&bytes),
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
@@ -709,15 +710,15 @@ async fn execute_account_endpoint(
             None,
             started.elapsed().as_millis() as u64,
         );
-        event.consecutive_failures = Some(0);
         populate_tokens(&mut event, &bytes);
-        runtime.record_success_with_metrics(
+        let recovered = runtime.record_success_with_metrics(
             &route.candidate_id,
             &route.source_model,
             now_ms(),
             event.output_tokens,
             event.generation_ms.unwrap_or(event.latency_ms),
         );
+        event.consecutive_failures = recovered.then_some(0);
         emit_usage(&runtime, event);
         drop(lease);
         return proxy_response(status, &response_headers, Body::from(bytes));
@@ -730,6 +731,7 @@ async fn execute_account_endpoint(
             &resolved_model,
             &[WireApi::Responses],
             &account_only_exclusions,
+            response_affinity_key.as_deref(),
             now_ms(),
         ) {
             return cooldown_error(retry_at);
@@ -905,6 +907,7 @@ async fn execute_request(
                     &resolved_model,
                     candidate_protocols(wire_api),
                     &tried,
+                    response_affinity_key.as_deref(),
                     now_ms(),
                 ) {
                     return cooldown_error(retry_at);
@@ -1111,7 +1114,7 @@ async fn execute_request(
                 false,
             );
             if affinity_miss || retryable_status(status, has_previous_response_id) {
-                let _ = crate::runtime::collect_limited(
+                let body = crate::runtime::collect_limited(
                     upstream,
                     crate::runtime::MAX_NON_STREAM_BODY_BYTES,
                 )
@@ -1132,12 +1135,13 @@ async fn execute_request(
                     started.elapsed().as_millis() as u64,
                 );
                 if !affinity_miss {
-                    let state = apply_status_cooldown(
+                    let state = apply_status_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         &source_model,
                         status,
                         &response_headers,
+                        body.as_deref().ok(),
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
@@ -1305,15 +1309,15 @@ async fn execute_request(
                 None,
                 started.elapsed().as_millis() as u64,
             );
-            event.consecutive_failures = Some(0);
             populate_tokens(&mut event, &bytes);
-            runtime.record_success_with_metrics(
+            let recovered = runtime.record_success_with_metrics(
                 &route.candidate_id,
                 &source_model,
                 now_ms(),
                 event.output_tokens,
                 event.generation_ms.unwrap_or(event.latency_ms),
             );
+            event.consecutive_failures = recovered.then_some(0);
             emit_usage(&runtime, event);
             let completed_response_id = response_id_from_bytes(&bytes);
             runtime.bind_response_affinity(
@@ -1344,14 +1348,14 @@ async fn execute_request(
                 let completion: CompletionCallback = Arc::new(move |event, response_id| {
                     lease.release();
                     if event.success {
-                        completion_runtime.record_success_with_metrics(
+                        let recovered = completion_runtime.record_success_with_metrics(
                             &completion_source,
                             &completion_model,
                             now_ms(),
                             event.output_tokens,
                             event.generation_ms.unwrap_or(event.latency_ms),
                         );
-                        event.consecutive_failures = Some(0);
+                        event.consecutive_failures = recovered.then_some(0);
                         completion_runtime.bind_response_affinity(
                             response_id,
                             &completion_source,
@@ -1448,6 +1452,7 @@ async fn execute_request(
             &resolved_model,
             candidate_protocols(wire_api),
             &HashSet::new(),
+            response_affinity_key.as_deref(),
             now_ms(),
         ) {
             return cooldown_error(retry_at);
@@ -2386,12 +2391,40 @@ pub(super) fn contains_function_call_output(value: &Value) -> bool {
     }
 }
 
-fn apply_status_cooldown(
+fn apply_status_cooldown_with_body(
     runtime: &GatewayRuntime,
     candidate_id: &str,
     model: &str,
     status: StatusCode,
     headers: &reqwest::header::HeaderMap,
+    body: Option<&[u8]>,
+    half_open_probe: bool,
+) -> FailureState {
+    let hint = body.map(rate_limit_body_hint).unwrap_or_default();
+    apply_status_cooldown_with_hint(
+        runtime,
+        candidate_id,
+        model,
+        status,
+        headers,
+        hint,
+        half_open_probe,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RateLimitBodyHint {
+    retry_after_ms: Option<u64>,
+    global: bool,
+}
+
+fn apply_status_cooldown_with_hint(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    model: &str,
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    hint: RateLimitBodyHint,
     half_open_probe: bool,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
@@ -2406,11 +2439,14 @@ fn apply_status_cooldown(
             ("*", 30 * 60_000)
         }
         StatusCode::NOT_FOUND => (model, TRANSIENT_COOLDOWN_MS),
-        StatusCode::TOO_MANY_REQUESTS => (
-            model,
-            retry_after_ms(headers, now_system)
-                .unwrap_or_else(|| exponential_backoff_ms(consecutive_failures)),
-        ),
+        StatusCode::TOO_MANY_REQUESTS => {
+            let duration_ms = rate_limit_cooldown_ms(
+                retry_after_ms(headers, now_system),
+                hint.retry_after_ms,
+                consecutive_failures,
+            );
+            (if hint.global { "*" } else { model }, duration_ms)
+        }
         _ => ("*", TRANSIENT_COOLDOWN_MS),
     };
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
@@ -2420,6 +2456,99 @@ fn apply_status_cooldown(
         cooldown_scope: scope.to_string(),
         retry_at_ms,
         consecutive_failures,
+    }
+}
+
+fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
+    rate_limit_body_hint_at(body, SystemTime::now())
+}
+
+fn rate_limit_body_hint_at(body: &[u8], now: SystemTime) -> RateLimitBodyHint {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return RateLimitBodyHint::default();
+    };
+    rate_limit_body_hint_value(&value, now)
+}
+
+fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> RateLimitBodyHint {
+    let retry_after_ms = rate_limit_reset_delay_ms(value, now).or_else(|| {
+        [
+            "/resets_in_seconds",
+            "/error/resets_in_seconds",
+            "/body/error/resets_in_seconds",
+            "/response/error/resets_in_seconds",
+        ]
+        .into_iter()
+        .find_map(|path| value.pointer(path).and_then(json_u64))
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .filter(|duration_ms| *duration_ms > 0)
+        .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
+    });
+    let global = [
+        "/type",
+        "/code",
+        "/error/type",
+        "/error/code",
+        "/body/error/type",
+        "/body/error/code",
+        "/response/error/type",
+        "/response/error/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::to_ascii_lowercase)
+    .any(|kind| {
+        kind.contains("usage_limit")
+            || kind.contains("quota")
+            || matches!(
+                kind.as_str(),
+                "rate_limit_reached" | "websocket_connection_limit_reached"
+            )
+    });
+    RateLimitBodyHint {
+        retry_after_ms,
+        global,
+    }
+}
+
+fn rate_limit_reset_delay_ms(value: &Value, now: SystemTime) -> Option<u64> {
+    let reset_at = [
+        "/resets_at",
+        "/error/resets_at",
+        "/body/error/resets_at",
+        "/response/error/resets_at",
+    ]
+    .into_iter()
+    .find_map(|path| value.pointer(path).and_then(json_u64))?;
+    let reset_seconds = if reset_at > 10_000_000_000 {
+        reset_at / 1_000
+    } else {
+        reset_at
+    };
+    let now_seconds = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    reset_seconds
+        .checked_sub(now_seconds)
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .filter(|duration_ms| *duration_ms > 0)
+        .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+}
+
+fn rate_limit_cooldown_ms(
+    header_delay_ms: Option<u64>,
+    body_delay_ms: Option<u64>,
+    consecutive_failures: u32,
+) -> u64 {
+    match (header_delay_ms, body_delay_ms) {
+        (Some(header), Some(body)) => header.max(body),
+        (Some(header), None) => header,
+        (None, Some(body)) => body,
+        (None, None) => exponential_backoff_ms(consecutive_failures),
     }
 }
 
@@ -2473,6 +2602,7 @@ fn half_open_backoff_ms(duration_ms: u64, consecutive_failures: u32, half_open_p
     if !half_open_probe {
         return duration_ms;
     }
+    let duration_ms = duration_ms.max(1_000);
     let exponent = consecutive_failures.saturating_sub(1).min(31);
     duration_ms
         .saturating_mul(1_u64.checked_shl(exponent).unwrap_or(u64::MAX))
@@ -2707,6 +2837,12 @@ impl<S> UsageStream<S> {
         }
         if let Some(category) = category {
             event.error_category = Some(category.to_string());
+        }
+        if !event.success
+            && event.http_status < 400
+            && event.error_category.as_deref() != Some("client_cancelled")
+        {
+            event.http_status = StatusCode::BAD_GATEWAY.as_u16();
         }
         event.latency_ms = self.started.elapsed().as_millis() as u64;
         event.generation_ms = event
@@ -3417,6 +3553,54 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_body_hint_uses_reset_time_and_marks_usage_limits_global() {
+        let hint = rate_limit_body_hint_at(
+            br#"{"error":{"type":"usage_limit_reached","resets_at":1700000120,"resets_in_seconds":1}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(hint.retry_after_ms, Some(120_000));
+        assert!(hint.global);
+    }
+
+    #[test]
+    fn rate_limit_body_hint_accepts_relative_reset_seconds() {
+        let hint = rate_limit_body_hint_at(
+            br#"{"error":{"code":"rate_limit","resets_in_seconds":"17"}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(hint.retry_after_ms, Some(17_000));
+        assert!(!hint.global);
+    }
+
+    #[test]
+    fn rate_limit_body_hint_accepts_top_level_quota_variants() {
+        let hint = rate_limit_body_hint_at(
+            br#"{"code":"rate_limit_reached","resets_in_seconds":9}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(hint.retry_after_ms, Some(9_000));
+        assert!(hint.global);
+    }
+
+    #[test]
+    fn websocket_connection_limit_is_account_global() {
+        let hint = rate_limit_body_hint_at(
+            br#"{"error":{"code":"websocket_connection_limit_reached"}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert!(hint.global);
+    }
+
+    #[test]
+    fn rate_limit_delay_uses_the_stronger_hint_and_keeps_explicit_zero() {
+        assert_eq!(
+            rate_limit_cooldown_ms(Some(1_000), Some(120_000), 1),
+            120_000
+        );
+        assert_eq!(rate_limit_cooldown_ms(Some(0), None, 5), 0);
+    }
+
+    #[test]
     fn no_header_rate_limit_backoff_is_exponential_and_capped() {
         assert_eq!(exponential_backoff_ms(1), 1_000);
         assert_eq!(exponential_backoff_ms(2), 2_000);
@@ -3426,6 +3610,7 @@ mod tests {
 
     #[test]
     fn failed_half_open_probes_back_off_without_shortening_retry_after() {
+        assert_eq!(half_open_backoff_ms(0, 2, true), 2_000);
         assert_eq!(half_open_backoff_ms(60_000, 2, false), 60_000);
         assert_eq!(half_open_backoff_ms(60_000, 2, true), 120_000);
         assert_eq!(half_open_backoff_ms(60_000, 3, true), 240_000);

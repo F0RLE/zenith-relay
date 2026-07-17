@@ -1,6 +1,7 @@
 use super::{
-    apply_cooldown, apply_failure_state, apply_status_cooldown, apply_usage, emit_usage,
-    has_output_delta, invalid_host, now_ms, unauthorized, usage_event, CODEX_RESPONSES_LITE_HEADER,
+    apply_cooldown, apply_failure_state, apply_status_cooldown_with_hint, apply_usage, emit_usage,
+    has_output_delta, invalid_host, now_ms, rate_limit_body_hint, rate_limit_body_hint_value,
+    unauthorized, usage_event, RateLimitBodyHint, CODEX_RESPONSES_LITE_HEADER,
     TRANSIENT_COOLDOWN_MS,
 };
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
@@ -342,13 +343,15 @@ async fn connect_upstream(
         let response_headers = upgrade.headers().clone();
         if status != StatusCode::SWITCHING_PROTOCOLS {
             let response = upgrade.into_inner();
-            let _ = timeout(
+            let body = timeout(
                 UPSTREAM_CONNECT_TIMEOUT,
                 crate::runtime::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
             )
-            .await;
+            .await
+            .ok()
+            .and_then(Result::ok);
             let failure = GatewayFailure::upstream_status(status);
-            record_connect_failure(
+            record_connect_failure_with_hint(
                 runtime,
                 key,
                 &route,
@@ -357,6 +360,9 @@ async fn connect_upstream(
                 started,
                 &failure,
                 Some(&response_headers),
+                body.as_deref()
+                    .map(rate_limit_body_hint)
+                    .unwrap_or_default(),
             );
             last_failure = Some(failure);
             continue;
@@ -400,7 +406,7 @@ async fn connect_upstream(
         };
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(false) {
-                let status = terminal.status.unwrap_or(StatusCode::BAD_GATEWAY);
+                let status = terminal_failure_status(terminal.status);
                 let affinity_miss = super::recoverable_response_affinity_miss(
                     status,
                     request.has_previous_response_id(),
@@ -420,7 +426,7 @@ async fn connect_upstream(
                             runtime, key, &route, &request, attempt, started, status,
                         );
                     } else {
-                        record_connect_failure(
+                        record_connect_failure_with_hint(
                             runtime,
                             key,
                             &route,
@@ -429,6 +435,7 @@ async fn connect_upstream(
                             started,
                             &failure,
                             Some(&terminal.headers),
+                            terminal.body_hint,
                         );
                     }
                     last_failure = Some(failure);
@@ -476,7 +483,8 @@ async fn connect_upstream(
         key,
         &request.resolved_model,
         WEBSOCKET_PROTOCOLS,
-        &tried,
+        &HashSet::new(),
+        request.response_affinity_key.as_deref(),
         now_ms(),
     ) {
         return Err(GatewayFailure::cooldown(retry_at_ms));
@@ -576,13 +584,39 @@ fn record_connect_failure(
     failure: &GatewayFailure,
     headers: Option<&HeaderMap>,
 ) {
+    record_connect_failure_with_hint(
+        runtime,
+        key,
+        route,
+        request,
+        attempt,
+        started,
+        failure,
+        headers,
+        RateLimitBodyHint::default(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_connect_failure_with_hint(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    route: &ExecutorRoute,
+    request: &ClientRequest,
+    attempt: u16,
+    started: Instant,
+    failure: &GatewayFailure,
+    headers: Option<&HeaderMap>,
+    hint: RateLimitBodyHint,
+) {
     let state = match headers {
-        Some(headers) => apply_status_cooldown(
+        Some(headers) => apply_status_cooldown_with_hint(
             runtime,
             &route.candidate_id,
             &route.source_model,
             failure.status,
             headers,
+            hint,
             route.half_open_probe,
         ),
         None => apply_cooldown(
@@ -898,14 +932,25 @@ async fn start_next_request(
         .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
     {
         let tried = HashSet::new();
-        let Some((selected, lease)) = runtime.select_and_reserve(
+        let selected = runtime.select_and_reserve(
             key,
             &request.resolved_model,
             WEBSOCKET_PROTOCOLS,
             &tried,
             request.response_affinity_key.as_deref(),
             now_ms(),
-        ) else {
+        );
+        let Some((selected, lease)) = selected else {
+            if let Some(retry_at_ms) = runtime.earliest_retry_at(
+                key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &tried,
+                request.response_affinity_key.as_deref(),
+                now_ms(),
+            ) {
+                return Err(GatewayFailure::cooldown(retry_at_ms));
+            }
             return Err(GatewayFailure::unavailable());
         };
         if selected.candidate_id != state.upstream_candidate_id {
@@ -1042,6 +1087,7 @@ struct EventTerminal {
     outcome: Option<bool>,
     status: Option<StatusCode>,
     headers: HeaderMap,
+    body_hint: RateLimitBodyHint,
     previous_response_not_found: bool,
 }
 
@@ -1080,6 +1126,7 @@ fn event_terminal(value: &Value) -> EventTerminal {
         outcome,
         status: websocket_status(value),
         headers: websocket_retry_headers(value),
+        body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
         previous_response_not_found: super::previous_response_not_found_value(value),
     }
 }
@@ -1104,7 +1151,7 @@ fn finish_terminal(
     in_flight.event.success = success;
     if success {
         state.last_response_id = in_flight.response_id.clone();
-        runtime.record_success_with_metrics(
+        let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
             now_ms(),
@@ -1119,17 +1166,18 @@ fn finish_terminal(
             &in_flight.route.candidate_id,
             now_ms(),
         );
-        in_flight.event.consecutive_failures = Some(0);
+        in_flight.event.consecutive_failures = recovered.then_some(0);
     } else {
-        let status = terminal.status.unwrap_or(StatusCode::BAD_GATEWAY);
+        let status = terminal_failure_status(terminal.status);
         in_flight.event.http_status = status.as_u16();
         in_flight.event.error_category = Some(websocket_error_category(status).to_string());
-        let failure_state = apply_status_cooldown(
+        let failure_state = apply_status_cooldown_with_hint(
             runtime,
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
             status,
             &terminal.headers,
+            terminal.body_hint,
             in_flight.route.half_open_probe,
         );
         apply_failure_state(&mut in_flight.event, failure_state);
@@ -1204,9 +1252,17 @@ fn websocket_status(value: &Value) -> Option<StatusCode> {
     .find_map(|value| {
         value
             .as_u64()
+            .or_else(|| value.as_str().and_then(|status| status.trim().parse().ok()))
             .and_then(|status| u16::try_from(status).ok())
+            .filter(|status| *status > 0)
             .and_then(|status| StatusCode::from_u16(status).ok())
     })
+}
+
+fn terminal_failure_status(status: Option<StatusCode>) -> StatusCode {
+    status
+        .filter(|status| !status.is_success())
+        .unwrap_or(StatusCode::BAD_GATEWAY)
 }
 
 fn websocket_retry_headers(value: &Value) -> HeaderMap {
@@ -1431,7 +1487,10 @@ impl GatewayFailure {
 
 #[cfg(test)]
 mod tests {
-    use super::{incomplete_requires_cooldown, websocket_reset_delay_seconds};
+    use super::{
+        incomplete_requires_cooldown, terminal_failure_status, websocket_reset_delay_seconds,
+    };
+    use reqwest::StatusCode;
     use serde_json::json;
 
     #[test]
@@ -1451,6 +1510,27 @@ mod tests {
         assert_eq!(
             websocket_reset_delay_seconds(&value, 1_700_000_000),
             Some(120)
+        );
+    }
+
+    #[test]
+    fn terminal_errors_never_keep_a_success_status() {
+        assert_eq!(
+            terminal_failure_status(Some(StatusCode::OK)),
+            StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            terminal_failure_status(Some(StatusCode::TOO_MANY_REQUESTS)),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    #[test]
+    fn websocket_status_accepts_string_status_codes() {
+        let value = serde_json::json!({"type": "error", "status": "429"});
+        assert_eq!(
+            super::websocket_status(&value),
+            Some(StatusCode::TOO_MANY_REQUESTS)
         );
     }
 }

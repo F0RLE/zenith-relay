@@ -14,6 +14,7 @@ pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
     mut data: CodexQuotaRefreshData,
 ) -> Result<AppliedQuota, &'static str> {
+    let observed_at_ms = data.quota.observed_at_ms;
     let previous = account.account.quota.clone();
     data.quota
         .preserve_subscription_metadata(&account.account.subscription);
@@ -39,7 +40,53 @@ pub fn apply_quota_success(
         AccountHealthState::Healthy
     };
     account.account.last_error_code = None;
+    if account.account.health == AccountHealthState::Healthy {
+        if let Some(retry_at_ms) =
+            exhausted_quota_retry_at(account, data.limit_reached, observed_at_ms)
+        {
+            account
+                .cooldowns
+                .entry("*".into())
+                .and_modify(|current| *current = (*current).max(retry_at_ms))
+                .or_insert(retry_at_ms);
+        } else {
+            account.cooldowns.remove("*");
+        }
+        account.consecutive_failures = 0;
+    }
     Ok(AppliedQuota { transitions })
+}
+
+fn exhausted_quota_retry_at(
+    account: &LocalAccountRecord,
+    limit_reached: Option<bool>,
+    now_ms: u64,
+) -> Option<u64> {
+    let reset_at_ms = account
+        .account
+        .quota
+        .primary
+        .iter()
+        .chain(account.account.quota.secondary.iter())
+        .filter(|window| window.available_basis_points == Some(0))
+        .filter_map(|window| window.reset_at_ms)
+        .filter(|reset_at_ms| *reset_at_ms > now_ms)
+        .max();
+    reset_at_ms.or_else(|| {
+        (limit_reached == Some(true))
+            .then(|| {
+                account
+                    .account
+                    .quota
+                    .primary
+                    .iter()
+                    .chain(account.account.quota.secondary.iter())
+                    .filter_map(|window| window.reset_at_ms)
+                    .filter(|reset_at_ms| *reset_at_ms > now_ms)
+                    .max()
+            })
+            .flatten()
+    })
 }
 
 pub fn apply_quota_failure(
@@ -183,5 +230,39 @@ mod tests {
                 .available_basis_points,
             Some(9_500)
         );
+    }
+
+    #[test]
+    fn successful_quota_refresh_clears_only_global_failure_state() {
+        let mut account = account();
+        account.cooldowns.insert("*".into(), 60_000);
+        account.cooldowns.insert("gpt-test".into(), 30_000);
+        account.consecutive_failures = 3;
+
+        apply_quota_success(&mut account, refresh(40.0, 10)).unwrap();
+
+        assert!(!account.cooldowns.contains_key("*"));
+        assert_eq!(account.cooldowns.get("gpt-test"), Some(&30_000));
+        assert_eq!(account.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn exhausted_window_keeps_the_latest_reset_as_global_retry_time() {
+        let mut account = account();
+        let mut data = refresh(0.0, 10);
+        data.quota.primary.as_mut().unwrap().reset =
+            Some(ResetTime::AbsoluteUnixMilliseconds(5_000));
+        data.quota.secondary = Some(QuotaWindowInput {
+            kind: QuotaWindowKind::Secondary,
+            available_percent: Some(30.0),
+            explicitly_full: Some(false),
+            reset: Some(ResetTime::AbsoluteUnixMilliseconds(10_000)),
+            window_minutes: Some(10_080),
+            provider_cycle_id: None,
+            observed_at_ms: 10,
+        });
+        apply_quota_success(&mut account, data).unwrap();
+
+        assert_eq!(account.cooldowns.get("*"), Some(&5_000));
     }
 }
