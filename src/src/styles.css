@@ -2425,7 +2425,20 @@ textarea {
 .pool-header-actions {
   display: flex;
   align-items: center;
+  gap: 5px;
+}
+
+.pool-header-actions .relay-button {
+  min-height: 32px;
   gap: 6px;
+  padding: 0 10px;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.pool-header-actions .relay-button svg {
+  width: 14px;
+  height: 14px;
 }
 
 .relay-button,
@@ -6594,27 +6607,24 @@ textarea {
 .setup-language-floating {
   position: absolute;
   z-index: 2;
-  top: 10px;
+  top: 12px;
   right: 16px;
-  padding: 3px 4px 3px 8px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--relay-surface) 92%, transparent);
-  box-shadow: var(--relay-shadow-soft);
 }
 
-.language-select {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--relay-muted);
-  font-size: 12px;
+.setup-language-menu .relay-option-trigger {
+  width: 82px;
+  min-width: 82px;
+  min-height: 30px;
+  gap: 6px;
+  padding: 0 7px;
+  background: color-mix(in srgb, var(--relay-surface) 94%, transparent);
 }
 
-.language-select .relay-option-trigger {
-  width: auto;
-  min-width: 104px;
-  min-height: 28px;
+.setup-language-menu .relay-option-trigger > span {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0;
+  text-align: center;
 }
 
 .product-intro {
@@ -7184,12 +7194,6 @@ input[type="password"] {
 @media (max-width: 1023px) {
   .relay-page { padding: 0 16px 24px; }
   .relay-page-header { min-height: 64px; }
-  .relay-page-actions .relay-button[data-action="pool-toggle"] {
-    width: 34px;
-    flex: 0 0 34px;
-    padding: 0;
-  }
-  .relay-page-actions .relay-button[data-action="pool-toggle"] span { display: none; }
   .metric-band { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .pool-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .runtime-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -7299,10 +7303,6 @@ input[type="password"] {
 
   .setup-language-floating {
     right: 10px;
-  }
-
-  .language-select > span {
-    display: none;
   }
 
   .product-intro {

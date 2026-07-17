@@ -86,6 +86,12 @@ test("remote quick setup requires explicit consent for plain HTTP", async ({ pag
 test("quick setup can switch to Russian without untranslated keys", async ({ page }) => {
   await installTauriMock(page, { onboarding: false, locale: "ru", populated: true });
   await page.goto("/");
+  await page.getByRole("button", { name: "Язык: Русский" }).click();
+  await expect(page.getByRole("listbox", { name: "Язык" }).getByRole("option")).toHaveCount(2);
+  await page.getByRole("option", { name: "English" }).click();
+  await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
+  await page.getByRole("button", { name: "Language: English" }).click();
+  await page.getByRole("option", { name: "Русский" }).click();
   await expect(page.getByRole("button", { name: "Приступить" })).toBeVisible();
   await expect(page.locator("body")).not.toContainText(/(?:common|onboarding|modes)\.[a-z]/);
 });

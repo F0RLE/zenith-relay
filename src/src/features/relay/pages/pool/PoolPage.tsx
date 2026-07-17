@@ -27,11 +27,6 @@ export function PoolPage() {
   useEffect(() => {
     if ((view === "keys" && !supportsKeys) || (view === "models" && !supportsModels)) setView("members");
   }, [view, supportsKeys, supportsModels]);
-  const viewAction = view === "keys"
-    ? <Button variant="secondary" icon={<KeyRound aria-hidden />} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : undefined} onClick={() => setCreateKey(true)}>{t("keys.create")}</Button>
-    : view === "members"
-      ? <Button variant="secondary" icon={<Plus aria-hidden />} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : undefined} onClick={() => setAddMembers(true)}>{t("pool.addMember")}</Button>
-      : null;
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
@@ -45,11 +40,16 @@ export function PoolPage() {
   }, true);
   const running = Boolean(runtime?.gateway.running);
   const poolToggleLabel = running ? t("pool.stop") : t("pool.start");
+  const poolToggleShortLabel = running ? t("pool.stopShort") : t("pool.startShort");
   const action = <div className="pool-header-actions">
-    {viewAction}
+    {view === "keys"
+      ? <Button data-action="pool-add" variant="secondary" icon={<KeyRound aria-hidden />} aria-label={t("keys.create")} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : t("keys.create")} onClick={() => setCreateKey(true)}>{t("keys.create")}</Button>
+      : view === "members"
+        ? <Button data-action="pool-add" variant="secondary" icon={<Plus aria-hidden />} aria-label={t("pool.addMember")} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : t("pool.addMember")} onClick={() => setAddMembers(true)}>{t("pool.addMemberShort")}</Button>
+        : null}
     {mode === "local" ? <>
-      <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} disabled={!running && !poolReady} title={!running && !poolReady ? t("pool.startUnavailable") : poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleLabel}</Button>
-      <Button variant="primary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "pool-switch"} disabled={!running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !running ? t("pool.start") : undefined} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPT")}</Button>
+      <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} disabled={!running && !poolReady} title={!running && !poolReady ? t("pool.startUnavailable") : poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleShortLabel}</Button>
+      <Button data-action="pool-switch" variant="primary" icon={<ArrowRightLeft aria-hidden />} aria-label={t("pool.switchChatGPT")} busy={busy === "pool-switch"} disabled={!running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !running ? t("pool.start") : t("pool.switchChatGPT")} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPTShort")}</Button>
     </> : null}
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];

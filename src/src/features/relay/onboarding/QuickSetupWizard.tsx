@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Cloud, Laptop, Loader2, LogIn, Server, SkipForward, Upload } from "lucide-react";
+import { ArrowLeft, Check, CircleAlert, Cloud, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getSavedKeyModels, getSavedKeyStats, saveKey } from "../../../tauri";
 import { relayCommands } from "../api/commands";
@@ -180,7 +180,14 @@ function ConnectedLine() {
 
 function LanguageSelect() {
   const { i18n, t } = useTranslation();
-  return <div className="language-select"><span>{t("settings.language")}</span><OptionMenu label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>;
+  return <OptionMenu
+    className="setup-language-menu"
+    icon={<Languages aria-hidden />}
+    label={t("settings.language")}
+    value={i18n.language.startsWith("ru") ? "ru" : "en"}
+    onChange={(value) => void i18n.changeLanguage(value)}
+    options={[{ value: "ru", label: "Русский", shortLabel: "RU" }, { value: "en", label: "English", shortLabel: "EN" }]}
+  />;
 }
 
 function pendingChecks() {

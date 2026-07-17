@@ -219,6 +219,13 @@ for (const viewport of viewports) {
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeVisible();
+    const actionBoxes = await headerActions.locator(":scope > .relay-button").evaluateAll((buttons) => buttons.map((button) => {
+      const rect = button.getBoundingClientRect();
+      return { width: rect.width, height: rect.height, overflow: button.scrollWidth - button.clientWidth };
+    }));
+    expect(Math.max(...actionBoxes.map((box) => box.height)) - Math.min(...actionBoxes.map((box) => box.height))).toBeLessThanOrEqual(1);
+    expect(actionBoxes.every((box) => box.height <= 34 && box.overflow === 0)).toBe(true);
+    expect(actionBoxes.reduce((total, box) => total + box.width, 0)).toBeLessThan(380);
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);

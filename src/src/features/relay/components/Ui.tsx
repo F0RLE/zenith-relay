@@ -228,7 +228,7 @@ export function ActionMenuItem({ children, icon, danger = false, className = "",
 export function OptionMenu({ label, value, options, icon, onChange, className = "", disabled = false }: {
   label: string;
   value: string;
-  options: Array<{ value: string; label: string }>;
+  options: Array<{ value: string; label: string; shortLabel?: string }>;
   icon?: ReactNode;
   onChange: (value: string) => void;
   className?: string;
@@ -329,7 +329,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       }}
     >
       {icon}
-      <span>{selected?.label}</span>
+      <span>{selected?.shortLabel ?? selected?.label}</span>
       <ChevronDown aria-hidden />
     </button>
     {open && typeof document !== "undefined" ? createPortal(
