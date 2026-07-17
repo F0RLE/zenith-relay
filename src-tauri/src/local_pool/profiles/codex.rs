@@ -49,6 +49,8 @@ struct AccountProfileBackup {
     version: u32,
     profile_dir: String,
     previous_model_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_openai_base_url: Option<String>,
     previous_auth_secret_ref: Option<String>,
     managed_account_id: String,
     managed_access_hash: String,
@@ -203,7 +205,7 @@ fn snapshot_user_profile_with(
             )
         })?;
         if account_managed_config_matches(&document) {
-            restore_config(&mut document, backup.previous_model_provider.as_deref());
+            restore_account_config(&mut document, &backup);
             let auth =
                 if account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)? {
                     previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
@@ -1083,10 +1085,14 @@ fn attach_account_locked(
         version: 1,
         profile_dir: profile_dir.to_string_lossy().into_owned(),
         previous_model_provider: root_model_provider(&document),
+        previous_openai_base_url: root_openai_base_url(&document),
         previous_auth_secret_ref: None,
         managed_account_id: String::new(),
         managed_access_hash: String::new(),
     });
+    if backup.previous_openai_base_url.is_none() {
+        backup.previous_openai_base_url = root_openai_base_url(&document);
+    }
     if created_backup {
         if let Some(previous_auth) = original_auth.filter(|value| !value.trim().is_empty()) {
             let secret_ref = account_backup_secret_ref(&profile_dir);
@@ -1191,7 +1197,7 @@ fn restore_account_locked(
         })?),
         None => None,
     };
-    restore_config(&mut document, backup.previous_model_provider.as_deref());
+    restore_account_config(&mut document, &backup);
     let restored_config = document.to_string();
     replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
 
@@ -1286,7 +1292,15 @@ fn sync_account_profile_with(
 }
 
 fn attach_account_config(document: &mut DocumentMut) {
-    document.remove("model_provider");
+    restore_config(document, None);
+    document.remove("openai_base_url");
+}
+
+fn restore_account_config(document: &mut DocumentMut, backup: &AccountProfileBackup) {
+    restore_config(document, backup.previous_model_provider.as_deref());
+    if let Some(base_url) = backup.previous_openai_base_url.as_deref() {
+        document["openai_base_url"] = value(base_url);
+    }
 }
 
 fn account_managed_config_matches(document: &DocumentMut) -> bool {
@@ -1306,12 +1320,10 @@ fn account_auth_content(tokens: &TokenSet, provider_account_id: &str) -> Result<
         "account_id".into(),
         serde_json::Value::String(provider_account_id.to_string()),
     );
-    if let Some(refresh_token) = tokens.refresh_token() {
-        token_values.insert(
-            "refresh_token".into(),
-            serde_json::Value::String(refresh_token.to_string()),
-        );
-    }
+    token_values.insert(
+        "refresh_token".into(),
+        serde_json::Value::String(tokens.refresh_token().unwrap_or_default().to_string()),
+    );
     if let Some(id_token) = tokens.id_token() {
         token_values.insert(
             "id_token".into(),
@@ -1595,6 +1607,13 @@ fn remove_managed_provider(document: &mut DocumentMut) {
 fn root_model_provider(document: &DocumentMut) -> Option<String> {
     document
         .get("model_provider")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn root_openai_base_url(document: &DocumentMut) -> Option<String> {
+    document
+        .get("openai_base_url")
         .and_then(Item::as_str)
         .map(ToOwned::to_owned)
 }
@@ -2651,7 +2670,14 @@ mod tests {
     #[test]
     fn oauth_account_attach_reuses_one_profile_binding_and_restores_previous_login() {
         let (root, home, backups) = profile_dirs("oauth-account");
-        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        let previous_config = r#"model_provider = "custom"
+openai_base_url = "https://stale.example.com/v1"
+
+[model_providers.custom]
+name = "Custom"
+base_url = "https://custom.example.com/v1"
+"#;
+        fs::write(home.join(CONFIG_FILE), previous_config).unwrap();
         fs::write(
             home.join(AUTH_FILE),
             "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"previous\"}}",
@@ -2681,9 +2707,16 @@ mod tests {
         assert_eq!(stored_bindings.len(), 1);
         assert_eq!(stored_bindings[0].credential_id, binding.credential_id);
         assert!(profile_bindings(&home, &backups).unwrap()[0].active);
-        assert!(!fs::read_to_string(home.join(CONFIG_FILE))
-            .unwrap()
-            .contains("model_provider ="));
+        let account_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(!account_config.contains("model_provider ="));
+        assert!(!account_config.contains("openai_base_url"));
+        assert!(!account_config.contains("[model_providers.zenith_relay_local]"));
+        assert!(account_config.contains("[model_providers.custom]"));
+        let account_auth: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        assert_eq!(account_auth["OPENAI_API_KEY"], serde_json::Value::Null);
+        assert_eq!(account_auth["tokens"]["refresh_token"], "refresh-secret");
+        assert!(account_auth.get("auth_mode").is_none());
 
         let canonical_home = canonical_profile_dir(&home).unwrap();
         let backup_path = account_backup_path(&backups, &canonical_home);
@@ -2736,9 +2769,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(restored, binding);
-        assert!(fs::read_to_string(home.join(CONFIG_FILE))
-            .unwrap()
-            .contains("model_provider = \"custom\""));
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            previous_config
+        );
         assert!(fs::read_to_string(home.join(AUTH_FILE))
             .unwrap()
             .contains("previous"));
@@ -3202,6 +3236,9 @@ mod tests {
             &secrets,
         )
         .unwrap();
+        let auth: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        assert_eq!(auth["tokens"]["refresh_token"], "");
         fs::write(
             home.join(AUTH_FILE),
             "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
