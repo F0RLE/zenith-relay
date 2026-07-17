@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, X, Zap } from "lucide-react";
+import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
@@ -59,6 +59,7 @@ export function PoolPage() {
 function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onQuotaPolicy: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy, codexPoolOauthSelection } = useRelayState();
+  const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
   const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
@@ -91,6 +92,11 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
       ? relayCommands.setPoolMembership(member.kind === "account" ? [member.id] : [], member.kind === "source" ? [member.id] : [], false)
       : relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds: member.kind === "account" ? [member.id] : [], sourceIds: member.kind === "source" ? [member.id] : [], inPool: false }), "feedback.saved");
     if (ok) setSelectedId(null);
+  };
+  const confirmRemove = async (member: Member) => {
+    const name = member.kind === "source" ? member.name : member.label;
+    if (!await confirm(t("pool.removeMemberConfirm", { name }), { danger: true, confirmLabel: t("pool.removeMember") })) return;
+    await remove(member);
   };
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
   const refreshQuotas = () => perform("pool-quota-refresh", () => mode === "local"
@@ -158,19 +164,24 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
             ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleTimeString(i18n.language) })
             : excludedByFreePolicy ? t("pool.freePolicyHint") : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
+        const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
+        const removing = busy === `pool-remove-${member.id}`;
         return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"}>
           <div className="pool-member-card-main">
             <div className="pool-member-state" title={runtimeHint}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} />{isCurrent ? <small className="pool-member-current"><Activity aria-hidden />{runtimeState?.halfOpen ? t("pool.recoveryProbe") : runtimeState && runtimeState.inFlight > 1 ? t("pool.activeRequests", { count: runtimeState.inFlight }) : t("pool.currentRoute")}</small> : isLastUsed ? <small className="pool-member-last"><Clock3 aria-hidden />{t("pool.lastRoute")}</small> : <small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small>}</div>
             <div className="pool-member-identity"><strong title={identity}>{identity}</strong>{member.kind === "source" ? <small title={detail}>{detail}</small> : <div className="pool-member-account-meta">{identity !== member.label ? <small title={detail}>{detail}</small> : null}<AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /></div>}</div>
             <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
-            <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
+            <div className="pool-member-actions">
+              <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
+              <IconButton className="danger" label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} />
+            </div>
           </div>
           {member.kind === "account" ? <div className="account-card-quota pool-member-quota"><QuotaStack snapshot={member.quota} /></div> : null}
         </article>;
       })}
     </div>
-    {selected ? <MemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} onRemove={() => void remove(selected)} /> : null}
+    {selected ? <MemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : null}
   </>;
 }
 
@@ -253,18 +264,23 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   </Dialog>;
 }
 
-function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: () => void; onRemove: () => void }) {
+function MemberEditor({ member, onClose }: { member: Member; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [weight, setWeight] = useState(member.weight);
-  const [allowed, setAllowed] = useState(member.allowedModels.join(", "));
-  const [excluded, setExcluded] = useState(member.excludedModels.join(", "));
+  const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
+  const [enabledModels, setEnabledModels] = useState(() => {
+    const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
+    const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
+    return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
+  });
   const [draining, setDraining] = useState(member.draining);
   const save = async () => {
-    const allowedModels = parseList(allowed);
-    const excludedModels = parseList(excluded);
+    const allEnabled = modelIds.every((model) => enabledModels.includes(model));
+    const allowedModels = allEnabled ? [] : modelIds.filter((model) => enabledModels.includes(model));
+    const excludedModels = allEnabled ? [] : modelIds.filter((model) => !enabledModels.includes(model));
     const ok = await perform(`member-${member.id}`, () => {
       if (member.kind === "account") {
         const payload = { allowedModels, excludedModels, draining };
@@ -278,7 +294,28 @@ function MemberEditor({ member, onClose, onRemove }: { member: Member; onClose: 
     }, "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="danger" onClick={onRemove}>{t("pool.removeMember")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}><div className="relay-form"><div className="settings-row">{member.kind === "source" ? <><div className="relay-field"><span>{t("sources.poolRole")}</span><OptionMenu className="field-option-menu" label={t("sources.poolRole")} value={sourceRole} onChange={(value) => setSourceRole(value as ApiSourceRole)} options={[{ value: "primary", label: t("sources.roles.primary") }, { value: "stabilizer", label: t("sources.roles.stabilizer") }, { value: "reserve", label: t("sources.roles.reserve") }]} /><small>{t(`sources.roleHints.${sourceRole}`)}</small></div><label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></> : null}<label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} placeholder={t("sources.modelListPlaceholder")} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><p className="form-note">{t("pool.modelListHint")}</p></div></Dialog>;
+  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
+    <div className="relay-form">
+      <div className="settings-row">
+        {member.kind === "source" ? <>
+          <div className="relay-field"><span>{t("sources.poolRole")}</span><OptionMenu className="field-option-menu" label={t("sources.poolRole")} value={sourceRole} onChange={(value) => setSourceRole(value as ApiSourceRole)} options={[{ value: "primary", label: t("sources.roles.primary") }, { value: "stabilizer", label: t("sources.roles.stabilizer") }, { value: "reserve", label: t("sources.roles.reserve") }]} /><small>{t(`sources.roleHints.${sourceRole}`)}</small></div>
+          <label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label>
+        </> : null}
+        <label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label>
+      </div>
+      <section className="member-model-rules">
+        <header><h2>{t("common.models")}</h2></header>
+        {modelIds.length ? <ul>{modelIds.map((model) => {
+          const enabled = enabledModels.includes(model);
+          return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
+            <code>{model}</code>
+            <StatusBadge status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
+            <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => setEnabledModels((values) => toggle(values, model))} />
+          </li>;
+        })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}
+      </section>
+    </div>
+  </Dialog>;
 }
 
 function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
@@ -329,10 +366,10 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
         <header><strong>{t("connections.accounts")}</strong><span>{t("pool.availableAccounts", { count: allAccounts.length })}</span></header>
         <label className="relay-field"><span>{t("pool.searchAccounts")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchAccountsPlaceholder")} /></label>
         {plans.length > 1 ? <div className="pool-member-plan-tools"><div className="account-plan-filters" role="group" aria-label={t("accounts.filterByPlan")}><span>{t("accounts.plan")}</span><button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => setPlanFilter("all")}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>{plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => setPlanFilter(plan.id)}><span>{plan.label}</span><small>{plan.count}</small></button>)}</div><Button variant="secondary" icon={shownSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} disabled={!accounts.length} onClick={toggleShown}>{shownSelected ? t("pool.clearShown") : t("pool.selectShown", { count: accounts.length })}</Button></div> : null}
-        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
+        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span className="pool-member-option-copy"><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
         {!accounts.length ? <p className="form-note">{t("pool.noMatchingAccounts")}</p> : null}
       </section> : null}
-      {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
+      {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span className="pool-member-option-copy"><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
       </> : <EmptyState title={t("pool.noAvailableMembers")} description={t("pool.noAvailableMembersHint")} />}
     </div>
   </Dialog>;

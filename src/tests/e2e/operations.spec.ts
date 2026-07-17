@@ -87,7 +87,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Pool member policy: Personal Plus" }).click();
   await page.getByLabel("Drain").check();
-  await page.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
+  await page.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
   await page.getByRole("tab", { name: "Client Access" }).click();
@@ -127,7 +127,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   });
   expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", models: ["gpt-5.4-mini", "gpt-5.4"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"] } });
   expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
-  expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"] } });
+  expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"] } });
   expect(policyCalls.update_local_gateway_key).toMatchObject({ input: { modelPrefix: "team" } });
 });
 
@@ -651,8 +651,16 @@ test("connections stay outside the pool until the user adds selected members", a
   const rows = page.locator(".pool-member-card");
   await expect(rows).toHaveCount(1);
   await expect(rows.first()).toContainText("Business Workspace");
-  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "set_local_pool_membership"));
-  expect(call?.args).toEqual({ input: { accountIds: ["account_synthetic_2"], sourceIds: [], inPool: true } });
+  await rows.first().getByRole("button", { name: "Remove from pool: Business Workspace" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Confirm action" });
+  await expect(confirmation).toContainText("Remove Business Workspace from the pool?");
+  await confirmation.getByRole("button", { name: "Remove from pool" }).click();
+  await expect(page.getByText("No pool members", { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "set_local_pool_membership"));
+  expect(calls.map((call) => call.args)).toEqual([
+    { input: { accountIds: ["account_synthetic_2"], sourceIds: [], inPool: true } },
+    { input: { accountIds: ["account_synthetic_2"], sourceIds: [], inPool: false } },
+  ]);
 });
 
 for (const mode of ["local", "remote"] as const) {
@@ -1174,7 +1182,9 @@ test("OAuth member policy hides manual routing controls", async ({ page }) => {
   await expect(dialog).not.toContainText("Tie-break priority");
   await expect(dialog).not.toContainText("Traffic share");
   await expect(dialog.getByText("Drain", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Allowed models", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Models" })).toBeVisible();
+  await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
+  await expect(dialog.getByRole("button", { name: "Remove from pool" })).toHaveCount(0);
 });
 
 for (const mode of ["local", "remote"] as const) {

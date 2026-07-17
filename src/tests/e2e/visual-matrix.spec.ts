@@ -203,11 +203,21 @@ for (const viewport of viewports) {
     const accountSearch = dialog.getByLabel("Найти учётную запись");
     await accountSearch.fill("pro");
     await expect(dialog.locator(".pool-member-options > label").first()).toContainText("Pro account");
-    await expect(dialog.locator(".pool-member-options .account-plan-badge")).toHaveText("Pro");
+    const planBadge = dialog.locator(".pool-member-options .account-plan-badge");
+    await expect(planBadge).toHaveText("Pro");
+    expect(await planBadge.evaluate((badge) => badge.scrollWidth <= badge.clientWidth && badge.scrollHeight <= badge.clientHeight)).toBe(true);
     await page.screenshot({ path: `output/playwright/pool-add-pro-ru-dark-${viewport.width}x${viewport.height}.png` });
     await accountSearch.fill("");
     await dialog.getByText("Business Workspace", { exact: true }).click();
     await dialog.getByRole("button", { name: "Добавить выбранные (1)" }).click();
+
+    const memberActions = page.locator(".pool-member-card .pool-member-actions");
+    await expect(memberActions.getByRole("button")).toHaveCount(2);
+    expect(await memberActions.evaluate((actions) => {
+      const card = actions.closest(".pool-member-card")?.getBoundingClientRect();
+      const bounds = actions.getBoundingClientRect();
+      return Boolean(card && bounds.left >= card.left && bounds.right <= card.right && bounds.top >= card.top && bounds.bottom <= card.bottom);
+    })).toBe(true);
 
     const poolToolbar = page.locator(".pool-member-toolbar");
     await expect(poolToolbar).toBeVisible();
@@ -905,7 +915,9 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await expect(dialog).not.toContainText("Приоритет при равенстве");
   await expect(dialog).not.toContainText("Доля трафика");
   await expect(dialog.getByText("Не назначать запросы", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Разрешённые модели", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Модели" })).toBeVisible();
+  await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
+  expect(await dialog.locator("[data-member-model-id]").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 

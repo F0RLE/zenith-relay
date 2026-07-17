@@ -692,6 +692,7 @@ const relayEn = {
     noAvailableMembers: "All connections are already in the pool",
     noAvailableMembersHint: "Add another connection or remove an existing pool member first.",
     removeMember: "Remove from pool",
+    removeMemberConfirm: "Remove {{name}} from the pool? New requests will no longer be sent to this connection.",
     priorityTitle: "Routing",
     priorityHint: "The scheduler owns this order: active requests first, followed by the next routing priority.",
     currentRoute: "Active now",
@@ -783,7 +784,6 @@ const relayEn = {
     selectMemberHint: "Select a member to edit tie-break priority, traffic share, draining, and model rules.",
     allowedModels: "Allowed models",
     excludedModels: "Excluded models",
-    modelListHint: "Separate model ids with commas. Empty means no additional restriction.",
     savePolicy: "Save policy",
     types: {
       account: "Account",
