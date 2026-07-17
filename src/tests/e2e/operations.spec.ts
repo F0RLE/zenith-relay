@@ -545,7 +545,22 @@ test("bulk account actions stay compact and delete the selected records", async 
   await expect(page.getByText("No accounts", { exact: true })).toBeVisible();
 
   const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "delete_local_account").map((call) => call.args.accountId));
-  expect(deleted).toEqual(["account_synthetic", "account_synthetic_2", "account_synthetic_3"]);
+  expect([...deleted].sort()).toEqual(["account_synthetic", "account_synthetic_2", "account_synthetic_3"].sort());
+});
+
+test("filtered bulk deletion never includes a previously selected hidden account", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  await page.locator(".account-card").filter({ hasText: "Personal Plus" }).getByRole("checkbox").first().check();
+  await page.getByRole("button", { name: "Free (1)", exact: true }).click();
+  await page.getByLabel("Select all accounts").check();
+  await page.getByRole("button", { name: "Delete selected accounts" }).click();
+  await settleConfirmation(page);
+
+  const deleted = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { accountId?: string } }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "delete_local_account").map((call) => call.args.accountId));
+  expect(deleted).toEqual(["account_synthetic_3"]);
 });
 
 test("global cleanup refreshes first and deletes only terminal account errors", async ({ page }) => {

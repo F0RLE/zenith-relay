@@ -229,7 +229,7 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
 
 function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, canRevealIdentity, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; canRevealIdentity: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsage, perform, activateCodexProfile, busy } = useRelayState();
+  const { mode, runtime, localUsage, perform, activateCodexProfile, refresh, busy } = useRelayState();
   const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [planFilter, setPlanFilter] = useState("all");
@@ -256,7 +256,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   const errorCount = allAccounts.filter((account) => accountErrorCode(account)).length;
   const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
-  useEffect(() => { setRevealedIdentities({}); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
+  useEffect(() => { setSelected([]); setRevealedIdentities({}); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
   if (!runtime?.accounts.length) {
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
@@ -267,13 +267,15 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     .sort(compareAccounts);
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
-  const exportIds = selected.length ? selected : allAccounts.map((account) => account.id);
-  const selectedAccounts = allAccounts.filter((account) => selected.includes(account.id));
+  const selectedAccounts = accounts.filter((account) => selected.includes(account.id));
+  const selectedIds = selectedAccounts.map((account) => account.id);
+  const selectedCount = selectedAccounts.length;
+  const exportIds = selectedCount ? selectedIds : allAccounts.map((account) => account.id);
   const canIncludeSelected = selectedAccounts.some((account) => !accountParticipates(account));
   const canExcludeSelected = selectedAccounts.some(accountParticipates);
   const allSelected = accounts.length > 0 && accounts.every((account) => selected.includes(account.id));
   const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
-  const toggleAllVisible = (checked: boolean) => setSelected(checked ? [...new Set([...selected, ...accounts.map((account) => account.id)])] : selected.filter((id) => !accounts.some((account) => account.id === id)));
+  const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
   const updateParticipation = async (account: AccountSummary, participate: boolean) => {
     if (mode === "local") {
       await relayCommands.setPoolMembership([account.id], [], participate);
@@ -299,11 +301,12 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
         else await relayCommands.remoteAction({ type: "delete_account", id: accountId });
       }
     }, "feedback.deleted");
+    if (!ok) await refresh().catch(() => undefined);
     if (ok) setSelected((current) => current.filter((id) => !accountIds.includes(id)));
     return ok;
   };
   const deleteSelected = async () => {
-    const accountIds = allAccounts.filter((account) => selected.includes(account.id)).map((account) => account.id);
+    const accountIds = selectedAccounts.map((account) => account.id);
     if (accountIds.length && await confirm(t("accounts.deleteSelectedConfirm", { count: accountIds.length }), { danger: true })) {
       await deleteAccounts(accountIds, "delete-selected-accounts");
     }
@@ -339,13 +342,13 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     <div className="account-command-bar">
       <div className="account-command-context">
         <input type="checkbox" aria-label={t("accounts.selectAll")} title={t("accounts.selectAll")} checked={allSelected} disabled={!accounts.length} onChange={(event) => toggleAllVisible(event.target.checked)} />
-        {selected.length ? <span>{t("accounts.selectedCount", { count: selected.length })}</span> : <label className="search-field account-search"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} /></label>}
+        {selectedCount ? <span>{t("accounts.selectedCount", { count: selectedCount })}</span> : <label className="search-field account-search"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} /></label>}
       </div>
       <div className="account-command-actions">
-        {selected.length ? <>
+        {selectedCount ? <>
           {canIncludeSelected ? <IconButton label={t("accounts.includeSelectedInPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(true)} /> : null}
           {canExcludeSelected ? <IconButton label={t("accounts.excludeSelectedFromPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(false)} /> : null}
-          <IconButton label={t("accounts.exportSelected", { count: selected.length })} icon={<Download aria-hidden />} disabled={!canExport || Boolean(busy)} title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selected.length })} onClick={() => onExport(exportIds)} />
+          <IconButton label={t("accounts.exportSelected", { count: selectedCount })} icon={<Download aria-hidden />} disabled={!canExport || Boolean(busy)} title={!canExport ? t("remote.capabilityUnavailable") : t("accounts.exportSelected", { count: selectedCount })} onClick={() => onExport(exportIds)} />
           <IconButton className="danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
@@ -363,17 +366,17 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       <span>{t("accounts.poolParticipation")}</span>
       {(["all", "included", "excluded"] as const).map((value) => {
         const count = value === "all" ? allAccounts.length : allAccounts.filter((account) => accountParticipates(account) === (value === "included")).length;
-        return <button key={value} type="button" aria-pressed={participationFilter === value} aria-label={t("accounts.participationFilterOption", { state: t(`accounts.participation.${value}`), count })} onClick={() => setParticipationFilter(value)}><span>{t(`accounts.participation.${value}`)}</span><small>{count}</small></button>;
+        return <button key={value} type="button" aria-pressed={participationFilter === value} aria-label={t("accounts.participationFilterOption", { state: t(`accounts.participation.${value}`), count })} onClick={() => { setSelected([]); setParticipationFilter(value); }}><span>{t(`accounts.participation.${value}`)}</span><small>{count}</small></button>;
       })}
     </div>
     {plans.length > 1 ? <div className="account-plan-filters" role="group" aria-label={t("accounts.filterByPlan")}>
       <span>{t("accounts.plan")}</span>
-      <button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => setPlanFilter("all")}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>
-      {errorCount ? <button type="button" className="error" aria-pressed={activePlan === "errors"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.errorsOnly"), count: errorCount })} onClick={() => setPlanFilter("errors")}><ShieldAlert aria-hidden /><span>{t("accounts.errorsOnly")}</span><small>{errorCount}</small></button> : null}
-      {plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => setPlanFilter(plan.id)}><span>{plan.label}</span><small>{plan.count}</small></button>)}
+      <button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => { setSelected([]); setPlanFilter("all"); }}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>
+      {errorCount ? <button type="button" className="error" aria-pressed={activePlan === "errors"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.errorsOnly"), count: errorCount })} onClick={() => { setSelected([]); setPlanFilter("errors"); }}><ShieldAlert aria-hidden /><span>{t("accounts.errorsOnly")}</span><small>{errorCount}</small></button> : null}
+      {plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => { setSelected([]); setPlanFilter(plan.id); }}><span>{plan.label}</span><small>{plan.count}</small></button>)}
     </div> : null}
     </div>
-    {filtersHideAccounts ? <div className="account-filter-summary" role="status" aria-live="polite"><span>{t("accounts.filterSummary", { visible: accounts.length, total: allAccounts.length })}</span><button type="button" onClick={() => { onQuery(""); setPlanFilter("all"); setParticipationFilter("all"); }}><X aria-hidden /><span>{t("accounts.clearFilters")}</span></button></div> : null}
+    {filtersHideAccounts ? <div className="account-filter-summary" role="status" aria-live="polite"><span>{t("accounts.filterSummary", { visible: accounts.length, total: allAccounts.length })}</span><button type="button" onClick={() => { setSelected([]); onQuery(""); setPlanFilter("all"); setParticipationFilter("all"); }}><X aria-hidden /><span>{t("accounts.clearFilters")}</span></button></div> : null}
     {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")} data-layout="list">
       {accounts.map((account) => {
         const errorCode = accountErrorCode(account);
@@ -469,7 +472,7 @@ function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onC
       : relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: value }), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("proxies.accountTitle", { name: account.label })} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder="user:password@us-proxy.example:8080" /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
+  return <Dialog title={t("proxies.accountTitle", { name: account.label })} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
 }
 
 function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {

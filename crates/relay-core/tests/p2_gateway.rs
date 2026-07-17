@@ -690,7 +690,7 @@ async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() 
 }
 
 #[tokio::test]
-async fn stream_never_falls_back_after_the_first_complete_event() {
+async fn stream_falls_back_after_prelude_before_first_output() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -706,7 +706,7 @@ async fn stream_never_falls_back_after_the_first_complete_event() {
         "b-key",
         vec![Reply::Stream {
             chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
-            cache_control: "must-not-run",
+            cache_control: "winner",
         }],
     )
     .await;
@@ -721,22 +721,24 @@ async fn stream_never_falls_back_after_the_first_complete_event() {
     .await;
 
     let response = request(&gateway, true).await;
-    assert_eq!(response.headers()[CACHE_CONTROL], "first");
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
     let body = response.text().await.unwrap();
-    assert!(body.contains("response.created"));
-    assert!(body.contains("event: response.failed"));
-    assert!(body.contains("upstream_stream"));
-    assert!(!body.contains("[DONE]"));
+    assert!(!body.contains("response.created"));
+    assert!(body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
-    assert_eq!(events[0].error_category.as_deref(), Some("upstream_stream"));
+    assert!(events[0]
+        .error_category
+        .as_deref()
+        .is_some_and(|category| category.starts_with("upstream_transport")));
+    assert!(events[1].success);
 }
 
 #[tokio::test]
-async fn invalid_sse_after_first_event_is_not_forwarded_or_marked_successful() {
+async fn invalid_sse_after_prelude_falls_back_before_client_output() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
@@ -754,7 +756,7 @@ async fn invalid_sse_after_first_event_is_not_forwarded_or_marked_successful() {
         "b-key",
         vec![Reply::Stream {
             chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
-            cache_control: "must-not-run",
+            cache_control: "winner",
         }],
     )
     .await;
@@ -769,16 +771,18 @@ async fn invalid_sse_after_first_event_is_not_forwarded_or_marked_successful() {
     .await;
 
     let response = request(&gateway, true).await;
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
     let body = response.text().await.unwrap();
-    assert!(body.contains("response.created"));
+    assert!(!body.contains("response.created"));
     assert!(!body.contains("not-json"));
-    assert!(!body.contains("[DONE]"));
+    assert!(body.contains("[DONE]"));
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
-    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     let events = events.lock().unwrap();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     assert!(!events[0].success);
     assert_eq!(events[0].error_category.as_deref(), Some("stream_invalid"));
+    assert!(events[1].success);
 }
 
 #[tokio::test]

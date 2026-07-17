@@ -37,6 +37,7 @@ const TRANSPORT_COOLDOWN_MS: u64 = 5_000;
 const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
+const SSE_PRE_OUTPUT_RETRY_GRACE: Duration = Duration::from_secs(30);
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 type CompletionCallback =
     Arc<dyn Fn(&mut UsageEvent, Option<&str>, RateLimitBodyHint) + Send + Sync>;
@@ -1550,8 +1551,21 @@ async fn bootstrap_stream(
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
     let mut buffer = Vec::new();
+    let deadline = Instant::now() + SSE_PRE_OUTPUT_RETRY_GRACE;
     loop {
-        match stream.next().await {
+        let next = if buffer.is_empty() {
+            stream.next().await
+        } else {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok((headers, Bytes::from(buffer), stream));
+            }
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => return Ok((headers, Bytes::from(buffer), stream)),
+            }
+        };
+        match next {
             Some(Ok(chunk)) => {
                 if buffer.len().saturating_add(chunk.len()) > MAX_SSE_EVENT_BYTES {
                     return Err(AttemptFailure::stream("stream_event_too_large"));
@@ -1574,10 +1588,13 @@ async fn bootstrap_stream(
                             event.cooldown_hint,
                         ));
                     }
-                    if event.has_data {
+                    if event.has_output_delta || event.outcome == Some(TerminalOutcome::Success) {
                         return Ok((headers, Bytes::from(buffer), stream));
                     }
                     inspected = absolute_end;
+                }
+                if Instant::now() >= deadline {
+                    return Ok((headers, Bytes::from(buffer), stream));
                 }
             }
             Some(Err(error)) => return Err(AttemptFailure::transport(&error)),

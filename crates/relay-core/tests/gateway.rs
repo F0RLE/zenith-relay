@@ -259,17 +259,24 @@ async fn oversized_non_stream_response_is_rejected_and_recorded() {
 }
 
 #[tokio::test]
-async fn sse_chunks_cross_the_gateway_before_the_stream_finishes() {
+async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
     let (upstream, state) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({"model": "gpt-test", "input": "hello", "stream": true}))
-        .send()
-        .await
-        .unwrap();
+    let request_url = format!("{}/v1/responses", gateway.base_url);
+    let response_task = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(request_url)
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({"model": "gpt-test", "input": "hello", "stream": true}))
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!response_task.is_finished());
+    state.release_stream.notify_one();
+    let response = response_task.await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
@@ -286,12 +293,6 @@ async fn sse_chunks_cross_the_gateway_before_the_stream_finishes() {
         .unwrap()
         .unwrap();
     assert_eq!(first, "data: {\"type\":\"response.created\"}\n\n");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), chunks.next())
-            .await
-            .is_err()
-    );
-    state.release_stream.notify_one();
     let second = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
         .unwrap()
@@ -404,7 +405,7 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
 }
 
 #[tokio::test]
-async fn truncated_success_stream_is_recorded_as_incomplete() {
+async fn truncated_prelude_stream_returns_bad_gateway_and_is_recorded_as_incomplete() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let response = reqwest::Client::new()
@@ -418,9 +419,9 @@ async fn truncated_success_stream_is_recorded_as_incomplete() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = response.text().await.unwrap();
-    assert!(body.contains("event: response.failed"));
+    assert!(!body.contains("event: response.failed"));
     assert!(body.contains("stream_incomplete"));
 
     let events = events.lock().unwrap();

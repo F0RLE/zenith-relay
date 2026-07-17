@@ -33,11 +33,8 @@ pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
     {
         return Err("proxy URL is invalid");
     }
-    let candidate = if value.contains("://") {
-        value.to_string()
-    } else {
-        format!("http://{value}")
-    };
+    let (scheme, authority) = value.split_once("://").unwrap_or(("http", value));
+    let candidate = format!("{scheme}://{}", normalize_proxy_authority(authority));
     let url = Url::parse(&candidate).map_err(|_| "proxy URL is invalid")?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
@@ -50,6 +47,48 @@ pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
     }
     reqwest::Proxy::all(url.as_str()).map_err(|_| "proxy URL is invalid")?;
     Ok(url.to_string())
+}
+
+fn normalize_proxy_authority(value: &str) -> String {
+    if let Some((left, right)) = value.rsplit_once('@') {
+        if is_proxy_endpoint(right) {
+            return value.to_string();
+        }
+        if is_proxy_endpoint(left) && has_proxy_credentials(right) {
+            return format!("{right}@{left}");
+        }
+    }
+
+    let mut parts = value.splitn(4, ':');
+    let (Some(host), Some(port), Some(username), Some(password)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return value.to_string();
+    };
+    let endpoint = format!("{host}:{port}");
+    if is_proxy_endpoint(&endpoint) && !username.is_empty() && !password.is_empty() {
+        format!("{username}:{password}@{endpoint}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn is_proxy_endpoint(value: &str) -> bool {
+    Url::parse(&format!("http://{value}")).is_ok_and(|url| {
+        url.username().is_empty()
+            && url.password().is_none()
+            && url.host_str().is_some()
+            && url.port().is_some()
+            && matches!(url.path(), "" | "/")
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
+}
+
+fn has_proxy_credentials(value: &str) -> bool {
+    value
+        .split_once(':')
+        .is_some_and(|(username, password)| !username.is_empty() && !password.is_empty())
 }
 
 #[cfg(test)]
@@ -65,6 +104,15 @@ mod tests {
     fn proxy_url_accepts_popular_http_shape_and_redacts_debug() {
         let normalized = normalize_proxy_url("user:pass@proxy.example:8080").unwrap();
         assert_eq!(normalized, "http://user:pass@proxy.example:8080/");
+        let provider_style = "proxy.example:8080:user__cr.us;anon.1;sessttl.5:pass";
+        assert_eq!(
+            normalize_proxy_url(provider_style).unwrap(),
+            "http://user__cr.us%3Banon.1%3Bsessttl.5:pass@proxy.example:8080/"
+        );
+        assert_eq!(
+            normalize_proxy_url("proxy.example:8080@user__cr.us;anon.1;sessttl.5:pass").unwrap(),
+            "http://user__cr.us%3Banon.1%3Bsessttl.5:pass@proxy.example:8080/"
+        );
         let proxy = ProxyConfig::parse(&normalized).unwrap();
         let rendered = format!("{proxy:?}");
         assert!(!rendered.contains("user"));

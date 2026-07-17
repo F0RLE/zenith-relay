@@ -650,7 +650,7 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
 }
 
 #[tokio::test]
-async fn prompt_cache_key_keeps_sequential_http_requests_on_the_warm_account() {
+async fn prompt_cache_key_does_not_override_sequential_http_account_rotation() {
     let (first_upstream, first_state) = spawn_upstream(vec![
         success_reply("first-response"),
         success_reply("first-continuation"),
@@ -697,11 +697,11 @@ async fn prompt_cache_key_keeps_sequential_http_requests_on_the_warm_account() {
         first_state.requests.lock().unwrap().len(),
         second_state.requests.lock().unwrap().len(),
     ];
-    assert!(counts == [2, 0] || counts == [0, 2]);
+    assert_eq!(counts, [1, 1]);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].candidate_id, events[1].candidate_id);
-    assert_eq!(
+    assert_ne!(events[0].candidate_id, events[1].candidate_id);
+    assert_ne!(
         events[1].routing.as_ref().map(|routing| routing.reason),
         Some(SelectionReason::PromptCacheAffinity)
     );
@@ -1808,7 +1808,7 @@ async fn account_websocket_restores_previous_response_affinity_after_reconnect()
 }
 
 #[tokio::test]
-async fn prompt_cache_key_keeps_reconnected_websocket_on_the_warm_account() {
+async fn prompt_cache_key_does_not_override_reconnected_websocket_account_rotation() {
     let (first_upstream, first_state) = spawn_websocket_upstream().await;
     let (second_upstream, second_state) = spawn_websocket_upstream().await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
@@ -1858,11 +1858,11 @@ async fn prompt_cache_key_keeps_reconnected_websocket_on_the_warm_account() {
         first_state.requests.lock().unwrap().len(),
         second_state.requests.lock().unwrap().len(),
     ];
-    assert!(counts == [2, 0] || counts == [0, 2]);
+    assert_eq!(counts, [1, 1]);
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
-    assert_eq!(events[0].candidate_id, events[1].candidate_id);
-    assert_eq!(
+    assert_ne!(events[0].candidate_id, events[1].candidate_id);
+    assert_ne!(
         events[1].routing.as_ref().map(|routing| routing.reason),
         Some(SelectionReason::PromptCacheAffinity)
     );

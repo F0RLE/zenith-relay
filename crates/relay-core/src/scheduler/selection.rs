@@ -542,7 +542,11 @@ impl PoolScheduler {
         candidate_id: &str,
         now_ms: u64,
     ) -> bool {
-        if !self.candidates.contains_key(candidate_id) {
+        if !self
+            .candidates
+            .get(candidate_id)
+            .is_some_and(|candidate| candidate.kind == CandidateKind::ApiSource)
+        {
             return false;
         }
         self.prompt_affinity.bind(key, candidate_id, now_ms);
@@ -807,7 +811,8 @@ impl PoolScheduler {
         baseline: &RuntimeCandidate,
         lane: InFlightLane,
     ) -> bool {
-        if routing_tier(preferred) != routing_tier(baseline)
+        if preferred.kind != CandidateKind::ApiSource
+            || routing_tier(preferred) != routing_tier(baseline)
             || candidate_kind_preference(preferred) != candidate_kind_preference(baseline)
             || self.in_flight_count(&preferred.id, lane) != self.in_flight_count(&baseline.id, lane)
         {
@@ -1395,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_cache_affinity_yields_to_load_and_material_quota_gaps() {
+    fn prompt_cache_affinity_applies_to_api_sources_but_not_oauth_accounts() {
         let mut scheduler = PoolScheduler::new();
         let mut cached = oauth_candidate("cached");
         cached.quota = CandidateQuota::Available(5_000);
@@ -1403,7 +1408,7 @@ mod tests {
         let mut fullest = oauth_candidate("fullest");
         fullest.quota = CandidateQuota::Available(5_400);
         scheduler.upsert(fullest);
-        assert!(scheduler.bind_prompt_affinity("thread", "cached", 0));
+        assert!(!scheduler.bind_prompt_affinity("thread", "cached", 0));
 
         let select_thread = |scheduler: &mut PoolScheduler| {
             scheduler
@@ -1419,24 +1424,18 @@ mod tests {
                 .unwrap()
         };
 
+        assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
+
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("a"));
+        scheduler.upsert(candidate("b"));
+        assert!(scheduler.bind_prompt_affinity("thread", "b", 0));
         let selected = select_thread(&mut scheduler);
-        assert_eq!(selected.candidate_id, "cached");
+        assert_eq!(selected.candidate_id, "b");
         assert_eq!(
             selected.diagnostics.reason,
             SelectionReason::PromptCacheAffinity
         );
-
-        assert!(scheduler.reserve("cached"));
-        assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
-        assert!(scheduler.release("cached"));
-
-        assert!(scheduler.update_candidate_availability(
-            "fullest",
-            true,
-            CandidateHealth::Healthy,
-            CandidateQuota::Available(5_501),
-        ));
-        assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
     }
 
     #[test]

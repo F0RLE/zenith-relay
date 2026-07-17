@@ -528,7 +528,7 @@ Core scheduler state:
 PoolScheduler
   candidates: candidate_id -> RuntimeCandidate
   response_affinity: bounded response id -> creating candidate id (30-day TTL)
-  prompt_affinity: bounded cache key -> successful candidate id (1-hour TTL)
+  prompt_affinity: bounded cache key -> successful API source id (1-hour TTL)
   in_flight: candidate_id -> active request count
   dispatches: candidate_id -> committed request count
 
@@ -566,9 +566,9 @@ Selection contract:
    count. Subscription, token totals, measured speed, manual priority, and
    manual weight do not affect OAuth selection. API-source roles remain strict,
    with traffic share used only between API sources in the same role.
-8. Prefer a successful `prompt_cache_key` binding only when its candidate has
-   the same role, kind, and active-request count as the baseline and is within
-   5 percentage points of the baseline quota.
+8. For API sources only, prefer a successful `prompt_cache_key` binding when
+   its source has the same role and active-request count as the baseline. OAuth
+   accounts always retain normal quota and load rotation.
 9. Exclude candidates already tried for this request.
 10. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
@@ -999,10 +999,10 @@ group that starves otherwise eligible accounts.
 
 Zenith does not infer or persist hard chat-to-account bindings from headers,
 metadata, `conversation_id`, or client thread identifiers. A client-supplied
-`prompt_cache_key` is a separate best-effort cache hint: hash local key identity,
-resolved model, and cache key; bind only after success; keep at most 4096 entries
-in memory for one hour; and ignore it when the candidate is busy or more than
-5 percentage points below the quota leader.
+`prompt_cache_key` is a best-effort hint for API sources only: hash local key
+identity, resolved model, and cache key; bind only after success; keep at most
+4096 entries in memory for one hour; and ignore it when the source is busy.
+OAuth accounts always follow normal quota and load rotation.
 
 Two protocol constraints remain mandatory:
 

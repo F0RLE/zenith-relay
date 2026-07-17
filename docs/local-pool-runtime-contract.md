@@ -667,11 +667,11 @@ Selection:
    dispatch count. Subscription, token totals, measured speed, manual priority,
    and manual weight do not affect OAuth selection. API sources retain their
    explicit primary/stabilizer/reserve role and traffic share within one role.
-7. A successful `prompt_cache_key` binding may replace that baseline only when
-   its candidate has the same role, kind, and active-request count and is within
-   5 percentage points of the baseline quota. The binding is keyed by local API
-   key, resolved model, and prompt cache key; it is memory-only, bounded to 4096
-   entries, and expires after one hour.
+7. For API sources only, a successful `prompt_cache_key` binding may replace
+   that baseline when its source has the same role and active-request count.
+   OAuth accounts always keep normal quota and load rotation. The binding is
+   keyed by local API key, resolved model, and prompt cache key; it is
+   memory-only, bounded to 4096 entries, and expires after one hour.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
 
