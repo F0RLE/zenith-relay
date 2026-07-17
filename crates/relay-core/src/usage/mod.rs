@@ -34,6 +34,7 @@ pub struct UsageEvent {
     pub generation_ms: Option<u64>,
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -79,6 +80,7 @@ struct ModelPrice {
     id: String,
     input_micro_usd_per_million: u64,
     cached_input_micro_usd_per_million: Option<u64>,
+    cache_write_input_micro_usd_per_million: Option<u64>,
     output_micro_usd_per_million: u64,
 }
 
@@ -86,6 +88,7 @@ pub fn estimate_api_equivalent(
     model: Option<&str>,
     input_tokens: Option<u64>,
     cached_input_tokens: Option<u64>,
+    cache_write_input_tokens: Option<u64>,
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 ) -> ApiEquivalentSummary {
@@ -101,11 +104,18 @@ pub fn estimate_api_equivalent(
     };
     let input_tokens = input_tokens.unwrap_or_default();
     let cached_input_tokens = cached_input_tokens.map(|tokens| tokens.min(input_tokens));
-    let uncached_input_tokens =
-        cached_input_tokens.map(|cached| input_tokens.saturating_sub(cached));
+    let cache_write_input_tokens = cache_write_input_tokens.map(|tokens| {
+        tokens.min(input_tokens.saturating_sub(cached_input_tokens.unwrap_or_default()))
+    });
+    let uncached_input_tokens = cached_input_tokens.map(|cached| {
+        input_tokens
+            .saturating_sub(cached)
+            .saturating_sub(cache_write_input_tokens.unwrap_or_default())
+    });
     let output_tokens = output_tokens.unwrap_or_default();
     let priced_input_tokens = cached_input_tokens
         .unwrap_or_default()
+        .saturating_add(cache_write_input_tokens.unwrap_or_default())
         .saturating_add(uncached_input_tokens.unwrap_or_default());
     ApiEquivalentSummary {
         micro_usd: token_cost(
@@ -116,6 +126,12 @@ pub fn estimate_api_equivalent(
             cached_input_tokens.unwrap_or_default(),
             price
                 .cached_input_micro_usd_per_million
+                .unwrap_or(price.input_micro_usd_per_million),
+        ))
+        .saturating_add(token_cost(
+            cache_write_input_tokens.unwrap_or_default(),
+            price
+                .cache_write_input_micro_usd_per_million
                 .unwrap_or(price.input_micro_usd_per_million),
         ))
         .saturating_add(token_cost(
@@ -158,7 +174,7 @@ fn price_catalog() -> Option<&'static PriceCatalog> {
         })
         .as_ref()
         .filter(|catalog| {
-            catalog.schema_version == 2
+            catalog.schema_version == 3
                 && catalog.unit_tokens == 1_000_000
                 && catalog.currency == "USD"
                 && !catalog.catalog_version.is_empty()
@@ -168,6 +184,9 @@ fn price_catalog() -> Option<&'static PriceCatalog> {
                     price
                         .cached_input_micro_usd_per_million
                         .is_none_or(|cached| cached <= price.input_micro_usd_per_million)
+                        && price
+                            .cache_write_input_micro_usd_per_million
+                            .is_none_or(|write| write > 0)
                 })
         })
 }
@@ -189,6 +208,7 @@ mod pricing_tests {
             Some("gpt-5.4"),
             Some(1_000_000),
             Some(400_000),
+            None,
             Some(100_000),
             Some(1_100_000),
         );
@@ -197,7 +217,7 @@ mod pricing_tests {
         assert_eq!(estimate.unpriced_tokens, 0);
         assert_eq!(api_model_price("GPT-5.4").unwrap().catalog_rank, 5);
         let catalog = price_catalog().unwrap();
-        assert_eq!(catalog.catalog_version, "openai-standard-2026-07-13");
+        assert_eq!(catalog.catalog_version, "openai-standard-2026-07-17");
         assert_eq!(
             catalog.source_url,
             "https://developers.openai.com/api/docs/pricing/"
@@ -216,7 +236,14 @@ mod pricing_tests {
     #[test]
     fn unknown_or_unsplit_usage_is_never_silently_priced() {
         assert_eq!(
-            estimate_api_equivalent(Some("private-model"), Some(2), Some(1), Some(3), Some(5)),
+            estimate_api_equivalent(
+                Some("private-model"),
+                Some(2),
+                Some(1),
+                None,
+                Some(3),
+                Some(5)
+            ),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -224,7 +251,7 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, Some(9)),
+            estimate_api_equivalent(Some("gpt-5.4"), None, None, None, None, Some(9)),
             ApiEquivalentSummary {
                 micro_usd: 0,
                 priced_tokens: 0,
@@ -232,8 +259,15 @@ mod pricing_tests {
             }
         );
         assert_eq!(
-            estimate_api_equivalent(Some("gpt-5.4"), Some(10), Some(100), Some(0), Some(10))
-                .micro_usd,
+            estimate_api_equivalent(
+                Some("gpt-5.4"),
+                Some(10),
+                Some(100),
+                None,
+                Some(0),
+                Some(10)
+            )
+            .micro_usd,
             3
         );
         assert_eq!(
@@ -241,11 +275,27 @@ mod pricing_tests {
                 Some("gpt-5.6-sol"),
                 Some(1_000_000),
                 Some(100_000),
+                Some(200_000),
                 Some(0),
                 Some(1_000_000)
             )
             .micro_usd,
-            4_550_000
+            4_800_000
+        );
+        assert_eq!(
+            estimate_api_equivalent(
+                Some("gpt-5.6-sol"),
+                Some(100),
+                None,
+                Some(20),
+                Some(0),
+                Some(100)
+            ),
+            ApiEquivalentSummary {
+                micro_usd: 125,
+                priced_tokens: 20,
+                unpriced_tokens: 80,
+            }
         );
         assert!(api_model_price("gpt-future-codex").is_none());
     }

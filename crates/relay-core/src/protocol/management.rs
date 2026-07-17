@@ -309,6 +309,8 @@ pub struct UsageSummary {
     pub input_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
@@ -329,6 +331,10 @@ pub struct UsageTotals {
     pub input_tokens: u64,
     pub cached_input_tokens: u64,
     pub cached_input_samples: u64,
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_input_samples: u64,
     pub reasoning_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -480,6 +486,14 @@ mod tests {
 
         assert_eq!(summary.reasoning_tokens, None);
         assert_eq!(summary.ttft_ms, None);
+
+        let mut legacy_totals = serde_json::to_value(UsageTotals::default()).unwrap();
+        let fields = legacy_totals.as_object_mut().unwrap();
+        fields.remove("cacheWriteInputTokens");
+        fields.remove("cacheWriteInputSamples");
+        let totals: UsageTotals = serde_json::from_value(legacy_totals).unwrap();
+        assert_eq!(totals.cache_write_input_tokens, 0);
+        assert_eq!(totals.cache_write_input_samples, 0);
     }
 
     #[test]

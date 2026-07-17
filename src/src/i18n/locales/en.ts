@@ -991,6 +991,7 @@ const relayEn = {
     dispatchesBefore: "Previous dispatches",
     routingReasons: {
       response_affinity: "Continuation stayed on the response owner",
+      prompt_cache_affinity: "This chat's cache was preserved",
       session_affinity: "Legacy session affinity",
       connection_affinity: "Existing WebSocket connection",
       only_eligible: "Only eligible participant",

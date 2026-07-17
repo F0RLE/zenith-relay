@@ -991,6 +991,7 @@ const relayRu = {
     dispatchesBefore: "Предыдущих назначений",
     routingReasons: {
       response_affinity: "Продолжение осталось у владельца ответа",
+      prompt_cache_affinity: "Сохранён кэш этого чата",
       session_affinity: "Старое закрепление сессии",
       connection_affinity: "Существующее WebSocket-соединение",
       only_eligible: "Единственный доступный участник",

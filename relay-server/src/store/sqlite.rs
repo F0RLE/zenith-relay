@@ -127,6 +127,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "019_remove_cache_write_input_tokens",
         sql: include_str!("../../migrations/019_remove_cache_write_input_tokens.sql"),
     },
+    Migration {
+        version: 20,
+        name: "020_cache_write_input_tokens",
+        sql: include_str!("../../migrations/020_cache_write_input_tokens.sql"),
+    },
 ];
 
 struct Migration {
@@ -636,8 +641,8 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -671,6 +676,7 @@ impl Store {
                         event.generation_ms.map(|value| value as i64),
                         event.input_tokens.map(|value| value as i64),
                         event.cached_input_tokens.map(|value| value as i64),
+                        event.cache_write_input_tokens.map(|value| value as i64),
                         event.reasoning_tokens.map(|value| value as i64),
                         event.output_tokens.map(|value| value as i64),
                         event.total_tokens.map(|value| value as i64),
@@ -704,6 +710,8 @@ impl Store {
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
                 (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
+                (group.totals.cache_write_input_samples > 0)
+                    .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
             );
@@ -719,7 +727,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -737,7 +745,7 @@ impl Store {
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
                     routing: row
-                        .get::<_, Option<String>>(20)?
+                        .get::<_, Option<String>>(21)?
                         .as_deref()
                         .and_then(|value| serde_json::from_str(value).ok()),
                     requested_model: row.get(5)?,
@@ -751,10 +759,11 @@ impl Store {
                     generation_ms: optional_u64(row.get(13)?),
                     input_tokens: optional_u64(row.get(14)?),
                     cached_input_tokens: optional_u64(row.get(15)?),
-                    reasoning_tokens: optional_u64(row.get(16)?),
-                    output_tokens: optional_u64(row.get(17)?),
-                    total_tokens: optional_u64(row.get(18)?),
-                    created_at_ms: row.get::<_, i64>(19)?.max(0) as u64,
+                    cache_write_input_tokens: optional_u64(row.get(16)?),
+                    reasoning_tokens: optional_u64(row.get(17)?),
+                    output_tokens: optional_u64(row.get(18)?),
+                    total_tokens: optional_u64(row.get(19)?),
+                    created_at_ms: row.get::<_, i64>(20)?.max(0) as u64,
                 })
             })
             .map_err(db_error)?;
@@ -782,8 +791,9 @@ impl Store {
         let mut statement = connection
             .prepare(
                 "SELECT candidate_hint, COALESCE(resolved_model, requested_model),
-                    SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens),
-                    SUM(total_tokens), COUNT(input_tokens), COUNT(cached_input_tokens)
+                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+                    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
+                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
                  FROM usage_events
                  GROUP BY candidate_hint, COALESCE(resolved_model, requested_model)",
             )
@@ -792,10 +802,12 @@ impl Store {
             .query_map([], |row| {
                 let input_tokens: Option<i64> = row.get(2)?;
                 let cached_input_tokens: Option<i64> = row.get(3)?;
-                let output_tokens: Option<i64> = row.get(4)?;
-                let total_tokens: Option<i64> = row.get(5)?;
-                let input_samples: i64 = row.get(6)?;
-                let cached_samples: i64 = row.get(7)?;
+                let cache_write_input_tokens: Option<i64> = row.get(4)?;
+                let output_tokens: Option<i64> = row.get(5)?;
+                let total_tokens: Option<i64> = row.get(6)?;
+                let input_samples: i64 = row.get(7)?;
+                let cached_samples: i64 = row.get(8)?;
+                let cache_write_samples: i64 = row.get(9)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     estimate_api_equivalent(
@@ -803,6 +815,9 @@ impl Store {
                         optional_u64(input_tokens),
                         (input_samples > 0 && cached_samples == input_samples)
                             .then(|| optional_u64(cached_input_tokens))
+                            .flatten(),
+                        (input_samples > 0 && cache_write_samples == input_samples)
+                            .then(|| optional_u64(cache_write_input_tokens))
                             .flatten(),
                         optional_u64(output_tokens),
                         optional_u64(total_tokens),
@@ -1044,7 +1059,8 @@ const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
         THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0), 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
-    COUNT(cached_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
+    COUNT(cached_input_tokens), COALESCE(SUM(cache_write_input_tokens), 0), \
+    COUNT(cache_write_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
     COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
@@ -1121,8 +1137,9 @@ fn usage_buckets(
     };
     let price_sql = format!(
         "SELECT {bucket_sql}, COALESCE(resolved_model, requested_model), \
-            SUM(input_tokens), SUM(cached_input_tokens), SUM(output_tokens), \
-            SUM(total_tokens), COUNT(cached_input_tokens) \
+            SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
+            SUM(output_tokens), SUM(total_tokens), COUNT(cached_input_tokens), \
+            COUNT(cache_write_input_tokens) \
          FROM usage_events{where_sql} GROUP BY 1, 2"
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
@@ -1130,9 +1147,11 @@ fn usage_buckets(
         .query_map(params_from_iter(parameters.iter()), |row| {
             let input_tokens: Option<i64> = row.get(2)?;
             let cached_input_tokens: Option<i64> = row.get(3)?;
-            let output_tokens: Option<i64> = row.get(4)?;
-            let total_tokens: Option<i64> = row.get(5)?;
-            let cached_samples: i64 = row.get(6)?;
+            let cache_write_input_tokens: Option<i64> = row.get(4)?;
+            let output_tokens: Option<i64> = row.get(5)?;
+            let total_tokens: Option<i64> = row.get(6)?;
+            let cached_samples: i64 = row.get(7)?;
+            let cache_write_samples: i64 = row.get(8)?;
             Ok((
                 nonnegative_u64(row.get(0)?),
                 estimate_api_equivalent(
@@ -1140,6 +1159,9 @@ fn usage_buckets(
                     optional_u64(input_tokens),
                     (cached_samples > 0)
                         .then(|| optional_u64(cached_input_tokens))
+                        .flatten(),
+                    (cache_write_samples > 0)
+                        .then(|| optional_u64(cache_write_input_tokens))
                         .flatten(),
                     optional_u64(output_tokens),
                     optional_u64(total_tokens),
@@ -1171,11 +1193,13 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         input_tokens: nonnegative_u64(row.get(offset + 8)?),
         cached_input_tokens: nonnegative_u64(row.get(offset + 9)?),
         cached_input_samples: nonnegative_u64(row.get(offset + 10)?),
-        reasoning_tokens: nonnegative_u64(row.get(offset + 11)?),
-        output_tokens: nonnegative_u64(row.get(offset + 12)?),
-        total_tokens: nonnegative_u64(row.get(offset + 13)?),
-        speed_output_tokens: nonnegative_u64(row.get(offset + 14)?),
-        speed_duration_ms: nonnegative_u64(row.get(offset + 15)?),
+        cache_write_input_tokens: nonnegative_u64(row.get(offset + 11)?),
+        cache_write_input_samples: nonnegative_u64(row.get(offset + 12)?),
+        reasoning_tokens: nonnegative_u64(row.get(offset + 13)?),
+        output_tokens: nonnegative_u64(row.get(offset + 14)?),
+        total_tokens: nonnegative_u64(row.get(offset + 15)?),
+        speed_output_tokens: nonnegative_u64(row.get(offset + 16)?),
+        speed_duration_ms: nonnegative_u64(row.get(offset + 17)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
 }
@@ -1753,7 +1777,8 @@ mod tests {
                 (16, "016_response_affinity".to_string()),
                 (17, "017_generation_ms".to_string()),
                 (18, "018_image_base_model".to_string()),
-                (19, "019_remove_cache_write_input_tokens".to_string())
+                (19, "019_remove_cache_write_input_tokens".to_string()),
+                (20, "020_cache_write_input_tokens".to_string())
             ]
         );
         drop(store);
@@ -1878,7 +1903,8 @@ mod tests {
                         ttft_ms: Some(4),
                         generation_ms: Some(6),
                         input_tokens: Some(1),
-                        cached_input_tokens: Some(1),
+                        cached_input_tokens: Some(u64::from(index != 2)),
+                        cache_write_input_tokens: (index == 2).then_some(1),
                         reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),
@@ -1919,6 +1945,9 @@ mod tests {
         );
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
+        assert_eq!(page.events[0].cache_write_input_tokens, Some(1));
+        assert_eq!(page.totals.cache_write_input_tokens, 1);
+        assert_eq!(page.totals.cache_write_input_samples, 1);
         assert_eq!(
             page.events[0]
                 .routing

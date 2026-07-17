@@ -124,17 +124,21 @@ Runtime ordering is intentionally small:
 4. OAuth preference within an otherwise equal stabilizer comparison;
 5. greatest known minimum quota remaining after any protected interface
    reserve;
-6. recent use and dispatch count for equal-quota rotation, then stable id.
+6. successful `prompt_cache_key` affinity when the candidate has the same load
+   and role and is no more than 5 percentage points below the quota leader;
+7. recent use and dispatch count for equal-quota rotation, then stable id.
 
 The OAuth account projected into the ChatGPT interface keeps a 1% quota reserve
 while pool mode is attached. At or below that reserve it fails the same hard
 gate as an exhausted candidate, including previous-response and WebSocket
 continuations.
 
-Chats are never optionally pinned to accounts. Only a continuation carrying
+Chats are never hard-pinned by local thread identifiers. A continuation carrying
 `previous_response_id` stays with the account that created that response, and
 an active compatibility WebSocket keeps ownership for the lifetime of its
-current upstream connection.
+current upstream connection. A client-supplied `prompt_cache_key` creates only
+one-hour, in-memory best-effort affinity after a successful response. It yields
+to a free candidate and to a quota lead greater than 5 percentage points.
 
 Source role is explicit and editable. Subscription plan names and expiry dates
 must not create a hidden routing rule.

@@ -658,17 +658,20 @@ Selection:
 2. Apply hard gates.
 3. If `previous_response_id` resolves to a response binding, require the
    creating candidate; never replay that continuation through another account.
-4. Otherwise, use a valid session binding when it still points to a healthy
-   capable candidate.
-5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request count so a parallel request does not wait
+4. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
+5. Prefer the lowest active-request count so a parallel request does not wait
    behind a busy account.
-7. In adaptive mode, choose the greatest known minimum remaining quota across
+6. In adaptive mode, choose the greatest known minimum remaining quota across
    the refreshed primary and secondary windows. A protected OAuth account uses
    only quota above its reserve. Equal-quota accounts rotate by recent use and
    dispatch count. Subscription, token totals, measured speed, manual priority,
    and manual weight do not affect OAuth selection. API sources retain their
    explicit primary/stabilizer/reserve role and traffic share within one role.
+7. A successful `prompt_cache_key` binding may replace that baseline only when
+   its candidate has the same role, kind, and active-request count and is within
+   5 percentage points of the baseline quota. The binding is keyed by local API
+   key, resolved model, and prompt cache key; it is memory-only, bounded to 4096
+   entries, and expires after one hour.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
 
@@ -677,9 +680,9 @@ count, selected quota reserve, in-flight count, and dispatch count. Bodies,
 headers, credentials, proxy addresses, and raw identities are outside this
 record.
 
-Usage token fields follow Responses semantics: cached input is a breakdown of
-input tokens, reasoning is a breakdown of output tokens, and neither breakdown
-is added again to `total_tokens`. Visible generation speed is
+Usage token fields follow Responses semantics: cached input and cache-write
+input are breakdowns of input tokens, reasoning is a breakdown of output
+tokens, and no breakdown is added again to `total_tokens`. Visible generation speed is
 `max(output_tokens - reasoning_tokens, 0) / generation duration after first
 output`. TTFT and full request latency remain separate. When explicit generation
 duration is unavailable, it may be derived from `latency - TTFT`; without both

@@ -19,6 +19,7 @@ type UsageSample = {
   generationMs: number | null;
   inputTokens: number | null;
   cachedInputTokens: number | null;
+  cacheWriteInputTokens?: number | null;
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
@@ -209,6 +210,7 @@ function totalsFromSamples(samples: UsageSample[]) {
     if (sample.success && sample.generationMs != null && sample.generationMs > 0) { totals.generationMs += sample.generationMs; totals.generationSamples += 1; totals.generationOutputTokens += visibleOutput; }
     totals.inputTokens += sample.inputTokens ?? 0;
     if (sample.cachedInputTokens != null) { totals.cachedInputTokens += sample.cachedInputTokens; totals.cachedInputSamples += 1; }
+    if (sample.cacheWriteInputTokens != null) { totals.cacheWriteInputTokens = (totals.cacheWriteInputTokens ?? 0) + sample.cacheWriteInputTokens; totals.cacheWriteInputSamples = (totals.cacheWriteInputSamples ?? 0) + 1; }
     totals.reasoningTokens += sample.reasoningTokens ?? 0;
     totals.outputTokens += sample.outputTokens ?? 0;
     totals.totalTokens += sample.totalTokens ?? 0;
@@ -232,11 +234,11 @@ function remoteSamples(events: RemoteUsage[]): UsageSample[] {
 }
 
 function readySamples(events: UsageLogEntry[]): UsageSample[] {
-  return events.map((item) => ({ createdAtMs: Date.parse(item.createdAt), success: item.status === "success", latencyMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, ttftMs: item.timeToFirstByteMs ?? null, generationMs: item.streamDurationMs ?? null, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, totalTokens: item.totalTokens, apiEquivalentMicroUsd: item.displayCostMicrousd ?? item.costMicrousd ?? (Number.isFinite(item.costCents) ? item.costCents * 10_000 : null) }));
+  return events.map((item) => ({ createdAtMs: Date.parse(item.createdAt), success: item.status === "success", latencyMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, ttftMs: item.timeToFirstByteMs ?? null, generationMs: item.streamDurationMs ?? null, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, totalTokens: item.totalTokens, apiEquivalentMicroUsd: item.displayCostMicrousd ?? item.costMicrousd ?? (Number.isFinite(item.costCents) ? item.costCents * 10_000 : null) }));
 }
 
 function emptyTotals(): UsageTotals {
-  return { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } };
+  return { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } };
 }
 
 function formatCompactNumber(value: number, locale: string) {

@@ -28,7 +28,7 @@ use zenith_relay_core::gateway;
 use zenith_relay_core::{
     CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
     LocalGatewayKey, ProviderSource, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey,
-    RuntimeSource, UsageEvent, WireApi,
+    RuntimeSource, SelectionReason, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -647,6 +647,64 @@ async fn previous_response_id_keeps_http_continuations_on_the_creating_account()
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
+async fn prompt_cache_key_keeps_sequential_http_requests_on_the_warm_account() {
+    let (first_upstream, first_state) = spawn_upstream(vec![
+        success_reply("first-response"),
+        success_reply("first-continuation"),
+    ])
+    .await;
+    let (second_upstream, second_state) = spawn_upstream(vec![
+        success_reply("second-response"),
+        success_reply("second-continuation"),
+    ])
+    .await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    for input in ["start", "continue"] {
+        let response = client
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&json!({
+                "model": MODEL,
+                "input": input,
+                "prompt_cache_key": "thread-1"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let counts = [
+        first_state.requests.lock().unwrap().len(),
+        second_state.requests.lock().unwrap().len(),
+    ];
+    assert!(counts == [2, 0] || counts == [0, 2]);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].candidate_id, events[1].candidate_id);
+    assert_eq!(
+        events[1].routing.as_ref().map(|routing| routing.reason),
+        Some(SelectionReason::PromptCacheAffinity)
+    );
 }
 
 #[tokio::test]
@@ -1747,6 +1805,67 @@ async fn account_websocket_restores_previous_response_affinity_after_reconnect()
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].candidate_id, events[1].candidate_id);
+}
+
+#[tokio::test]
+async fn prompt_cache_key_keeps_reconnected_websocket_on_the_warm_account() {
+    let (first_upstream, first_state) = spawn_websocket_upstream().await;
+    let (second_upstream, second_state) = spawn_websocket_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let client = reqwest::Client::new();
+    for input in ["start", "continue"] {
+        let upgraded = client
+            .get(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .upgrade()
+            .send()
+            .await
+            .unwrap();
+        let mut socket = upgraded.into_websocket().await.unwrap();
+        socket
+            .send(ClientWsMessage::Text(
+                json!({
+                    "type": "response.create",
+                    "model": MODEL,
+                    "input": input,
+                    "prompt_cache_key": "thread-1"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        let _ = receive_websocket_json(&mut socket).await;
+        let _ = receive_websocket_completion(&mut socket).await;
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let counts = [
+        first_state.requests.lock().unwrap().len(),
+        second_state.requests.lock().unwrap().len(),
+    ];
+    assert!(counts == [2, 0] || counts == [0, 2]);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].candidate_id, events[1].candidate_id);
+    assert_eq!(
+        events[1].routing.as_ref().map(|routing| routing.reason),
+        Some(SelectionReason::PromptCacheAffinity)
+    );
 }
 
 #[tokio::test]

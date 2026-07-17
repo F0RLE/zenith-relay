@@ -12,6 +12,9 @@ const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 pub const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
+const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
+pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
+const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -26,6 +29,7 @@ pub struct SelectionRequest<'a> {
     pub scope: &'a CandidateScope,
     pub tried: &'a HashSet<String>,
     pub response_affinity_key: Option<&'a str>,
+    pub prompt_affinity_key: Option<&'a str>,
     pub now_ms: u64,
 }
 
@@ -62,6 +66,7 @@ pub enum RoutingStrategy {
 #[serde(rename_all = "snake_case")]
 pub enum SelectionReason {
     ResponseAffinity,
+    PromptCacheAffinity,
     SessionAffinity,
     ConnectionAffinity,
     OnlyEligible,
@@ -92,6 +97,7 @@ pub struct RoutingDiagnostics {
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
     response_affinity: AffinityCache,
+    prompt_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
     image_in_flight: BTreeMap<String, u32>,
     half_open: BTreeSet<(String, String)>,
@@ -116,6 +122,10 @@ impl PoolScheduler {
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
                 RESPONSE_AFFINITY_TTL_MS,
+            ),
+            prompt_affinity: AffinityCache::new(
+                PROMPT_AFFINITY_MAX_ENTRIES,
+                PROMPT_AFFINITY_TTL_MS,
             ),
             in_flight: BTreeMap::new(),
             image_in_flight: BTreeMap::new(),
@@ -160,6 +170,7 @@ impl PoolScheduler {
 
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.response_affinity.invalidate_candidate(candidate_id);
+        self.prompt_affinity.invalidate_candidate(candidate_id);
         self.in_flight.remove(candidate_id);
         self.image_in_flight.remove(candidate_id);
         self.half_open
@@ -348,6 +359,12 @@ impl PoolScheduler {
             }
         }
 
+        let prompt_affinity_candidate = request.prompt_affinity_key.and_then(|key| {
+            self.prompt_affinity
+                .get(key, request.now_ms)
+                .map(str::to_string)
+        });
+
         let eligible = self
             .candidates
             .values()
@@ -363,18 +380,36 @@ impl PoolScheduler {
                     )
             })
             .collect::<Vec<_>>();
-        let selected = eligible
+        let baseline = eligible
             .iter()
             .copied()
             .max_by(|left, right| self.compare_preference(left, right, lane))?;
+        let selected = prompt_affinity_candidate
+            .as_deref()
+            .and_then(|candidate_id| {
+                eligible
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.id == candidate_id)
+            })
+            .filter(|preferred| {
+                preferred.id != baseline.id
+                    && self.prompt_affinity_allows(preferred, baseline, lane)
+            })
+            .unwrap_or(baseline);
+        let prompt_affinity_hit = selected.id != baseline.id;
         let runner_up = eligible
             .iter()
             .copied()
             .filter(|candidate| candidate.id != selected.id)
             .max_by(|left, right| self.compare_preference(left, right, lane));
-        let reason = runner_up.map_or(SelectionReason::OnlyEligible, |runner_up| {
-            self.selection_reason(selected, runner_up, lane)
-        });
+        let reason = if prompt_affinity_hit {
+            SelectionReason::PromptCacheAffinity
+        } else {
+            runner_up.map_or(SelectionReason::OnlyEligible, |runner_up| {
+                self.selection_reason(selected, runner_up, lane)
+            })
+        };
         Some(Selection {
             candidate_id: selected.id.clone(),
             response_affinity_hit: false,
@@ -498,6 +533,19 @@ impl PoolScheduler {
             return false;
         }
         self.response_affinity.bind(key, candidate_id, now_ms);
+        true
+    }
+
+    pub fn bind_prompt_affinity(
+        &mut self,
+        key: impl Into<String>,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        self.prompt_affinity.bind(key, candidate_id, now_ms);
         true
     }
 
@@ -750,6 +798,28 @@ impl PoolScheduler {
                 })
                 .then_with(|| compare_lru(left.last_used_at, right.last_used_at))
                 .then_with(|| right.id.cmp(&left.id)),
+        }
+    }
+
+    fn prompt_affinity_allows(
+        &self,
+        preferred: &RuntimeCandidate,
+        baseline: &RuntimeCandidate,
+        lane: InFlightLane,
+    ) -> bool {
+        if routing_tier(preferred) != routing_tier(baseline)
+            || candidate_kind_preference(preferred) != candidate_kind_preference(baseline)
+            || self.in_flight_count(&preferred.id, lane) != self.in_flight_count(&baseline.id, lane)
+        {
+            return false;
+        }
+        match (self.routing_quota(preferred), self.routing_quota(baseline)) {
+            (CandidateQuota::Available(preferred), CandidateQuota::Available(baseline)) => {
+                preferred.saturating_add(PROMPT_AFFINITY_QUOTA_SLACK_BPS) >= baseline
+            }
+            (CandidateQuota::Available(_), CandidateQuota::Unknown)
+            | (CandidateQuota::Unknown, CandidateQuota::Unknown) => true,
+            _ => false,
         }
     }
 
@@ -1012,6 +1082,7 @@ mod tests {
             scope: &CandidateScope::default(),
             tried,
             response_affinity_key: None,
+            prompt_affinity_key: None,
             now_ms: 100,
         })
     }
@@ -1023,6 +1094,7 @@ mod tests {
             scope: &CandidateScope::default(),
             tried,
             response_affinity_key: None,
+            prompt_affinity_key: None,
             now_ms: 100,
         })
     }
@@ -1104,6 +1176,7 @@ mod tests {
             scope: &scope,
             tried: &tried,
             response_affinity_key: None,
+            prompt_affinity_key: None,
             now_ms,
         };
 
@@ -1198,6 +1271,7 @@ mod tests {
                 scope: &scope,
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 100,
             }),
             None
@@ -1217,6 +1291,7 @@ mod tests {
                 scope: &scope,
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 100,
             })
             .is_none());
@@ -1320,6 +1395,51 @@ mod tests {
     }
 
     #[test]
+    fn prompt_cache_affinity_yields_to_load_and_material_quota_gaps() {
+        let mut scheduler = PoolScheduler::new();
+        let mut cached = oauth_candidate("cached");
+        cached.quota = CandidateQuota::Available(5_000);
+        scheduler.upsert(cached);
+        let mut fullest = oauth_candidate("fullest");
+        fullest.quota = CandidateQuota::Available(5_400);
+        scheduler.upsert(fullest);
+        assert!(scheduler.bind_prompt_affinity("thread", "cached", 0));
+
+        let select_thread = |scheduler: &mut PoolScheduler| {
+            scheduler
+                .select(SelectionRequest {
+                    model: "gpt-5",
+                    allowed_protocols: &[WireApi::Responses],
+                    scope: &CandidateScope::default(),
+                    tried: &HashSet::new(),
+                    response_affinity_key: None,
+                    prompt_affinity_key: Some("thread"),
+                    now_ms: 1,
+                })
+                .unwrap()
+        };
+
+        let selected = select_thread(&mut scheduler);
+        assert_eq!(selected.candidate_id, "cached");
+        assert_eq!(
+            selected.diagnostics.reason,
+            SelectionReason::PromptCacheAffinity
+        );
+
+        assert!(scheduler.reserve("cached"));
+        assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
+        assert!(scheduler.release("cached"));
+
+        assert!(scheduler.update_candidate_availability(
+            "fullest",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Available(5_501),
+        ));
+        assert_eq!(select_thread(&mut scheduler).candidate_id, "fullest");
+    }
+
+    #[test]
     fn oauth_equal_quota_rotates_without_legacy_priority() {
         let mut scheduler = PoolScheduler::new();
         let mut high_priority = oauth_candidate("high-priority");
@@ -1354,6 +1474,7 @@ mod tests {
                     scope: &scope,
                     tried: &tried,
                     response_affinity_key: None,
+                    prompt_affinity_key: None,
                     now_ms: 100,
                 })
                 .unwrap()
@@ -1630,6 +1751,7 @@ mod tests {
                 scope: &scope,
                 tried: &empty,
                 response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
                 now_ms: 1,
             })
             .unwrap();
@@ -1648,6 +1770,7 @@ mod tests {
                 scope: &scope,
                 tried: &empty,
                 response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
                 now_ms: 1,
             }),
             None,
@@ -1693,6 +1816,7 @@ mod tests {
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 101,
             })
             .is_some());
@@ -1752,6 +1876,7 @@ mod tests {
                 scope: &scope,
                 tried: &HashSet::new(),
                 response_affinity_key: Some("response"),
+                prompt_affinity_key: None,
                 now_ms: 100,
             }),
             Some(300)
@@ -1772,6 +1897,7 @@ mod tests {
             scope: &scope,
             tried: &tried,
             response_affinity_key: None,
+            prompt_affinity_key: None,
             now_ms: 101,
         };
 
@@ -1798,6 +1924,7 @@ mod tests {
             scope: &scope,
             tried: &tried,
             response_affinity_key: None,
+            prompt_affinity_key: None,
             now_ms: 101,
         };
 
@@ -1833,6 +1960,7 @@ mod tests {
                     scope: &CandidateScope::default(),
                     tried: &HashSet::new(),
                     response_affinity_key: None,
+                    prompt_affinity_key: None,
                     now_ms: 50,
                 })
                 .unwrap()
@@ -1882,6 +2010,7 @@ mod tests {
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 100,
             }),
             Some(200)
@@ -1898,6 +2027,7 @@ mod tests {
                 scope: &CandidateScope::default(),
                 tried: &HashSet::from(["sooner".to_string()]),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 100,
             }),
             Some(250)
@@ -1924,6 +2054,7 @@ mod tests {
                 scope: &scope,
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 0,
             })
             .is_some());
@@ -1943,6 +2074,7 @@ mod tests {
                 scope: &CandidateScope::default(),
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 0,
             })
             .is_some());
@@ -1964,6 +2096,7 @@ mod tests {
                 scope: &scope,
                 tried: &HashSet::new(),
                 response_affinity_key: None,
+                prompt_affinity_key: None,
                 now_ms: 0,
             })
             .is_none());

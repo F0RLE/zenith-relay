@@ -143,6 +143,7 @@ struct ClientRequest {
     resolved_model: String,
     responses_lite: bool,
     response_affinity_key: Option<String>,
+    prompt_affinity_key: Option<String>,
 }
 
 impl ClientRequest {
@@ -194,6 +195,11 @@ impl ClientRequest {
             || runtime.codex_model_uses_responses_lite(&resolved_model);
         let response_affinity_key = runtime
             .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
+        let prompt_affinity_key = runtime.prompt_affinity_key(
+            &key.id,
+            &resolved_model,
+            value.get("prompt_cache_key").and_then(Value::as_str),
+        );
         Ok(Self {
             request_id: super::request_id(),
             value,
@@ -201,6 +207,7 @@ impl ClientRequest {
             resolved_model,
             responses_lite,
             response_affinity_key,
+            prompt_affinity_key,
         })
     }
 
@@ -286,7 +293,10 @@ async fn connect_upstream(
             &request.resolved_model,
             WEBSOCKET_PROTOCOLS,
             &tried,
-            request.response_affinity_key.as_deref(),
+            (
+                request.response_affinity_key.as_deref(),
+                request.prompt_affinity_key.as_deref(),
+            ),
             now_ms(),
         );
         let Some((selected, lease)) = selected else {
@@ -795,6 +805,7 @@ struct InFlight {
     event: UsageEvent,
     started: Instant,
     response_id: Option<String>,
+    prompt_affinity_key: Option<String>,
 }
 
 struct BridgeState {
@@ -824,6 +835,7 @@ async fn bridge(
         0,
     );
     let upstream_candidate_id = connected.route.candidate_id.clone();
+    let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
         lease: Some(connected.lease),
         in_flight: Some(InFlight {
@@ -831,6 +843,7 @@ async fn bridge(
             event: initial_event,
             started: connected.started,
             response_id: None,
+            prompt_affinity_key,
         }),
         upstream_candidate_id,
         last_response_id: None,
@@ -1004,7 +1017,10 @@ async fn start_next_request(
             &request.resolved_model,
             WEBSOCKET_PROTOCOLS,
             &tried,
-            request.response_affinity_key.as_deref(),
+            (
+                request.response_affinity_key.as_deref(),
+                request.prompt_affinity_key.as_deref(),
+            ),
             now_ms(),
         );
         let Some((selected, lease)) = selected else {
@@ -1050,6 +1066,7 @@ async fn start_next_request(
             event,
             started,
             response_id: None,
+            prompt_affinity_key: request.prompt_affinity_key,
         });
         return Ok(true);
     }
@@ -1089,6 +1106,7 @@ async fn start_next_request(
         event,
         started,
         response_id: None,
+        prompt_affinity_key: request.prompt_affinity_key,
     });
     for message in initial_messages {
         if !handle_upstream_message(downstream, runtime, state, message).await {
@@ -1236,6 +1254,11 @@ fn finish_terminal(
         );
         runtime.bind_response_affinity(
             in_flight.response_id.as_deref(),
+            &in_flight.route.candidate_id,
+            now_ms(),
+        );
+        runtime.bind_prompt_affinity(
+            in_flight.prompt_affinity_key.as_deref(),
             &in_flight.route.candidate_id,
             now_ms(),
         );

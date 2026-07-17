@@ -1,19 +1,19 @@
 {
-  "schema_version": 2,
-  "catalog_version": "openai-standard-2026-07-13",
+  "schema_version": 3,
+  "catalog_version": "openai-standard-2026-07-17",
   "source_url": "https://developers.openai.com/api/docs/pricing/",
-  "verified_at": "2026-07-13",
+  "verified_at": "2026-07-17",
   "currency": "USD",
   "unit_tokens": 1000000,
   "models": [
-    { "id": "gpt-5.6-sol", "input_micro_usd_per_million": 5000000, "cached_input_micro_usd_per_million": 500000, "output_micro_usd_per_million": 30000000 },
-    { "id": "gpt-5.6-terra", "input_micro_usd_per_million": 2500000, "cached_input_micro_usd_per_million": 250000, "output_micro_usd_per_million": 15000000 },
-    { "id": "gpt-5.6-luna", "input_micro_usd_per_million": 1000000, "cached_input_micro_usd_per_million": 100000, "output_micro_usd_per_million": 6000000 },
-    { "id": "gpt-5.5", "input_micro_usd_per_million": 5000000, "cached_input_micro_usd_per_million": 500000, "output_micro_usd_per_million": 30000000 },
-    { "id": "gpt-5.5-pro", "input_micro_usd_per_million": 30000000, "cached_input_micro_usd_per_million": null, "output_micro_usd_per_million": 180000000 },
-    { "id": "gpt-5.4", "input_micro_usd_per_million": 2500000, "cached_input_micro_usd_per_million": 250000, "output_micro_usd_per_million": 15000000 },
-    { "id": "gpt-5.4-mini", "input_micro_usd_per_million": 750000, "cached_input_micro_usd_per_million": 75000, "output_micro_usd_per_million": 4500000 },
-    { "id": "gpt-5.4-nano", "input_micro_usd_per_million": 200000, "cached_input_micro_usd_per_million": 20000, "output_micro_usd_per_million": 1250000 },
-    { "id": "gpt-5.4-pro", "input_micro_usd_per_million": 30000000, "cached_input_micro_usd_per_million": null, "output_micro_usd_per_million": 180000000 }
+    { "id": "gpt-5.6-sol", "input_micro_usd_per_million": 5000000, "cached_input_micro_usd_per_million": 500000, "cache_write_input_micro_usd_per_million": 6250000, "output_micro_usd_per_million": 30000000 },
+    { "id": "gpt-5.6-terra", "input_micro_usd_per_million": 2500000, "cached_input_micro_usd_per_million": 250000, "cache_write_input_micro_usd_per_million": 3125000, "output_micro_usd_per_million": 15000000 },
+    { "id": "gpt-5.6-luna", "input_micro_usd_per_million": 1000000, "cached_input_micro_usd_per_million": 100000, "cache_write_input_micro_usd_per_million": 1250000, "output_micro_usd_per_million": 6000000 },
+    { "id": "gpt-5.5", "input_micro_usd_per_million": 5000000, "cached_input_micro_usd_per_million": 500000, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 30000000 },
+    { "id": "gpt-5.5-pro", "input_micro_usd_per_million": 30000000, "cached_input_micro_usd_per_million": null, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 180000000 },
+    { "id": "gpt-5.4", "input_micro_usd_per_million": 2500000, "cached_input_micro_usd_per_million": 250000, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 15000000 },
+    { "id": "gpt-5.4-mini", "input_micro_usd_per_million": 750000, "cached_input_micro_usd_per_million": 75000, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 4500000 },
+    { "id": "gpt-5.4-nano", "input_micro_usd_per_million": 200000, "cached_input_micro_usd_per_million": 20000, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 1250000 },
+    { "id": "gpt-5.4-pro", "input_micro_usd_per_million": 30000000, "cached_input_micro_usd_per_million": null, "cache_write_input_micro_usd_per_million": null, "output_micro_usd_per_million": 180000000 }
   ]
 }

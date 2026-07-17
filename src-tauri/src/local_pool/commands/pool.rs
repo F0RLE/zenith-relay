@@ -229,6 +229,7 @@ pub async fn set_local_pool_membership(
     state.snapshot().await.map_err(Into::into)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_local_gateway_key(
     label: String,

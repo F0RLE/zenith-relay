@@ -478,6 +478,11 @@ async fn execute_account_endpoint(
     rewrite_model: bool,
 ) -> Response<Body> {
     let request_id = request_id();
+    let prompt_affinity_key = runtime.prompt_affinity_key(
+        &key.id,
+        &resolved_model,
+        request.get("prompt_cache_key").and_then(Value::as_str),
+    );
     let has_previous_response_id = request
         .get("previous_response_id")
         .and_then(Value::as_str)
@@ -496,7 +501,10 @@ async fn execute_account_endpoint(
             &resolved_model,
             &[WireApi::Responses],
             &tried,
-            response_affinity_key.as_deref(),
+            (
+                response_affinity_key.as_deref(),
+                prompt_affinity_key.as_deref(),
+            ),
             now_ms(),
         ) else {
             break;
@@ -725,6 +733,11 @@ async fn execute_account_endpoint(
             event.generation_ms.unwrap_or(event.latency_ms),
         );
         event.consecutive_failures = recovered.then_some(0);
+        runtime.bind_prompt_affinity(
+            prompt_affinity_key.as_deref(),
+            &route.candidate_id,
+            now_ms(),
+        );
         emit_usage(&runtime, event);
         drop(lease);
         return proxy_response(status, &response_headers, Body::from(bytes));
@@ -894,6 +907,11 @@ async fn execute_request(
         .get("previous_response_id")
         .and_then(Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
+    let prompt_affinity_key = runtime.prompt_affinity_key(
+        &key.id,
+        &resolved_model,
+        request.get("prompt_cache_key").and_then(Value::as_str),
+    );
 
     while attempts_this_run
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
@@ -903,7 +921,10 @@ async fn execute_request(
             &resolved_model,
             candidate_protocols(wire_api),
             &tried,
-            response_affinity_key.as_deref(),
+            (
+                response_affinity_key.as_deref(),
+                prompt_affinity_key.as_deref(),
+            ),
             now_ms(),
         );
         let Some((selected, lease)) = selected else {
@@ -1324,6 +1345,11 @@ async fn execute_request(
                 event.generation_ms.unwrap_or(event.latency_ms),
             );
             event.consecutive_failures = recovered.then_some(0);
+            runtime.bind_prompt_affinity(
+                prompt_affinity_key.as_deref(),
+                &route.candidate_id,
+                now_ms(),
+            );
             emit_usage(&runtime, event);
             let completed_response_id = response_id_from_bytes(&bytes);
             runtime.bind_response_affinity(
@@ -1350,6 +1376,7 @@ async fn execute_request(
                 let completion_runtime = runtime.clone();
                 let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
+                let completion_prompt_affinity = prompt_affinity_key.clone();
                 let completion_half_open_probe = route.half_open_probe;
                 let completion_headers = headers.clone();
                 let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
@@ -1363,6 +1390,11 @@ async fn execute_request(
                             event.generation_ms.unwrap_or(event.latency_ms),
                         );
                         event.consecutive_failures = recovered.then_some(0);
+                        completion_runtime.bind_prompt_affinity(
+                            completion_prompt_affinity.as_deref(),
+                            &completion_source,
+                            now_ms(),
+                        );
                         completion_runtime.bind_response_affinity(
                             response_id,
                             &completion_source,
@@ -3535,6 +3567,7 @@ fn usage_event(
         generation_ms: None,
         input_tokens: None,
         cached_input_tokens: None,
+        cache_write_input_tokens: None,
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
@@ -4052,6 +4085,23 @@ fn apply_usage(event: &mut UsageEvent, usage: &Value) {
         .or_else(|| usage.get("cached_tokens"))
         .and_then(Value::as_u64)
         .map(|cached| cached.min(input_tokens.unwrap_or(cached)));
+    event.cache_write_input_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cache_write_tokens"))
+        .or_else(|| {
+            usage
+                .get("prompt_tokens_details")
+                .and_then(|details| details.get("cache_write_tokens"))
+        })
+        .or_else(|| usage.get("cache_write_tokens"))
+        .and_then(Value::as_u64)
+        .map(|written| {
+            written.min(
+                input_tokens
+                    .unwrap_or(written)
+                    .saturating_sub(event.cached_input_tokens.unwrap_or_default()),
+            )
+        });
     event.reasoning_tokens = usage
         .get("reasoning_tokens")
         .or_else(|| {
@@ -4534,6 +4584,7 @@ mod tests {
                 generation_ms: None,
                 input_tokens: None,
                 cached_input_tokens: None,
+                cache_write_input_tokens: None,
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
@@ -4587,13 +4638,14 @@ mod tests {
             Arc::new(|_, _, _| {}),
         );
         stream.ingest_sse(
-            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
+            b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9,\"cache_write_tokens\":7},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
         );
 
         let events = events.lock().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].input_tokens, Some(32));
         assert_eq!(events[0].cached_input_tokens, Some(9));
+        assert_eq!(events[0].cache_write_input_tokens, Some(7));
         assert_eq!(events[0].reasoning_tokens, Some(4));
         assert_eq!(events[0].output_tokens, Some(6));
         assert_eq!(events[0].total_tokens, Some(38));
@@ -4770,6 +4822,7 @@ mod tests {
             generation_ms: None,
             input_tokens: None,
             cached_input_tokens: None,
+            cache_write_input_tokens: None,
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,

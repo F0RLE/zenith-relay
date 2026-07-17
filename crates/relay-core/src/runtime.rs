@@ -901,15 +901,17 @@ impl GatewayRuntime {
         model: &str,
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
+        affinity_keys: (Option<&str>, Option<&str>),
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
+        let (response_affinity_key, prompt_affinity_key) = affinity_keys;
         self.select_and_reserve_for(
             key,
             model,
             allowed_protocols,
             tried,
             response_affinity_key,
+            prompt_affinity_key,
             now_ms,
             CandidateLeaseLane::Text,
         )
@@ -929,6 +931,7 @@ impl GatewayRuntime {
             allowed_protocols,
             tried,
             None,
+            None,
             now_ms,
             CandidateLeaseLane::Image,
         )
@@ -942,6 +945,7 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         tried: &HashSet<String>,
         response_affinity_key: Option<&str>,
+        prompt_affinity_key: Option<&str>,
         now_ms: u64,
         lane: CandidateLeaseLane,
     ) -> Option<(Selection, CandidateLease)> {
@@ -967,6 +971,7 @@ impl GatewayRuntime {
             scope: &key.scope,
             tried,
             response_affinity_key,
+            prompt_affinity_key,
             now_ms,
         };
         let selection = match lane {
@@ -1015,6 +1020,7 @@ impl GatewayRuntime {
             scope: &key.scope,
             tried,
             response_affinity_key,
+            prompt_affinity_key: None,
             now_ms,
         })
     }
@@ -1155,6 +1161,37 @@ impl GatewayRuntime {
             "{:x}",
             Sha256::digest(format!("response\0{response_id}").as_bytes())
         ))
+    }
+
+    pub(crate) fn prompt_affinity_key(
+        &self,
+        local_key_id: &str,
+        model: &str,
+        prompt_cache_key: Option<&str>,
+    ) -> Option<String> {
+        let prompt_cache_key = prompt_cache_key?.trim();
+        if prompt_cache_key.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "prompt\0{}\0{}\0{}",
+                    local_key_id,
+                    model.to_ascii_lowercase(),
+                    prompt_cache_key
+                )
+                .as_bytes()
+            )
+        ))
+    }
+
+    pub(crate) fn bind_prompt_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
+        if let Some(key) = key {
+            self.lock_scheduler()
+                .bind_prompt_affinity(key, candidate_id, now_ms);
+        }
     }
 
     pub(crate) fn bind_response_affinity(
