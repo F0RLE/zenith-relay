@@ -527,7 +527,8 @@ fn affinity_binding_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Respon
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(generation_ms), 0), COUNT(generation_ms), \
+    COALESCE(SUM(CASE WHEN success != 0 THEN generation_ms ELSE 0 END), 0), \
+    COUNT(CASE WHEN success != 0 THEN generation_ms END), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
         THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0), 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
@@ -872,6 +873,15 @@ mod tests {
         event.output_tokens = Some(20);
         event.total_tokens = Some(30);
         database.record(&event).unwrap();
+        event.request_id = "req_page_3".into();
+        event.success = false;
+        event.http_status = 502;
+        event.error_category = Some("upstream_websocket_closed".into());
+        event.generation_ms = Some(5_000);
+        event.input_tokens = Some(0);
+        event.output_tokens = Some(100);
+        event.total_tokens = Some(100);
+        database.record(&event).unwrap();
 
         let page = database
             .usage_page(&UsageQuery {
@@ -881,14 +891,16 @@ mod tests {
             })
             .unwrap();
         assert_eq!(page.events.len(), 1);
-        assert_eq!(page.total, 2);
-        assert_eq!(page.total_pages, 2);
-        assert_eq!(page.totals.requests, 2);
-        assert_eq!(page.totals.total_tokens, 58);
+        assert_eq!(page.total, 3);
+        assert_eq!(page.total_pages, 3);
+        assert_eq!(page.totals.requests, 3);
+        assert_eq!(page.totals.total_tokens, 158);
         assert_eq!(page.totals.generation_output_tokens, 23);
+        assert_eq!(page.totals.generation_ms, 600);
+        assert_eq!(page.totals.generation_samples, 2);
         assert_eq!(page.totals.speed_output_tokens, 23);
         assert_eq!(page.totals.speed_duration_ms, 928);
-        assert_eq!(page.totals.api_equivalent.priced_tokens, 58);
+        assert_eq!(page.totals.api_equivalent.priced_tokens, 158);
         assert_eq!(page.models.len(), 1);
         assert_eq!(page.pool_members.len(), 2);
         assert_eq!(page.events[0].wire_api, "chat_completions");
@@ -899,8 +911,8 @@ mod tests {
                 ..UsageQuery::default()
             })
             .unwrap();
-        assert_eq!(chat.total, 1);
-        assert_eq!(chat.events[0].request_id, "req_page_2");
+        assert_eq!(chat.total, 2);
+        assert_eq!(chat.events[0].request_id, "req_page_3");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

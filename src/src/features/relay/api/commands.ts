@@ -73,8 +73,8 @@ export const relayCommands = {
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
 
   startOAuth: () => invoke<OAuthFlow>("start_codex_oauth"),
+  resumeOAuth: (loginId: string) => invoke<OAuthFlow>("resume_codex_oauth", { loginId }),
   onOAuthStatus: (callback: (event: OAuthFlowEvent) => void) => listen<OAuthFlowEvent>("relay-oauth-status", (event) => callback(event.payload)),
-  submitOAuthCallback: (loginId: string, callbackUrl: string) => invoke("submit_codex_oauth_callback", { loginId, callbackUrl }),
   completeOAuth: (loginId: string) => invoke<OAuthCompletion>("complete_codex_oauth", { loginId }),
   cancelOAuth: (loginId: string) => invoke("cancel_codex_oauth", { loginId }),
 

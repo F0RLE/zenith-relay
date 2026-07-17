@@ -5705,37 +5705,71 @@ textarea {
   color: var(--relay-secondary);
 }
 
-.oauth-waiting > a,
-.oauth-progress > a {
-  width: fit-content;
-  color: var(--relay-accent-hover);
-  font-weight: 600;
+.oauth-waiting .oauth-waiting-status {
+  padding: 14px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-subtle);
 }
 
-.oauth-resume,
+.oauth-expiry {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 0 11px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  color: var(--relay-secondary);
+}
+
+.oauth-expiry svg {
+  width: 17px;
+  height: 17px;
+  color: var(--relay-accent);
+}
+
+.oauth-expiry strong {
+  color: var(--relay-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.oauth-link-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.oauth-link-actions .relay-button {
+  min-width: 0;
+}
+
+.oauth-link-actions .relay-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .import-resume {
   padding-top: 12px;
   border-top: 1px solid var(--relay-border);
 }
 
-.oauth-resume summary,
 .import-resume summary {
   color: var(--relay-accent-hover);
   font-weight: 600;
   cursor: pointer;
 }
 
-.oauth-resume[open] summary,
 .import-resume[open] summary {
   margin-bottom: 12px;
 }
 
-.oauth-resume .inline-actions,
 .import-resume .inline-actions {
   justify-content: stretch;
 }
 
-.oauth-resume .inline-actions input,
 .import-resume .inline-actions input {
   min-width: 0;
   flex: 1;
@@ -7368,6 +7402,10 @@ input[type="password"] {
 }
 
 @media (max-width: 560px) {
+  .oauth-link-actions {
+    grid-template-columns: 1fr;
+  }
+
   .pool-policy-row {
     grid-template-columns: minmax(0, 1fr);
     gap: 10px;

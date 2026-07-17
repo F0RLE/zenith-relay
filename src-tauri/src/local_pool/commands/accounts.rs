@@ -1469,11 +1469,12 @@ pub(crate) async fn refresh_account_quota_once(
     let now_ms = current_time_ms();
     let request_timeout =
         Duration::from_secs(state.store()?.gateway().quota_request_timeout_seconds);
-    let mut subscription = state
+    let account_before_refresh = state
         .store()?
         .account(account_id)
-        .map(|account| account.account.subscription.clone())
+        .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    let mut subscription = account_before_refresh.account.subscription.clone();
     if subscription.active_until_ms.is_none() {
         if let Some(active_until_ms) = imported_identity(
             prepared.tokens().id_token(),
@@ -1533,32 +1534,44 @@ pub(crate) async fn refresh_account_quota_once(
     );
 
     let _mutation = state.setup_guard().await;
-    let (old_accounts, old_keys) = current_account_records(state)?;
-    let mut account = state
-        .store()?
-        .account(account_id)
-        .cloned()
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
-    let previous_models = account.models.iter().cloned().collect::<BTreeSet<_>>();
-    if account.account.subscription.active_until_ms.is_none()
-        && subscription.active_until_ms.is_some()
-    {
-        account.account.subscription = subscription;
-    }
-    let outcome = match refreshed {
-        Ok(outcome) => apply_quota_outcome(&mut account, outcome, now_ms),
-        Err(_) => {
-            let failure = QuotaRefreshFailure::new("quota_timeout", true);
-            apply_quota_failure(&mut account, &failure, now_ms);
-            AccountQuotaOutcome::Failed {
-                code: failure.code,
-                retryable: failure.retryable,
-            }
+    let (old_accounts, old_keys, account, outcome, models_changed) = {
+        let mut store = state.store()?;
+        let old_accounts = store.accounts().to_vec();
+        let old_keys = store.keys().to_vec();
+        let current_account = store
+            .account(account_id)
+            .cloned()
+            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+        let mut account = current_account.clone();
+        let previous_models = account.models.iter().cloned().collect::<BTreeSet<_>>();
+        if account.account.subscription.active_until_ms.is_none()
+            && subscription.active_until_ms.is_some()
+        {
+            account.account.subscription = subscription;
         }
+        let outcome = match refreshed {
+            Ok(outcome) => apply_quota_outcome(&mut account, outcome, now_ms),
+            Err(_) => {
+                let failure = QuotaRefreshFailure::new("quota_timeout", true);
+                apply_quota_failure(&mut account, &failure, now_ms);
+                AccountQuotaOutcome::Failed {
+                    code: failure.code,
+                    retryable: failure.retryable,
+                }
+            }
+        };
+        apply_model_discovery(&mut account, discovered_models);
+        preserve_newer_routing_failure(
+            &mut account,
+            &account_before_refresh,
+            &current_account,
+            now_ms,
+        );
+        let models_changed =
+            account.models.iter().cloned().collect::<BTreeSet<_>>() != previous_models;
+        store.upsert_account(account.clone())?;
+        (old_accounts, old_keys, account, outcome, models_changed)
     };
-    apply_model_discovery(&mut account, discovered_models);
-    let models_changed = account.models.iter().cloned().collect::<BTreeSet<_>>() != previous_models;
-    state.store()?.upsert_account(account.clone())?;
     sync_refreshed_account_or_rollback(state, account_id, models_changed, old_accounts, old_keys)
         .await?;
     Ok(AccountQuotaRefreshResponse {
@@ -3035,6 +3048,42 @@ fn merge_existing_account(account: &mut LocalAccountRecord, existing: Option<&Lo
     account.excluded_models = existing.excluded_models.clone();
     account.priority = existing.priority;
     account.weight = existing.weight;
+    account.cooldowns = existing.cooldowns.clone();
+    account.consecutive_failures = existing.consecutive_failures;
+}
+
+fn preserve_newer_routing_failure(
+    account: &mut LocalAccountRecord,
+    before_refresh: &LocalAccountRecord,
+    current: &LocalAccountRecord,
+    now_ms: u64,
+) {
+    let routing_state_changed = current.cooldowns != before_refresh.cooldowns
+        || current.consecutive_failures != before_refresh.consecutive_failures
+        || current.account.auth_state != before_refresh.account.auth_state
+        || current.account.health != before_refresh.account.health
+        || current.account.last_error_code != before_refresh.account.last_error_code;
+    let has_active_failure = current.consecutive_failures > 0
+        || current
+            .cooldowns
+            .values()
+            .any(|retry_at_ms| *retry_at_ms > now_ms);
+    if !routing_state_changed || !has_active_failure {
+        return;
+    }
+    for (scope, retry_at_ms) in &current.cooldowns {
+        account
+            .cooldowns
+            .entry(scope.clone())
+            .and_modify(|saved| *saved = (*saved).max(*retry_at_ms))
+            .or_insert(*retry_at_ms);
+    }
+    account.consecutive_failures = account
+        .consecutive_failures
+        .max(current.consecutive_failures);
+    account.account.auth_state = current.account.auth_state;
+    account.account.health = current.account.health;
+    account.account.last_error_code = current.account.last_error_code.clone();
 }
 
 fn apply_account_patch(
@@ -3865,6 +3914,27 @@ mod tests {
     }
 
     #[test]
+    fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
+        let before_refresh = account_record("account-race");
+        let mut current = before_refresh.clone();
+        current.account.health = AccountHealthState::Degraded;
+        current.account.last_error_code = Some("upstream_rate_limited".into());
+        current.cooldowns.insert("*".into(), 500);
+        current.consecutive_failures = 2;
+        let mut refreshed = before_refresh.clone();
+
+        preserve_newer_routing_failure(&mut refreshed, &before_refresh, &current, 100);
+
+        assert_eq!(refreshed.cooldowns.get("*"), Some(&500));
+        assert_eq!(refreshed.consecutive_failures, 2);
+        assert_eq!(refreshed.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            refreshed.account.last_error_code.as_deref(),
+            Some("upstream_rate_limited")
+        );
+    }
+
+    #[test]
     fn large_import_preview_defers_quota_network_calls() {
         assert!(should_probe_import_quota(true, QUOTA_REFRESH_BATCH_SIZE));
         assert!(!should_probe_import_quota(
@@ -4196,6 +4266,8 @@ mod tests {
         existing.account.token_generation = 7;
         existing.account.in_pool = true;
         existing.priority = 9;
+        existing.cooldowns.insert("gpt-test".into(), 900);
+        existing.consecutive_failures = 2;
         let resolved = existing.clone();
         let credentials = ImportedCredentialMaterial {
             access_token: "access-rotated".into(),
@@ -4229,6 +4301,8 @@ mod tests {
         assert_eq!(updated.account.token_generation, 8);
         assert!(updated.account.in_pool);
         assert_eq!(updated.priority, 9);
+        assert_eq!(updated.cooldowns.get("gpt-test"), Some(&900));
+        assert_eq!(updated.consecutive_failures, 2);
         assert_ne!(
             updated.account.identity.stable_index,
             existing.account.identity.stable_index

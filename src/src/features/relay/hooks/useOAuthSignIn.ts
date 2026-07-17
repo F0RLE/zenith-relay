@@ -9,7 +9,7 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
   const flowRef = useRef<OAuthFlow | null>(null);
   const listenerRef = useRef<ReturnType<typeof relayCommands.onOAuthStatus> | null>(null);
   const handlerRef = useRef<(event: OAuthFlowEvent) => void>(() => undefined);
-  const finishRef = useRef<(loginId: string, callbackUrl?: string) => Promise<boolean>>(async () => false);
+  const finishRef = useRef<(loginId: string) => Promise<boolean>>(async () => false);
   const latestEventRef = useRef<OAuthFlowEvent | null>(null);
   const onCompleteRef = useRef(onComplete);
   const startingRef = useRef(false);
@@ -26,12 +26,11 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     return listenerRef.current;
   }, []);
 
-  const finish = useCallback(async (loginId: string, callbackUrl?: string) => {
+  const finish = useCallback(async (loginId: string) => {
     if (completingRef.current) return false;
     completingRef.current = true;
     const completed: { current: OAuthCompletion | null } = { current: null };
     const ok = await perform("oauth-complete", async () => {
-      if (callbackUrl) await relayCommands.submitOAuthCallback(loginId, callbackUrl);
       completed.current = await relayCommands.completeOAuth(loginId);
     }, "feedback.accountAdded");
     completingRef.current = false;
@@ -75,11 +74,6 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     return true;
   }, [ensureListener, perform]);
 
-  const complete = useCallback((callbackUrl?: string) => {
-    const current = flowRef.current;
-    return current ? finish(current.loginId, callbackUrl) : Promise.resolve(false);
-  }, [finish]);
-
   const cancel = useCallback(async () => {
     const current = flowRef.current;
     flowRef.current = null;
@@ -92,5 +86,5 @@ export function useOAuthSignIn(onComplete?: (result: OAuthCompletion) => void | 
     if (listener) void listener.then((unlisten) => unlisten()).catch(() => undefined);
   }, []);
 
-  return { flow, start, complete, cancel };
+  return { flow, start, cancel };
 }

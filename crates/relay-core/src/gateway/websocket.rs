@@ -351,21 +351,47 @@ async fn connect_upstream(
             .ok()
             .and_then(Result::ok);
             let failure = GatewayFailure::upstream_status(status);
-            record_connect_failure_with_hint(
-                runtime,
-                key,
-                &route,
-                &request,
-                attempt,
-                started,
-                &failure,
-                Some(&response_headers),
-                body.as_deref()
-                    .map(rate_limit_body_hint)
-                    .unwrap_or_default(),
+            let response_missing = body
+                .as_deref()
+                .is_some_and(super::previous_response_not_found);
+            let affinity_miss = super::recoverable_response_affinity_miss(
+                status,
+                request.has_previous_response_id(),
+                response_affinity_hit,
+                response_missing,
             );
-            last_failure = Some(failure);
-            continue;
+            if affinity_miss {
+                confirmed_response_missing |= response_missing;
+                owner_recovery_confirmed |= !response_affinity_hit;
+                runtime.invalidate_response_affinity(request.response_affinity_key.as_deref());
+                record_connect_affinity_miss(
+                    runtime, key, &route, &request, attempt, started, status,
+                );
+                last_failure = Some(failure);
+                if response_missing && response_affinity_hit {
+                    break;
+                }
+                continue;
+            }
+            if super::retryable_status(status, request.has_previous_response_id()) {
+                record_connect_failure_with_hint(
+                    runtime,
+                    key,
+                    &route,
+                    &request,
+                    attempt,
+                    started,
+                    &failure,
+                    Some(&response_headers),
+                    body.as_deref()
+                        .map(rate_limit_body_hint)
+                        .unwrap_or_default(),
+                );
+                last_failure = Some(failure);
+                continue;
+            }
+            record_connect_rejection(runtime, key, &route, &request, attempt, started, &failure);
+            return Err(failure);
         }
         let mut upstream = match timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.into_websocket()).await {
             Ok(Ok(upstream)) => upstream,
@@ -662,6 +688,31 @@ fn record_connect_affinity_miss(
             false,
             status.as_u16(),
             Some("response_affinity_miss".to_string()),
+            started.elapsed().as_millis() as u64,
+        ),
+    );
+}
+
+fn record_connect_rejection(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    route: &ExecutorRoute,
+    request: &ClientRequest,
+    attempt: u16,
+    started: Instant,
+    failure: &GatewayFailure,
+) {
+    emit_usage(
+        runtime,
+        usage_event(
+            &request.request_id,
+            attempt,
+            &key.id,
+            route,
+            &request.requested_model,
+            false,
+            failure.status.as_u16(),
+            Some(failure.category.to_string()),
             started.elapsed().as_millis() as u64,
         ),
     );
@@ -1171,16 +1222,18 @@ fn finish_terminal(
         let status = terminal_failure_status(terminal.status);
         in_flight.event.http_status = status.as_u16();
         in_flight.event.error_category = Some(websocket_error_category(status).to_string());
-        let failure_state = apply_status_cooldown_with_hint(
-            runtime,
-            &in_flight.route.candidate_id,
-            &in_flight.route.source_model,
-            status,
-            &terminal.headers,
-            terminal.body_hint,
-            in_flight.route.half_open_probe,
-        );
-        apply_failure_state(&mut in_flight.event, failure_state);
+        if super::retryable_status(status, false) {
+            let failure_state = apply_status_cooldown_with_hint(
+                runtime,
+                &in_flight.route.candidate_id,
+                &in_flight.route.source_model,
+                status,
+                &terminal.headers,
+                terminal.body_hint,
+                in_flight.route.half_open_probe,
+            );
+            apply_failure_state(&mut in_flight.event, failure_state);
+        }
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();

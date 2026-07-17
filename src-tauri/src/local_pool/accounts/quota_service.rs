@@ -15,6 +15,13 @@ pub fn apply_quota_success(
     mut data: CodexQuotaRefreshData,
 ) -> Result<AppliedQuota, &'static str> {
     let observed_at_ms = data.quota.observed_at_ms;
+    let active_model_cooldown = account
+        .cooldowns
+        .iter()
+        .any(|(scope, retry_at_ms)| scope != "*" && *retry_at_ms > observed_at_ms);
+    let previous_health = account.account.health;
+    let previous_error = account.account.last_error_code.clone();
+    let previous_failures = account.consecutive_failures;
     let previous = account.account.quota.clone();
     data.quota
         .preserve_subscription_metadata(&account.account.subscription);
@@ -39,7 +46,6 @@ pub fn apply_quota_success(
     } else {
         AccountHealthState::Healthy
     };
-    account.account.last_error_code = None;
     if account.account.health == AccountHealthState::Healthy {
         if let Some(retry_at_ms) =
             exhausted_quota_retry_at(account, data.limit_reached, observed_at_ms)
@@ -52,7 +58,19 @@ pub fn apply_quota_success(
         } else {
             account.cooldowns.remove("*");
         }
-        account.consecutive_failures = 0;
+        if active_model_cooldown {
+            account.account.health = match previous_health {
+                AccountHealthState::Blocked | AccountHealthState::Unhealthy => previous_health,
+                _ => AccountHealthState::Degraded,
+            };
+            account.account.last_error_code = previous_error;
+            account.consecutive_failures = previous_failures.max(1);
+        } else {
+            account.account.last_error_code = None;
+            account.consecutive_failures = 0;
+        }
+    } else {
+        account.account.last_error_code = Some("quota_forbidden".to_string());
     }
     Ok(AppliedQuota { transitions })
 }
@@ -235,6 +253,8 @@ mod tests {
     #[test]
     fn successful_quota_refresh_clears_only_global_failure_state() {
         let mut account = account();
+        account.account.health = AccountHealthState::Degraded;
+        account.account.last_error_code = Some("upstream_rate_limited".into());
         account.cooldowns.insert("*".into(), 60_000);
         account.cooldowns.insert("gpt-test".into(), 30_000);
         account.consecutive_failures = 3;
@@ -243,7 +263,12 @@ mod tests {
 
         assert!(!account.cooldowns.contains_key("*"));
         assert_eq!(account.cooldowns.get("gpt-test"), Some(&30_000));
-        assert_eq!(account.consecutive_failures, 0);
+        assert_eq!(account.consecutive_failures, 3);
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("upstream_rate_limited")
+        );
     }
 
     #[test]

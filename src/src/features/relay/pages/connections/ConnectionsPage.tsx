@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, Copy, CreditCard, Download, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, CalendarDays, Check, Clock3, Copy, CreditCard, Download, ExternalLink, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, Network, Pencil, Play, Plus, Power, RefreshCw, Rows3, ShieldAlert, Trash2, Upload, UserRoundX, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { createSavedTopUpIntentAndOpen, prepareTopUpAmount, resetKey, saveKey } from "../../../../tauri";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
@@ -171,7 +171,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       {view === "api" ? <ReadyApiView connected={Boolean(readyState?.providerActive)} onConnect={() => setDialog("ready")} onTopUp={() => setDialog("topup")} /> : null}
 
       {dialog === "source" ? <SourceDialog source={editingSource} onClose={() => { setDialog(null); setEditingSource(null); }} /> : null}
-      {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} onComplete={oauth.complete} /> : null}
+      {oauth.flow ? <OAuthDialog flow={oauth.flow} onCancel={oauth.cancel} /> : null}
       {dialog === "automation" ? <AutomationDialog task={editingAutomation} onClose={() => { setDialog(null); setEditingAutomation(null); }} /> : null}
       {dialog === "remote" ? <RemoteDialog onClose={() => setDialog(null)} /> : null}
       {dialog === "deploy" ? <DeployDialog onClose={() => setDialog(null)} /> : null}
@@ -597,13 +597,30 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiKey.trim()} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form" onSubmit={submit}><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label><div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={wireApi} onChange={(value) => setWireApi(value as SourceSummary["wireApi"])} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div><SecretField label={source ? t("sources.replaceKey") : t("sources.apiKey")} value={apiKey} onChange={setApiKey} /><label className="relay-field"><span>{t("common.models")}</span><input value={models} onChange={(event) => setModels(event.target.value)} placeholder={t("sources.modelListPlaceholder")} /></label><div className="settings-row"><label><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label></div><div className="settings-row"><div className="relay-field"><span>{t("sources.poolRole")}</span><OptionMenu className="field-option-menu" label={t("sources.poolRole")} value={role} onChange={(value) => setRole(value as ApiSourceRole)} options={[{ value: "primary", label: t("sources.roles.primary") }, { value: "stabilizer", label: t("sources.roles.stabilizer") }, { value: "reserve", label: t("sources.roles.reserve") }]} /><small>{t(`sources.roleHints.${role}`)}</small></div><label><span>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label></div></form></Dialog>;
 }
 
-function OAuthDialog({ flow, onCancel, onComplete }: { flow: OAuthFlow; onCancel: () => Promise<void>; onComplete: (callbackUrl?: string) => Promise<boolean> }) {
-  const { t, i18n } = useTranslation();
-  const { busy } = useRelayState();
-  const [callbackUrl, setCallbackUrl] = useState("");
-  const expiresAt = new Intl.DateTimeFormat(i18n.language, { timeStyle: "short" }).format(new Date(flow.expiresAtMs));
+function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Promise<void> }) {
+  const { t } = useTranslation();
+  const { busy, perform } = useRelayState();
+  const [now, setNow] = useState(Date.now);
+  const [reopenAt, setReopenAt] = useState(() => Date.now() + 3_000);
+  const [linkCopied, setLinkCopied] = useState(false);
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(interval);
+  }, []);
+  const secondsRemaining = Math.max(0, Math.ceil((flow.expiresAtMs - now) / 1_000));
+  const reopenIn = Math.max(0, Math.ceil((reopenAt - now) / 1_000));
   const callbackReceived = flow.status === "callback_received" || busy === "oauth-complete";
   const flowFailed = flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed";
+  const flowUnavailable = secondsRemaining === 0 || flow.status !== "pending";
+  const reopen = async () => {
+    const opened = await perform("oauth-reopen", () => relayCommands.resumeOAuth(flow.loginId));
+    if (opened) setReopenAt(Date.now() + 3_000);
+  };
+  const copyLink = async () => {
+    await copyText(flow.authorizationUrl);
+    setLinkCopied(true);
+    window.setTimeout(() => setLinkCopied(false), 1_500);
+  };
   return <Dialog
     title={t("accounts.signIn")}
     onClose={() => void onCancel()}
@@ -612,11 +629,22 @@ function OAuthDialog({ flow, onCancel, onComplete }: { flow: OAuthFlow; onCancel
     <div className="relay-form oauth-waiting">
       <div className="oauth-waiting-status"><Loader2 className="spin" aria-hidden /><div><strong>{t(callbackReceived ? "accounts.completingSignIn" : "accounts.waitingForSignIn")}</strong><p>{t("accounts.waitingForSignInHint")}</p></div></div>
       {flowFailed ? <p role="alert" className="form-note error-text">{t(`accounts.oauthStatus.${flow.status}`)}</p> : null}
-      <a href={flow.authorizationUrl} target="_blank" rel="noreferrer">{t("accounts.reopenSignIn")}</a>
-      <small>{t("accounts.oauthExpires", { value: expiresAt })}</small>
-      <details className="oauth-resume"><summary>{t("accounts.manualCompletion")}</summary><label className="relay-field"><span>{t("accounts.callbackUrl")}</span><div className="inline-actions"><input value={callbackUrl} onChange={(event) => setCallbackUrl(event.target.value)} placeholder={flow.redirectUri} /><Button variant="primary" busy={busy === "oauth-complete"} disabled={!callbackUrl.trim() && !callbackReceived} onClick={() => void onComplete(callbackUrl.trim() || undefined)}>{t("accounts.finishSignIn")}</Button></div></label></details>
+      <div className="oauth-expiry" role="timer"><Clock3 aria-hidden /><span>{t("accounts.oauthRemaining")}</span><strong>{formatCountdown(secondsRemaining)}</strong></div>
+      <div className="oauth-link-actions">
+        <Button variant="primary" icon={<ExternalLink aria-hidden />} busy={busy === "oauth-reopen"} disabled={flowUnavailable || reopenIn > 0} onClick={() => void reopen()}>{reopenIn > 0 ? t("accounts.reopenSignInCooldown", { count: reopenIn }) : t("accounts.reopenSignIn")}</Button>
+        <Button variant="secondary" icon={linkCopied ? <Check aria-hidden /> : <Copy aria-hidden />} disabled={flowUnavailable} onClick={() => void copyLink()}>{t(linkCopied ? "accounts.signInLinkCopied" : "accounts.copySignInLink")}</Button>
+      </div>
     </div>
   </Dialog>;
+}
+
+function formatCountdown(seconds: number) {
+  const hours = Math.floor(seconds / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`
+    : `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
 export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = false, onImported, onClose }: { initialPaths?: string[]; modeOverride?: RelayMode; defaultAddToPool?: boolean; onImported?: () => void; onClose: () => void }) {

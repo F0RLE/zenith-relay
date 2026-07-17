@@ -23,8 +23,15 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Sign in" }).first().click();
   const oauthDialog = page.getByRole("dialog", { name: "Sign in" });
   await expect(oauthDialog.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
-  await oauthDialog.getByText("Sign-in did not finish automatically", { exact: true }).click();
-  await expect(oauthDialog.getByLabel(/Callback URL/)).toBeVisible();
+  await expect(oauthDialog.getByText("Time remaining", { exact: true })).toBeVisible();
+  await expect(oauthDialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
+  const reopen = oauthDialog.getByRole("button", { name: /Open again in|Reopen sign-in page/ });
+  await expect(reopen).toBeDisabled();
+  await expect(reopen).toBeEnabled({ timeout: 4_000 });
+  await reopen.click();
+  await expect(reopen).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "resume_codex_oauth"))).toBe(true);
+  await expect(oauthDialog.getByText("Sign-in did not finish automatically", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Cancel" }).click();
 
   await page.getByRole("button", { name: "Import", exact: true }).click();
@@ -1222,17 +1229,18 @@ test("updates are checked without downloading and require an explicit action", a
   expect(commands.filter((command) => command === "plugin:updater|download_and_install")).toHaveLength(1);
 });
 
-test("OAuth keeps recovery fields behind an explicit disclosure", async ({ page }) => {
+test("OAuth sign-in exposes only safe recovery actions", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Sign in", exact: true }).first().click();
-  await expect(page.getByLabel(/Callback URL/)).toBeHidden();
-  await page.getByText("Sign-in did not finish automatically", { exact: true }).click();
-  await expect(page.getByLabel(/Callback URL/)).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "Sign in" });
+  await expect(dialog.getByRole("button", { name: "Copy sign-in link" })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: /Open again in|Reopen sign-in page/ })).toBeVisible();
+  await expect(dialog.locator("input, textarea, details")).toHaveCount(0);
 });
 
-test("key and OAuth timestamps follow the active locale", async ({ page }) => {
+test("key timestamps and the OAuth countdown follow the active locale", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "ru", populated: true, codexBindings: false });
   await page.goto("/");
 
@@ -1243,7 +1251,7 @@ test("key and OAuth timestamps follow the active locale", async ({ page }) => {
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("button", { name: "Войти", exact: true }).first().click();
   const dialog = page.getByRole("dialog", { name: "Войти" });
-  await expect(dialog).toContainText(/истекает в \d{2}:\d{2}\./);
+  await expect(dialog).toContainText(/Осталось времени\d+:\d{2}/);
   await expect(dialog).not.toContainText(/\b(?:AM|PM)\b/);
 });
 

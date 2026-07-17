@@ -75,6 +75,7 @@ pub async fn start_codex_oauth(
 
 #[tauri::command]
 pub async fn resume_codex_oauth(
+    app: AppHandle,
     login_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
@@ -84,7 +85,8 @@ pub async fn resume_codex_oauth(
         .resume(&login_id)
         .await
         .map_err(flow_error)?;
-    validated_authorization_url(&start)?;
+    let authorization_url = validated_authorization_url(&start)?;
+    let _ = app.opener().open_url(authorization_url, None::<&str>);
     Ok(start)
 }
 
@@ -772,13 +774,23 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.account.label = current.account.label.clone();
     next.account.tags = current.account.tags.clone();
     next.account.enabled = current.account.enabled;
+    next.account.in_pool = current.account.in_pool;
     next.account.draining = current.account.draining;
     next.account.created_at_ms = current.account.created_at_ms;
     next.account.last_used_at_ms = current.account.last_used_at_ms;
+    next.account.quota = current.account.quota.clone();
+    if next.account.subscription.plan_type.is_none() {
+        next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
+    }
+    if next.account.subscription.active_until_ms.is_none() {
+        next.account.subscription.active_until_ms = current.account.subscription.active_until_ms;
+    }
     next.allowed_models = current.allowed_models.clone();
     next.excluded_models = current.excluded_models.clone();
     next.priority = current.priority;
     next.weight = current.weight;
+    next.cooldowns = current.cooldowns.clone();
+    next.consecutive_failures = current.consecutive_failures;
 }
 
 fn validated_authorization_url(start: &OAuthFlowStart) -> LocalResult<String> {
@@ -1067,6 +1079,7 @@ mod tests {
         current.account.label = "My Codex".into();
         current.account.tags = BTreeSet::from(["work".into()]);
         current.account.enabled = false;
+        current.account.in_pool = true;
         current.account.draining = true;
         current.account.created_at_ms = 7;
         current.account.last_used_at_ms = Some(8);
@@ -1074,6 +1087,8 @@ mod tests {
         current.excluded_models = vec!["excluded".into()];
         current.priority = -10;
         current.weight = 4;
+        current.cooldowns.insert("gpt-test".into(), 900);
+        current.consecutive_failures = 3;
 
         let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let identity_hash =
@@ -1098,6 +1113,7 @@ mod tests {
         );
         assert_eq!(next.account.tags, current.account.tags);
         assert!(!next.account.enabled);
+        assert!(next.account.in_pool);
         assert!(next.account.draining);
         assert_eq!(next.account.created_at_ms, 7);
         assert_eq!(next.account.last_used_at_ms, Some(8));
@@ -1105,6 +1121,8 @@ mod tests {
         assert_eq!(next.excluded_models, vec!["excluded"]);
         assert_eq!(next.priority, -10);
         assert_eq!(next.weight, 4);
+        assert_eq!(next.cooldowns.get("gpt-test"), Some(&900));
+        assert_eq!(next.consecutive_failures, 3);
         assert_eq!(next.models, vec!["new-model"]);
     }
 

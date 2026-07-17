@@ -239,7 +239,7 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
       totals.ttftMs += row.ttft;
       totals.ttftSamples += 1;
     }
-    if (row.generationDurationMs != null && row.generationDurationMs > 0) {
+    if (row.success && row.generationDurationMs != null && row.generationDurationMs > 0) {
       totals.generationMs += row.generationDurationMs;
       totals.generationSamples += 1;
       totals.generationOutputTokens += visibleOutputTokens;

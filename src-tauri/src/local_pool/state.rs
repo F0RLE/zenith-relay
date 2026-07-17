@@ -379,12 +379,12 @@ impl DesktopState {
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
             let account_id = event.account_id.clone();
-            let access_expired = if event.http_status == 401 {
-                account_id.as_deref().is_some_and(|account_id| {
+            let access_expiry = if event.http_status == 401 {
+                account_id.as_deref().map(|account_id| {
                     expire_account_access(&credentials, account_id, observed_at_ms)
                 })
             } else {
-                true
+                None
             };
             let successful_auth_state = if event.success {
                 account_id
@@ -410,7 +410,7 @@ impl DesktopState {
                     account,
                     &event,
                     observed_at_ms,
-                    access_expired,
+                    access_expiry,
                     successful_auth_state,
                 );
                 let mut keys = store.keys().to_vec();
@@ -662,16 +662,30 @@ impl ResponseAffinityStore for DesktopResponseAffinityStore {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AccountAccessExpiry {
+    Refreshable,
+    AccessOnly,
+    Failed,
+}
+
 fn expire_account_access(
     credentials: &CredentialStore<NativeSecretBackend>,
     account_id: &str,
     now_ms: u64,
-) -> bool {
+) -> AccountAccessExpiry {
     let Ok(Some(mut stored)) = credentials.load(account_id) else {
-        return false;
+        return AccountAccessExpiry::Failed;
     };
+    let refreshable = stored.refresh_token().is_some();
     stored.expire_access_at(now_ms);
-    credentials.save(&stored).is_ok()
+    if credentials.save(&stored).is_err() {
+        AccountAccessExpiry::Failed
+    } else if refreshable {
+        AccountAccessExpiry::Refreshable
+    } else {
+        AccountAccessExpiry::AccessOnly
+    }
 }
 
 fn persisted_auth_state(
@@ -691,7 +705,7 @@ fn apply_account_usage_state(
     account: &mut LocalAccountRecord,
     event: &UsageEvent,
     observed_at_ms: u64,
-    access_expired: bool,
+    access_expiry: Option<AccountAccessExpiry>,
     successful_auth_state: Option<AccountAuthState>,
 ) -> bool {
     if event.success {
@@ -753,10 +767,19 @@ fn apply_account_usage_state(
     ) || account.account.health == AccountHealthState::Blocked;
     match event.http_status {
         401 => {
-            if access_expired {
+            if access_expiry == Some(AccountAccessExpiry::Refreshable) {
                 if !explicit_state {
                     account.account.health = AccountHealthState::Degraded;
                 }
+                account.account.last_error_code = Some("upstream_unauthorized".to_string());
+            } else if access_expiry == Some(AccountAccessExpiry::AccessOnly) {
+                if !matches!(
+                    account.account.auth_state,
+                    AccountAuthState::RequiresReauth(_)
+                ) {
+                    account.account.auth_state = AccountAuthState::Error;
+                }
+                account.account.health = AccountHealthState::Unhealthy;
                 account.account.last_error_code = Some("upstream_unauthorized".to_string());
             } else if !explicit_state {
                 account.account.auth_state = AccountAuthState::Error;
@@ -787,7 +810,8 @@ fn apply_account_usage_state(
             );
         }
     }
-    matches!(event.http_status, 401 | 429)
+    event.http_status == 429
+        || (event.http_status == 401 && access_expiry == Some(AccountAccessExpiry::Refreshable))
 }
 
 fn valid_cooldown_scope(scope: &str) -> bool {
@@ -1034,7 +1058,7 @@ mod tests {
     }
 
     #[test]
-    fn unauthorized_access_only_account_expires_credentials_and_queues_refresh() {
+    fn unauthorized_access_only_account_is_saved_but_removed_from_routing() {
         let root = temp_root("usage-401");
         let account_id = format!("account-{}", uuid::Uuid::new_v4().simple());
         let state = DesktopState::open(root.clone()).unwrap();
@@ -1077,21 +1101,15 @@ mod tests {
         let stored = credentials.require(&account_id).unwrap();
         assert!(!stored.is_access_usable(observed_after, 0));
         let account = state.store().unwrap().account(&account_id).unwrap().clone();
-        assert_eq!(
-            account.account.auth_state,
-            AccountAuthState::DegradedAccessOnly
-        );
-        assert_eq!(account.account.health, AccountHealthState::Degraded);
+        assert_eq!(account.account.auth_state, AccountAuthState::Error);
+        assert_eq!(account.account.health, AccountHealthState::Unhealthy);
         assert_eq!(
             account.account.last_error_code.as_deref(),
             Some("upstream_unauthorized")
         );
         assert_eq!(account.cooldowns.get("*"), Some(&retry_at_ms));
         assert_eq!(account.consecutive_failures, 1);
-        assert!(state
-            .next_quota_refresh_due()
-            .unwrap()
-            .is_some_and(|due_at_ms| due_at_ms <= observed_after));
+        assert!(state.next_quota_refresh_due().unwrap().is_none());
         drop(state);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
@@ -1166,7 +1184,7 @@ mod tests {
             &mut account,
             &failure,
             100,
-            true,
+            None,
             None,
         ));
 
@@ -1176,7 +1194,7 @@ mod tests {
             &mut account,
             &late_success,
             200,
-            true,
+            None,
             Some(AccountAuthState::Active),
         ));
         let older_failure = account_status_event("account-race", 429, Some("*"), Some(300), 1);
@@ -1184,7 +1202,7 @@ mod tests {
             &mut account,
             &older_failure,
             250,
-            true,
+            None,
             None,
         ));
 
@@ -1208,7 +1226,7 @@ mod tests {
             &mut account,
             &event,
             100,
-            true,
+            None,
             None,
         ));
         assert_eq!(account.account.health, AccountHealthState::Healthy);
