@@ -2921,11 +2921,20 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
 }
 
 fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool {
-    if event_type.is_some_and(|kind| kind.starts_with("response.") && kind.ends_with(".delta"))
-        && value
-            .get("delta")
-            .and_then(Value::as_str)
-            .is_some_and(|delta| !delta.is_empty())
+    if matches!(
+        event_type,
+        Some(
+            "response.output_text.delta"
+                | "response.refusal.delta"
+                | "response.function_call_arguments.delta"
+                | "response.custom_tool_call_input.delta"
+                | "response.mcp_call_arguments.delta"
+                | "response.code_interpreter_call_code.delta"
+        )
+    ) && value
+        .get("delta")
+        .and_then(Value::as_str)
+        .is_some_and(|delta| !delta.is_empty())
     {
         return true;
     }
@@ -3373,6 +3382,7 @@ mod tests {
     fn ttft_requires_real_output_for_supported_stream_protocols() {
         for event in [
             "data: {\"type\":\"response.created\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"hidden\"}\n\n",
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
             "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":null}}\n\n",
         ] {
@@ -3380,6 +3390,7 @@ mod tests {
         }
         for event in [
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         ] {
