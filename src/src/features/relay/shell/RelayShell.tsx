@@ -237,7 +237,7 @@ export function RelayShell() {
         ) : null}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} />}
       </div>
-      {importDragActive ? <div className="import-drop-overlay" role="status"><Upload aria-hidden /><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
+      {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
       {importRequest ? <ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /> : null}
       {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={() => { if (!installingUpdate) setUpdateDialogOpen(false); }} /> : null}
     </div>

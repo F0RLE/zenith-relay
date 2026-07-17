@@ -30,6 +30,7 @@ export type MockOptions = {
   poolMembers?: boolean;
   importResult?: "success" | "item_failure" | "not_found";
   importFailureCode?: string;
+  importPreviewDelayMs?: number;
   remoteConnected?: boolean;
   remoteFeatures?: string[];
   legacyRemoteRouting?: boolean;
@@ -343,8 +344,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "delete_local_source": localRuntime.sources = []; return structuredClone(localRuntime);
           case "test_local_source": return structuredClone(source);
           case "start_local_account_import": return importSession("11111111-2222-4333-8444-555555555555");
-          case "preview_local_account_import_files": return importSession("11111111-2222-4333-8444-555555555555");
-          case "preview_remote_account_import_files": return importSession("remote_import");
+          case "preview_local_account_import_files":
+            if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
+            return importSession("11111111-2222-4333-8444-555555555555");
+          case "preview_remote_account_import_files":
+            if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
+            return importSession("remote_import");
           case "resume_local_account_import": return importSession(String(args.sessionId ?? "11111111-2222-4333-8444-555555555555"));
           case "prepare_local_account_import": return importSession(String((args.input as { sessionId?: string })?.sessionId ?? "11111111-2222-4333-8444-555555555555"));
           case "confirm_local_account_import": {
@@ -553,9 +558,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
 
     function importSession(sessionId: string) {
       return { sessionId, prepared: true, preview: { format: "portable", rows: [
-        { itemId: "import_0123456789abcdef", label: "Imported account", identity: "im••••ed", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "Plus", defaultSelected: true, selectable: true, existing: false, warnings: [] },
-        { itemId: "import_1111222233334444", label: "Second imported account", identity: "se••••nd", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "Plus", defaultSelected: true, selectable: true, existing: false, warnings: [] },
-        { itemId: "import_fedcba9876543210", label: "Existing account", identity: "ex••••ng", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "existing", plan: "Plus", defaultSelected: false, selectable: true, existing: true, warnings: [] },
+        { itemId: "import_0123456789abcdef", label: "Imported account", identity: "im••••ed", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "k12", defaultSelected: true, selectable: true, existing: false, warnings: [] },
+        { itemId: "import_1111222233334444", label: "Second imported account", identity: "se••••nd", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "ready", plan: "k12", defaultSelected: true, selectable: true, existing: false, warnings: [] },
+        { itemId: "import_fedcba9876543210", label: "Existing account", identity: "ex••••ng", authMode: "oauth", sourceName: "OpenAI", quotaStatus: "available", status: "existing", plan: "k12", defaultSelected: false, selectable: true, existing: true, warnings: [] },
       ], warnings: [] } };
     }
 

@@ -1654,7 +1654,8 @@ svg {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spin {
+  .spin,
+  .import-drop-visual {
     animation: none;
   }
 }
@@ -2094,7 +2095,8 @@ textarea {
 .account-plan-badge[data-plan="business"] { --plan-accent: #8257c7; }
 .account-plan-badge[data-plan="enterprise"] { --plan-accent: var(--relay-warning); }
 .account-plan-badge[data-plan="go"] { --plan-accent: #15869a; }
-.account-plan-badge[data-plan="edu"] { --plan-accent: #ad4f82; }
+.account-plan-badge[data-plan="edu"],
+.account-plan-badge[data-plan="k12"] { --plan-accent: #ad4f82; }
 
 @media (max-width: 1023px) {
   .scope-grid {
@@ -6541,6 +6543,43 @@ textarea {
   text-overflow: ellipsis;
 }
 
+.import-file-loading {
+  min-height: 240px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 14px;
+  text-align: center;
+}
+
+.import-file-loading > span,
+.import-drop-visual {
+  width: 54px;
+  height: 54px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--relay-accent) 34%, var(--relay-border));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--relay-accent) 10%, var(--relay-surface));
+  color: var(--relay-accent-hover);
+}
+
+.import-file-loading svg,
+.import-drop-visual svg {
+  width: 24px;
+  height: 24px;
+}
+
+.import-file-loading strong {
+  font-size: 14px;
+}
+
+.import-file-loading p {
+  margin: 4px 0 0;
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
 .import-drop-overlay {
   position: fixed;
   z-index: 220;
@@ -6557,9 +6596,16 @@ textarea {
   pointer-events: none;
 }
 
-.import-drop-overlay svg {
-  width: 40px;
-  height: 40px;
+.import-drop-visual {
+  animation: import-drop-pulse 1.25s ease-in-out infinite;
+}
+
+@keyframes import-drop-pulse {
+  50% {
+    border-color: var(--relay-accent);
+    box-shadow: 0 0 0 8px color-mix(in srgb, var(--relay-accent) 10%, transparent);
+    transform: translateY(-3px);
+  }
 }
 
 .secret-field {

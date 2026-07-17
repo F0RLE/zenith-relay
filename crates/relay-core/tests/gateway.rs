@@ -292,22 +292,16 @@ async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
         .expect("first SSE chunk was buffered")
         .unwrap()
         .unwrap();
-    assert_eq!(first, "data: {\"type\":\"response.created\"}\n\n");
+    assert_eq!(
+        first,
+        "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+    );
     let second = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(
-        second,
-        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
-    );
-    let third = tokio::time::timeout(Duration::from_secs(1), chunks.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert_eq!(third, "data: [DONE]\n\n");
+    assert_eq!(second, "data: [DONE]\n\n");
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();

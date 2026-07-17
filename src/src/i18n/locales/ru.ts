@@ -525,6 +525,8 @@ const relayRu = {
     chooseImportFiles: "Выбрать JSON-файлы",
     importFileHint: "или перетащите JSON-файлы в любое место Relay",
     dropImportFiles: "Отпустите JSON-файлы для предпросмотра",
+    readingImportFiles: "Читаем файлы учётных записей",
+    readingImportFilesHint: "Проверяем формат и подготавливаем предпросмотр.",
     importData: "JSON для импорта учётных записей",
     resumeExistingImport: "Продолжить незавершённый импорт",
     resumeImportId: "Идентификатор незавершённого импорта",

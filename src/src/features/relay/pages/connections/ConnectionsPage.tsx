@@ -652,6 +652,7 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
   const [commandFailed, setCommandFailed] = useState(false);
   const [completed, setCompleted] = useState<ImportFailure[] | null>(null);
   const [addToPool, setAddToPool] = useState(defaultAddToPool);
+  const [fileLoading, setFileLoading] = useState(Boolean(initialPaths?.length));
   const activeSessionId = useRef<string | null>(null);
   const initialPreviewStarted = useRef(false);
   const canImportToPool = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("account_import_to_pool"));
@@ -692,14 +693,19 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
     else if (!ok) setCommandFailed(true);
   };
   const chooseFiles = async (paths?: string[]) => {
+    setFileLoading(true);
     const result: { current: ImportSession | null } = { current: null };
-    const ok = await perform("import-files", async () => {
-      result.current = mode === "local"
-        ? await relayCommands.previewImportFiles(paths)
-        : await relayCommands.previewRemoteImportFiles(paths);
-    });
-    if (ok && result.current) acceptSession(result.current);
-    else if (!ok) setCommandFailed(true);
+    try {
+      const ok = await perform("import-files", async () => {
+        result.current = mode === "local"
+          ? await relayCommands.previewImportFiles(paths)
+          : await relayCommands.previewRemoteImportFiles(paths);
+      });
+      if (ok && result.current) acceptSession(result.current);
+      else if (!ok) setCommandFailed(true);
+    } finally {
+      setFileLoading(false);
+    }
   };
   const resume = async () => {
     const result: { current: ImportSession | null } = { current: null };
@@ -761,11 +767,11 @@ export function ImportDialog({ initialPaths, modeOverride, defaultAddToPool = fa
     : [...current, itemId]);
   const footer = completed
     ? <Button variant="primary" onClick={cancel}>{t("common.close")}</Button>
-    : <>{session && canImportToPool ? <label className="toggle-row import-pool-option"><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span>{t("accounts.addImportedToPool")}</span></label> : null}<Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
+    : <>{session && canImportToPool ? <label className="toggle-row import-pool-option"><input type="checkbox" checked={addToPool} onChange={(event) => setAddToPool(event.target.checked)} /><span>{t("accounts.addImportedToPool")}</span></label> : null}<Button variant="secondary" onClick={cancel}>{t("common.cancel")}</Button>{fileLoading ? null : session ? <Button variant="primary" busy={busy === "import-confirm"} disabled={selected.length === 0} onClick={confirm}>{t("accounts.confirmImport", { count: selected.length })}</Button> : <Button variant="primary" busy={busy === "import-preview"} disabled={!content.trim()} onClick={preview}>{t("accounts.preview")}</Button>}</>;
   const body = completed ? <div role="alert" className="relay-form import-failure-summary"><strong>{t("accounts.importIncomplete")}</strong><p>{t("accounts.importIncompleteHint", { count: completed.length })}</p><ul className="import-failure-list">{completed.map((failure) => <li key={failure.itemId}><div><strong>{failure.label || t("accounts.importUnknownAccount")}</strong><code title={t("accounts.importTechnicalCode")}>{failure.code}</code></div>{failure.identity ? <span>{failure.identity}</span> : null}<p>{importFailureReason(failure.code, t)}</p></li>)}</ul></div> : session ? <div className="import-preview"><table className="relay-table"><thead><tr><th><span className="sr-only">{t("accounts.selectImport")}</span></th><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("accounts.identity")}</th><th>{t("accounts.plan")}</th></tr></thead><tbody>{session.preview.rows.map((row) => {
     const badge = row.status === "invalid" ? "error" : row.status === "quota_failed" ? "warning" : row.status === "existing" ? "info" : "ready";
-    return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td>{row.plan ?? "-"}</td></tr>;
-  })}</tbody></table></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={() => chooseFiles()}>{t("accounts.chooseImportFiles")}</Button><span>{t("accounts.importFileHint")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <details className="import-resume"><summary>{t("accounts.resumeExistingImport")}</summary><label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label></details> : null}</div>;
+    return <tr key={row.itemId}><td><input type="checkbox" checked={selected.includes(row.itemId)} disabled={!row.selectable} aria-label={t("accounts.selectImportRow", { name: row.label })} onChange={() => toggle(row.itemId)} /></td><td><StatusBadge status={badge} label={t(`accounts.importStatus.${row.status}`, { defaultValue: row.status })} /></td><td>{row.label}{row.error ? <small className="error-text">{t("accounts.importIssue", { code: row.error.code })}</small> : row.warnings.length ? <small>{row.warnings.map((warning) => warning.code).join(", ")}</small> : null}</td><td><code>{row.identity}</code></td><td><AccountPlanBadge planType={row.plan ?? null} unknown="-" /></td></tr>;
+  })}</tbody></table></div> : fileLoading ? <div className="import-file-loading" role="status" aria-live="polite"><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.readingImportFiles")}</strong><p>{t("accounts.readingImportFilesHint")}</p></div></div> : <div className="relay-form"><div className="import-file-picker"><Button variant="secondary" icon={<Upload aria-hidden />} busy={busy === "import-files"} onClick={() => chooseFiles()}>{t("accounts.chooseImportFiles")}</Button><span>{t("accounts.importFileHint")}</span></div><label className="relay-field"><span>{t("accounts.importData")}</span><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder={mode === "local" ? t("accounts.importPlaceholder") : t("accounts.remoteImportPlaceholder")} spellCheck={false} /></label>{mode === "local" ? <details className="import-resume"><summary>{t("accounts.resumeExistingImport")}</summary><label className="relay-field"><span>{t("accounts.resumeImportId")}</span><div className="inline-actions"><input value={resumeId} onChange={(event) => setResumeId(event.target.value)} /><Button variant="secondary" busy={busy === "import-resume"} disabled={!resumeId.trim()} onClick={resume}>{t("common.resume")}</Button></div></label></details> : null}</div>;
   return <Dialog wide title={t("accounts.import")} onClose={cancel} footer={footer}>{commandFailed ? <p role="alert" className="form-note error-text">{t("accounts.importCommandFailed")}</p> : null}{body}</Dialog>;
 }
 

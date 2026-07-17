@@ -183,8 +183,8 @@ test("pasted Cockpit arrays reach the Rust batch preview unchanged", async ({ pa
   await dialog.getByRole("button", { name: "Cancel" }).click();
 });
 
-test("dropping JSON files anywhere opens the shared import preview", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+test("dropping JSON files shows progress before the shared import preview", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, importPreviewDelayMs: 500 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await expect.poll(() => page.evaluate(() => {
@@ -203,8 +203,11 @@ test("dropping JSON files anywhere opens the shared import preview", async ({ pa
   }, paths);
 
   const dialog = page.getByRole("dialog", { name: "Import accounts" });
+  await expect(dialog.getByText("Reading account files", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".import-file-loading .spin")).toBeVisible();
   await expect(dialog.getByLabel("Select Imported account for import")).toBeChecked();
   await expect(dialog.getByLabel("Select Second imported account for import")).toBeChecked();
+  await expect(dialog.locator('.account-plan-badge[data-plan="k12"]')).toHaveCount(3);
   await expect(page.getByText("Drop JSON files to preview accounts")).toBeHidden();
   const call = await page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { paths?: string[] } }> }).__TAURI_TEST_INVOKES__;

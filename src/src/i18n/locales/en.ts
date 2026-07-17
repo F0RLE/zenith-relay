@@ -525,6 +525,8 @@ const relayEn = {
     chooseImportFiles: "Choose JSON files",
     importFileHint: "or drop JSON files anywhere in Relay",
     dropImportFiles: "Drop JSON files to preview accounts",
+    readingImportFiles: "Reading account files",
+    readingImportFilesHint: "Checking the format and preparing the preview.",
     importData: "Account import JSON",
     resumeExistingImport: "Resume an unfinished import",
     resumeImportId: "Resume import session ID",

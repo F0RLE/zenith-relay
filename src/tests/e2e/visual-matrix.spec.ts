@@ -109,7 +109,7 @@ test("overview analytics remain readable through the full scroll", async ({ page
 for (const theme of themes) {
   for (const viewport of viewports) {
     test(`account import ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
-      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, importPreviewDelayMs: 500 });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
@@ -125,8 +125,11 @@ for (const theme of themes) {
       await page.screenshot({ path: `output/playwright/account-import-empty-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
       await dialog.getByRole("button", { name: "Выбрать JSON-файлы" }).click();
+      await expect(dialog.getByText("Читаем файлы учётных записей", { exact: true })).toBeVisible();
+      await page.screenshot({ path: `output/playwright/account-import-loading-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await expect(dialog.getByLabel("Выбрать Imported account для импорта")).toBeChecked();
       await expect(dialog.getByLabel("Выбрать Second imported account для импорта")).toBeChecked();
+      await expect(dialog.locator('.account-plan-badge[data-plan="k12"]')).toHaveCount(3);
       expect(await dialog.locator(".relay-dialog-body").evaluate((body) => {
         const preview = body.querySelector<HTMLElement>(".import-preview")!;
         const table = preview.querySelector<HTMLElement>(".relay-table")!;

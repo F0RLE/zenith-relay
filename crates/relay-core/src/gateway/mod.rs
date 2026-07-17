@@ -3776,7 +3776,6 @@ impl<S> UsageStream<S> {
             if terminal.response_id.is_some() {
                 self.response_id = terminal.response_id;
             }
-            self.output_pending.push_back(Bytes::from(event));
             match terminal.outcome {
                 Some(TerminalOutcome::Success) => {
                     self.finish(None, None);
@@ -3818,7 +3817,13 @@ where
                 return Poll::Ready(None);
             }
             match this.inner.as_mut().poll_next(context) {
-                Poll::Ready(Some(Ok(bytes))) => this.ingest_sse(&bytes),
+                Poll::Ready(Some(Ok(bytes))) => {
+                    this.ingest_sse(&bytes);
+                    if let Some(failure) = this.output_pending.pop_front() {
+                        return Poll::Ready(Some(Ok(failure)));
+                    }
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
                 Poll::Ready(Some(Err(error))) => {
                     if this.fail_stream("upstream_stream") {
                         continue;
@@ -4626,6 +4631,33 @@ mod tests {
             events[0].error_category.as_deref(),
             Some("stream_event_too_large")
         );
+    }
+
+    #[tokio::test]
+    async fn usage_stream_forwards_chunks_without_waiting_for_an_sse_boundary() {
+        let first =
+            Bytes::from_static(br#"data: {"type":"response.output_text.delta","delta":"hel"#);
+        let second = Bytes::from_static(b"lo\"}\n\n");
+        let completed = Bytes::from_static(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\"}}\n\n",
+        );
+        let input = futures_util::stream::iter([
+            Ok::<_, Infallible>(first.clone()),
+            Ok(second.clone()),
+            Ok(completed.clone()),
+        ]);
+        let mut stream = UsageStream::new(
+            input,
+            Arc::new(|_| {}),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), first);
+        assert_eq!(stream.next().await.unwrap().unwrap(), second);
+        assert_eq!(stream.next().await.unwrap().unwrap(), completed);
+        assert!(stream.next().await.is_none());
     }
 
     #[test]
