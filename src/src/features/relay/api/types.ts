@@ -251,6 +251,11 @@ export type UsageGroup = {
   totals: UsageTotals;
 };
 
+export type UsageBucket = {
+  startMs: number;
+  totals: UsageTotals;
+};
+
 export type LocalUsagePage = {
   events: LocalUsage[];
   total: number;
@@ -260,6 +265,7 @@ export type LocalUsagePage = {
   totals: UsageTotals;
   models: UsageGroup[];
   poolMembers: UsageGroup[];
+  buckets?: UsageBucket[];
 };
 
 export type UsageExportRow = {
@@ -329,6 +335,7 @@ export type RemoteUsageQuery = {
   range?: "daily" | "weekly" | "monthly" | "custom";
   fromMs?: number;
   toMs?: number;
+  bucketMs?: number;
   modelQuery?: string;
   sourceOrAccountQuery?: string;
   localKeyQuery?: string;
@@ -347,6 +354,7 @@ export type RemoteUsagePage = {
   totals?: UsageTotals;
   models?: UsageGroup[];
   poolMembers?: UsageGroup[];
+  buckets?: UsageBucket[];
 };
 
 export type ImportSession = {

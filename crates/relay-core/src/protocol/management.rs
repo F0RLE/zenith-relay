@@ -344,6 +344,13 @@ pub struct UsageGroup {
     pub totals: UsageTotals,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageBucket {
+    pub start_ms: u64,
+    pub totals: UsageTotals,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsagePage {
@@ -358,6 +365,8 @@ pub struct UsagePage {
     pub models: Vec<UsageGroup>,
     #[serde(default)]
     pub pool_members: Vec<UsageGroup>,
+    #[serde(default)]
+    pub buckets: Vec<UsageBucket>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -379,6 +388,7 @@ pub struct UsageQuery {
     pub range: Option<UsageRange>,
     pub from_ms: Option<u64>,
     pub to_ms: Option<u64>,
+    pub bucket_ms: Option<u64>,
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
     pub local_key_query: Option<String>,

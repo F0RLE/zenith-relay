@@ -50,6 +50,7 @@ fn normalize_usage_query_at(mut query: UsageQuery, now: u64) -> UsageQuery {
     } else {
         query.page_size.clamp(1, 200)
     };
+    query.bucket_ms = query.bucket_ms.filter(|value| *value >= 60_000);
     for value in [
         &mut query.model_query,
         &mut query.source_or_account_query,

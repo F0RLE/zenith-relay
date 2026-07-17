@@ -86,6 +86,26 @@ for (const locale of locales) {
   }
 }
 
+test("overview analytics remain readable through the full scroll", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Месяц" }).click();
+
+  const charts = page.locator(".overview-chart");
+  await expect(charts).toHaveCount(3);
+  expect(await charts.evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+  const tokenPoint = charts.first().locator(".overview-chart-bar");
+  await tokenPoint.hover();
+  await expect(tokenPoint.getByRole("tooltip")).toBeVisible();
+  await page.screenshot({ path: "output/playwright/overview-analytics-tooltip-ru-dark-840x560.png" });
+
+  await charts.last().scrollIntoViewIfNeeded();
+  await expect(charts.last().getByText("Скорость генерации", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Последние события" })).toBeVisible();
+  await page.screenshot({ path: "output/playwright/overview-analytics-lower-ru-dark-840x560.png" });
+});
+
 for (const theme of themes) {
   for (const viewport of viewports) {
     test(`account import ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {

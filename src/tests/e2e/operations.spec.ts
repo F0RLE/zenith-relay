@@ -1731,12 +1731,25 @@ test("remote server keeps capability refresh in the page header only", async ({ 
   await expect(page.getByRole("button", { name: "Refresh capabilities" })).toHaveCount(1);
 });
 
-test("Ready API overview shows hosted connection facts instead of local pool counts", async ({ page }) => {
+test("overview presents time-based usage analytics in every mode", async ({ page }) => {
   await installTauriMock(page, { locale: "en", mode: "zenith", theme: "light", populated: true });
   await page.goto("/");
-  const facts = page.locator(".overview-split section").nth(1);
-  await expect(facts.getByRole("heading", { name: "API connection" })).toBeVisible();
-  await expect(facts).toContainText("Requests");
-  await expect(facts).toContainText("Balance");
-  await expect(facts).not.toContainText("Automations");
+  await expect(page.getByRole("heading", { name: "Usage over time" })).toBeVisible();
+  await expect(page.getByText("Token usage", { exact: true })).toBeVisible();
+  await expect(page.getByText("Response time", { exact: true })).toBeVisible();
+  await expect(page.getByText("Generation speed", { exact: true })).toBeVisible();
+  await expect(page.getByText("Runtime", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Connections and capacity", { exact: true })).toHaveCount(0);
+  await page.getByRole("tab", { name: "Week" }).click();
+  await expect(page.getByRole("tab", { name: "Week" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("overview asks the runtime for one aggregated series per selected period", async ({ page }) => {
+  await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
+  await page.goto("/");
+  await page.getByRole("tab", { name: "Month" }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { range?: string; bucketMs?: number; fromMs?: number; toMs?: number } } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "get_local_usage_page" && call.args.input?.bucketMs === 86_400_000)?.args.input;
+  })).toMatchObject({ range: "custom", bucketMs: 86_400_000 });
 });

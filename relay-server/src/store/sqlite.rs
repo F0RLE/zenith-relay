@@ -18,7 +18,7 @@ use std::{
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     estimate_api_equivalent, normalize_image_base_model,
-    protocol::{UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
+    protocol::{UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
     ApiEquivalentSummary, DefaultServiceTier, ResponseAffinityBinding, ResponseAffinityStore,
     RoutingStrategy, UsageEvent, WireApi,
 };
@@ -715,6 +715,7 @@ impl Store {
             &values,
             "COALESCE(candidate_hint, '')",
         )?;
+        let buckets = usage_buckets(&connection, &where_sql, &values, query)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
@@ -772,6 +773,7 @@ impl Store {
             totals,
             models,
             pool_members,
+            buckets,
         })
     }
 
@@ -1037,16 +1039,17 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
-    COALESCE(SUM(generation_ms), 0), COUNT(generation_ms), \
+    COALESCE(SUM(CASE WHEN success != 0 THEN generation_ms ELSE 0 END), 0), \
+    COUNT(CASE WHEN success != 0 THEN generation_ms END), \
     COALESCE(SUM(CASE WHEN success != 0 AND generation_ms IS NOT NULL \
-        THEN COALESCE(output_tokens, 0) ELSE 0 END), 0), \
+        THEN MAX(COALESCE(output_tokens, 0) - COALESCE(reasoning_tokens, 0), 0) ELSE 0 END), 0), \
     COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0), \
     COUNT(cached_input_tokens), COALESCE(SUM(reasoning_tokens), 0), \
     COALESCE(SUM(output_tokens), 0), \
     COALESCE(SUM(total_tokens), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 \
-        THEN output_tokens ELSE 0 END), 0), \
-    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > 0 AND latency_ms > 0 \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) \
+        THEN output_tokens - COALESCE(reasoning_tokens, 0) ELSE 0 END), 0), \
+    COALESCE(SUM(CASE WHEN success != 0 AND COALESCE(output_tokens, 0) > COALESCE(reasoning_tokens, 0) AND latency_ms > 0 \
         THEN latency_ms ELSE 0 END), 0)";
 
 fn usage_totals(
@@ -1078,6 +1081,36 @@ fn usage_groups(
             Ok(UsageGroup {
                 key: row.get(0)?,
                 label: None,
+                totals: usage_totals_from_row(row, 1)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(db_error)
+}
+
+fn usage_buckets(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+    query: &UsageQuery,
+) -> Result<Vec<UsageBucket>, String> {
+    let Some(bucket_ms) = query.bucket_ms else {
+        return Ok(Vec::new());
+    };
+    let start_ms = query.from_ms.unwrap_or_default();
+    let start = SqlValue::Integer(start_ms.min(i64::MAX as u64) as i64);
+    let bucket = SqlValue::Integer(bucket_ms.min(i64::MAX as u64) as i64);
+    let sql = format!(
+        "SELECT ? + ((created_at_ms - ?) / ?) * ?, {USAGE_TOTAL_COLUMNS} \
+         FROM usage_events{where_sql} GROUP BY 1 ORDER BY 1"
+    );
+    let mut parameters = vec![start.clone(), start, bucket.clone(), bucket];
+    parameters.extend_from_slice(values);
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            Ok(UsageBucket {
+                start_ms: nonnegative_u64(row.get(0)?),
                 totals: usage_totals_from_row(row, 1)?,
             })
         })
@@ -1822,6 +1855,7 @@ mod tests {
                 range: Some(UsageRange::Custom),
                 from_ms: Some(2_000),
                 to_ms: Some(3_000),
+                bucket_ms: Some(1_000),
                 model_query: Some("%".to_string()),
                 success: Some(false),
                 error_category: Some("quota_exhausted".to_string()),
@@ -1836,6 +1870,9 @@ mod tests {
         assert_eq!(page.totals.speed_output_tokens, 0);
         assert_eq!(page.models.len(), 1);
         assert_eq!(page.pool_members.len(), 1);
+        assert_eq!(page.buckets.len(), 1);
+        assert_eq!(page.buckets[0].start_ms, 2_000);
+        assert_eq!(page.buckets[0].totals.total_tokens, 2);
         assert_eq!(page.events[0].request_id, "req_2");
         assert_eq!(page.events[0].ttft_ms, Some(4));
         assert_eq!(

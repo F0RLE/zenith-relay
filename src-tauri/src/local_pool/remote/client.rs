@@ -255,6 +255,7 @@ fn usage_path(query: &UsageQuery) -> String {
     }
     append_number(&mut parameters, "fromMs", query.from_ms);
     append_number(&mut parameters, "toMs", query.to_ms);
+    append_number(&mut parameters, "bucketMs", query.bucket_ms);
     append_text(&mut parameters, "modelQuery", query.model_query.as_deref());
     append_text(
         &mut parameters,
@@ -403,6 +404,7 @@ mod tests {
             .usage(&UsageQuery {
                 page: 1,
                 page_size: 25,
+                bucket_ms: Some(60_000),
                 model_query: Some("gpt test&success=false".to_string()),
                 success: Some(true),
                 ..UsageQuery::default()
@@ -412,6 +414,7 @@ mod tests {
         let uri = observed.lock().unwrap().clone();
         assert!(uri.contains("modelQuery=gpt+test%26success%3Dfalse"));
         assert!(uri.contains("success=true"));
+        assert!(uri.contains("bucketMs=60000"));
         assert!(!uri.contains("modelQuery=gpt+test&success=false"));
     }
 

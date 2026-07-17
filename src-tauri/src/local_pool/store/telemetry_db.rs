@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::{collections::HashMap, path::Path, sync::Mutex};
 use zenith_relay_core::{
     estimate_api_equivalent,
-    protocol::{UsageGroup, UsageQuery, UsageTotals},
+    protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
     ApiEquivalentSummary, ResponseAffinityBinding, RoutingDiagnostics, UsageEvent, WireApi,
 };
 
@@ -167,6 +167,7 @@ pub struct LocalUsagePage {
     pub totals: UsageTotals,
     pub models: Vec<UsageGroup>,
     pub pool_members: Vec<UsageGroup>,
+    pub buckets: Vec<UsageBucket>,
 }
 
 #[derive(Default)]
@@ -345,6 +346,7 @@ impl TelemetryDb {
             &values,
             "COALESCE(account_id, source_id, '')",
         )?;
+        let buckets = usage_buckets(&connection, &where_sql, &values, query)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
@@ -378,6 +380,7 @@ impl TelemetryDb {
             totals,
             models,
             pool_members,
+            buckets,
         })
     }
 
@@ -637,6 +640,37 @@ fn usage_groups(
         .map_err(db_error)
 }
 
+fn usage_buckets(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+    query: &UsageQuery,
+) -> Result<Vec<UsageBucket>> {
+    let Some(bucket_ms) = query.bucket_ms else {
+        return Ok(Vec::new());
+    };
+    let start_ms = query.from_ms.unwrap_or_default();
+    let start = SqlValue::Integer(start_ms.min(i64::MAX as u64) as i64);
+    let bucket = SqlValue::Integer(bucket_ms.min(i64::MAX as u64) as i64);
+    let sql = format!(
+        "SELECT ? + ((CAST(strftime('%s', created_at) AS INTEGER) * 1000 - ?) / ?) * ?, \
+         {USAGE_TOTAL_COLUMNS} FROM request_logs{where_sql} GROUP BY 1 ORDER BY 1"
+    );
+    let mut parameters = vec![start.clone(), start, bucket.clone(), bucket];
+    parameters.extend_from_slice(values);
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(parameters.iter()), |row| {
+            Ok(UsageBucket {
+                start_ms: rust_u64(row.get(0)?),
+                totals: usage_totals_from_row(row, 1)?,
+            })
+        })
+        .map_err(db_error)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_error)
+}
+
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
     Ok(UsageTotals {
         requests: rust_u64(row.get(offset)?),
@@ -887,6 +921,8 @@ mod tests {
             .usage_page(&UsageQuery {
                 page: 1,
                 page_size: 1,
+                from_ms: Some(0),
+                bucket_ms: Some(3_600_000),
                 ..UsageQuery::default()
             })
             .unwrap();
@@ -903,6 +939,8 @@ mod tests {
         assert_eq!(page.totals.api_equivalent.priced_tokens, 158);
         assert_eq!(page.models.len(), 1);
         assert_eq!(page.pool_members.len(), 2);
+        assert_eq!(page.buckets.len(), 1);
+        assert_eq!(page.buckets[0].totals.total_tokens, 158);
         assert_eq!(page.events[0].wire_api, "chat_completions");
 
         let chat = database
