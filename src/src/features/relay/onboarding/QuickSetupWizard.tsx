@@ -119,6 +119,7 @@ export function QuickSetupWizard() {
       setConnectionReady(true);
     }
     if (step === 2 && mode === "zenith" && !connectionReady) {
+      if (!apiProviderReady(provider)) return;
       const ok = await perform("onboarding-api", async () => {
         if (provider.kind === "zenith") {
           await saveKey(provider.apiKey);

@@ -7,6 +7,7 @@ export type MockOptions = {
   theme?: "system" | "light" | "dark";
   compact?: boolean;
   populated?: boolean;
+  readyConnected?: boolean;
   accountCount?: number;
   usageAccountIndex?: number;
   usageActive?: boolean;
@@ -281,7 +282,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         return totals;
       }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
-    let readyKey = "zrk_synthetic_ready_key";
+    let readyKey = input.readyConnected === false ? "" : "zrk_synthetic_ready_key";
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
     let nextCallback = 1;

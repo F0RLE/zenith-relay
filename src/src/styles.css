@@ -3930,6 +3930,12 @@ textarea {
   padding: 18px 0;
 }
 
+.ready-api-connection {
+  max-width: 820px;
+  display: grid;
+  gap: 18px;
+}
+
 .remote-status {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--relay-border);
@@ -3940,48 +3946,89 @@ textarea {
   flex: 1;
 }
 
-.recommended-line {
-  min-height: 52px;
+.ready-api-empty,
+.ready-api-connected-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 14px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
-  box-shadow: var(--relay-shadow-soft);
+  gap: 14px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--relay-border);
 }
 
-.recommended-line code {
-  min-width: 0;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ready-api-empty > svg {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  padding: 9px;
+  border-radius: 7px;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
 }
 
-.recommended-line > div {
+.ready-api-empty > div,
+.ready-api-connected-heading > div {
   min-width: 0;
   display: grid;
   gap: 2px;
 }
 
-.recommended-line > div small {
+.ready-api-empty h2,
+.ready-api-empty p {
+  margin: 0;
+}
+
+.ready-api-empty h2 {
+  font-size: 15px;
+}
+
+.ready-api-empty p,
+.ready-api-connected-heading small {
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.ready-api-connected-heading {
+  justify-content: space-between;
+}
+
+.ready-api-connected-heading small {
   display: block;
   overflow: hidden;
-  color: var(--relay-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recommended-line span {
-  padding: 2px 7px;
-  border-radius: 10px;
-  background: var(--relay-accent-soft);
-  color: var(--relay-accent-hover);
-  font-size: 11px;
-  font-weight: 600;
+.api-protocol-guide {
+  display: grid;
+}
+
+.api-protocol-guide h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.api-protocol-guide > div {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.api-protocol-guide code {
+  color: var(--relay-secondary);
+  font-size: 12px;
+}
+
+.api-protocol-guide span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.api-protocol-guide small {
+  color: var(--relay-muted);
+  line-height: 1.45;
 }
 
 .pool-summary {
@@ -6948,7 +6995,8 @@ textarea {
 
 .secret-field {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 32px;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  border-radius: 6px;
 }
 
 .secret-field input {
@@ -6959,6 +7007,16 @@ textarea {
 .secret-field button {
   border-left: 0;
   border-radius: 0 6px 6px 0;
+}
+
+.secret-field:has(input:focus-visible, button:focus-visible) {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 1px;
+}
+
+.secret-field input:focus-visible,
+.secret-field button:focus-visible {
+  outline: 0;
 }
 
 .deployment-result {
@@ -7297,10 +7355,153 @@ textarea {
   font-weight: 650;
 }
 
+.api-provider-prompt {
+  margin: 0;
+  padding: 4px 0;
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.api-provider-endpoint {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.api-provider-endpoint code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-provider-endpoint span {
+  flex: 0 0 auto;
+  color: var(--relay-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.api-protocol-help {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--relay-border-strong);
+  border-radius: 0 5px 5px 0;
+  background: var(--relay-subtle);
+  font-size: 12px;
+}
+
+.api-protocol-help span {
+  color: var(--relay-muted);
+  line-height: 1.45;
+}
+
 .api-provider-fields {
   display: grid;
   grid-template-columns: minmax(150px, 0.8fr) minmax(260px, 1.5fr) minmax(170px, 0.8fr);
   gap: 12px;
+}
+
+.source-form-section {
+  display: grid;
+  gap: 14px;
+}
+
+.source-form-section > header {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.source-form-section h3,
+.source-form-section p {
+  margin: 0;
+}
+
+.source-form-section h3 {
+  font-size: 13px;
+}
+
+.source-form-section header p {
+  margin-top: 3px;
+  color: var(--relay-muted);
+  font-size: 12px;
+}
+
+.source-identity-grid,
+.source-access-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.75fr) minmax(280px, 1.5fr);
+  gap: 12px;
+}
+
+.source-advanced {
+  border-top: 1px solid var(--relay-border);
+}
+
+.source-advanced summary {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  color: var(--relay-secondary);
+  cursor: pointer;
+  list-style: none;
+}
+
+.source-advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.source-advanced summary:focus-visible {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 1px;
+}
+
+.source-advanced summary > svg:first-child {
+  width: 18px;
+  height: 18px;
+  color: var(--relay-muted);
+}
+
+.source-advanced summary > svg:last-child {
+  width: 16px;
+  height: 16px;
+  transition: transform 140ms ease;
+}
+
+.source-advanced[open] summary > svg:last-child {
+  transform: rotate(180deg);
+}
+
+.source-advanced summary span {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.source-advanced summary small {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.source-advanced > div {
+  display: grid;
+  gap: 14px;
+  padding: 4px 0 2px;
+}
+
+.source-advanced .form-note {
+  margin: -8px 0 0;
 }
 
 .relay-dialog .api-provider-options {
@@ -7712,6 +7913,20 @@ input[type="password"] {
 }
 
 @media (max-width: 700px) {
+  .source-identity-grid,
+  .source-access-grid,
+  .api-protocol-help,
+  .api-protocol-guide > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 5px;
+  }
+
+  .api-provider-endpoint {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
   .pool-member-toolbar .pool-priority-label,
   .pool-member-toolbar .pool-quota-actions {
     width: 100%;
@@ -7839,6 +8054,11 @@ input[type="password"] {
 }
 
 @media (max-width: 560px) {
+  .api-provider-options,
+  .relay-dialog .api-provider-options {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .oauth-link-actions {
     grid-template-columns: 1fr;
   }

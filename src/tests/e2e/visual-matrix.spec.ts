@@ -86,6 +86,61 @@ for (const locale of locales) {
   }
 }
 
+for (const scenario of [
+  { theme: "light", viewport: { width: 1160, height: 760 } },
+  { theme: "dark", viewport: { width: 840, height: 560 } },
+] as const) {
+  test(`API connection redesign ${scenario.theme} ${scenario.viewport.width}x${scenario.viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "zenith", theme: scenario.theme, populated: false, readyConnected: false });
+    await page.setViewportSize(scenario.viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Подключения", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "API пока не подключён" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Подключить API", exact: true })).toHaveCount(1);
+    await page.screenshot({ path: `output/playwright/api-empty-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+
+    await page.getByRole("button", { name: "Подключить API", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Подключить API" });
+    await expect(dialog).toBeVisible();
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+    expect(await dialog.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
+    await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+
+    await dialog.getByRole("radio", { name: /Свой API/ }).click();
+    const key = dialog.getByLabel("Ключ внешнего API");
+    await key.focus();
+    expect(await key.evaluate((input) => {
+      const field = input.closest<HTMLElement>(".secret-field")!;
+      const fieldRect = field.getBoundingClientRect();
+      return [...field.children].every((child) => {
+        const rect = child.getBoundingClientRect();
+        return rect.left >= fieldRect.left && rect.right <= fieldRect.right && rect.top >= fieldRect.top && rect.bottom <= fieldRect.bottom;
+      });
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/api-custom-focus-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+  });
+}
+
+test("API source form keeps optional controls compact", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: false });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("tab", { name: "Источники API" }).click();
+  await page.getByRole("button", { name: "Добавить источник", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Добавить источник" });
+  await expect(dialog.getByText("Модели и маршрутизация", { exact: true })).toBeVisible();
+  await expect(dialog.getByLabel("Модели", { exact: true })).toBeHidden();
+  await page.screenshot({ path: "output/playwright/api-source-compact-ru-light-840x560.png" });
+  await dialog.locator("summary").click();
+  await dialog.getByLabel("Модели", { exact: true }).scrollIntoViewIfNeeded();
+  await expect(dialog.getByLabel("Модели", { exact: true })).toBeVisible();
+  await page.screenshot({ path: "output/playwright/api-source-advanced-ru-light-840x560.png" });
+});
+
 test("overview analytics remain readable through the full scroll", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 840, height: 560 });

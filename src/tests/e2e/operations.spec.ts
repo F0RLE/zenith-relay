@@ -20,6 +20,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("button", { name: "Edit" }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
   await chooseOption(page, sourceDialog, "Protocol", "chat_completions");
+  await sourceDialog.locator("summary").filter({ hasText: "Models and routing" }).click();
   await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4-mini, gpt-5.4");
   await sourceDialog.getByLabel("Allowed models", { exact: true }).fill("gpt-5.4-mini");
   await sourceDialog.getByLabel("Excluded models", { exact: true }).fill("gpt-5.4");
@@ -315,6 +316,31 @@ test("Ready API top-up uses the stored-key backend command", async ({ page }) =>
   await page.getByLabel("Top-up amount, USD").fill("10");
   await page.getByRole("button", { name: "Open top-up" }).click();
   await expect(page.getByText("Top-up opened in Telegram.")).toBeVisible();
+});
+
+test("empty Ready API has one action and an unbiased provider picker", async ({ page }) => {
+  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "No API connected yet" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connect API", exact: true })).toHaveCount(1);
+  await expect(page.getByText("Zenith API", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Connect API", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Connect API" });
+  await expect(dialog.locator(".api-provider-title strong")).toHaveText(["OpenAI", "OpenRouter", "Zenith API", "Custom API"]);
+  expect(await dialog.getByRole("radio").evaluateAll((items) => items.map((item) => item.getAttribute("aria-checked")))).toEqual(["false", "false", "false", "false"]);
+  await expect(dialog.getByText("Recommended", { exact: true })).toHaveCount(1);
+  await expect(dialog.getByRole("button", { name: "Connect", exact: true })).toBeDisabled();
+
+  await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
+  await expect(dialog.getByText("A widely supported compatibility protocol", { exact: false })).toBeVisible();
+  const key = dialog.getByLabel("Upstream API key");
+  await key.focus();
+  expect(await key.evaluate((input) => {
+    const field = input.closest<HTMLElement>(".secret-field")!;
+    return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineWidth };
+  })).toEqual({ inputOutline: "none", fieldOutline: "2px" });
 });
 
 test("Ready API connection dialog can switch to a custom local source", async ({ page }) => {
@@ -740,6 +766,7 @@ for (const mode of ["local", "remote"] as const) {
     await sourceDialog.getByLabel("Name", { exact: true }).fill("Failover API");
     await sourceDialog.getByLabel("API address").fill("https://failover.example.invalid/v1");
     await sourceDialog.getByLabel("Upstream API key").fill("synthetic-upstream-key");
+    await sourceDialog.locator("summary").filter({ hasText: "Models and routing" }).click();
     await sourceDialog.getByLabel("Models", { exact: true }).fill("gpt-5.4");
     const role = sourceDialog.getByRole("button", { name: /^API source role:/ });
     await role.click();
