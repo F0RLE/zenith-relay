@@ -399,7 +399,10 @@ fn persist_usage_batch(
                 account.consecutive_failures = 0;
                 account.last_error_code = None;
                 natural_use_at_ms = Some(queued.observed_at_ms);
-            } else {
+            } else if event.cooldown_scope.is_some()
+                || event.retry_at_ms.is_some()
+                || event.consecutive_failures.is_some()
+            {
                 account.consecutive_failures = event
                     .consecutive_failures
                     .unwrap_or_else(|| account.consecutive_failures.saturating_add(1));

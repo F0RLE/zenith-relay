@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
@@ -362,6 +362,56 @@ async fn bad_request_is_terminal_and_does_not_call_the_fallback_source() {
 }
 
 #[tokio::test]
+async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![Reply::Json {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "server_is_overloaded",
+                    "message": "Please retry later."
+                }
+            }),
+            cache_control: "overloaded",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![response_reply("fallback-response", "fallback")],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "fallback-response"
+    );
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_overloaded")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
+}
+
+#[tokio::test]
 async fn retry_budget_counts_execution_attempts_and_stops_before_third_source() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
@@ -490,6 +540,153 @@ async fn stream_bootstrap_falls_back_before_first_event_and_uses_only_winner_hea
     assert_eq!(events.len(), 2);
     assert!(!events[0].success);
     assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
+    let (source_a, _) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":120}}}\n\n",
+            )],
+            cache_control: "limited",
+        }],
+    )
+    .await;
+    let (source_b, _) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
+                StreamChunk::Data("data: [DONE]\n\n"),
+            ],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let _ = response.text().await.unwrap();
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_quota_exhausted")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[0]
+        .retry_at_ms
+        .is_some_and(|retry_at| retry_at > now_ms + 100_000));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_account() {
+    let (source_a, _) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_not_included\"}}}\n\n",
+            )],
+            cache_control: "limited",
+        }],
+    )
+    .await;
+    let (source_b, _) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let _ = response.text().await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].http_status, StatusCode::FORBIDDEN.as_u16());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_usage_not_included")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_prompt\",\"message\":\"Invalid prompt\"}}}\n\n",
+            )],
+            cache_control: "rejected",
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "must-not-run",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("invalid_request_error"), "body={body}");
+    assert!(body.contains("invalid_request"), "body={body}");
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
+    assert!(events[0].cooldown_scope.is_none());
 }
 
 #[tokio::test]

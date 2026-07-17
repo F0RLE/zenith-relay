@@ -38,7 +38,8 @@ const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
-type CompletionCallback = Arc<dyn Fn(&mut UsageEvent, Option<&str>) + Send + Sync>;
+type CompletionCallback =
+    Arc<dyn Fn(&mut UsageEvent, Option<&str>, RateLimitBodyHint) + Send + Sync>;
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
     Router::new()
@@ -658,6 +659,7 @@ async fn execute_account_endpoint(
             }
         };
         if !status.is_success() {
+            let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -666,7 +668,7 @@ async fn execute_account_endpoint(
                 &requested_model,
                 false,
                 status.as_u16(),
-                Some("upstream_status".to_string()),
+                Some(failure.category.to_string()),
                 started.elapsed().as_millis() as u64,
             );
             let affinity_miss = recoverable_response_affinity_miss(
@@ -675,17 +677,20 @@ async fn execute_account_endpoint(
                 response_affinity_hit,
                 previous_response_not_found(&bytes),
             );
-            if affinity_miss || retryable_status(status, has_previous_response_id) {
+            if affinity_miss
+                || retryable_failure(status, failure.category, has_previous_response_id)
+            {
                 if affinity_miss {
                     owner_recovery_confirmed |= !response_affinity_hit;
                     runtime.invalidate_response_affinity(response_affinity_key.as_deref());
                     event.error_category = Some("response_affinity_miss".to_string());
                 } else {
-                    let state = apply_status_cooldown_with_body(
+                    let state = apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         &route.source_model,
                         status,
+                        failure.category,
                         &response_headers,
                         Some(&bytes),
                         route.half_open_probe,
@@ -693,7 +698,7 @@ async fn execute_account_endpoint(
                     apply_failure_state(&mut event, state);
                 }
                 emit_usage(&runtime, event);
-                last_failure = Some(AttemptFailure::status(status));
+                last_failure = Some(failure);
                 continue;
             }
             emit_usage(&runtime, event);
@@ -1064,114 +1069,84 @@ async fn execute_request(
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
-            if matches!(status, StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND)
-                && has_previous_response_id
-            {
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    status.as_u16(),
-                    Some("upstream_status".to_string()),
-                    started.elapsed().as_millis() as u64,
-                );
-                let bytes = match crate::runtime::collect_limited(
-                    upstream,
-                    crate::runtime::MAX_NON_STREAM_BODY_BYTES,
-                )
-                .await
-                {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        return upstream_body_error_response(&runtime, event, started, error)
-                    }
-                };
-                let response_missing = previous_response_not_found(&bytes);
-                if recoverable_response_affinity_miss(
-                    status,
-                    has_previous_response_id,
-                    response_affinity_hit,
-                    response_missing,
-                ) {
-                    confirmed_response_missing |= response_missing;
-                    owner_recovery_confirmed |= !response_affinity_hit;
-                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
-                    event.error_category = Some("response_affinity_miss".to_string());
-                    emit_usage(&runtime, event);
-                    last_failure = Some(AttemptFailure::status(status));
-                    if response_missing && response_affinity_hit {
-                        break;
-                    }
-                    continue;
-                }
-                populate_tokens(&mut event, &bytes);
-                emit_usage(&runtime, event);
-                return proxy_response(status, &response_headers, Body::from(bytes));
-            }
-            let affinity_miss = recoverable_response_affinity_miss(
-                status,
-                has_previous_response_id,
-                response_affinity_hit,
+            let mut event = usage_event(
+                &request_id,
+                attempt,
+                &key.id,
+                &route,
+                &requested_model,
                 false,
+                status.as_u16(),
+                None,
+                started.elapsed().as_millis() as u64,
             );
-            if affinity_miss || retryable_status(status, has_previous_response_id) {
-                let body = crate::runtime::collect_limited(
-                    upstream,
-                    crate::runtime::MAX_NON_STREAM_BODY_BYTES,
-                )
-                .await;
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    status.as_u16(),
-                    Some(if affinity_miss {
-                        "response_affinity_miss".to_string()
-                    } else {
-                        "upstream_status".to_string()
-                    }),
-                    started.elapsed().as_millis() as u64,
-                );
-                if !affinity_miss {
-                    let state = apply_status_cooldown_with_body(
+            let bytes = match crate::runtime::collect_limited(
+                upstream,
+                crate::runtime::MAX_NON_STREAM_BODY_BYTES,
+            )
+            .await
+            {
+                Ok(bytes) => bytes,
+                Err(_) if retryable_status(status, has_previous_response_id) => {
+                    let failure = AttemptFailure::status_with_body(status, None);
+                    event.error_category = Some(failure.category.to_string());
+                    let state = apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         &source_model,
                         status,
+                        failure.category,
                         &response_headers,
-                        body.as_deref().ok(),
+                        None,
+                        route.half_open_probe,
+                    );
+                    apply_failure_state(&mut event, state);
+                    emit_usage(&runtime, event);
+                    last_failure = Some(failure);
+                    continue;
+                }
+                Err(error) => return upstream_body_error_response(&runtime, event, started, error),
+            };
+            let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            event.error_category = Some(failure.category.to_string());
+            let response_missing = previous_response_not_found(&bytes);
+            let affinity_miss = recoverable_response_affinity_miss(
+                status,
+                has_previous_response_id,
+                response_affinity_hit,
+                response_missing,
+            );
+            if affinity_miss
+                || retryable_failure(status, failure.category, has_previous_response_id)
+            {
+                if affinity_miss {
+                    confirmed_response_missing |= response_missing;
+                    owner_recovery_confirmed |= !response_affinity_hit;
+                    runtime.invalidate_response_affinity(response_affinity_key.as_deref());
+                    event.error_category = Some("response_affinity_miss".to_string());
+                } else {
+                    let state = apply_failure_cooldown_with_body(
+                        &runtime,
+                        &route.candidate_id,
+                        &source_model,
+                        status,
+                        failure.category,
+                        &response_headers,
+                        Some(&bytes),
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
                 }
                 emit_usage(&runtime, event);
-                last_failure = Some(AttemptFailure::status(status));
+                last_failure = Some(failure);
+                if affinity_miss && response_missing && response_affinity_hit {
+                    break;
+                }
                 continue;
             }
-            return finish_non_stream(
-                &runtime,
-                upstream,
-                &response_headers,
-                usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    status.as_u16(),
-                    Some("upstream_status".to_string()),
-                    0,
-                ),
-                started,
-            )
-            .await;
+            populate_tokens(&mut event, &bytes);
+            emit_usage(&runtime, event);
+            return proxy_response(status, &response_headers, Body::from(bytes));
         }
 
         if !upstream_stream {
@@ -1216,13 +1191,17 @@ async fn execute_request(
                 match completed_account_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        let state = apply_cooldown(
-                            &runtime,
-                            &route.candidate_id,
-                            &source_model,
-                            TRANSIENT_COOLDOWN_MS,
-                            route.half_open_probe,
-                        );
+                        let state =
+                            failure_category_requires_cooldown(failure.category).then(|| {
+                                apply_attempt_failure_cooldown(
+                                    &runtime,
+                                    &route.candidate_id,
+                                    &source_model,
+                                    &failure,
+                                    &response_headers,
+                                    route.half_open_probe,
+                                )
+                            });
                         let mut event = usage_event(
                             &request_id,
                             attempt,
@@ -1234,8 +1213,13 @@ async fn execute_request(
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
                         );
-                        apply_failure_state(&mut event, state);
+                        if let Some(state) = state {
+                            apply_failure_state(&mut event, state);
+                        }
                         emit_usage(&runtime, event);
+                        if failure_category_is_request_terminal(failure.category) {
+                            return api_error(failure.status, failure.message, failure.category);
+                        }
                         last_failure = Some(failure);
                         continue;
                     }
@@ -1247,13 +1231,17 @@ async fn execute_request(
                 match translate_chat_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        let state = apply_cooldown(
-                            &runtime,
-                            &route.candidate_id,
-                            &source_model,
-                            TRANSIENT_COOLDOWN_MS,
-                            route.half_open_probe,
-                        );
+                        let state =
+                            failure_category_requires_cooldown(failure.category).then(|| {
+                                apply_attempt_failure_cooldown(
+                                    &runtime,
+                                    &route.candidate_id,
+                                    &source_model,
+                                    &failure,
+                                    &response_headers,
+                                    route.half_open_probe,
+                                )
+                            });
                         let mut event = usage_event(
                             &request_id,
                             attempt,
@@ -1265,8 +1253,13 @@ async fn execute_request(
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
                         );
-                        apply_failure_state(&mut event, state);
+                        if let Some(state) = state {
+                            apply_failure_state(&mut event, state);
+                        }
                         emit_usage(&runtime, event);
+                        if failure_category_is_request_terminal(failure.category) {
+                            return api_error(failure.status, failure.message, failure.category);
+                        }
                         last_failure = Some(failure);
                         continue;
                     }
@@ -1275,13 +1268,17 @@ async fn execute_request(
                 match translate_responses_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        let state = apply_cooldown(
-                            &runtime,
-                            &route.candidate_id,
-                            &source_model,
-                            TRANSIENT_COOLDOWN_MS,
-                            route.half_open_probe,
-                        );
+                        let state =
+                            failure_category_requires_cooldown(failure.category).then(|| {
+                                apply_attempt_failure_cooldown(
+                                    &runtime,
+                                    &route.candidate_id,
+                                    &source_model,
+                                    &failure,
+                                    &response_headers,
+                                    route.half_open_probe,
+                                )
+                            });
                         let mut event = usage_event(
                             &request_id,
                             attempt,
@@ -1293,8 +1290,13 @@ async fn execute_request(
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
                         );
-                        apply_failure_state(&mut event, state);
+                        if let Some(state) = state {
+                            apply_failure_state(&mut event, state);
+                        }
                         emit_usage(&runtime, event);
+                        if failure_category_is_request_terminal(failure.category) {
+                            return api_error(failure.status, failure.message, failure.category);
+                        }
                         last_failure = Some(failure);
                         continue;
                     }
@@ -1349,7 +1351,8 @@ async fn execute_request(
                 let completion_source = route.candidate_id.clone();
                 let completion_model = source_model.clone();
                 let completion_half_open_probe = route.half_open_probe;
-                let completion: CompletionCallback = Arc::new(move |event, response_id| {
+                let completion_headers = headers.clone();
+                let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
                     lease.release();
                     if event.success {
                         let recovered = completion_runtime.record_success_with_metrics(
@@ -1365,12 +1368,21 @@ async fn execute_request(
                             &completion_source,
                             now_ms(),
                         );
-                    } else if event.error_category.as_deref() != Some("client_cancelled") {
-                        let state = apply_cooldown(
+                    } else if let Some(category) = event
+                        .error_category
+                        .as_deref()
+                        .filter(|category| failure_category_requires_cooldown(category))
+                    {
+                        let status = StatusCode::from_u16(event.http_status)
+                            .unwrap_or(StatusCode::BAD_GATEWAY);
+                        let state = apply_failure_cooldown_with_hint(
                             &completion_runtime,
                             &completion_source,
                             &completion_model,
-                            TRANSIENT_COOLDOWN_MS,
+                            status,
+                            category,
+                            &completion_headers,
+                            hint,
                             completion_half_open_probe,
                         );
                         apply_failure_state(event, state);
@@ -1398,13 +1410,16 @@ async fn execute_request(
                 return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
             Err(failure) => {
-                let state = apply_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    &source_model,
-                    TRANSIENT_COOLDOWN_MS,
-                    route.half_open_probe,
-                );
+                let state = failure_category_requires_cooldown(failure.category).then(|| {
+                    apply_attempt_failure_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        &source_model,
+                        &failure,
+                        &response_headers,
+                        route.half_open_probe,
+                    )
+                });
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -1416,8 +1431,13 @@ async fn execute_request(
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
                 );
-                apply_failure_state(&mut event, state);
+                if let Some(state) = state {
+                    apply_failure_state(&mut event, state);
+                }
                 emit_usage(&runtime, event);
+                if failure_category_is_request_terminal(failure.category) {
+                    return api_error(failure.status, failure.message, failure.category);
+                }
                 last_failure = Some(failure);
             }
         }
@@ -1463,26 +1483,6 @@ async fn execute_request(
         }
     }
     api_error(failure.status, failure.message, failure.category)
-}
-
-async fn finish_non_stream(
-    runtime: &GatewayRuntime,
-    upstream: reqwest::Response,
-    response_headers: &reqwest::header::HeaderMap,
-    mut event: UsageEvent,
-    started: Instant,
-) -> Response<Body> {
-    let status = upstream.status();
-    match crate::runtime::collect_limited(upstream, crate::runtime::MAX_NON_STREAM_BODY_BYTES).await
-    {
-        Ok(bytes) => {
-            event.latency_ms = started.elapsed().as_millis() as u64;
-            populate_tokens(&mut event, &bytes);
-            emit_usage(runtime, event);
-            proxy_response(status, response_headers, Body::from(bytes))
-        }
-        Err(error) => upstream_body_error_response(runtime, event, started, error),
-    }
 }
 
 fn upstream_body_error_response(
@@ -1533,7 +1533,14 @@ async fn bootstrap_stream(
                         return Err(AttemptFailure::stream("stream_invalid"));
                     }
                     if event.outcome == Some(TerminalOutcome::Failure) {
-                        return Err(AttemptFailure::stream("upstream_terminal"));
+                        let category = event.error_category.unwrap_or("upstream_terminal");
+                        return Err(AttemptFailure::classified_with_hint(
+                            event
+                                .error_status
+                                .unwrap_or_else(|| upstream_failure_status(category)),
+                            category,
+                            event.cooldown_hint,
+                        ));
                     }
                     if event.has_data {
                         return Ok((headers, Bytes::from(buffer), stream));
@@ -2219,12 +2226,514 @@ struct AttemptFailure {
     category: &'static str,
     message: &'static str,
     cooldown_ms: u64,
+    cooldown_hint: RateLimitBodyHint,
 }
 
 struct FailureState {
     cooldown_scope: String,
     retry_at_ms: u64,
     consecutive_failures: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct UpstreamErrorClassification {
+    category: &'static str,
+    message: &'static str,
+}
+
+fn classify_upstream_error(status: StatusCode, body: Option<&[u8]>) -> UpstreamErrorClassification {
+    let Some(body) = body else {
+        return classify_upstream_error_text(status, "");
+    };
+    match serde_json::from_slice::<Value>(body) {
+        Ok(value) => classify_upstream_error_value(status, &value),
+        Err(_) => classify_upstream_error_text(status, &normalized_error_text(body)),
+    }
+}
+
+fn classify_upstream_error_value(status: StatusCode, value: &Value) -> UpstreamErrorClassification {
+    classify_upstream_error_text(status, &upstream_error_text(value))
+}
+
+fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamErrorClassification {
+    let category = if text_has_any(
+        text,
+        &[
+            "previous_response_not_found",
+            "invalid_previous_response_id",
+            "previous response not found",
+            "no response found for previous_response_id",
+            "unknown or expired previous_response_id",
+        ],
+    ) {
+        "upstream_previous_response_not_found"
+    } else if text_has_any(
+        text,
+        &[
+            "tool_call_not_found",
+            "no tool call found for",
+            "no matching tool call",
+            "tool call output does not match",
+            "unanswered_function_call",
+            "no tool output found for function call",
+            "no tool output found for custom tool call",
+            "no tool output found for apply patch call",
+        ],
+    ) {
+        "upstream_tool_call_mismatch"
+    } else if text_has_any(
+        text,
+        &[
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "context_too_large",
+            "maximum context length",
+            "max context length",
+        ],
+    ) || (text.contains("context window")
+        && text_has_any(text, &["exceed", "too large", "too long"]))
+        || (text.contains("context length")
+            && text_has_any(text, &["exceed", "too large", "too long"]))
+    {
+        "upstream_context_too_large"
+    } else if text_has_any(
+        text,
+        &[
+            "invalid_encrypted_content",
+            "thinking_signature_invalid",
+            "invalid signature in thinking block",
+            "encrypted content could not be verified",
+        ],
+    ) {
+        "upstream_encrypted_content_invalid"
+    } else if text_has_any(
+        text,
+        &[
+            "instructions are required",
+            "required parameter: 'instructions'",
+            "required parameter: instructions",
+        ],
+    ) {
+        "upstream_instructions_required"
+    } else if text_has_any(
+        text,
+        &[
+            "account_deactivated",
+            "account_disabled",
+            "account_expired",
+            "organization_deactivated",
+            "organization_disabled",
+            "project_deactivated",
+            "deactivated_workspace",
+            "workspace_disabled",
+            "workspace_expired",
+            "workspace_terminated",
+            "account has been deactivated",
+            "account is disabled",
+        ],
+    ) {
+        "upstream_account_disabled"
+    } else if text_has_any(
+        text,
+        &[
+            "usage_not_included",
+            "not included in your plan",
+            "subscription does not include",
+        ],
+    ) {
+        "upstream_usage_not_included"
+    } else if text_has_any(
+        text,
+        &[
+            "insufficient_quota",
+            "usage_limit_reached",
+            "usage_limit_exceeded",
+            "usage limit reached",
+            "quota_exhausted",
+            "quota exceeded",
+            "billing_hard_limit_reached",
+            "credit_balance_exhausted",
+            "credits_exhausted",
+            "credits exhausted",
+            "exceeded your current quota",
+            "out of credits",
+            "add credits to continue",
+        ],
+    ) || status == StatusCode::PAYMENT_REQUIRED
+    {
+        "upstream_quota_exhausted"
+    } else if text_has_any(
+        text,
+        &[
+            "invalid_api_key",
+            "authentication_error",
+            "invalid authentication",
+            "invalid bearer token",
+            "expired_token",
+            "token_expired",
+            "token_invalidated",
+            "token_revoked",
+            "refresh_token_reused",
+            "invalid or expired token",
+            "invalid_grant",
+        ],
+    ) || status == StatusCode::UNAUTHORIZED
+    {
+        "upstream_unauthorized"
+    } else if text_has_any(
+        text,
+        &[
+            "unsupported_country_region_territory",
+            "country_not_supported",
+            "region_not_supported",
+            "country, region, or territory not supported",
+        ],
+    ) {
+        "upstream_region_unsupported"
+    } else if text_has_any(
+        text,
+        &[
+            "content_policy_violation",
+            "content_filter",
+            "policy_violation",
+            "safety_violation",
+            "cyber_policy",
+            "bio_policy",
+            "content_moderation_failed",
+        ],
+    ) {
+        "upstream_content_policy"
+    } else if text_has_any(text, &["invalid_prompt"]) {
+        "upstream_invalid_request"
+    } else if status == StatusCode::PAYLOAD_TOO_LARGE
+        || text_has_any(
+            text,
+            &[
+                "request_too_large",
+                "payload_too_large",
+                "content_too_large",
+                "request body too large",
+                "length limit exceeded",
+            ],
+        )
+    {
+        "upstream_payload_too_large"
+    } else if text_has_any(
+        text,
+        &[
+            "unsupported_parameter",
+            "unsupported_value",
+            "invalid_parameter",
+            "parameter_not_supported",
+        ],
+    ) {
+        "upstream_unsupported_request"
+    } else if text_has_any(
+        text,
+        &[
+            "model_at_capacity",
+            "selected model is at capacity",
+            "model is at capacity",
+        ],
+    ) {
+        "upstream_model_capacity"
+    } else if text_has_any(text, &["model_not_found", "model_not_available"]) {
+        "upstream_model_not_found"
+    } else if status == StatusCode::NOT_ACCEPTABLE
+        || text_has_any(
+            text,
+            &[
+                "model_not_supported",
+                "requested model is not supported",
+                "model is not supported when using codex with a chatgpt account",
+                "is not currently available for this chatgpt account",
+            ],
+        )
+        || (text.contains("model")
+            && text.contains("does not exist or you do not have access to it"))
+    {
+        "upstream_model_unsupported"
+    } else if status == StatusCode::UPGRADE_REQUIRED
+        || text_has_any(text, &["websocket_not_supported", "websocket_unsupported"])
+    {
+        "upstream_websocket_unsupported"
+    } else if text.contains("websocket_connection_limit_reached") {
+        "upstream_websocket_connection_limit"
+    } else if text_has_any(
+        text,
+        &[
+            "rate_limit_exceeded",
+            "rate_limit_error",
+            "rate_limit_reached",
+            "rate limit reached",
+            "rate limit exceeded",
+            "too many requests",
+        ],
+    ) {
+        "upstream_rate_limited"
+    } else if status.as_u16() == 529
+        || text_has_any(
+            text,
+            &[
+                "server_is_overloaded",
+                "server_overloaded",
+                "overloaded",
+                "slow_down",
+                "slow down",
+            ],
+        )
+    {
+        "upstream_overloaded"
+    } else if text_has_any(text, &["service_unavailable", "temporarily unavailable"]) {
+        "upstream_unavailable"
+    } else if text_has_any(
+        text,
+        &[
+            "internal_server_error",
+            "server_error",
+            "an error occurred while processing your request",
+        ],
+    ) || (text.contains("you can retry your request") && text.contains("request id"))
+    {
+        "upstream_server_error"
+    } else if status == StatusCode::FORBIDDEN
+        && text_has_any(
+            text,
+            &[
+                "cf-mitigated",
+                "cf-chl-bypass",
+                "_cf_chl",
+                "cf_chl",
+                "attention required",
+                "just a moment",
+            ],
+        )
+    {
+        "upstream_edge_challenge"
+    } else if status == StatusCode::FORBIDDEN {
+        "upstream_forbidden"
+    } else if status == StatusCode::NOT_FOUND {
+        "upstream_not_found"
+    } else if status == StatusCode::REQUEST_TIMEOUT {
+        "upstream_request_timeout"
+    } else if status == StatusCode::CONFLICT {
+        "upstream_conflict"
+    } else if status == StatusCode::UNPROCESSABLE_ENTITY {
+        "upstream_invalid_request"
+    } else if status == StatusCode::TOO_MANY_REQUESTS {
+        "upstream_rate_limited"
+    } else if status == StatusCode::INTERNAL_SERVER_ERROR {
+        "upstream_server_error"
+    } else if status == StatusCode::BAD_GATEWAY {
+        "upstream_bad_gateway"
+    } else if status == StatusCode::SERVICE_UNAVAILABLE {
+        "upstream_unavailable"
+    } else if status == StatusCode::GATEWAY_TIMEOUT {
+        "upstream_gateway_timeout"
+    } else if status == StatusCode::BAD_REQUEST {
+        "upstream_invalid_request"
+    } else if status.is_server_error() {
+        "upstream_server_error"
+    } else {
+        "upstream_status"
+    };
+    UpstreamErrorClassification {
+        category,
+        message: upstream_failure_message(category),
+    }
+}
+
+fn upstream_failure_message(category: &str) -> &'static str {
+    match category {
+        "upstream_previous_response_not_found" => "previous response is unavailable",
+        "upstream_tool_call_mismatch" => "tool output does not match an active tool call",
+        "upstream_context_too_large" => "request context exceeds the model limit",
+        "upstream_encrypted_content_invalid" => "encrypted reasoning context is invalid",
+        "upstream_instructions_required" => "upstream requires request instructions",
+        "upstream_usage_not_included" => "upstream account plan does not include this capability",
+        "upstream_quota_exhausted" => "upstream usage quota is exhausted",
+        "upstream_account_disabled" => "upstream account is disabled",
+        "upstream_unauthorized" => "upstream authentication failed",
+        "upstream_region_unsupported" => "upstream rejected the request region",
+        "upstream_content_policy" => "upstream content policy rejected the request",
+        "upstream_payload_too_large" => "upstream rejected the request size",
+        "upstream_unsupported_request" => "upstream does not support this request",
+        "upstream_model_not_found" => "upstream model is unavailable",
+        "upstream_model_unsupported" => "upstream does not support this model",
+        "upstream_model_capacity" => "upstream model is at capacity",
+        "upstream_websocket_unsupported" => "upstream does not support WebSocket requests",
+        "upstream_websocket_connection_limit" => "upstream WebSocket connection limit was reached",
+        "upstream_rate_limited" => "upstream rate limit was reached",
+        "upstream_edge_challenge" => "upstream edge security challenged the request",
+        "upstream_forbidden" => "upstream access was forbidden",
+        "upstream_not_found" => "upstream resource was not found",
+        "upstream_request_timeout" => "upstream request timed out",
+        "upstream_conflict" => "upstream request conflicted with current state",
+        "upstream_invalid_request" => "upstream rejected the request",
+        "upstream_overloaded" => "upstream service is overloaded",
+        "upstream_server_error" => "upstream service failed",
+        "upstream_bad_gateway" => "upstream gateway failed",
+        "upstream_unavailable" => "upstream service is unavailable",
+        "upstream_gateway_timeout" => "upstream gateway timed out",
+        _ => "all eligible upstream sources failed",
+    }
+}
+
+fn upstream_failure_status(category: &str) -> StatusCode {
+    match category {
+        "upstream_unauthorized" => StatusCode::UNAUTHORIZED,
+        "upstream_account_disabled" | "upstream_forbidden" | "upstream_region_unsupported" => {
+            StatusCode::FORBIDDEN
+        }
+        "upstream_usage_not_included" => StatusCode::FORBIDDEN,
+        "upstream_quota_exhausted"
+        | "upstream_rate_limited"
+        | "upstream_websocket_connection_limit" => StatusCode::TOO_MANY_REQUESTS,
+        "upstream_model_not_found" | "upstream_not_found" => StatusCode::NOT_FOUND,
+        "upstream_model_unsupported" => StatusCode::NOT_ACCEPTABLE,
+        "upstream_websocket_unsupported" => StatusCode::UPGRADE_REQUIRED,
+        "upstream_request_timeout" => StatusCode::REQUEST_TIMEOUT,
+        "upstream_conflict" => StatusCode::CONFLICT,
+        "upstream_payload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        "upstream_previous_response_not_found"
+        | "upstream_tool_call_mismatch"
+        | "upstream_context_too_large"
+        | "upstream_encrypted_content_invalid"
+        | "upstream_instructions_required"
+        | "upstream_content_policy"
+        | "upstream_unsupported_request"
+        | "upstream_invalid_request" => StatusCode::BAD_REQUEST,
+        "upstream_model_capacity"
+        | "upstream_overloaded"
+        | "upstream_unavailable"
+        | "upstream_edge_challenge" => StatusCode::SERVICE_UNAVAILABLE,
+        "upstream_server_error" => StatusCode::INTERNAL_SERVER_ERROR,
+        "upstream_gateway_timeout" => StatusCode::GATEWAY_TIMEOUT,
+        _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+fn canonical_upstream_status(status: StatusCode, category: &str) -> StatusCode {
+    if category == "upstream_status" {
+        status
+    } else {
+        upstream_failure_status(category)
+    }
+}
+
+fn upstream_error_text(value: &Value) -> String {
+    const PATHS: &[&str] = &[
+        "/code",
+        "/type",
+        "/message",
+        "/msg",
+        "/err",
+        "/error_msg",
+        "/detail",
+        "/error_code",
+        "/error",
+        "/error/code",
+        "/error/type",
+        "/error/message",
+        "/error/detail",
+        "/body/code",
+        "/body/type",
+        "/body/message",
+        "/body/error",
+        "/body/error/code",
+        "/body/error/type",
+        "/body/error/message",
+        "/response/code",
+        "/response/type",
+        "/response/message",
+        "/response/error",
+        "/response/error/code",
+        "/response/error/type",
+        "/response/error/message",
+        "/response/incomplete_details/reason",
+        "/header/message",
+    ];
+    let mut text = String::new();
+    for value in PATHS
+        .iter()
+        .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.extend(
+            value
+                .chars()
+                .take(4_096)
+                .map(|character| character.to_ascii_lowercase()),
+        );
+    }
+    text
+}
+
+fn normalized_error_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .take(4_096)
+        .map(|character| character.to_ascii_lowercase())
+        .collect()
+}
+
+fn text_has_any(text: &str, values: &[&str]) -> bool {
+    values.iter().any(|value| text.contains(value))
+}
+
+fn upstream_status_from_value(value: &Value) -> Option<StatusCode> {
+    [
+        "/status",
+        "/status_code",
+        "/error/status",
+        "/error/status_code",
+        "/body/status",
+        "/body/status_code",
+        "/body/error/status",
+        "/body/error/status_code",
+        "/response/status",
+        "/response/status_code",
+        "/response/error/status",
+        "/response/error/status_code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path))
+    .find_map(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|status| status.trim().parse().ok()))
+            .and_then(|status| u16::try_from(status).ok())
+            .filter(|status| *status > 0)
+            .and_then(|status| StatusCode::from_u16(status).ok())
+    })
+}
+
+fn upstream_event_failure_category(
+    event_type: Option<&str>,
+    value: &Value,
+) -> Option<&'static str> {
+    match event_type {
+        Some("response.incomplete") => Some("response_incomplete"),
+        Some("response.cancelled" | "response.canceled") => Some("upstream_cancelled"),
+        Some("response.failed" | "error") => {
+            let classification = classify_upstream_error_value(
+                upstream_status_from_value(value).unwrap_or(StatusCode::BAD_GATEWAY),
+                value,
+            );
+            Some(
+                if classification.category == "upstream_bad_gateway"
+                    && upstream_status_from_value(value).is_none()
+                {
+                    "upstream_terminal"
+                } else {
+                    classification.category
+                },
+            )
+        }
+        _ => None,
+    }
 }
 
 impl AttemptFailure {
@@ -2251,6 +2760,7 @@ impl AttemptFailure {
             category,
             message,
             cooldown_ms: TRANSPORT_COOLDOWN_MS,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
@@ -2260,6 +2770,7 @@ impl AttemptFailure {
             category: "upstream_error",
             message: "upstream response failed",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
@@ -2269,6 +2780,7 @@ impl AttemptFailure {
             category: "invalid_request",
             message: "request cannot be translated for an eligible source",
             cooldown_ms: 0,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
@@ -2278,15 +2790,32 @@ impl AttemptFailure {
             category: "upstream_translation",
             message: "upstream response could not be translated",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
-    fn status(status: StatusCode) -> Self {
+    fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
+        let classification = classify_upstream_error(status, body);
         Self {
-            status,
-            category: "upstream_status",
-            message: "all eligible upstream sources failed",
+            status: canonical_upstream_status(status, classification.category),
+            category: classification.category,
+            message: classification.message,
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
+        }
+    }
+
+    fn classified_with_hint(
+        status: StatusCode,
+        category: &'static str,
+        cooldown_hint: RateLimitBodyHint,
+    ) -> Self {
+        Self {
+            status: canonical_upstream_status(status, category),
+            category,
+            message: upstream_failure_message(category),
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            cooldown_hint,
         }
     }
 
@@ -2296,6 +2825,7 @@ impl AttemptFailure {
             category,
             message: "upstream stream failed before the first event",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
@@ -2305,6 +2835,7 @@ impl AttemptFailure {
             category: "no_eligible_source",
             message: "no eligible source is available for this model",
             cooldown_ms: 0,
+            cooldown_hint: RateLimitBodyHint::default(),
         }
     }
 
@@ -2316,6 +2847,7 @@ impl AttemptFailure {
                     category: "account_auth",
                     message: "account authorization is unavailable",
                     cooldown_ms: 30 * 60_000,
+                    cooldown_hint: RateLimitBodyHint::default(),
                 }
             }
             ExecutorPrepareError::Persistence => Self {
@@ -2323,12 +2855,14 @@ impl AttemptFailure {
                 category: "account_token_persistence",
                 message: "refreshed account authorization could not be persisted",
                 cooldown_ms: TRANSIENT_COOLDOWN_MS,
+                cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
                 status: StatusCode::BAD_GATEWAY,
                 category: "account_refresh",
                 message: "account authorization refresh failed",
                 cooldown_ms: TRANSIENT_COOLDOWN_MS,
+                cooldown_hint: RateLimitBodyHint::default(),
             },
         }
     }
@@ -2341,12 +2875,72 @@ fn retryable_status(status: StatusCode, has_previous_response_id: bool) -> bool 
             | StatusCode::PAYMENT_REQUIRED
             | StatusCode::FORBIDDEN
             | StatusCode::REQUEST_TIMEOUT
+            | StatusCode::CONFLICT
             | StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    ) || (status == StatusCode::NOT_FOUND && !has_previous_response_id)
+    ) || status.is_server_error()
+        || (status == StatusCode::NOT_FOUND && !has_previous_response_id)
+}
+
+fn retryable_failure(status: StatusCode, category: &str, has_previous_response_id: bool) -> bool {
+    if !failure_category_requires_cooldown(category) {
+        return false;
+    }
+    retryable_status(status, has_previous_response_id)
+        || matches!(
+            category,
+            "upstream_unauthorized"
+                | "upstream_account_disabled"
+                | "upstream_usage_not_included"
+                | "upstream_quota_exhausted"
+                | "upstream_region_unsupported"
+                | "upstream_model_not_found"
+                | "upstream_model_unsupported"
+                | "upstream_model_capacity"
+                | "upstream_websocket_connection_limit"
+                | "upstream_rate_limited"
+                | "upstream_request_timeout"
+                | "upstream_overloaded"
+                | "upstream_edge_challenge"
+                | "upstream_server_error"
+                | "upstream_bad_gateway"
+                | "upstream_unavailable"
+                | "upstream_gateway_timeout"
+        )
+}
+
+fn failure_category_requires_cooldown(category: &str) -> bool {
+    !matches!(
+        category,
+        "client_cancelled"
+            | "response_affinity_miss"
+            | "response_incomplete"
+            | "upstream_cancelled"
+            | "upstream_previous_response_not_found"
+            | "upstream_tool_call_mismatch"
+            | "upstream_context_too_large"
+            | "upstream_encrypted_content_invalid"
+            | "upstream_instructions_required"
+            | "upstream_content_policy"
+            | "upstream_payload_too_large"
+            | "upstream_unsupported_request"
+            | "upstream_websocket_unsupported"
+            | "upstream_invalid_request"
+    )
+}
+
+fn failure_category_is_request_terminal(category: &str) -> bool {
+    matches!(
+        category,
+        "upstream_tool_call_mismatch"
+            | "upstream_context_too_large"
+            | "upstream_encrypted_content_invalid"
+            | "upstream_instructions_required"
+            | "upstream_content_policy"
+            | "upstream_payload_too_large"
+            | "upstream_unsupported_request"
+            | "upstream_websocket_unsupported"
+            | "upstream_invalid_request"
+    )
 }
 
 fn recoverable_response_affinity_miss(
@@ -2412,23 +3006,46 @@ pub(super) fn contains_function_call_output(value: &Value) -> bool {
     }
 }
 
-fn apply_status_cooldown_with_body(
+#[allow(clippy::too_many_arguments)]
+fn apply_failure_cooldown_with_body(
     runtime: &GatewayRuntime,
     candidate_id: &str,
     model: &str,
     status: StatusCode,
+    category: &str,
     headers: &reqwest::header::HeaderMap,
     body: Option<&[u8]>,
     half_open_probe: bool,
 ) -> FailureState {
     let hint = body.map(rate_limit_body_hint).unwrap_or_default();
-    apply_status_cooldown_with_hint(
+    apply_failure_cooldown_with_hint(
         runtime,
         candidate_id,
         model,
         status,
+        category,
         headers,
         hint,
+        half_open_probe,
+    )
+}
+
+fn apply_attempt_failure_cooldown(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    model: &str,
+    failure: &AttemptFailure,
+    headers: &reqwest::header::HeaderMap,
+    half_open_probe: bool,
+) -> FailureState {
+    apply_failure_cooldown_with_hint(
+        runtime,
+        candidate_id,
+        model,
+        failure.status,
+        failure.category,
+        headers,
+        failure.cooldown_hint,
         half_open_probe,
     )
 }
@@ -2480,6 +3097,44 @@ fn apply_status_cooldown_with_hint(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn apply_failure_cooldown_with_hint(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    model: &str,
+    status: StatusCode,
+    category: &str,
+    headers: &reqwest::header::HeaderMap,
+    hint: RateLimitBodyHint,
+    half_open_probe: bool,
+) -> FailureState {
+    let status = canonical_upstream_status(status, category);
+    if matches!(
+        category,
+        "upstream_model_not_found"
+            | "upstream_model_unsupported"
+            | "upstream_model_capacity"
+            | "upstream_overloaded"
+    ) {
+        return apply_cooldown(
+            runtime,
+            candidate_id,
+            model,
+            TRANSIENT_COOLDOWN_MS,
+            half_open_probe,
+        );
+    }
+    apply_status_cooldown_with_hint(
+        runtime,
+        candidate_id,
+        model,
+        status,
+        headers,
+        hint,
+        half_open_probe,
+    )
+}
+
 fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
     rate_limit_body_hint_at(body, SystemTime::now())
 }
@@ -2492,19 +3147,28 @@ fn rate_limit_body_hint_at(body: &[u8], now: SystemTime) -> RateLimitBodyHint {
 }
 
 fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> RateLimitBodyHint {
-    let retry_after_ms = rate_limit_reset_delay_ms(value, now).or_else(|| {
-        [
-            "/resets_in_seconds",
-            "/error/resets_in_seconds",
-            "/body/error/resets_in_seconds",
-            "/response/error/resets_in_seconds",
-        ]
-        .into_iter()
-        .find_map(|path| value.pointer(path).and_then(json_u64))
-        .and_then(|seconds| seconds.checked_mul(1_000))
-        .filter(|duration_ms| *duration_ms > 0)
-        .map(|duration_ms| duration_ms.min(MAX_RATE_LIMIT_RETRY_HINT_MS))
-    });
+    let retry_after_ms = rate_limit_reset_delay_ms(value, now)
+        .or_else(|| {
+            [
+                "/resets_in_seconds",
+                "/error/resets_in_seconds",
+                "/body/error/resets_in_seconds",
+                "/response/error/resets_in_seconds",
+            ]
+            .into_iter()
+            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
+        })
+        .or_else(|| {
+            [
+                "/retry_after",
+                "/error/retry_after",
+                "/body/error/retry_after",
+                "/response/error/retry_after",
+            ]
+            .into_iter()
+            .find_map(|path| value.pointer(path).and_then(json_seconds_to_ms))
+        })
+        .or_else(|| retry_delay_from_text(&upstream_error_text(value)));
     let global = [
         "/type",
         "/code",
@@ -2520,7 +3184,9 @@ fn rate_limit_body_hint_value(value: &Value, now: SystemTime) -> RateLimitBodyHi
     .map(str::to_ascii_lowercase)
     .any(|kind| {
         kind.contains("usage_limit")
+            || kind.contains("usage_not_included")
             || kind.contains("quota")
+            || kind.contains("credits_depleted")
             || matches!(
                 kind.as_str(),
                 "rate_limit_reached" | "websocket_connection_limit_reached"
@@ -2558,6 +3224,44 @@ fn json_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+}
+
+fn json_seconds_to_ms(value: &Value) -> Option<u64> {
+    let seconds = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some(
+        (seconds * 1_000.0)
+            .ceil()
+            .min(MAX_RATE_LIMIT_RETRY_HINT_MS as f64) as u64,
+    )
+}
+
+fn retry_delay_from_text(text: &str) -> Option<u64> {
+    let suffix = text.split_once("try again in")?.1.trim_start();
+    let number_end = suffix
+        .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .unwrap_or(suffix.len());
+    let seconds_or_millis = suffix[..number_end].parse::<f64>().ok()?;
+    if !seconds_or_millis.is_finite() || seconds_or_millis <= 0.0 {
+        return None;
+    }
+    let unit = suffix[number_end..].trim_start();
+    let multiplier = if unit.starts_with("ms") || unit.starts_with("millisecond") {
+        1.0
+    } else if unit.starts_with('s') || unit.starts_with("second") {
+        1_000.0
+    } else {
+        return None;
+    };
+    Some(
+        (seconds_or_millis * multiplier)
+            .ceil()
+            .min(MAX_RATE_LIMIT_RETRY_HINT_MS as f64) as u64,
+    )
 }
 
 fn rate_limit_cooldown_ms(
@@ -2692,17 +3396,65 @@ fn cooldown_error(retry_at_ms: u64) -> Response<Body> {
 }
 
 fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
+    let error_type = api_error_type(status);
+    let code = api_error_code(code);
     (
         status,
         Json(json!({
             "error": {
                 "message": message,
-                "type": "relay_error",
+                "type": error_type,
                 "code": code,
             }
         })),
     )
         .into_response()
+}
+
+fn api_error_type(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        StatusCode::FORBIDDEN => "permission_error",
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
+        status if status.is_server_error() => "server_error",
+        _ => "invalid_request_error",
+    }
+}
+
+fn api_error_code(code: &str) -> &str {
+    match code {
+        "upstream_unauthorized" => "invalid_api_key",
+        "upstream_account_disabled" => "account_deactivated",
+        "upstream_usage_not_included" => "usage_not_included",
+        "upstream_quota_exhausted" => "insufficient_quota",
+        "upstream_rate_limited" => "rate_limit_exceeded",
+        "upstream_context_too_large" => "context_too_large",
+        "upstream_encrypted_content_invalid" => "invalid_encrypted_content",
+        "upstream_instructions_required" => "missing_required_parameter",
+        "upstream_previous_response_not_found" => "previous_response_not_found",
+        "upstream_tool_call_mismatch" => "tool_call_not_found",
+        "upstream_content_policy" => "content_policy_violation",
+        "upstream_payload_too_large" => "request_too_large",
+        "upstream_unsupported_request" => "unsupported_request",
+        "upstream_model_not_found" => "model_not_found",
+        "upstream_model_unsupported" => "model_not_supported",
+        "upstream_model_capacity" => "model_at_capacity",
+        "upstream_websocket_unsupported" => "websocket_not_supported",
+        "upstream_websocket_connection_limit" => "websocket_connection_limit_reached",
+        "upstream_region_unsupported" => "unsupported_country_region_territory",
+        "upstream_edge_challenge" => "edge_security_challenge",
+        "upstream_forbidden" => "permission_denied",
+        "upstream_not_found" => "not_found",
+        "upstream_request_timeout" => "request_timeout",
+        "upstream_conflict" => "conflict",
+        "upstream_invalid_request" => "invalid_request",
+        "upstream_overloaded" => "server_is_overloaded",
+        "upstream_server_error" => "internal_server_error",
+        "upstream_bad_gateway" => "bad_gateway",
+        "upstream_unavailable" => "service_unavailable",
+        "upstream_gateway_timeout" => "gateway_timeout",
+        _ => code,
+    }
 }
 
 fn proxy_response(
@@ -2822,6 +3574,7 @@ struct UsageStream<S> {
     completion: CompletionCallback,
     event: Option<UsageEvent>,
     response_id: Option<String>,
+    cooldown_hint: RateLimitBodyHint,
     started: Instant,
     sse_pending: Vec<u8>,
     output_pending: VecDeque<Bytes>,
@@ -2842,6 +3595,7 @@ impl<S> UsageStream<S> {
             completion,
             event: Some(event),
             response_id: None,
+            cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
             output_pending: VecDeque::new(),
@@ -2859,18 +3613,21 @@ impl<S> UsageStream<S> {
         if let Some(category) = category {
             event.error_category = Some(category.to_string());
         }
-        if !event.success
-            && event.http_status < 400
-            && event.error_category.as_deref() != Some("client_cancelled")
-        {
-            event.http_status = StatusCode::BAD_GATEWAY.as_u16();
+        if !event.success && event.http_status < 400 {
+            event.http_status = event
+                .error_category
+                .as_deref()
+                .filter(|category| *category != "client_cancelled")
+                .map(upstream_failure_status)
+                .unwrap_or(StatusCode::BAD_GATEWAY)
+                .as_u16();
         }
         event.latency_ms = self.started.elapsed().as_millis() as u64;
         event.generation_ms = event
             .ttft_ms
             .map(|ttft_ms| event.latency_ms.saturating_sub(ttft_ms))
             .filter(|duration| *duration > 0);
-        (self.completion)(&mut event, self.response_id.as_deref());
+        (self.completion)(&mut event, self.response_id.as_deref(), self.cooldown_hint);
         emit_callback(&self.callback, event);
     }
 
@@ -2977,7 +3734,11 @@ impl<S> UsageStream<S> {
                     return;
                 }
                 Some(TerminalOutcome::Failure) => {
-                    self.finish(Some(false), Some("upstream_terminal"));
+                    self.cooldown_hint = terminal.cooldown_hint;
+                    self.finish(
+                        Some(false),
+                        Some(terminal.error_category.unwrap_or("upstream_terminal")),
+                    );
                     self.terminated = true;
                     return;
                 }
@@ -3038,6 +3799,9 @@ struct TerminalEvent {
     valid: bool,
     has_output_delta: bool,
     outcome: Option<TerminalOutcome>,
+    error_status: Option<StatusCode>,
+    error_category: Option<&'static str>,
+    cooldown_hint: RateLimitBodyHint,
     usage: Option<Value>,
     response_id: Option<String>,
     response: Option<Value>,
@@ -3084,6 +3848,9 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             valid: true,
             has_output_delta: false,
             outcome: Some(TerminalOutcome::Success),
+            error_status: None,
+            error_category: None,
+            cooldown_hint: RateLimitBodyHint::default(),
             usage: None,
             response_id: None,
             response: None,
@@ -3110,6 +3877,14 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         ) => Some(TerminalOutcome::Failure),
         _ => None,
     };
+    let error_category = upstream_event_failure_category(event_type, &value);
+    let error_status = error_category.map(|category| {
+        let status = upstream_status_from_value(&value)
+            .filter(|status| !status.is_success())
+            .unwrap_or_else(|| upstream_failure_status(category));
+        canonical_upstream_status(status, category)
+    });
+    let cooldown_hint = rate_limit_body_hint_value(&value, SystemTime::now());
     let has_output_delta = has_output_delta(&value, event_type);
     let usage = find_usage(&value).cloned();
     let response_id = response_id(&value).map(str::to_string);
@@ -3123,6 +3898,9 @@ fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         valid: true,
         has_output_delta,
         outcome,
+        error_status,
+        error_category,
+        cooldown_hint,
         usage,
         response_id,
         response,
@@ -3216,7 +3994,14 @@ fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, AttemptFailure> {
         }
         match terminal.outcome {
             Some(TerminalOutcome::Failure) => {
-                return Err(AttemptFailure::stream("upstream_terminal"));
+                let category = terminal.error_category.unwrap_or("upstream_terminal");
+                return Err(AttemptFailure::classified_with_hint(
+                    terminal
+                        .error_status
+                        .unwrap_or_else(|| upstream_failure_status(category)),
+                    category,
+                    terminal.cooldown_hint,
+                ));
             }
             Some(TerminalOutcome::Success) => {
                 if let Some(mut response) = terminal.response {
@@ -3390,6 +4175,245 @@ mod tests {
     }
 
     #[test]
+    fn upstream_errors_use_stable_status_and_body_categories() {
+        let cases = [
+            (
+                StatusCode::UNAUTHORIZED,
+                br#"{"error":{"code":"invalid_api_key"}}"#.as_slice(),
+                "upstream_unauthorized",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                br#"{"error":{"code":"account_deactivated"}}"#.as_slice(),
+                "upstream_account_disabled",
+            ),
+            (
+                StatusCode::PAYMENT_REQUIRED,
+                br#"{"error":{"code":"deactivated_workspace"}}"#.as_slice(),
+                "upstream_account_disabled",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"error":{"type":"usage_not_included"}}"#.as_slice(),
+                "upstream_usage_not_included",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"error":{"type":"insufficient_quota"}}"#.as_slice(),
+                "upstream_quota_exhausted",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"error":{"code":"rate_limit_exceeded"}}"#.as_slice(),
+                "upstream_rate_limited",
+            ),
+            (
+                StatusCode::NOT_FOUND,
+                br#"{"error":{"code":"model_not_found"}}"#.as_slice(),
+                "upstream_model_not_found",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"unsupported_parameter"}}"#.as_slice(),
+                "upstream_unsupported_request",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"previous_response_not_found"}}"#.as_slice(),
+                "upstream_previous_response_not_found",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"No tool call found for custom tool call output with call_id call_1"}}"#.as_slice(),
+                "upstream_tool_call_mismatch",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"No tool output found for apply patch call call_1"}}"#.as_slice(),
+                "upstream_tool_call_mismatch",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"context_length_exceeded"}}"#.as_slice(),
+                "upstream_context_too_large",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"invalid_encrypted_content"}}"#.as_slice(),
+                "upstream_encrypted_content_invalid",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"Instructions are required"}}"#.as_slice(),
+                "upstream_instructions_required",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"response":{"error":{"code":"invalid_prompt"}}}"#.as_slice(),
+                "upstream_invalid_request",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"response":{"error":{"code":"bio_policy"}}}"#.as_slice(),
+                "upstream_content_policy",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"model_at_capacity"}}"#.as_slice(),
+                "upstream_model_capacity",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"token_invalidated"}}"#.as_slice(),
+                "upstream_unauthorized",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"message":"An error occurred while processing your request"}}"#.as_slice(),
+                "upstream_server_error",
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                br#"{"error":{"code":"server_is_overloaded"}}"#.as_slice(),
+                "upstream_overloaded",
+            ),
+            (
+                StatusCode::NOT_ACCEPTABLE,
+                b"".as_slice(),
+                "upstream_model_unsupported",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"invalid_request_error","message":"The 'gpt-next' model is not supported when using Codex with a ChatGPT account."}}"#.as_slice(),
+                "upstream_model_unsupported",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                br#"{"error":{"code":"websocket_not_supported"}}"#.as_slice(),
+                "upstream_websocket_unsupported",
+            ),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                b"Failed to buffer request body: length limit exceeded".as_slice(),
+                "upstream_payload_too_large",
+            ),
+            (
+                StatusCode::FORBIDDEN,
+                b"<!doctype html><title>Just a moment...</title>".as_slice(),
+                "upstream_edge_challenge",
+            ),
+            (StatusCode::CONFLICT, b"".as_slice(), "upstream_conflict"),
+            (
+                StatusCode::from_u16(529).unwrap(),
+                b"server overloaded".as_slice(),
+                "upstream_overloaded",
+            ),
+        ];
+        for (status, body, expected) in cases {
+            assert_eq!(
+                classify_upstream_error(status, Some(body)).category,
+                expected,
+                "status={status} body={}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn retry_policy_matches_account_failover_and_official_transient_statuses() {
+        assert!(retryable_status(StatusCode::UNAUTHORIZED, false));
+        assert!(retryable_status(StatusCode::CONFLICT, false));
+        assert!(retryable_status(StatusCode::from_u16(529).unwrap(), false));
+        assert!(!retryable_status(StatusCode::PAYLOAD_TOO_LARGE, false));
+        assert!(!retryable_status(StatusCode::BAD_REQUEST, false));
+        assert!(retryable_failure(
+            StatusCode::BAD_REQUEST,
+            "upstream_model_capacity",
+            false
+        ));
+        assert!(retryable_failure(
+            StatusCode::BAD_REQUEST,
+            "upstream_overloaded",
+            false
+        ));
+        assert!(retryable_failure(
+            StatusCode::BAD_GATEWAY,
+            "upstream_usage_not_included",
+            false
+        ));
+        assert!(!retryable_failure(
+            StatusCode::BAD_REQUEST,
+            "upstream_context_too_large",
+            false
+        ));
+        assert!(!retryable_failure(
+            StatusCode::FORBIDDEN,
+            "upstream_content_policy",
+            false
+        ));
+        assert_eq!(
+            AttemptFailure::status_with_body(
+                StatusCode::BAD_REQUEST,
+                Some(br#"{"error":{"code":"model_at_capacity"}}"#)
+            )
+            .status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            canonical_upstream_status(StatusCode::FORBIDDEN, "upstream_quota_exhausted"),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            canonical_upstream_status(StatusCode::TOO_MANY_REQUESTS, "upstream_usage_not_included"),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn local_errors_use_openai_compatible_error_types() {
+        assert_eq!(
+            api_error_type(StatusCode::UNAUTHORIZED),
+            "authentication_error"
+        );
+        assert_eq!(api_error_type(StatusCode::FORBIDDEN), "permission_error");
+        assert_eq!(
+            api_error_type(StatusCode::TOO_MANY_REQUESTS),
+            "rate_limit_error"
+        );
+        assert_eq!(
+            api_error_type(StatusCode::BAD_REQUEST),
+            "invalid_request_error"
+        );
+        assert_eq!(api_error_type(StatusCode::BAD_GATEWAY), "server_error");
+        assert_eq!(
+            api_error_code("upstream_quota_exhausted"),
+            "insufficient_quota"
+        );
+        assert_eq!(
+            api_error_code("upstream_usage_not_included"),
+            "usage_not_included"
+        );
+        assert_eq!(
+            api_error_code("upstream_model_capacity"),
+            "model_at_capacity"
+        );
+        assert_eq!(api_error_code("local_internal_code"), "local_internal_code");
+    }
+
+    #[test]
+    fn streaming_terminal_errors_keep_the_canonical_category() {
+        let terminal = parse_sse_event(
+            br#"data: {"type":"response.failed","response":{"error":{"type":"usage_limit_reached","resets_in_seconds":7}}}
+
+"#,
+        );
+        assert_eq!(terminal.error_category, Some("upstream_quota_exhausted"));
+        assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
+        assert_eq!(terminal.cooldown_hint.retry_after_ms, Some(7_000));
+        assert!(terminal.cooldown_hint.global);
+    }
+
+    #[test]
     fn responses_lite_keeps_only_client_executed_tools() {
         let mut request = json!({
             "model": "gpt-lite",
@@ -3515,7 +4539,7 @@ mod tests {
                 total_tokens: None,
             },
             Instant::now(),
-            Arc::new(|_, _| {}),
+            Arc::new(|_, _, _| {}),
         );
         stream.ingest_sse(&vec![b'x'; MAX_SSE_EVENT_BYTES + 1]);
         assert!(stream.terminated);
@@ -3560,7 +4584,7 @@ mod tests {
             Arc::new(move |event| captured.lock().unwrap().push(event)),
             test_usage_event(),
             Instant::now(),
-            Arc::new(|_, _| {}),
+            Arc::new(|_, _, _| {}),
         );
         stream.ingest_sse(
             b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"prompt_tokens\":32,\"prompt_tokens_details\":{\"cached_tokens\":9},\"completion_tokens\":6,\"completion_tokens_details\":{\"reasoning_tokens\":4}}}}\n\n",
@@ -3648,6 +4672,27 @@ mod tests {
         );
         assert_eq!(hint.retry_after_ms, Some(17_000));
         assert!(!hint.global);
+    }
+
+    #[test]
+    fn rate_limit_body_hint_accepts_retry_after_and_message_delays() {
+        let retry_after = rate_limit_body_hint_at(
+            br#"{"error":{"code":"rate_limit_exceeded","retry_after":"2.5"}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(retry_after.retry_after_ms, Some(2_500));
+
+        let seconds = rate_limit_body_hint_at(
+            br#"{"response":{"error":{"code":"rate_limit_exceeded","message":"Please try again in 11.054s."}}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(seconds.retry_after_ms, Some(11_054));
+
+        let millis = rate_limit_body_hint_at(
+            br#"{"error":{"message":"Please try again in 250ms."}}"#,
+            UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+        );
+        assert_eq!(millis.retry_after_ms, Some(250));
     }
 
     #[test]

@@ -60,6 +60,7 @@ struct ImageFailure {
     code: String,
     message: String,
     retryable: bool,
+    cooldown_hint: RateLimitBodyHint,
 }
 
 pub(super) async fn generations(
@@ -581,8 +582,9 @@ async fn execute_prepared(
                 }
             };
         if !status.is_success() {
+            let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             let capability_failure = image_capability_unavailable(&bytes);
-            if retryable_status(status, false) || capability_failure {
+            if retryable_failure(status, failure.category, false) || capability_failure {
                 let state = if capability_failure {
                     apply_cooldown(
                         &runtime,
@@ -592,11 +594,12 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 } else {
-                    apply_status_cooldown_with_body(
+                    apply_failure_cooldown_with_body(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         status,
+                        failure.category,
                         &response_headers,
                         Some(&bytes),
                         route.half_open_probe,
@@ -613,13 +616,13 @@ async fn execute_prepared(
                     Some(if capability_failure {
                         "image_generation_not_enabled".to_string()
                     } else {
-                        "upstream_status".to_string()
+                        failure.category.to_string()
                     }),
                     started,
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
-                last_failure = Some(AttemptFailure::status(status));
+                last_failure = Some(failure);
                 continue;
             }
             let mut event = image_usage_event(
@@ -630,7 +633,7 @@ async fn execute_prepared(
                 &prepared,
                 false,
                 status,
-                Some("upstream_status".to_string()),
+                Some(failure.category.to_string()),
                 started,
             );
             populate_tokens(&mut event, &bytes);
@@ -684,13 +687,14 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 } else {
-                    apply_status_cooldown_with_body(
+                    apply_failure_cooldown_with_hint(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         failure.status,
+                        failure.category,
                         &response_headers,
-                        Some(&bytes),
+                        failure.cooldown_hint,
                         route.half_open_probe,
                     )
                 };
@@ -707,7 +711,11 @@ async fn execute_prepared(
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
-                last_failure = Some(AttemptFailure::status(failure.status));
+                last_failure = Some(AttemptFailure::classified_with_hint(
+                    failure.status,
+                    failure.category,
+                    failure.cooldown_hint,
+                ));
                 continue;
             }
             Err(failure) => {
@@ -956,6 +964,7 @@ fn translate_account_response(
             code: "stream_incomplete".to_string(),
             message: "upstream image stream ended before completion".to_string(),
             retryable: true,
+            cooldown_hint: RateLimitBodyHint::default(),
         });
     };
     if completed
@@ -980,6 +989,7 @@ fn translate_account_response(
             code: "image_output_missing".to_string(),
             message: "upstream did not return image output".to_string(),
             retryable: true,
+            cooldown_hint: RateLimitBodyHint::default(),
         });
     }
     let created = completed
@@ -1169,6 +1179,14 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
         });
     let normalized =
         format!("{error_type} {code} {message} {incomplete_reason}").to_ascii_lowercase();
+    let classification = classify_upstream_error_value(
+        upstream_status_from_value(value).unwrap_or(StatusCode::BAD_GATEWAY),
+        value,
+    );
+    let classified_status = upstream_status_from_value(value)
+        .filter(|status| !status.is_success())
+        .unwrap_or_else(|| upstream_failure_status(classification.category));
+    let classified_status = canonical_upstream_status(classified_status, classification.category);
     let capability = normalized.contains("image generation is not enabled")
         || normalized.contains("image_generation_not_enabled");
     let user_error = error_type.eq_ignore_ascii_case("image_generation_user_error")
@@ -1189,14 +1207,12 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
             "image_generation_user_error",
             false,
         )
-    } else if normalized.contains("rate_limit") {
-        (StatusCode::TOO_MANY_REQUESTS, "rate_limit", true)
-    } else if normalized.contains("authentication") || normalized.contains("unauthorized") {
-        (StatusCode::UNAUTHORIZED, "authentication", true)
-    } else if normalized.contains("permission") || normalized.contains("forbidden") {
-        (StatusCode::FORBIDDEN, "permission", true)
     } else {
-        (StatusCode::BAD_GATEWAY, "upstream_image_error", true)
+        (
+            classified_status,
+            classification.category,
+            retryable_failure(classified_status, classification.category, false),
+        )
     };
     Some(ImageFailure {
         status,
@@ -1204,6 +1220,7 @@ fn image_failure_from_event(value: &Value) -> Option<ImageFailure> {
         code: code.to_string(),
         message,
         retryable,
+        cooldown_hint: rate_limit_body_hint_value(value, SystemTime::now()),
     })
 }
 
@@ -1219,7 +1236,7 @@ fn image_error_response(failure: ImageFailure) -> Response<Body> {
         Json(json!({
             "error": {
                 "message": failure.message,
-                "type": failure.category,
+                "type": api_error_type(failure.status),
                 "code": failure.code,
             }
         })),
@@ -1282,6 +1299,21 @@ mod tests {
         .unwrap_err();
         assert_eq!(failure.status, StatusCode::BAD_REQUEST);
         assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn image_usage_limit_keeps_the_provider_reset() {
+        let failure = translate_account_response(
+            b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":12}}}\n\n",
+            "b64_json",
+            "image_generation",
+        )
+        .unwrap_err();
+        assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(failure.category, "upstream_quota_exhausted");
+        assert!(failure.retryable);
+        assert_eq!(failure.cooldown_hint.retry_after_ms, Some(12_000));
+        assert!(failure.cooldown_hint.global);
     }
 
     #[tokio::test]

@@ -458,7 +458,10 @@ async fn non_success_stream_done_does_not_override_upstream_status() {
         events[0].http_status,
         StatusCode::TOO_MANY_REQUESTS.as_u16()
     );
-    assert_eq!(events[0].error_category.as_deref(), Some("upstream_status"));
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_rate_limited")
+    );
 }
 
 async fn spawn_gateway(

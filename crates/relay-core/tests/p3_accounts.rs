@@ -768,7 +768,10 @@ async fn unknown_http_response_owner_does_not_retry_arbitrary_bad_requests() {
     assert!(owner_state.requests.lock().unwrap().is_empty());
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].error_category.as_deref(), Some("upstream_status"));
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
 }
 
 #[tokio::test]
@@ -1163,7 +1166,7 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
     );
     assert_eq!(
         events[0].error_category.as_deref(),
-        Some("upstream_rate_limited")
+        Some("upstream_quota_exhausted")
     );
     assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
     assert!(events[0]

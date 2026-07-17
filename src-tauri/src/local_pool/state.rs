@@ -765,13 +765,21 @@ fn apply_account_usage_state(
         account.account.auth_state,
         AccountAuthState::RequiresReauth(_)
     ) || account.account.health == AccountHealthState::Blocked;
+    let failure_category = event
+        .error_category
+        .as_deref()
+        .filter(|category| *category != "upstream_status");
     match event.http_status {
         401 => {
             if access_expiry == Some(AccountAccessExpiry::Refreshable) {
                 if !explicit_state {
                     account.account.health = AccountHealthState::Degraded;
                 }
-                account.account.last_error_code = Some("upstream_unauthorized".to_string());
+                account.account.last_error_code = Some(
+                    failure_category
+                        .unwrap_or("upstream_unauthorized")
+                        .to_string(),
+                );
             } else if access_expiry == Some(AccountAccessExpiry::AccessOnly) {
                 if !matches!(
                     account.account.auth_state,
@@ -780,7 +788,11 @@ fn apply_account_usage_state(
                     account.account.auth_state = AccountAuthState::Error;
                 }
                 account.account.health = AccountHealthState::Unhealthy;
-                account.account.last_error_code = Some("upstream_unauthorized".to_string());
+                account.account.last_error_code = Some(
+                    failure_category
+                        .unwrap_or("upstream_unauthorized")
+                        .to_string(),
+                );
             } else if !explicit_state {
                 account.account.auth_state = AccountAuthState::Error;
                 account.account.health = AccountHealthState::Unhealthy;
@@ -789,14 +801,31 @@ fn apply_account_usage_state(
             }
         }
         403 => {
-            account.account.health = AccountHealthState::Blocked;
-            account.account.last_error_code = Some("upstream_forbidden".to_string());
+            let category = failure_category.unwrap_or("upstream_forbidden");
+            if matches!(
+                category,
+                "upstream_quota_exhausted"
+                    | "upstream_usage_not_included"
+                    | "upstream_region_unsupported"
+                    | "upstream_edge_challenge"
+            ) {
+                if !explicit_state {
+                    account.account.health = AccountHealthState::Degraded;
+                }
+            } else {
+                account.account.health = AccountHealthState::Blocked;
+            }
+            account.account.last_error_code = Some(category.to_string());
         }
         429 => {
             if !explicit_state {
                 account.account.health = AccountHealthState::Degraded;
             }
-            account.account.last_error_code = Some("upstream_rate_limited".to_string());
+            account.account.last_error_code = Some(
+                failure_category
+                    .unwrap_or("upstream_rate_limited")
+                    .to_string(),
+            );
         }
         _ => {
             if !explicit_state {
@@ -1234,6 +1263,45 @@ mod tests {
         assert_eq!(account.account.last_error_code, None);
         assert!(account.cooldowns.is_empty());
         assert_eq!(account.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn quota_classification_does_not_turn_a_forbidden_response_into_a_block() {
+        let mut account = account_record("account-quota");
+        let mut event = account_status_event("account-quota", 403, Some("*"), Some(60_000), 1);
+        event.error_category = Some("upstream_quota_exhausted".into());
+
+        assert!(!apply_account_usage_state(
+            &mut account,
+            &event,
+            100,
+            None,
+            None,
+        ));
+        assert_eq!(account.account.health, AccountHealthState::Degraded);
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("upstream_quota_exhausted")
+        );
+    }
+
+    #[test]
+    fn entitlement_and_edge_challenges_do_not_block_the_account() {
+        for category in ["upstream_usage_not_included", "upstream_edge_challenge"] {
+            let mut account = account_record(category);
+            let mut event = account_status_event(category, 403, Some("*"), Some(60_000), 1);
+            event.error_category = Some(category.into());
+
+            assert!(!apply_account_usage_state(
+                &mut account,
+                &event,
+                100,
+                None,
+                None,
+            ));
+            assert_eq!(account.account.health, AccountHealthState::Degraded);
+            assert_eq!(account.account.last_error_code.as_deref(), Some(category));
+        }
     }
 
     #[test]
