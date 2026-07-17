@@ -56,11 +56,12 @@ for (const locale of locales) {
                     return Math.abs((rect.top + rect.bottom) / 2 - centerY) <= 1;
                 });
               }))).toBe(true);
-              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".usage-metrics > div")].every((cell) => {
+              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".usage-metrics > div, .usage-performance > div")].every((cell) => {
                 const cellRect = cell.getBoundingClientRect();
                 const children = [...cell.children].map((child) => child.getBoundingClientRect());
+                const textChildren = [...cell.querySelectorAll<HTMLElement>(":scope > span, :scope > strong, :scope > small")].map((child) => child.getBoundingClientRect());
                 return children.every((rect) => rect.left >= cellRect.left - 1 && rect.right <= cellRect.right + 1 && rect.top >= cellRect.top - 1 && rect.bottom <= cellRect.bottom + 1)
-                  && children.every((rect, index) => index === 0 || children[index - 1].bottom <= rect.top + 1);
+                  && textChildren.every((rect, index) => index === 0 || textChildren[index - 1].bottom <= rect.top + 1);
               }))).toBe(true);
               expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".model-rules header h2")].every((heading) => heading.scrollHeight <= 21))).toBe(true);
               expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".relay-page-header p")].every((subtitle) => {
@@ -987,7 +988,7 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Использование", exact: true }).click();
 
     const filters = page.locator(".usage-filter-panel");
-    await expect(filters.getByLabel("Период")).toBeVisible();
+    await expect(page.locator(".usage-range-menu").getByRole("button", { name: /^Период:/ })).toBeVisible();
     await expect(filters.getByLabel("Локальный ключ")).toHaveCount(0);
     await filters.getByRole("button", { name: "Другие фильтры" }).click();
     await expect(filters.getByLabel("Локальный ключ")).toBeVisible();

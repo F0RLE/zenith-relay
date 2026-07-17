@@ -450,7 +450,13 @@ test("account sorting follows pool and quota window usage", async ({ page }) => 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const labels = page.locator(".account-card .account-identity > strong");
 
-  await chooseOption(page, page, "Sort accounts", "primary");
+  await page.getByRole("button", { name: /^Sort accounts:/ }).click();
+  const sortMenu = page.getByRole("listbox", { name: "Sort accounts" });
+  await sortMenu.hover();
+  await page.mouse.wheel(0, 320);
+  await expect(sortMenu).toBeVisible();
+  await expect.poll(() => sortMenu.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await sortMenu.locator('[role="option"][data-value="primary"]').click();
   await expect(labels).toHaveText(["Backup account", "Business Workspace", "Personal Plus"]);
   await page.getByRole("button", { name: "Descending order" }).click();
   await expect(labels).toHaveText(["Personal Plus", "Business Workspace", "Backup account"]);
@@ -1087,7 +1093,7 @@ test("ChatGPT pool identity migrates the previous stored account selection", asy
   expect(await page.evaluate(() => ({ current: localStorage.getItem("relay.codexPoolOauthSelection"), legacy: localStorage.getItem("relay.codexPoolOauthAccountId") }))).toEqual({ current: "account_synthetic_2", legacy: null });
 });
 
-test("usage filters name independent choices", async ({ page }) => {
+test("usage filters are named and stay scoped to the request report", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
@@ -1097,6 +1103,18 @@ test("usage filters name independent choices", async ({ page }) => {
   await page.getByRole("button", { name: "More filters" }).click();
   await page.getByRole("button", { name: /^Protocol:/ }).click();
   await expect(page.getByRole("option").first()).toHaveText("Any protocol");
+  await page.locator('[role="option"][data-value="responses"]').click();
+  await chooseOption(page, page, "Status", "failed");
+  await expect.poll(() => page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string } } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input;
+  })).toMatchObject({ success: false, wireApi: "responses" });
+
+  await page.getByRole("tab", { name: "Models" }).click();
+  await expect.poll(() => page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { success?: boolean; wireApi?: string } } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input ?? {};
+  })).not.toMatchObject({ success: false, wireApi: "responses" });
 });
 
 test("local usage warns when ChatGPT bypasses localhost", async ({ page }) => {
@@ -1123,8 +1141,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
   await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "10 tok/s", "128 / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Reason5", "Out8"]);
-  await expect(page.locator(".usage-metrics")).toContainText("Generation speed10 tok/s");
-  await expect(page.locator(".usage-metrics")).toContainText("Effective end-to-end speed7 tok/s");
+  await expect(page.locator(".usage-performance")).toContainText("Generation speed10 tok/s");
+  await expect(page.locator(".usage-performance")).toContainText("Effective end-to-end speed7 tok/s");
 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();

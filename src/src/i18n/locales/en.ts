@@ -889,6 +889,7 @@ const relayEn = {
   },
   usage: {
     subtitle: "Request diagnostics without prompt or response bodies",
+    summary: "Usage summary",
     sources: {
       local: "Local Relay",
       remote: "Connected server",
@@ -916,6 +917,7 @@ const relayEn = {
     totalTokens: "Total tokens",
     apiEquivalent: "API equivalent",
     apiEquivalentHint: "Estimate from the official OpenAI price catalog for the selected range. Unpriced tokens: {{count}}.",
+    pricedTokens: "{{count}} priced tokens",
     averageSpeed: "Average output speed",
     generationSpeed: "Generation speed",
     effectiveSpeed: "Effective end-to-end speed",

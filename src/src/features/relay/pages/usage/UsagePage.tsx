@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, Download, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery, RoutingDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
@@ -50,17 +50,18 @@ export function UsagePage() {
   const [selected, setSelected] = useState<UsageRow | null>(null);
   const [localProfileActive, setLocalProfileActive] = useState<boolean | null>(null);
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
+  const requestFiltersActive = view === "requests";
   const usageQuery = useMemo<RemoteUsageQuery>(() => ({
     page,
     pageSize: 50,
     range: range === "all" ? undefined : range,
-    modelQuery: modelQuery.trim() || undefined,
-    sourceOrAccountQuery: connectionQuery.trim() || undefined,
-    localKeyQuery: keyQuery.trim() || undefined,
-    wireApi: wireApi ? wireApi as RemoteUsageQuery["wireApi"] : undefined,
-    success: view === "errors" ? false : status === "all" ? undefined : status === "success",
-    errorCategory: errorQuery.trim() || undefined,
-    requestIdQuery: requestQuery.trim() || undefined,
+    modelQuery: requestFiltersActive ? modelQuery.trim() || undefined : undefined,
+    sourceOrAccountQuery: requestFiltersActive ? connectionQuery.trim() || undefined : undefined,
+    localKeyQuery: requestFiltersActive ? keyQuery.trim() || undefined : undefined,
+    wireApi: requestFiltersActive && wireApi ? wireApi as RemoteUsageQuery["wireApi"] : undefined,
+    success: view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined,
+    errorCategory: requestFiltersActive ? errorQuery.trim() || undefined : undefined,
+    requestIdQuery: requestFiltersActive ? requestQuery.trim() || undefined : undefined,
   }), [page, range, modelQuery, connectionQuery, keyQuery, wireApi, status, errorQuery, requestQuery, view]);
 
   useEffect(() => {
@@ -105,21 +106,25 @@ export function UsagePage() {
     return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? item.accountId : sourceLabels.get(item.sourceId) ?? item.sourceId, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: item.generationMs }));
   }, [mode, readyUsage, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels]);
   const cutoff = range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000;
-  const filtered = mode !== "zenith" ? rows : rows.filter((item) =>
-    (status === "all" || (status === "success" ? item.success : !item.success))
-    && (!requestQuery.trim() || item.requestId?.toLocaleLowerCase().includes(requestQuery.trim().toLocaleLowerCase()))
-    && (!modelQuery.trim() || item.model?.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()))
-    && (!connectionQuery.trim() || item.connection.toLocaleLowerCase().includes(connectionQuery.trim().toLocaleLowerCase()))
-    && (!keyQuery.trim() || item.key.toLocaleLowerCase().includes(keyQuery.trim().toLocaleLowerCase()))
-    && (!wireApi || item.wireApi === wireApi)
-    && (!errorQuery.trim() || item.errorCategory === errorQuery.trim())
-    && new Date(item.time).getTime() >= cutoff);
+  const filtered = mode !== "zenith" ? rows : rows.filter((item) => {
+    if (new Date(item.time).getTime() < cutoff) return false;
+    if (view === "errors") return !item.success;
+    if (!requestFiltersActive) return true;
+    return (status === "all" || (status === "success" ? item.success : !item.success))
+      && (!requestQuery.trim() || item.requestId?.toLocaleLowerCase().includes(requestQuery.trim().toLocaleLowerCase()))
+      && (!modelQuery.trim() || item.model?.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()))
+      && (!connectionQuery.trim() || item.connection.toLocaleLowerCase().includes(connectionQuery.trim().toLocaleLowerCase()))
+      && (!keyQuery.trim() || item.key.toLocaleLowerCase().includes(keyQuery.trim().toLocaleLowerCase()))
+      && (!wireApi || item.wireApi === wireApi)
+      && (!errorQuery.trim() || item.errorCategory === errorQuery.trim());
+  });
   const usagePage = mode === "local" ? localUsagePage : mode === "remote" ? remoteUsagePage : null;
   const totals = usagePage?.totals ?? totalsFromRows(filtered);
   const averageFirstResponse = totals.ttftSamples ? Math.round(totals.ttftMs / totals.ttftSamples) : null;
   const averageDuration = totals.requests ? Math.round(totals.latencyMs / totals.requests) : null;
   const averageGenerationSpeed = totals.generationMs ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
   const averageEffectiveSpeed = totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null;
+  const successRate = totals.requests ? Math.round(totals.successfulRequests / totals.requests * 100) : null;
   const speedUnit = t("usage.tokensPerSecondUnit");
   const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
@@ -135,7 +140,7 @@ export function UsagePage() {
   const modelGroups = usagePage?.models;
   const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: group.label ?? accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.key }));
   const clearFilters = () => {
-    setStatus("all"); setRange("weekly"); setModelQuery(""); setConnectionQuery("");
+    setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setKeyQuery(""); setWireApi(""); setErrorQuery(""); setRequestQuery("");
     setPage(1); setSelected(null);
   };
@@ -151,10 +156,25 @@ export function UsagePage() {
       <span>{mode === "local" ? t(localProfileActive === null ? "usage.clientStateUnknown" : localProfileActive ? "usage.clientUsesLocal" : "usage.clientBypassesLocal") : t(`usage.sourceHints.${mode}`)}</span>
       {mode === "local" && localProfileActive === false ? <Button variant="secondary" onClick={() => setShellPage("pool")}>{t("usage.openPool")}</Button> : null}
     </div>
-    <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
-    <div className="metric-band usage-metrics"><div><span>{t("usage.requests")}</span><strong><CompactNumber value={totals.requests} locale={i18n.language} /></strong></div><div><span>{t("common.success")}</span><strong><CompactNumber value={totals.successfulRequests} locale={i18n.language} /></strong></div><div><span>{t("usage.totalTokens")}</span><strong><CompactNumber value={totals.totalTokens} locale={i18n.language} /></strong></div><div title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })}><span>{t("usage.apiEquivalent")}</span><strong>{formatApiEquivalent(totals.apiEquivalent, i18n.language)}</strong></div><div><span>{t("usage.generationSpeed")}</span><strong>{formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.effectiveSpeed")}</span><strong>{formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)}</strong></div><div><span>{t("usage.timing")}</span><strong>{averageDuration == null ? "-" : `${averageFirstResponse ?? "-"} / ${averageDuration} ms`}</strong></div></div>
-    <p className="form-note usage-metric-note">{t("usage.tokenCompositionHint")} {t("usage.visibleSpeedHint")}</p>
-    {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} range={range} setRange={(value) => resetPage(() => setRange(value))} modelQuery={modelQuery} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} keyQuery={keyQuery} setKeyQuery={(value) => resetPage(() => setKeyQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
+    <div className="usage-view-toolbar">
+      <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
+      <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
+    </div>
+    <section className="usage-overview" aria-label={t("usage.summary")}>
+      <div className="usage-metrics">
+        <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} />
+        <UsageMetric icon={<CheckCircle2 aria-hidden />} label={t("common.success")} value={successRate == null ? "-" : `${successRate}%`} detail={`${formatFullNumber(totals.successfulRequests, i18n.language)} / ${formatFullNumber(totals.requests, i18n.language)}`} />
+        <UsageMetric icon={<Database aria-hidden />} label={t("usage.totalTokens")} value={<CompactNumber value={totals.totalTokens} locale={i18n.language} />} detail={`${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, i18n.language)} · ${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, i18n.language) : "—"} · ${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, i18n.language)}`} title={t("usage.tokenCompositionHint")} />
+        <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.pricedTokens", { count: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} />
+      </div>
+      <div className="usage-performance">
+        <UsageMetric label={t("usage.firstResponse")} value={averageFirstResponse == null ? "-" : `${averageFirstResponse} ms`} />
+        <UsageMetric label={t("usage.totalTime")} value={averageDuration == null ? "-" : `${averageDuration} ms`} />
+        <UsageMetric label={t("usage.generationSpeed")} value={formatTokenSpeed(averageGenerationSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} title={t("usage.visibleSpeedHint")} />
+        <UsageMetric label={t("usage.effectiveSpeed")} value={formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} />
+      </div>
+    </section>
+    {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} keyQuery={keyQuery} setKeyQuery={(value) => resetPage(() => setKeyQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
     {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
     {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
     {view === "models" ? <AggregateView rows={filtered} groups={modelGroups} field="model" empty={t("usage.empty")} /> : null}
@@ -164,14 +184,13 @@ export function UsagePage() {
   </section>;
 }
 
-function RequestsView({ rows, status, setStatus, range, setRange, modelQuery, setModelQuery, connectionQuery, setConnectionQuery, keyQuery, setKeyQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; range: Range; setRange: (value: Range) => void; modelQuery: string; setModelQuery: (value: string) => void; connectionQuery: string; setConnectionQuery: (value: string) => void; keyQuery: string; setKeyQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
+function RequestsView({ rows, status, setStatus, modelQuery, setModelQuery, connectionQuery, setConnectionQuery, keyQuery, setKeyQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; setModelQuery: (value: string) => void; connectionQuery: string; setConnectionQuery: (value: string) => void; keyQuery: string; setKeyQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t, i18n } = useTranslation();
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const secondaryCount = [keyQuery, wireApi, errorQuery, requestQuery].filter(Boolean).length;
-  const hasFilters = range !== "weekly" || status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
+  const hasFilters = status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
   return <><div className="usage-filter-panel">
     <div className="usage-filters usage-filter-primary">
-      <OptionMenu className="filter-option-menu" label={t("usage.range")} value={range} onChange={(value) => setRange(value as Range)} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
       <OptionMenu className="filter-option-menu" label={t("common.status")} value={status} onChange={setStatus} options={[{ value: "all", label: t("usage.anyStatus") }, { value: "success", label: t("common.success") }, { value: "failed", label: t("common.failed") }]} />
       <input value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} aria-label={t("common.model")} placeholder={t("common.model")} />
       <input value={connectionQuery} onChange={(event) => setConnectionQuery(event.target.value)} aria-label={t("usage.poolMember")} placeholder={t("usage.poolMember")} />
@@ -184,6 +203,10 @@ function RequestsView({ rows, status, setStatus, range, setRange, modelQuery, se
       <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
     </div> : null}
   </div>{rows.length ? <div className="relay-table-wrap"><table className="relay-table usage-request-table"><thead><tr><th>{t("usage.time")}</th><th>{t("common.status")}</th><th>{t("common.model")}</th><th>{t("usage.poolMember")}</th><th>{t("usage.timing")}</th><th>{t("usage.speed")}</th><th>{t("usage.tokens")}</th><th>{t("usage.requestId")}</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td>{formatTime(item.time)}</td><td><StatusBadge status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /></td><td><code>{item.model ?? "-"}</code></td><td>{item.connection}</td><td>{formatTiming(item.ttft, item.duration)}</td><td>{formatTokenSpeed(tokenSpeed(rowSpeedSample(item)), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</td><td>{item.tokens == null ? "-" : <CompactNumber value={item.tokens} locale={i18n.language} />}</td><td><button type="button" className="request-link request-disclosure" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${item.requestId ?? "-"}`} onClick={() => onSelect(item)}><code>{item.requestId ?? "-"}</code><ChevronRight aria-hidden /></button></td></tr>)}</tbody></table></div> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />}</>;
+}
+
+function UsageMetric({ icon, label, value, detail, title }: { icon?: ReactNode; label: string; value: ReactNode; detail?: ReactNode; title?: string }) {
+  return <div title={title}>{icon}<span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div>;
 }
 
 function formatTiming(ttft: number | null, duration: number) { return `${ttft ?? "-"} / ${duration} ms`; }

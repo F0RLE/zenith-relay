@@ -238,15 +238,20 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       close(true);
     };
     const dismiss = () => close();
+    const dismissOnScroll = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && listRef.current?.contains(target)) return;
+      close();
+    };
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("scroll", dismissOnScroll, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("scroll", dismissOnScroll, true);
     };
   }, [open]);
 

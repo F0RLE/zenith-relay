@@ -889,6 +889,7 @@ const relayRu = {
   },
   usage: {
     subtitle: "Диагностика запросов без сохранения их текста и ответов",
+    summary: "Сводка использования",
     sources: {
       local: "Локальный Relay",
       remote: "Подключённый сервер",
@@ -916,6 +917,7 @@ const relayRu = {
     totalTokens: "Всего токенов",
     apiEquivalent: "Эквивалент API",
     apiEquivalentHint: "Оценка по официальному каталогу цен OpenAI для выбранного периода. Неоценённых токенов: {{count}}.",
+    pricedTokens: "Оценено токенов: {{count}}",
     averageSpeed: "Средняя выходная скорость",
     generationSpeed: "Скорость генерации",
     effectiveSpeed: "Эффективная сквозная скорость",
