@@ -42,16 +42,18 @@ the model gateway.
 
 ## Backup And Restore
 
-Stop writes or stop the service, then run:
+Stop the service, then run:
 
 ```bash
 zenith-relay-server --backup /secure/path/relay-backup
 zenith-relay-server --restore /secure/path/relay-backup
 ```
 
-The backup contains SQLite metadata and the encrypted vault. The same
-`ZENITH_RELAY_VAULT_KEY` is required after restore. Store the backup and vault
-key separately.
+The server holds an exclusive data-directory lock, so maintenance commands fail
+instead of racing a running process. Backup is built and validated in a temporary
+directory before it becomes visible. Restore validates the manifest, SQLite
+store, encrypted vault, secret references, and original `ZENITH_RELAY_VAULT_KEY`
+before replacing live files. Store the backup and vault key separately.
 
 ## Database Migrations
 

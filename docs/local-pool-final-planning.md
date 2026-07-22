@@ -207,7 +207,7 @@ Acceptance:
 
 ### Autonomous Server Runtime
 
-Implementation status (2026-07-21):
+Implementation status (2026-07-22):
 
 - [x] create and persist one encrypted server-managed ChatGPT client key without
   exposing it in ordinary key controls or runtime snapshots;
@@ -218,10 +218,10 @@ Implementation status (2026-07-21):
   reversible profile flow from the API screen;
 - [ ] prove requests continue after closing the desktop app and that reopening
   shows matching server usage, speed, quota, and API-equivalent statistics;
-- [ ] prove graceful termination stops new work, settles or cancels bounded
+- [x] prove graceful termination stops new work, settles or cancels bounded
   in-flight work, flushes queued terminal usage, and restarts without duplicate
   request rows. Forced termination must recover without inventing success;
-- [ ] prove one backup contains a consistent SQLite database plus encrypted
+- [x] prove one backup contains a consistent SQLite database plus encrypted
   vault, requires the separately stored original vault key, preserves server
   identity and client access, and restores without replacing a valid live store
   until integrity checks pass;

@@ -1,4 +1,5 @@
 use crate::{
+    app::UsageWriter,
     config::Config,
     store::{Store, Vault},
 };
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    sync::{atomic::AtomicU64, Arc, RwLock},
+    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
@@ -127,6 +128,7 @@ pub struct AppState {
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
     pub(crate) failed_usage_writes: AtomicU64,
+    pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
 }
 
@@ -146,6 +148,7 @@ impl AppState {
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
             failed_usage_writes: AtomicU64::new(0),
+            usage_writer: Mutex::new(None),
             runtime: RwLock::new(None),
         }))
     }

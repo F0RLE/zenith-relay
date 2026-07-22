@@ -9,6 +9,7 @@ use reqwest::{
 };
 use serde::Deserialize;
 use std::{collections::HashSet, sync::Arc, time::Duration};
+use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
     accounts::{
         reduce_account_quota, AccountAuthState, AccountHealthState, AccountQuotaOutcome,
@@ -25,18 +26,27 @@ const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
 const MAX_MODELS: usize = 4_096;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 
-pub fn start(state: Arc<AppState>) {
+pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let _ = run(&state).await;
-            let refresh_interval_seconds = state
-                .store
-                .quota_policy()
-                .map(|policy| policy.0)
-                .unwrap_or(crate::store::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS);
-            tokio::time::sleep(Duration::from_secs(refresh_interval_seconds)).await;
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = async {
+                    let _ = run(&state).await;
+                    let refresh_interval_seconds = state
+                        .store
+                        .quota_policy()
+                        .map(|policy| policy.0)
+                        .unwrap_or(crate::store::DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS);
+                    tokio::time::sleep(Duration::from_secs(refresh_interval_seconds)).await;
+                } => {}
+            }
         }
-    });
+    })
 }
 
 async fn run(state: &Arc<AppState>) -> Result<(), String> {

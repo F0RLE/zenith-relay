@@ -1,18 +1,28 @@
 use crate::state::AppState;
 use std::{sync::Arc, time::Duration};
+use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{discover_source_models, ProviderSource};
 
 const INTERVAL: Duration = Duration::from_secs(300);
 
-pub fn start(state: Arc<AppState>) {
+pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
-            let _ = run(&state).await;
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = async {
+                    interval.tick().await;
+                    let _ = run(&state).await;
+                } => {}
+            }
         }
-    });
+    })
 }
 
 async fn run(state: &Arc<AppState>) -> Result<(), String> {

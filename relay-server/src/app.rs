@@ -40,6 +40,97 @@ struct QueuedUsage {
     observed_at_ms: u64,
 }
 
+enum UsageWriterMessage {
+    Event(Box<QueuedUsage>),
+    Shutdown,
+}
+
+pub(crate) struct UsageWriter {
+    callback: UsageCallback,
+    sender: mpsc::SyncSender<UsageWriterMessage>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl UsageWriter {
+    fn start(state: &Arc<AppState>) -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel(USAGE_QUEUE_CAPACITY);
+        let weak_state = Arc::downgrade(state);
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "usage writer requires an async runtime".to_string())?;
+        let thread = std::thread::Builder::new()
+            .name("relay-usage-writer".to_string())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    let mut batch = Vec::with_capacity(USAGE_BATCH_SIZE);
+                    let mut stopping = false;
+                    match message {
+                        UsageWriterMessage::Event(event) => batch.push(*event),
+                        UsageWriterMessage::Shutdown => stopping = true,
+                    }
+                    for message in receiver.try_iter().take(USAGE_BATCH_SIZE - 1) {
+                        match message {
+                            UsageWriterMessage::Event(event) => batch.push(*event),
+                            UsageWriterMessage::Shutdown => {
+                                stopping = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !batch.is_empty() {
+                        let Some(state) = weak_state.upgrade() else {
+                            break;
+                        };
+                        persist_usage_batch(&state, &batch, &runtime);
+                    }
+                    if stopping {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to start usage writer: {error}"))?;
+
+        let callback_sender = sender.clone();
+        let weak_state = Arc::downgrade(state);
+        let callback = Arc::new(move |event| {
+            if callback_sender
+                .try_send(UsageWriterMessage::Event(Box::new(QueuedUsage {
+                    event,
+                    observed_at_ms: now_ms(),
+                })))
+                .is_err()
+            {
+                if let Some(state) = weak_state.upgrade() {
+                    state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        Ok(Self {
+            callback,
+            sender,
+            thread,
+        })
+    }
+
+    async fn shutdown(self) -> Result<(), String> {
+        let Self {
+            callback,
+            sender,
+            thread,
+        } = self;
+        drop(callback);
+        tokio::task::spawn_blocking(move || {
+            sender
+                .send(UsageWriterMessage::Shutdown)
+                .map_err(|_| "usage writer stopped before flush".to_string())?;
+            thread
+                .join()
+                .map_err(|_| "usage writer panicked during shutdown".to_string())
+        })
+        .await
+        .map_err(|_| "usage writer shutdown task failed".to_string())?
+    }
+}
+
 impl AppState {
     pub async fn prepare_account_tokens(
         self: &Arc<Self>,
@@ -222,39 +313,31 @@ impl AppState {
     }
 
     fn usage_callback(self: &Arc<Self>) -> Result<UsageCallback, String> {
-        let (sender, receiver) = mpsc::sync_channel::<QueuedUsage>(USAGE_QUEUE_CAPACITY);
-        let weak_state = Arc::downgrade(self);
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| "usage writer requires an async runtime".to_string())?;
-        std::thread::Builder::new()
-            .name("relay-usage-writer".to_string())
-            .spawn(move || {
-                while let Ok(first) = receiver.recv() {
-                    let Some(state) = weak_state.upgrade() else {
-                        break;
-                    };
-                    let mut batch = Vec::with_capacity(USAGE_BATCH_SIZE);
-                    batch.push(first);
-                    batch.extend(receiver.try_iter().take(USAGE_BATCH_SIZE - 1));
-                    persist_usage_batch(&state, &batch, &runtime);
-                }
-            })
-            .map_err(|error| format!("failed to start usage writer: {error}"))?;
+        let mut writer = self
+            .usage_writer
+            .lock()
+            .map_err(|_| "usage writer lock poisoned".to_string())?;
+        if writer.is_none() {
+            *writer = Some(UsageWriter::start(self)?);
+        }
+        Ok(writer
+            .as_ref()
+            .expect("usage writer initialized")
+            .callback
+            .clone())
+    }
 
-        let weak_state = Arc::downgrade(self);
-        Ok(Arc::new(move |event| {
-            if sender
-                .try_send(QueuedUsage {
-                    event,
-                    observed_at_ms: now_ms(),
-                })
-                .is_err()
-            {
-                if let Some(state) = weak_state.upgrade() {
-                    state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }))
+    pub async fn shutdown_runtime(self: &Arc<Self>) -> Result<(), String> {
+        self.replace_runtime(None)?;
+        let writer = self
+            .usage_writer
+            .lock()
+            .map_err(|_| "usage writer lock poisoned".to_string())?
+            .take();
+        if let Some(writer) = writer {
+            writer.shutdown().await?;
+        }
+        Ok(())
     }
 
     pub fn snapshot(&self) -> Result<RuntimeStateSnapshot, String> {
@@ -546,7 +629,7 @@ fn mark_natural_use(
     if events.is_empty() {
         return;
     }
-    runtime.spawn(async move {
+    runtime.block_on(async move {
         let _guard = state.wake_lock.lock().await;
         let Ok(wake_state) = state.store.wake_state() else {
             return;
@@ -1040,7 +1123,59 @@ fn safe_provider_code(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        config::Config,
+        store::{Store, Vault},
+    };
+    use tempfile::TempDir;
     use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription};
+    use zenith_relay_core::{protocol::UsageQuery, WireApi};
+
+    #[tokio::test]
+    async fn usage_writer_is_reused_and_flushes_before_shutdown() {
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store.clone(), vault).unwrap();
+        let first = state.usage_callback().unwrap();
+        let second = state.usage_callback().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        first(UsageEvent {
+            request_id: "req_shutdown_flush".into(),
+            attempt: 1,
+            local_key_id: "key_test".into(),
+            source_id: "source_test".into(),
+            candidate_id: Some("source_test".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            wire_api: WireApi::Responses,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 10,
+            ttft_ms: Some(3),
+            generation_ms: Some(7),
+            input_tokens: Some(2),
+            cached_input_tokens: Some(1),
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: Some(3),
+            total_tokens: Some(5),
+            quota_snapshot: None,
+        });
+        state.shutdown_runtime().await.unwrap();
+
+        let usage = store.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(usage.total, 1);
+        assert_eq!(usage.events[0].request_id, "req_shutdown_flush");
+    }
 
     #[test]
     fn refresh_errors_keep_distinct_reauthentication_reasons() {

@@ -13,6 +13,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountIdentity, AccountRecord, CodexIdentityEnvelope},
     automations::{
@@ -26,15 +27,24 @@ const INTERVAL: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const WAKE_PROMPT: &str = "Reply with OK.";
 
-pub fn start(state: Arc<AppState>) {
+pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
-            let _ = run_due(&state).await;
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = async {
+                    interval.tick().await;
+                    let _ = run_due(&state).await;
+                } => {}
+            }
         }
-    });
+    })
 }
 
 pub async fn schedule_transitions(
