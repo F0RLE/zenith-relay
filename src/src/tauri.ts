@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 import packageJson from "../package.json";
@@ -107,7 +108,8 @@ export type LocalPoolState = {
     port: number;
     clientHost: "localhost" | "127.0.0.1";
     maxRetryCandidates: number;
-    routingStrategy: "adaptive" | "oldest_account";
+    routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
+    subscriptionPlanOrder: string[];
     defaultServiceTier: "standard" | "fast";
   };
   platform: Platform;
@@ -293,7 +295,8 @@ export function rotateLocalGatewayKey(keyId: string) {
 
 export function updateLocalRouting(input: {
   maxRetryCandidates: number;
-  routingStrategy: "adaptive" | "oldest_account";
+  routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
+  subscriptionPlanOrder: string[];
   defaultServiceTier: "standard" | "fast";
 }) {
   return invoke<LocalPoolState>("update_local_routing", { input });
@@ -311,8 +314,8 @@ export function getLocalUsage(limit = 100) {
   return invoke<LocalUsageLog[]>("get_local_usage", { limit });
 }
 
-export function attachCodexToLocalGateway(keyId: string) {
-  return invoke<void>("attach_codex_to_local_gateway", { keyId });
+export function attachCodexToLocalGateway() {
+  return invoke<void>("attach_codex_to_local_gateway");
 }
 
 export function restoreCodexProfile() {
@@ -327,8 +330,8 @@ export function getSystemLocale() {
   return invoke<string | null>("get_system_locale");
 }
 
-export function saveKey(apiKey: string) {
-  return invoke<string>("save_key", { apiKey });
+export function saveKey(apiKey: string, activate = true) {
+  return invoke<string>("save_key", { apiKey, activate });
 }
 
 export function openApiKeyPage(provider: "zenith" | "openai" | "openrouter") {
@@ -341,6 +344,14 @@ export function getSavedKeyModels() {
 
 export function resetKey() {
   return invoke<string>("reset_key");
+}
+
+export function activateReadyApiProfile() {
+  return invoke<string>("activate_ready_api_profile");
+}
+
+export function deactivateReadyApiProfile() {
+  return invoke<string>("deactivate_ready_api_profile");
 }
 
 export function launchCodex() {
@@ -357,6 +368,14 @@ export function toggleMaximizeWindow() {
 
 export function closeWindow() {
   return getCurrentWindow().close();
+}
+
+export function setWindowBackgroundColor(color: string) {
+  try {
+    return getCurrentWebviewWindow().setBackgroundColor(color).catch(() => undefined);
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 export function createTopUpIntentAndOpen(apiKey: string, amountCents: number) {

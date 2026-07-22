@@ -1,59 +1,53 @@
-import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowRightLeft, CheckCheck, Clock3, Gauge, KeyRound, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, X, Zap } from "lucide-react";
+import { useEffect, useState, type DragEvent } from "react";
+import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, CalendarDays, CheckCheck, Clock3, Cloud, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, Trash2, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, CandidateRuntimeSnapshot, KeySummary, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
-import { AccountPlanBadge, ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusBadge, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, isCodexOauthAccountEligible, useConfirm } from "../../components/Ui";
+import type { AccountSummary, CandidateRuntimeSnapshot, ModelSummary, RoutingStrategy, SourceSummary } from "../../api/types";
+import { AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { SourceDialog } from "../connections/ConnectionsPage";
 
-type View = "members" | "keys" | "models";
-type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source"; health: string; quota: null });
+type View = "members" | "models";
+type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source" });
+type SubscriptionPlanGroup = { id: string; label: string; count: number };
 
 export function PoolPage() {
   const { t } = useTranslation();
   const { mode, runtime, activateCodexProfile, busy, perform, codexPoolOauthSelection } = useRelayState();
   const [view, setView] = useState<View>("members");
-  const [createKey, setCreateKey] = useState(false);
   const [createSource, setCreateSource] = useState(false);
   const [addMembers, setAddMembers] = useState(false);
   const [quotaPolicy, setQuotaPolicy] = useState(false);
   const [routingPolicy, setRoutingPolicy] = useState(false);
-  const supportsKeys = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
   const supportsModels = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("models"));
   const supportsMembers = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
-  const supportsRoutingSettings = mode !== "remote" || runtime?.gateway.maxRetryCandidates != null;
+  const supportsRoutingSettings = Boolean(runtime);
   useEffect(() => {
-    if ((view === "keys" && !supportsKeys) || (view === "models" && !supportsModels)) setView("members");
-  }, [view, supportsKeys, supportsModels]);
+    if (view === "models" && !supportsModels) setView("members");
+  }, [view, supportsModels]);
   const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
     : null;
-  const switchCodexToPool = () => activateCodexProfile("pool-switch", async () => {
-    const snapshot = await relayCommands.localState();
-    const key = snapshot.keys.find((candidate) => candidate.system && candidate.enabled)
-      ?? (await relayCommands.createKey(t("pool.codexKeyLabel"), true)).key;
-    return relayCommands.attachCodexGateway(key.id, selectedOauthAccountId, codexPoolOauthSelection === "none");
-  }, true);
+  const switchCodexToPool = () => activateCodexProfile(
+    "pool-switch",
+    () => relayCommands.attachCodexGateway(selectedOauthAccountId, codexPoolOauthSelection === "none"),
+    true,
+  );
   const running = Boolean(runtime?.gateway.running);
   const poolToggleLabel = running ? t("pool.stop") : t("pool.start");
   const poolToggleShortLabel = running ? t("pool.stopShort") : t("pool.startShort");
   const action = <div className="pool-header-actions">
-    {view === "keys"
-      ? <Button data-action="pool-add" variant="secondary" icon={<KeyRound aria-hidden />} aria-label={t("keys.create")} disabled={!supportsKeys} title={!supportsKeys ? t("remote.capabilityUnavailable") : t("keys.create")} onClick={() => setCreateKey(true)}>{t("keys.create")}</Button>
-      : view === "members"
-        ? <Button data-action="pool-add" variant="secondary" icon={<Plus aria-hidden />} aria-label={t("pool.addMember")} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : t("pool.addMember")} onClick={() => setAddMembers(true)}>{t("pool.addMemberShort")}</Button>
-        : null}
+    {view === "members" ? <Button data-action="pool-add" variant="secondary" icon={<Plus aria-hidden />} aria-label={t("pool.addMember")} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : t("pool.addMember")} onClick={() => setAddMembers(true)}>{t("pool.addMemberShort")}</Button> : null}
     {mode === "local" ? <>
       <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} disabled={!running && !poolReady} title={!running && !poolReady ? t("pool.startUnavailable") : poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleShortLabel}</Button>
       <Button data-action="pool-switch" variant="primary" icon={<ArrowRightLeft aria-hidden />} aria-label={t("pool.switchChatGPT")} busy={busy === "pool-switch"} disabled={!running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !running ? t("pool.start") : t("pool.switchChatGPT")} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPTShort")}</Button>
     </> : null}
   </div>;
-  const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsKeys ? [{ id: "keys", label: t("pool.keys") }] : []), ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
-  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} onRoutingPolicy={() => setRoutingPolicy(true)} supportsRoutingSettings={supportsRoutingSettings} /> : null}{view === "keys" ? <KeysView onCreate={() => setCreateKey(true)} /> : null}{view === "models" ? <ModelsView /> : null}{createKey ? <CreateKeyDialog onClose={() => setCreateKey(false)} /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
+  const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
+  return <section className="relay-page" data-view={view}><PageHeader title={t("nav.pool")} subtitle={t("pool.subtitle")} actions={action} /><Tabs value={view} onChange={(id) => setView(id as View)} label={t("pool.views")} items={tabs} />{view === "members" ? <MembersView onAdd={() => setAddMembers(true)} onQuotaPolicy={() => setQuotaPolicy(true)} onRoutingPolicy={() => setRoutingPolicy(true)} supportsRoutingSettings={supportsRoutingSettings} /> : null}{view === "models" ? <ModelsView /> : null}{addMembers ? <AddMembersDialog onClose={() => setAddMembers(false)} onAddSource={() => { setAddMembers(false); setCreateSource(true); }} /> : null}{createSource ? <SourceDialog source={null} addToPool onClose={() => setCreateSource(false)} /> : null}{quotaPolicy ? <QuotaPolicyDialog onClose={() => setQuotaPolicy(false)} /> : null}{routingPolicy ? <RoutingPolicyDialog onClose={() => setRoutingPolicy(false)} /> : null}{!runtime ? <span className="sr-only">{t("common.notConfigured")}</span> : null}</section>;
 }
 
 function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onQuotaPolicy: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
@@ -62,17 +56,27 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
-  const supportsServiceTier = mode !== "remote" || runtime?.gateway.defaultServiceTier != null;
   const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
+  const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
+  const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(Date.now());
   const poolMembers: Member[] = [
     ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
-    ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const, health: item.enabled ? "healthy" : "disabled", quota: null })),
+    ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const })),
   ];
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
   const runtimeByMember = new Map(runtimeOrder.map((candidate) => [runtimeMemberKey(candidate), candidate]));
   const orderByMember = new Map(runtimeOrder.map((candidate, index) => [runtimeMemberKey(candidate), index]));
   const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
+  const upcomingTimes = members.flatMap((member) => member.kind === "account"
+    ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)].filter((value): value is number => value != null && value > nowMs)
+    : []);
+  const showSeconds = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
+    return () => window.clearTimeout(timer);
+  }, [nowMs, showSeconds]);
   const activeMembers = members.filter((member) => (runtimeByMember.get(memberKey(member))?.inFlight ?? 0) > 0);
   const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
   const lastUsedMember = lastUsedRuntime ? members.find((member) => memberKey(member) === runtimeMemberKey(lastUsedRuntime)) ?? null : null;
@@ -100,21 +104,19 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
   };
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
   const refreshQuotas = () => perform("pool-quota-refresh", () => mode === "local"
-    ? relayCommands.refreshPoolAccountQuotas()
-    : relayCommands.remoteAction({ type: "refresh_pool_quotas" }), "feedback.refreshed");
+    ? relayCommands.refreshAllAccountQuotas()
+    : relayCommands.remoteAction({ type: "refresh_all_quotas" }), "feedback.refreshed");
   const updateServiceTier = (fast: boolean) => {
     const defaultServiceTier = fast ? "fast" : "standard";
     if (defaultServiceTier === serviceTier) return;
     const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
-    const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
-    const imageBaseModel = runtime?.gateway.imageBaseModel;
-    void perform("pool-service-tier", async () => {
-      if (mode === "local") return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel ?? null);
-      return relayCommands.remoteAction({ type: "set_routing_policy" }, { maxRetryCandidates, routingStrategy, defaultServiceTier, ...(imageBaseModel !== undefined ? { imageBaseModel } : {}) });
-    });
+    const subscriptionPlanOrder = runtime?.gateway.subscriptionPlanOrder ?? [];
+    void perform("pool-service-tier", async () => mode === "local"
+      ? relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, subscriptionPlanOrder)
+      : relayCommands.remoteAction({ type: "set_routing_policy" }, { maxRetryCandidates, routingStrategy, defaultServiceTier, subscriptionPlanOrder }));
   };
   if (!members.length) return <EmptyState title={t("pool.emptyTitle")} description={t("pool.emptyDescription")} action={<Button variant="primary" disabled={!canAdd} title={!canAdd ? t("remote.capabilityUnavailable") : undefined} onClick={onAdd}>{t("pool.addMember")}</Button>} />;
-  const statuses = members.map((member) => poolMemberStatus(member, runtimeByMember.get(memberKey(member))));
+  const statuses = members.map((member) => member.operationalStatus);
   const counts = {
     rotation: statuses.filter((status) => status === "rotation").length,
     quotaWait: statuses.filter((status) => status === "quotaWait").length,
@@ -127,13 +129,13 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
         <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small></span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
-            <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={supportsServiceTier ? t("pool.serviceTierHint") : t("remote.capabilityUnavailable")}>
+            <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
               <Zap aria-hidden />
               <span className="pool-speed-copy"><small>{t("pool.serviceTier")}</small><strong>{t(`pool.serviceTiers.${serviceTier}`)}</strong></span>
-              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={!supportsServiceTier || busy === "pool-service-tier"} onChange={(event) => updateServiceTier(event.target.checked)} />
+              <input type="checkbox" role="switch" aria-label={t("pool.serviceTier")} checked={serviceTier === "fast"} disabled={busy === "pool-service-tier"} onChange={(event) => updateServiceTier(event.target.checked)} />
               <span className="pool-speed-track" aria-hidden><span /></span>
             </label>
-            <IconButton className="pool-routing-settings-button" label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
+            <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
             <IconButton label={t("pool.refreshPolicy")} icon={<Clock3 aria-hidden />} disabled={!canRefreshQuota} onClick={onQuotaPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
@@ -143,41 +145,51 @@ function MembersView({ onAdd, onQuotaPolicy, onRoutingPolicy, supportsRoutingSet
       </div>
       <div className="pool-summary"><div><span>{t("pool.memberStatus.rotation")}</span><strong>{counts.rotation}</strong></div><div><span>{t("pool.memberStatus.quotaWait")}</span><strong>{counts.quotaWait}</strong></div><div><span>{t("pool.memberStatus.unavailable")}</span><strong>{counts.unavailable}</strong></div><div><span>{t("pool.memberStatus.disabled")}</span><strong>{counts.disabled}</strong></div></div>
     </div>
-    <div className="pool-member-list" role="list" aria-label={t("pool.members")} data-layout="list">
+    <div className="pool-member-list" role="list" aria-label={t("pool.members")}>
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(memberId);
         const excludedByFreePolicy = member.kind === "account" && member.routingExclusion === "free_plan_policy";
-        const statusKey = poolMemberStatus(member, runtimeState);
-        const statusTone = statusKey === "rotation" ? "ready" : statusKey === "disabled" ? "disabled" : statusKey === "quotaWait" ? "warning" : "error";
+        const statusKey = member.operationalStatus;
+        const statusTone = operationalStatusTone(statusKey);
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
-          ? `${member.wireApi} · ${member.baseUrl} · ${t(`sources.roles.${apiSourceRole(member.priority)}`)}`
+          ? `${member.wireApi} · ${member.baseUrl}`
           : member.label;
-        const quota = memberQuota(member);
+        const subscriptionExpiry = member.kind === "account"
+          ? member.subscription.activeUntilMs == null
+            ? { date: t("pool.subscriptionExpiryUnknown"), remaining: null }
+            : { date: subscriptionExpiryFormat.format(member.subscription.activeUntilMs), remaining: formatRemainingTime(member.subscription.activeUntilMs, nowMs, t) }
+          : null;
         const isCurrent = (runtimeState?.inFlight ?? 0) > 0;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
         const runtimeHint = runtimeState?.halfOpen
           ? t("pool.recoveryProbe")
-          : runtimeState?.nextRetryAtMs
-            ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleTimeString(i18n.language) })
+          : member.kind === "source" && runtimeState?.nextRetryAtMs
+            ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
             : excludedByFreePolicy ? t("pool.freePolicyHint") : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removing = busy === `pool-remove-${member.id}`;
-        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"}>
-          <div className="pool-member-card-main">
-            <div className="pool-member-state" title={runtimeHint}><StatusBadge status={statusTone} label={t(`pool.memberStatus.${statusKey}`)} />{isCurrent ? <small className="pool-member-current"><Activity aria-hidden />{runtimeState?.halfOpen ? t("pool.recoveryProbe") : runtimeState && runtimeState.inFlight > 1 ? t("pool.activeRequests", { count: runtimeState.inFlight }) : t("pool.currentRoute")}</small> : isLastUsed ? <small className="pool-member-last"><Clock3 aria-hidden />{t("pool.lastRoute")}</small> : <small title={codexInterface ? t("pool.codexInterfaceHint") : undefined}>{t(`pool.types.${member.kind}`)}{codexInterface ? ` · ${t("pool.codexInterface")}` : ""}</small>}</div>
-            <div className="pool-member-identity"><strong title={identity}>{identity}</strong>{member.kind === "source" ? <small title={detail}>{detail}</small> : <div className="pool-member-account-meta">{identity !== member.label ? <small title={detail}>{detail}</small> : null}<AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /></div>}</div>
-            <div className="pool-member-quota-summary" title={quota == null ? t("common.unsupported") : t("pool.quotaRemaining")}><span>{t("pool.quotaRemaining")}</span><strong>{quota == null ? "-" : `${Math.round(quota / 100)}%`}</strong></div>
+        const statusLabel = excludedByFreePolicy ? t("accounts.participation.freePolicy") : t(`pool.memberStatus.${statusKey}`);
+        return <article key={`${member.kind}-${member.id}`} className={`pool-member-card${selectedId === memberId ? " selected" : ""}${isCurrent ? " current" : ""}`} role="listitem" title={codexInterface ? t("pool.codexInterfaceHint") : undefined} data-member-label={member.kind === "source" ? member.name : member.label} data-current={isCurrent ? "true" : "false"} data-last-used={isLastUsed ? "true" : "false"} data-member-kind={member.kind}>
+          <header className="pool-member-card-header">
+            <div className="pool-member-kind-icon" aria-hidden>{member.kind === "source" ? <Cloud /> : <UserRound />}</div>
+            <div className="pool-member-identity">
+              <strong className="pool-member-name" title={identity === detail ? identity : `${identity} · ${detail}`}>{identity}</strong>
+              <div className="pool-member-meta">{member.kind === "account" ? <AccountPlanBadge planType={member.subscription.planType} unknown={t("common.unknown")} /> : <small title={detail}>{detail}</small>}<div className="pool-member-state"><StatusIcon status={statusTone} label={runtimeHint ? `${statusLabel} · ${runtimeHint}` : statusLabel} /></div></div>
+            </div>
+          </header>
+          <div className="pool-member-card-quota">{member.kind === "account" ? <QuotaStack snapshot={member.quota} nowMs={nowMs} /> : <span className="pool-member-quota-unavailable">{t("quota.notReported")}</span>}</div>
+          <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><CalendarDays aria-hidden /><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span> : null}</> : <><Cloud aria-hidden /><span>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</span></>}</div>
+          <footer className="pool-member-card-footer">
             <dl className="pool-member-routing"><div title={t("pool.apiEquivalentHint", { count: member.apiEquivalent.unpricedTokens })}><dt>{t("pool.apiEquivalent")}</dt><dd>{formatApiEquivalent(member.apiEquivalent.microUsd, i18n.language)}{member.apiEquivalent.unpricedTokens ? "*" : ""}</dd></div></dl>
             <div className="pool-member-actions">
               <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
               <IconButton className="danger" label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} />
             </div>
-          </div>
-          {member.kind === "account" ? <div className="account-card-quota pool-member-quota"><QuotaStack snapshot={member.quota} /></div> : null}
+          </footer>
         </article>;
       })}
     </div>
@@ -190,8 +202,8 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
   const { mode, runtime, perform, busy } = useRelayState();
   const [refreshIntervalSeconds, setRefreshIntervalSeconds] = useState(runtime?.gateway.quotaRefreshIntervalSeconds ?? 300);
   const requestTimeoutSeconds = runtime?.gateway.quotaRequestTimeoutSeconds ?? 20;
-  const [useFreeAccounts, setUseFreeAccounts] = useState(runtime?.gateway.useFreeAccounts ?? mode === "remote");
-  const supportsFreePolicy = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("free_account_policy"));
+  const [useFreeAccounts, setUseFreeAccounts] = useState(runtime?.gateway.useFreeAccounts ?? false);
+  const supportsFreeAccountPolicy = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("free_account_policy"));
   const save = async () => {
     const payload = { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts };
     const ok = await perform("quota-policy", () => mode === "local"
@@ -206,9 +218,10 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
         <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.refreshInterval")} value={String(refreshIntervalSeconds)} onChange={(value) => setRefreshIntervalSeconds(Number(value))} options={[{ value: "120", label: t("pool.refreshIntervals.twoMinutes") }, { value: "300", label: t("pool.refreshIntervals.fiveMinutes") }, { value: "600", label: t("pool.refreshIntervals.tenMinutes") }, { value: "1800", label: t("pool.refreshIntervals.thirtyMinutes") }, { value: "3600", label: t("pool.refreshIntervals.oneHour") }]} />
       </div>
       <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.useFreeAccounts")}</strong><small>{supportsFreePolicy ? t("pool.useFreeAccountsHint") : t("pool.useFreeAccountsLegacyHint")}</small></div>
-        <label className="toggle-row pool-policy-toggle"><input type="checkbox" aria-label={t("pool.useFreeAccounts")} checked={useFreeAccounts} disabled={!supportsFreePolicy} title={!supportsFreePolicy ? t("remote.capabilityUnavailable") : undefined} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t(useFreeAccounts ? "common.enabled" : "common.disabled")}</span></label>
+        <div className="pool-policy-copy"><strong>{t("pool.useFreeAccounts")}</strong><small>{t("pool.useFreeAccountsHint")}</small></div>
+        <label className="toggle-row pool-policy-toggle"><input type="checkbox" aria-label={t("pool.useFreeAccounts")} checked={useFreeAccounts} disabled={!supportsFreeAccountPolicy} onChange={(event) => setUseFreeAccounts(event.target.checked)} /><span>{t(useFreeAccounts ? "common.enabled" : "common.disabled")}</span></label>
       </div>
+      {!supportsFreeAccountPolicy ? <p className="form-note">{t("pool.freeAccountPolicyUnavailable")}</p> : null}
     </div>
   </Dialog>;
 }
@@ -216,35 +229,54 @@ function QuotaPolicyDialog({ onClose }: { onClose: () => void }) {
 function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
-  const supportsRoutingStrategy = mode !== "remote" || runtime?.gateway.routingStrategy != null;
-  const supportsImageBaseModel = mode !== "remote" || runtime?.gateway.imageBaseModel !== undefined;
-  const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(runtime?.gateway.routingStrategy ?? "adaptive");
+  const planGroups = subscriptionPlanGroups(runtime?.accounts ?? [], t("common.unknown"));
+  const defaultPlanOrder = planGroups.map((group) => group.id);
+  const storedPlanOrder = runtime?.gateway.subscriptionPlanOrder ?? [];
+  const initialPlanOrder = mergeSubscriptionPlanOrder(planGroups, storedPlanOrder);
+  const initialStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
+  const [routingStrategy, setRoutingStrategy] = useState<RoutingStrategy>(initialStrategy);
   const defaultServiceTier = runtime?.gateway.defaultServiceTier ?? "standard";
-  const [imageBaseModel, setImageBaseModel] = useState(runtime?.gateway.imageBaseModel ?? "auto");
+  const [subscriptionPlanOrder, setSubscriptionPlanOrder] = useState(initialPlanOrder);
+  const [hasCustomPlanOrder, setHasCustomPlanOrder] = useState(storedPlanOrder.length > 0 || initialStrategy === "subscription_plan");
+  const [draggedPlan, setDraggedPlan] = useState<string | null>(null);
   const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
-  const imageModelOptions = useMemo(() => {
-    const ids = new Map<string, string>();
-    const models = [...(runtime?.gateway.models ?? [])]
-      .filter((model) => model.enabled && !model.id.toLowerCase().includes("image"))
-      .sort((left, right) => compareModelPrice(left, right, 1) || compareModelCatalog(left, right));
-    for (const model of models) {
-      ids.set(model.id.toLowerCase(), model.id);
-    }
-    if (imageBaseModel !== "auto" && imageBaseModel.trim()) ids.set(imageBaseModel.toLowerCase(), imageBaseModel);
-    return [
-      { value: "auto", label: t("pool.imageBaseModels.auto") },
-      ...[...ids.values()].map((model) => ({ value: model, label: model })),
-    ];
-  }, [imageBaseModel, runtime?.gateway.models, t]);
+  const movePlan = (plan: string, target: string, after = false) => {
+    if (plan === target) return;
+    setSubscriptionPlanOrder((current) => {
+      const next = current.filter((value) => value !== plan);
+      const targetIndex = next.indexOf(target);
+      if (targetIndex < 0) return current;
+      next.splice(targetIndex + (after ? 1 : 0), 0, plan);
+      return next;
+    });
+    setHasCustomPlanOrder(true);
+  };
+  const movePlanBy = (plan: string, offset: number) => {
+    const index = subscriptionPlanOrder.indexOf(plan);
+    const target = subscriptionPlanOrder[index + offset];
+    if (target) movePlan(plan, target, offset > 0);
+  };
+  const chooseStrategy = (value: string) => {
+    const next = value as RoutingStrategy;
+    setRoutingStrategy(next);
+    if (next === "subscription_plan") setHasCustomPlanOrder(true);
+  };
+  const deletePlanOrder = () => {
+    setSubscriptionPlanOrder(defaultPlanOrder);
+    setHasCustomPlanOrder(false);
+    setRoutingStrategy("adaptive");
+  };
   const save = async () => {
+    const savedPlanOrder = hasCustomPlanOrder ? subscriptionPlanOrder : [];
     const payload = {
       maxRetryCandidates,
-      ...(supportsRoutingStrategy ? { routingStrategy } : {}),
-      ...(supportsImageBaseModel ? { imageBaseModel: imageBaseModel === "auto" ? null : imageBaseModel } : {}),
+      routingStrategy,
+      defaultServiceTier,
+      subscriptionPlanOrder: savedPlanOrder,
     };
     const ok = await perform("routing-policy", async () => {
       if (mode === "local") {
-        return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, imageBaseModel === "auto" ? null : imageBaseModel);
+        return relayCommands.updateRouting(routingStrategy, maxRetryCandidates, defaultServiceTier, savedPlanOrder);
       }
       return relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
     }, "feedback.saved");
@@ -253,15 +285,46 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   return <Dialog title={t("pool.routingSettingsTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "routing-policy"} onClick={save}>{t("common.save")}</Button></>}>
     <div className="relay-form pool-policy-form">
       <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{supportsRoutingStrategy ? t(`pool.routingStrategyHints.${routingStrategy}`) : t("remote.capabilityUnavailable")}</small></div>
-        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} disabled={!supportsRoutingStrategy} onChange={(value) => setRoutingStrategy(value as RoutingStrategy)} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "oldest_account", label: t("pool.routingStrategies.oldestAccount") }]} />
+        <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{t(`pool.routingStrategyHints.${routingStrategy}`)}</small></div>
+        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} onChange={chooseStrategy} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "quota_highest", label: t("pool.routingStrategies.quotaHighest") }, { value: "subscription_expiry", label: t("pool.routingStrategies.subscriptionExpiry") }, { value: "subscription_plan", label: t("pool.routingStrategies.subscriptionPlan") }]} />
       </div>
-      <div className="pool-policy-row">
-        <div className="pool-policy-copy"><strong>{t("pool.imageBaseModel")}</strong><small>{supportsImageBaseModel ? t("pool.imageBaseModelHint") : t("remote.capabilityUnavailable")}</small></div>
-        <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.imageBaseModel")} value={imageBaseModel} disabled={!supportsImageBaseModel} onChange={setImageBaseModel} options={imageModelOptions} />
-      </div>
+      {routingStrategy === "subscription_plan" ? <div className="subscription-plan-policy">
+        <div className="subscription-plan-policy-heading"><div><strong>{t("pool.subscriptionPlanOrder")}</strong><small>{t("pool.subscriptionPlanOrderHint")}</small></div>{hasCustomPlanOrder ? <IconButton label={t("pool.deleteSubscriptionPlanOrder")} icon={<Trash2 aria-hidden />} onClick={deletePlanOrder} /> : null}</div>
+        {subscriptionPlanOrder.length ? <div className="subscription-plan-order" role="list" aria-label={t("pool.subscriptionPlanOrder")}>{subscriptionPlanOrder.map((plan, index) => {
+          const group = planGroups.find((candidate) => candidate.id === plan);
+          if (!group) return null;
+          const drop = (event: DragEvent<HTMLDivElement>) => {
+            event.preventDefault();
+            if (draggedPlan) movePlan(draggedPlan, plan, subscriptionPlanOrder.indexOf(draggedPlan) < index);
+            setDraggedPlan(null);
+          };
+          return <div key={plan} className="subscription-plan-order-row" role="listitem" draggable onDragStart={() => setDraggedPlan(plan)} onDragEnd={() => setDraggedPlan(null)} onDragOver={(event) => event.preventDefault()} onDrop={drop} data-subscription-plan={plan} data-dragging={draggedPlan === plan ? "true" : "false"}>
+            <GripVertical aria-hidden />
+            <span className="subscription-plan-rank">{index + 1}</span>
+            <AccountPlanBadge planType={plan === "unknown" ? null : plan} unknown={t("common.unknown")} />
+            <small>{t("pool.subscriptionPlanAccountCount", { count: group.count })}</small>
+            <div className="inline-actions"><IconButton label={t("pool.moveSubscriptionPlanUp", { plan: group.label })} icon={<ArrowUp aria-hidden />} disabled={index === 0} onClick={() => movePlanBy(plan, -1)} /><IconButton label={t("pool.moveSubscriptionPlanDown", { plan: group.label })} icon={<ArrowDown aria-hidden />} disabled={index === subscriptionPlanOrder.length - 1} onClick={() => movePlanBy(plan, 1)} /></div>
+          </div>;
+        })}</div> : <p className="form-note">{t("pool.noSubscriptionPlanGroups")}</p>}
+      </div> : null}
     </div>
   </Dialog>;
+}
+
+function subscriptionPlanGroups(accounts: AccountSummary[], unknown: string): SubscriptionPlanGroup[] {
+  const groups = new Map<string, SubscriptionPlanGroup>();
+  for (const account of accounts.filter((account) => account.inPool)) {
+    const id = account.subscription.planType?.trim().toLocaleLowerCase() || "unknown";
+    const current = groups.get(id);
+    if (current) current.count += 1;
+    else groups.set(id, { id, label: accountPlanOption(account.subscription.planType, unknown).label, count: 1 });
+  }
+  return [...groups.values()].sort((left, right) => compareAccountPlans(accountPlanOption(left.id === "unknown" ? null : left.id, unknown), accountPlanOption(right.id === "unknown" ? null : right.id, unknown)));
+}
+
+function mergeSubscriptionPlanOrder(groups: SubscriptionPlanGroup[], saved: string[]) {
+  const available = new Set(groups.map((group) => group.id));
+  return [...saved.filter((plan) => available.delete(plan)), ...groups.map((group) => group.id).filter((plan) => available.has(plan))];
 }
 
 function MemberEditor({ member, onClose }: { member: Member; onClose: () => void }) {
@@ -269,7 +332,6 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
   const { mode, runtime, perform, busy } = useRelayState();
   const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
-  const [weight, setWeight] = useState(member.weight);
   const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
   const [enabledModels, setEnabledModels] = useState(() => {
     const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
@@ -288,7 +350,7 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
           ? relayCommands.updateAccount({ accountId: member.id, ...payload })
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
-      const payload = { allowedModels, excludedModels, draining, priority: apiSourcePriority(sourceRole), weight };
+      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: member.weight };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     }, "feedback.saved");
@@ -296,20 +358,19 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
   };
   return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
     <div className="relay-form">
-      <div className="settings-row">
-        {member.kind === "source" ? <>
-          <div className="relay-field"><span>{t("sources.poolRole")}</span><OptionMenu className="field-option-menu" label={t("sources.poolRole")} value={sourceRole} onChange={(value) => setSourceRole(value as ApiSourceRole)} options={[{ value: "primary", label: t("sources.roles.primary") }, { value: "stabilizer", label: t("sources.roles.stabilizer") }, { value: "reserve", label: t("sources.roles.reserve") }]} /><small>{t(`sources.roleHints.${sourceRole}`)}</small></div>
-          <label><span title={t("pool.weightHelp")}>{t("pool.trafficShare")}</span><input type="number" min="1" value={weight} onChange={(event) => setWeight(Number(event.target.value))} /></label>
-        </> : null}
-        <label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label>
-      </div>
+      {member.kind === "source" ? <section className="source-routing-section">
+        <header className="source-routing-heading"><Gauge aria-hidden /><div><h3>{t("sources.poolRole")}</h3><small>{t("sources.routingHint")}</small></div></header>
+        <div className="source-role-options" role="radiogroup" aria-label={t("sources.poolRole")}>
+          {(["primary", "stabilizer", "reserve"] as ApiSourceRole[]).map((value) => <button key={value} type="button" role="radio" aria-checked={sourceRole === value} onClick={() => setSourceRole(value)}><strong>{t(`sources.roles.${value}`)}</strong><small>{t(`sources.roleHints.${value}`)}</small></button>)}
+        </div>
+      </section> : <div className="settings-row"><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div>}
       <section className="member-model-rules">
         <header><h2>{t("common.models")}</h2></header>
         {modelIds.length ? <ul>{modelIds.map((model) => {
           const enabled = enabledModels.includes(model);
           return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
             <code>{model}</code>
-            <StatusBadge status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
+            <StatusIcon status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
             <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => setEnabledModels((values) => toggle(values, model))} />
           </li>;
         })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}
@@ -366,7 +427,7 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
         <header><strong>{t("connections.accounts")}</strong><span>{t("pool.availableAccounts", { count: allAccounts.length })}</span></header>
         <label className="relay-field"><span>{t("pool.searchAccounts")}</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("pool.searchAccountsPlaceholder")} /></label>
         {plans.length > 1 ? <div className="pool-member-plan-tools"><div className="account-plan-filters" role="group" aria-label={t("accounts.filterByPlan")}><span>{t("accounts.plan")}</span><button type="button" aria-pressed={activePlan === "all"} aria-label={t("accounts.planFilterOption", { plan: t("accounts.allPlans"), count: allAccounts.length })} onClick={() => setPlanFilter("all")}><span>{t("accounts.allPlans")}</span><small>{allAccounts.length}</small></button>{plans.map((plan) => <button key={plan.id} type="button" aria-pressed={activePlan === plan.id} aria-label={t("accounts.planFilterOption", { plan: plan.label, count: plan.count })} onClick={() => setPlanFilter(plan.id)}><span>{plan.label}</span><small>{plan.count}</small></button>)}</div><Button variant="secondary" icon={shownSelected ? <X aria-hidden /> : <CheckCheck aria-hidden />} disabled={!accounts.length} onClick={toggleShown}>{shownSelected ? t("pool.clearShown") : t("pool.selectShown", { count: accounts.length })}</Button></div> : null}
-        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span className="pool-member-option-copy"><strong>{account.identityHint || account.label}</strong><small>{account.label}</small></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
+        <div className="pool-member-options">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} /><span className="pool-member-option-copy"><strong>{account.label}</strong></span><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></label>)}</div>
         {!accounts.length ? <p className="form-note">{t("pool.noMatchingAccounts")}</p> : null}
       </section> : null}
       {sources.length ? <section><header><strong>{t("connections.sources")}</strong></header><div className="pool-member-options">{sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} /><span className="pool-member-option-copy"><strong>{source.name}</strong><small>{source.baseUrl} · {t(`sources.roles.${apiSourceRole(source.priority)}`)}</small></span></label>)}</div></section> : null}
@@ -375,67 +436,12 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
   </Dialog>;
 }
 
-function KeysView({ onCreate }: { onCreate: () => void }) {
-  const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
-  const confirm = useConfirm();
-  const canManage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("keys"));
-  const [revealed, setRevealed] = useState("");
-  const [editing, setEditing] = useState<KeySummary | null>(null);
-  const keys = (runtime?.keys ?? []).filter((key) => !key.system);
-  if (!keys.length) return <EmptyState title={t("keys.emptyTitle")} description={t("keys.emptyDescription")} action={<Button variant="primary" disabled={!canManage} title={!canManage ? t("remote.capabilityUnavailable") : undefined} onClick={onCreate}>{t("keys.create")}</Button>} />;
-  const formatLastUsed = new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" });
-  return <>
-    <div className="relay-table-wrap"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("keys.masked")}</th><th>{t("keys.scope")}</th><th>{t("common.models")}</th><th>{t("common.lastUsed")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>{keys.map((key) => <tr key={key.id}>
-      <td><StatusBadge status={key.enabled ? "ready" : "disabled"} label={key.enabled ? t("common.enabled") : t("common.disabled")} /></td>
-      <td>{key.label}</td>
-      <td><code>zlr_••••••••••••</code></td>
-      <td>{(key.accountIds?.length || key.sourceIds?.length) ? t("keys.scoped") : t("keys.allMembers")}</td>
-      <td>{key.allowedModels.length || t("keys.allModels")}</td>
-      <td>{key.lastUsedAtMs ? formatLastUsed.format(new Date(key.lastUsedAtMs)) : t("common.never")}</td>
-      <td className="row-actions"><IconButton label={t("keys.editPolicy")} icon={<Pencil aria-hidden />} onClick={() => setEditing(key)} /><ActionMenu>
-        <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`enable-${key.id}`, () => mode === "local" ? relayCommands.setKeyEnabled(key.id, !key.enabled) : relayCommands.remoteAction({ type: "update_key", id: key.id }, { enabled: !key.enabled }), "feedback.saved")}>{key.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
-        <ActionMenuItem icon={<RotateCcw aria-hidden />} disabled={busy === `rotate-${key.id}`} onClick={async () => {
-          if (!await confirm(t("keys.rotateConfirm"))) return;
-          const result: { current: { secret: string } | null } = { current: null };
-          await perform(`rotate-${key.id}`, async () => { result.current = mode === "local" ? await relayCommands.rotateKey(key.id) : await relayCommands.remoteAction({ type: "rotate_key", id: key.id }) as { secret: string }; }, "feedback.keyRotated");
-          if (result.current) setRevealed(result.current.secret);
-        }}>{t("keys.rotate")}</ActionMenuItem>
-        <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("keys.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${key.id}`, () => mode === "local" ? relayCommands.deleteKey(key.id) : relayCommands.remoteAction({ type: "delete_key", id: key.id }), "feedback.deleted"))}>{t("keys.delete")}</ActionMenuItem>
-      </ActionMenu></td>
-    </tr>)}</tbody></table></div>
-    {revealed ? <div className="one-time-secret" role="status"><strong>{t("keys.copyNow")}</strong><code>{revealed}</code><Button variant="secondary" onClick={() => navigator.clipboard.writeText(revealed)}>{t("common.copy")}</Button></div> : null}
-    {editing ? <KeyPolicyDialog key={editing.id} value={editing} onClose={() => setEditing(null)} /> : null}
-  </>;
-}
-
-function KeyPolicyDialog({ value, onClose }: { value: KeySummary; onClose: () => void }) {
-  const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
-  const confirm = useConfirm();
-  const [label, setLabel] = useState(value.label);
-  const [sourceIds, setSourceIds] = useState(value.sourceIds ?? []);
-  const [accountIds, setAccountIds] = useState(value.accountIds ?? []);
-  const [allowed, setAllowed] = useState(value.allowedModels.join(", "));
-  const [excluded, setExcluded] = useState(value.excludedModels.join(", "));
-  const [prefix, setPrefix] = useState(value.modelPrefix ?? "");
-  const save = async () => {
-    const payload = { label, sourceIds: sourceIds.length ? sourceIds : null, accountIds: accountIds.length ? accountIds : null, allowedModels: parseList(allowed), excludedModels: parseList(excluded), modelPrefix: prefix.trim() || null };
-    const ok = await perform(`key-policy-${value.id}`, () => mode === "local" ? relayCommands.updateKey({ keyId: value.id, ...payload }) : relayCommands.remoteAction({ type: "update_key", id: value.id }, payload), "feedback.saved");
-    if (ok) onClose();
-  };
-  const remove = async () => {
-    if (!await confirm(t("keys.deleteConfirm"), { danger: true })) return;
-    const ok = await perform(`delete-${value.id}`, () => mode === "local" ? relayCommands.deleteKey(value.id) : relayCommands.remoteAction({ type: "delete_key", id: value.id }), "feedback.deleted");
-    if (ok) onClose();
-  };
-  return <Dialog wide title={t("keys.editPolicy")} onClose={onClose} footer={<><Button variant="danger" busy={busy === `delete-${value.id}`} onClick={() => void remove()}>{t("keys.delete")}</Button><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `key-policy-${value.id}`} onClick={save}>{t("common.save")}</Button></>}><div className="relay-form"><p className="form-note">{t("keys.clientHint")}</p><label className="relay-field"><span>{t("keys.label")}</span><input value={label} onChange={(event) => setLabel(event.target.value)} /></label><fieldset><legend>{t("pool.members")}</legend><div className="scope-grid">{runtime?.accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => setAccountIds(toggle(accountIds, account.id))} />{account.label}</label>)}{runtime?.sources.map((source) => <label key={source.id}><input type="checkbox" checked={sourceIds.includes(source.id)} onChange={() => setSourceIds(toggle(sourceIds, source.id))} />{source.name}</label>)}</div></fieldset><label className="relay-field"><span>{t("pool.allowedModels")}</span><input value={allowed} onChange={(event) => setAllowed(event.target.value)} /></label><label className="relay-field"><span>{t("pool.excludedModels")}</span><input value={excluded} onChange={(event) => setExcluded(event.target.value)} /></label><label className="relay-field"><span>{t("keys.modelPrefix")}</span><input value={prefix} onChange={(event) => setPrefix(event.target.value)} /></label></div></Dialog>;
-}
-
 function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
+  const [priceModel, setPriceModel] = useState<ModelSummary | null>(null);
   const models = runtime ? modelSummaries(runtime).sort(compareModelCatalog) : [];
+  const canEditPrice = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("model_pricing"));
   const toggleModel = (model: ModelSummary) => perform(
     `model-toggle-${model.id}`,
     () => mode === "local"
@@ -444,38 +450,76 @@ function ModelsView() {
     "feedback.saved",
   );
   if (!models.length) return <EmptyState title={t("models.emptyTitle")} description={t("models.emptyDescription")} />;
-  return <section className="model-rules">
+  return <><section className="model-rules">
     <header>
       <div className="model-rules-copy"><h2>{t("models.visible")}</h2><p>{t("models.explanation")}</p></div>
     </header>
-    <ul>{models.map((model) => {
+    <div className="relay-table-wrap"><table className="relay-table model-rules-table">
+      <colgroup><col data-column="model" /><col data-column="status" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
+      <thead><tr><th>{t("common.model")}</th><th>{t("common.status")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
+      <tbody>{models.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
       const hasPrice = model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
+      const cachedInputPrice = model.cachedInputMicroUsdPerMillion ?? model.inputMicroUsdPerMillion;
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
-      return <li key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"}>
-        <div className="model-identity"><code>{model.id}</code><StatusBadge status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /></div>
-        <div className="model-price">{hasPrice ? <><span>{t("models.inputPrice", { price: formatModelPrice(model.inputMicroUsdPerMillion!, i18n.language) })}</span><span>{t("models.outputPrice", { price: formatModelPrice(model.outputMicroUsdPerMillion!, i18n.language) })}</span><small>{t("models.perMillion")}</small></> : <span className="muted">{t("models.priceUnavailable")}</span>}</div>
-        <span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span>
-        <IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="relay-icon-button model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} />
-      </li>;
-    })}</ul>
-  </section>;
+      return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"}>
+        <td data-column="model"><code>{model.id}</code></td>
+        <td data-column="status"><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /></td>
+        <td data-column="price"><div className="model-price">{hasPrice ? <><span>{t("models.inputPrice", { price: formatModelPrice(model.inputMicroUsdPerMillion!, i18n.language) })}</span><span>{t("models.outputPrice", { price: formatModelPrice(model.outputMicroUsdPerMillion!, i18n.language) })}</span><span>{t("models.cachedInputPrice", { price: formatModelPrice(cachedInputPrice!, i18n.language) })}</span><small className={model.customPrice ? "custom" : undefined}>{t(model.customPrice ? "models.customPrice" : "models.perMillion")}</small></> : <span className="muted">{t("models.priceUnavailable")}</span>}</div></td>
+        <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
+        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
+      </tr>;
+    })}</tbody>
+    </table></div>
+  </section>{priceModel ? <ModelPriceDialog key={priceModel.id} model={priceModel} onClose={() => setPriceModel(null)} /> : null}</>;
 }
 
-function CreateKeyDialog({ onClose }: { onClose: () => void }) {
+function ModelPriceDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, perform, busy } = useRelayState();
-  const [label, setLabel] = useState("ChatGPT");
-  const [secret, setSecret] = useState("");
-  useEffect(() => () => setSecret(""), []);
-  const create = async () => { const result: { current: { secret: string } | null } = { current: null }; const ok = await perform("key-create", async () => { result.current = mode === "local" ? await relayCommands.createKey(label) : await relayCommands.remoteAction({ type: "create_key" }, { label, sourceIds: null, accountIds: null, allowedModels: [], excludedModels: [], modelPrefix: null }) as { secret: string }; }, "feedback.keyCreated"); if (ok && result.current) setSecret(result.current.secret); };
-  return <Dialog title={t("keys.create")} onClose={onClose} footer={secret ? <Button variant="primary" onClick={onClose}>{t("common.done")}</Button> : <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "key-create"} onClick={create}>{t("keys.create")}</Button></>}>{secret ? <div className="one-time-secret"><strong>{t("keys.copyNow")}</strong><code>{secret}</code><Button variant="secondary" onClick={() => navigator.clipboard.writeText(secret)}>{t("common.copy")}</Button><p>{t("keys.shownOnce")}</p></div> : <label className="relay-field"><span>{t("keys.label")}</span><input value={label} onChange={(event) => setLabel(event.target.value)} /></label>}</Dialog>;
+  const [inputPrice, setInputPrice] = useState(formatEditableModelPrice(model.inputMicroUsdPerMillion));
+  const [cachedInputPrice, setCachedInputPrice] = useState(formatEditableModelPrice(model.cachedInputMicroUsdPerMillion ?? model.inputMicroUsdPerMillion));
+  const [outputPrice, setOutputPrice] = useState(formatEditableModelPrice(model.outputMicroUsdPerMillion));
+  const inputMicroUsd = parseEditableModelPrice(inputPrice);
+  const cachedInputMicroUsd = parseEditableModelPrice(cachedInputPrice);
+  const outputMicroUsd = parseEditableModelPrice(outputPrice);
+  const operation = `model-price-${model.id}`;
+  const valid = inputMicroUsd != null && cachedInputMicroUsd != null && outputMicroUsd != null;
+  const setPrice = (input: number | null, cachedInput: number | null, output: number | null) => mode === "local"
+    ? relayCommands.setModelPrice(model.id, input, cachedInput, output)
+    : relayCommands.remoteAction({ type: "set_model_price" }, { modelId: model.id, inputMicroUsdPerMillion: input, cachedInputMicroUsdPerMillion: cachedInput, outputMicroUsdPerMillion: output });
+  const save = async () => {
+    if (!valid) return;
+    const ok = await perform(operation, () => setPrice(inputMicroUsd, cachedInputMicroUsd, outputMicroUsd), "feedback.saved");
+    if (ok) onClose();
+  };
+  const restore = async () => {
+    const ok = await perform(operation, () => setPrice(null, null, null), "feedback.saved");
+    if (ok) onClose();
+  };
+  return <Dialog title={t("models.priceTitle", { model: model.id })} onClose={onClose} footer={<>{model.customPrice ? <Button variant="secondary" disabled={busy === operation} onClick={() => void restore()}>{t("models.restorePrice")}</Button> : null}<Button variant="secondary" disabled={busy === operation} onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === operation} disabled={!valid} onClick={() => void save()}>{t("common.save")}</Button></>}>
+    <div className="relay-form model-price-form">
+      <p>{t("models.priceHint")}</p>
+      <div className="model-price-fields">
+        <label className="relay-field"><span>{t("models.inputPriceLabel")}</span><div className="model-price-input"><span aria-hidden>$</span><input aria-label={t("models.inputPriceLabel")} type="number" inputMode="decimal" min="0" max="1000000" step="0.000001" value={inputPrice} aria-invalid={inputPrice.length > 0 && inputMicroUsd == null} onChange={(event) => setInputPrice(event.target.value)} /></div><small>{t("models.priceUnit")}</small></label>
+        <label className="relay-field"><span>{t("models.outputPriceLabel")}</span><div className="model-price-input"><span aria-hidden>$</span><input aria-label={t("models.outputPriceLabel")} type="number" inputMode="decimal" min="0" max="1000000" step="0.000001" value={outputPrice} aria-invalid={outputPrice.length > 0 && outputMicroUsd == null} onChange={(event) => setOutputPrice(event.target.value)} /></div><small>{t("models.priceUnit")}</small></label>
+        <label className="relay-field"><span>{t("models.cachedInputPriceLabel")}</span><div className="model-price-input"><span aria-hidden>$</span><input aria-label={t("models.cachedInputPriceLabel")} type="number" inputMode="decimal" min="0" max="1000000" step="0.000001" value={cachedInputPrice} aria-invalid={cachedInputPrice.length > 0 && cachedInputMicroUsd == null} onChange={(event) => setCachedInputPrice(event.target.value)} /></div><small>{t("models.priceUnit")}</small></label>
+      </div>
+      <p className="form-note">{t("models.priceCalculationHint")}</p>
+    </div>
+  </Dialog>;
 }
 
-function parseList(value: string) { return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))]; }
 function toggle(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function formatApiEquivalent(microUsd: number, locale: string) { return `≈${new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
-function formatModelPrice(microUsd: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 3 }).format(microUsd / 1_000_000); }
+function formatModelPrice(microUsd: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microUsd / 1_000_000); }
+function formatEditableModelPrice(microUsd: number | null) { return microUsd == null ? "" : (microUsd / 1_000_000).toFixed(6).replace(/\.?0+$/, ""); }
+function parseEditableModelPrice(value: string) {
+  const normalized = value.trim();
+  if (!/^\d+(?:\.\d{0,6})?$/.test(normalized)) return null;
+  const price = Number(normalized);
+  return Number.isFinite(price) && price >= 0 && price <= 1_000_000 ? Math.round(price * 1_000_000) : null;
+}
 function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
   if (runtime.gateway.models?.length) return [...runtime.gateway.models];
   return runtime.gateway.visibleModelIds.map((id) => ({
@@ -484,7 +528,9 @@ function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["r
     memberCount: [...runtime.sources, ...runtime.accounts].filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
     catalogRank: null,
     inputMicroUsdPerMillion: null,
+    cachedInputMicroUsdPerMillion: null,
     outputMicroUsdPerMillion: null,
+    customPrice: false,
   }));
 }
 function compareModelCatalog(left: ModelSummary, right: ModelSummary) {
@@ -506,23 +552,4 @@ function comparePoolMembers(left: Member, right: Member, order: Map<string, numb
 }
 function memberKey(member: Member) { return `${member.kind}:${member.id}`; }
 function runtimeMemberKey(candidate: CandidateRuntimeSnapshot) { return `${candidate.kind === "api_source" ? "source" : "account"}:${candidate.candidateId}`; }
-function memberQuota(member: Member) {
-  if (member.kind === "source") return null;
-  const values = [member.quota.primary, member.quota.secondary]
-    .map((window) => window?.availableBasisPoints)
-    .filter((value): value is number => value != null);
-  return values.length ? Math.min(...values) : null;
-}
-function memberName(member: Member) { return member.kind === "source" ? member.name : member.label; }
-function memberRoutingExcluded(member: Member) { return member.kind === "account" && member.routingExclusion != null; }
-function poolMemberStatus(member: Member, runtimeState?: CandidateRuntimeSnapshot): "rotation" | "quotaWait" | "unavailable" | "disabled" {
-  if (!member.enabled) return "disabled";
-  if (runtimeState?.available) return "rotation";
-  if (member.kind === "account" && (memberRoutingExcluded(member) || [member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0))) return "quotaWait";
-  if (runtimeState) return "unavailable";
-  return poolMemberReady(member) ? "rotation" : "unavailable";
-}
-function poolMemberReady(member: Member) {
-  if (!member.enabled || member.draining || !["unknown", "healthy", "degraded"].includes(member.health) || !member.secretAvailable || memberRoutingExcluded(member)) return false;
-  return member.kind === "source" || (member.proxyAvailable !== false && ![member.quota.primary, member.quota.secondary].some((window) => window?.availableBasisPoints === 0));
-}
+function memberName(member: Member) { return member.kind === "source" ? member.name : member.identityHint || member.label; }

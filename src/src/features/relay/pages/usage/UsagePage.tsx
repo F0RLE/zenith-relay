@@ -1,10 +1,10 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { RemoteUsageQuery, RoutingDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, StatusBadge, Tabs, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 
@@ -34,9 +34,114 @@ type UsageRow = {
   generationDurationMs: number | null;
 };
 
+const REQUEST_COLUMN_IDS = ["time", "status", "model", "connection", "timing", "speed", "tokens", "request"] as const;
+type RequestColumnId = typeof REQUEST_COLUMN_IDS[number];
+type RequestTableLayout = { order: RequestColumnId[]; widths: Partial<Record<RequestColumnId, number>> };
+const AGGREGATE_COLUMN_IDS = ["name", "requests", "success", "breakdown", "total", "speed", "timing"] as const;
+type AggregateColumnId = typeof AGGREGATE_COLUMN_IDS[number];
+const ERROR_COLUMN_IDS = ["time", "model", "connection", "error", "request"] as const;
+type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
+type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
+const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
+const REQUEST_COLUMN_MAX_WIDTH = 480;
+const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 58, model: 82, connection: 100, timing: 96, speed: 82, tokens: 72, request: 120 };
+
+function loadRequestTableLayout(): RequestTableLayout {
+  const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(REQUEST_TABLE_LAYOUT_KEY) ?? "null") as { order?: unknown; widths?: Record<string, unknown> } | null;
+    const order = parsed?.order;
+    if (!Array.isArray(order) || order.length !== REQUEST_COLUMN_IDS.length || new Set(order).size !== REQUEST_COLUMN_IDS.length || !order.every((id) => REQUEST_COLUMN_IDS.includes(id as RequestColumnId))) return fallback;
+    const widths: Partial<Record<RequestColumnId, number>> = {};
+    for (const id of REQUEST_COLUMN_IDS) {
+      const width = Number(parsed?.widths?.[id]);
+      if (Number.isFinite(width)) widths[id] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[id], Math.round(width)));
+    }
+    return { order: order as RequestColumnId[], widths: Object.keys(widths).length === REQUEST_COLUMN_IDS.length ? widths : {} };
+  } catch {
+    return fallback;
+  }
+}
+
+function reorderColumns<ColumnId extends string>(order: ColumnId[], column: ColumnId, target: ColumnId, after = false) {
+  if (column === target) return order;
+  const next = order.filter((id) => id !== column);
+  next.splice(next.indexOf(target) + Number(after), 0, column);
+  return next;
+}
+
+function shiftColumn<ColumnId extends string>(order: ColumnId[], column: ColumnId, offset: number) {
+  const from = order.indexOf(column);
+  const to = Math.min(order.length - 1, Math.max(0, from + offset));
+  if (from === to) return order;
+  const next = [...order];
+  next.splice(to, 0, next.splice(from, 1)[0]);
+  return next;
+}
+
+function useStoredColumnOrder<ColumnId extends string>(storageKey: string, defaults: readonly ColumnId[]) {
+  const [order, setOrder] = useState<ColumnId[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(storageKey) ?? "null") as unknown;
+      if (Array.isArray(stored) && stored.length === defaults.length && new Set(stored).size === defaults.length && stored.every((id) => defaults.includes(id as ColumnId))) return stored as ColumnId[];
+    } catch { }
+    return [...defaults];
+  });
+  useEffect(() => {
+    try { localStorage.setItem(storageKey, JSON.stringify(order)); } catch { }
+  }, [order, storageKey]);
+  return [order, setOrder] as const;
+}
+
+function useColumnDrag<ColumnId extends string>(moveColumn: (column: ColumnId, target: ColumnId, after: boolean) => void, moveColumnBy: (column: ColumnId, offset: number) => void) {
+  const [drag, setDrag] = useState<ColumnDrag<ColumnId> | null>(null);
+  const dragRef = useRef<ColumnDrag<ColumnId> | null>(null);
+  const cancel = () => { dragRef.current = null; setDrag(null); };
+  const bind = (column: ColumnId) => ({
+    onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      const next = { column, pointerId: event.pointerId, target: column, after: false };
+      dragRef.current = next;
+      setDrag(next);
+    },
+    onPointerMove: (event: PointerEvent<HTMLButtonElement>) => {
+      const current = dragRef.current;
+      const table = event.currentTarget.closest("table");
+      if (!current || current.pointerId !== event.pointerId || !(table instanceof HTMLTableElement)) return;
+      const headers = Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]"));
+      const target = headers.find((header) => event.clientX <= header.getBoundingClientRect().right) ?? headers[headers.length - 1];
+      if (!target) return;
+      const bounds = target.getBoundingClientRect();
+      const targetId = target.dataset.column as ColumnId;
+      const after = event.clientX > bounds.left + bounds.width / 2;
+      if (current.target === targetId && current.after === after) return;
+      const next = { ...current, target: targetId, after };
+      dragRef.current = next;
+      setDrag(next);
+    },
+    onPointerUp: (event: PointerEvent<HTMLButtonElement>) => {
+      const current = dragRef.current;
+      if (!current || current.pointerId !== event.pointerId) return;
+      if (current.column !== current.target) moveColumn(current.column, current.target, current.after);
+      cancel();
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    },
+    onPointerCancel: cancel,
+    onLostPointerCapture: () => { if (dragRef.current?.column === column) cancel(); },
+    onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
+      if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
+      event.preventDefault();
+      moveColumnBy(column, event.key === "ArrowLeft" ? -1 : 1);
+    },
+  });
+  return { bind, drag };
+}
+
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyUsage, refresh, loading, busy, perform, setPage: setShellPage } = useRelayState();
+  const { mode, runtime, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -51,7 +156,6 @@ export function UsagePage() {
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
   const [selected, setSelected] = useState<UsageRow | null>(null);
-  const [localProfileActive, setLocalProfileActive] = useState<boolean | null>(null);
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const requestFiltersActive = view === "requests";
   const usageQuery = useMemo<RemoteUsageQuery>(() => ({
@@ -89,25 +193,13 @@ export function UsagePage() {
     setSelected(null);
   }, [mode]);
 
-  useEffect(() => {
-    if (mode !== "local") {
-      setLocalProfileActive(null);
-      return;
-    }
-    let current = true;
-    relayCommands.profileBindings()
-      .then((bindings) => current && setLocalProfileActive(bindings.some((binding) => binding.active && binding.credentialKind === "local_gateway")))
-      .catch(() => current && setLocalProfileActive(null));
-    return () => { current = false; };
-  }, [mode]);
-
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     if (mode === "zenith") return readyUsage.map((item) => ({ id: item.id, time: item.createdAt, success: item.status === "success", model: item.modelDisplay || item.model, connection: "Zenith API", key: "Zenith API", wireApi: null, ttft: item.timeToFirstByteMs ?? null, duration: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.status === "success" ? 200 : null, errorCategory: item.status === "success" ? null : item.status, routing: null, accountId: null, generationDurationMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? null }));
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateLabel ?? item.candidateHint, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, generationDurationMs: item.generationMs ?? null }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? item.accountId : sourceLabels.get(item.sourceId) ?? item.sourceId, key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: item.generationMs }));
-  }, [mode, readyUsage, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels]);
+    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, generationDurationMs: item.generationMs ?? null }));
+    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: item.generationMs }));
+  }, [mode, readyUsage, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   const cutoff = range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000;
   const filtered = mode !== "zenith" ? rows : rows.filter((item) => {
     if (new Date(item.time).getTime() < cutoff) return false;
@@ -141,7 +233,7 @@ export function UsagePage() {
   const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
   const refreshUsage = async () => { await refresh(); await reloadUsage(); };
   const modelGroups = usagePage?.models;
-  const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: group.label ?? accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.key }));
+  const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("common.unknown") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
     setKeyQuery(""); setWireApi(""); setErrorQuery(""); setRequestQuery("");
@@ -154,11 +246,6 @@ export function UsagePage() {
 
   return <section className="relay-page">
     <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
-    <div className={`usage-source-status ${mode === "local" && localProfileActive === false ? "warning" : ""}`}>
-      <StatusBadge status={mode === "local" && localProfileActive === false ? "warning" : "ready"} label={t(`usage.sources.${mode}`)} />
-      <span>{mode === "local" ? t(localProfileActive === null ? "usage.clientStateUnknown" : localProfileActive ? "usage.clientUsesLocal" : "usage.clientBypassesLocal") : t(`usage.sourceHints.${mode}`)}</span>
-      {mode === "local" && localProfileActive === false ? <Button variant="secondary" onClick={() => setShellPage("pool")}>{t("usage.openPool")}</Button> : null}
-    </div>
     <div className="usage-view-toolbar">
       <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
       <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
@@ -179,17 +266,17 @@ export function UsagePage() {
     </section>
     <div className="usage-data-toolbar"><Button variant="secondary" icon={<Download aria-hidden />} busy={busy === "usage-export"} disabled={usageLoading} onClick={exportRows}>{t("common.export")}</Button></div>
     {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} keyQuery={keyQuery} setKeyQuery={(value) => resetPage(() => setKeyQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
-    {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
-    {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
     {view === "models" ? <AggregateView rows={filtered} groups={modelGroups} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={filtered} groups={poolMemberGroups} field="connection" empty={t("usage.empty")} /> : null}
     {view === "errors" ? <ErrorsView rows={filtered.filter((item) => !item.success)} formatTime={formatTime} onSelect={setSelected} /> : null}
+    {usageError ? <p role="alert" className="form-note error-text">{t("usage.remoteLoadFailed")}</p> : null}
+    {(view === "requests" || view === "errors") && usagePage && usagePage.totalPages > 1 ? <nav className="usage-pagination" aria-label={t("usage.pagination")}><Button variant="secondary" icon={<ChevronLeft aria-hidden />} disabled={page <= 1 || usageLoading} onClick={() => setPage((value) => Math.max(1, value - 1))}>{t("common.back")}</Button><span>{t("usage.page", { page: usagePage.page, total: usagePage.totalPages })}</span><Button variant="secondary" icon={<ChevronRight aria-hidden />} disabled={page >= usagePage.totalPages || usageLoading} onClick={() => setPage((value) => value + 1)}>{t("common.continue")}</Button></nav> : null}
     {selected ? <RequestDetails row={selected} onClose={() => setSelected(null)} /> : null}
   </section>;
 }
 
 function RequestsView({ rows, status, setStatus, modelQuery, setModelQuery, connectionQuery, setConnectionQuery, keyQuery, setKeyQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; setModelQuery: (value: string) => void; connectionQuery: string; setConnectionQuery: (value: string) => void; keyQuery: string; setKeyQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const secondaryCount = [keyQuery, wireApi, errorQuery, requestQuery].filter(Boolean).length;
   const hasFilters = status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
@@ -206,11 +293,77 @@ function RequestsView({ rows, status, setStatus, modelQuery, setModelQuery, conn
       <input value={errorQuery} onChange={(event) => setErrorQuery(event.target.value)} aria-label={t("usage.errorCategory")} placeholder={t("usage.errorCategory")} />
       <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
     </div> : null}
-  </div>{rows.length ? <div className="relay-table-wrap"><table className="relay-table usage-request-table"><thead><tr><th>{t("usage.time")}</th><th>{t("common.status")}</th><th>{t("common.model")}</th><th>{t("usage.poolMember")}</th><th>{t("usage.timing")}</th><th>{t("usage.speed")}</th><th>{t("usage.tokens")}</th><th>{t("usage.requestId")}</th></tr></thead><tbody>{rows.map((item) => <tr key={item.id}><td>{formatTime(item.time)}</td><td><StatusBadge status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /></td><td><code>{item.model ?? "-"}</code></td><td>{item.connection}</td><td>{formatTiming(item.ttft, item.duration)}</td><td>{formatTokenSpeed(tokenSpeed(rowSpeedSample(item)), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</td><td>{item.tokens == null ? "-" : <CompactNumber value={item.tokens} locale={i18n.language} />}</td><td><button type="button" className="request-link request-disclosure" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${item.requestId ?? "-"}`} onClick={() => onSelect(item)}><code>{item.requestId ?? "-"}</code><ChevronRight aria-hidden /></button></td></tr>)}</tbody></table></div> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />}</>;
+  </div>{rows.length ? <RequestTable rows={rows} formatTime={formatTime} onSelect={onSelect} /> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />}</>;
+}
+
+function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
+  const { t, i18n } = useTranslation();
+  const [layout, setLayout] = useState<RequestTableLayout>(loadRequestTableLayout);
+  const [resize, setResize] = useState<{ column: RequestColumnId; pointerId: number; startX: number; startWidth: number } | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem(REQUEST_TABLE_LAYOUT_KEY, JSON.stringify(layout)); } catch { }
+  }, [layout]);
+
+  const columns: Record<RequestColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
+    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} /> },
+    model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
+    connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
+    timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration) },
+    speed: { label: t("usage.speed"), cell: (row) => formatTokenSpeed(tokenSpeed(rowSpeedSample(row)), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
+    tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
+    request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
+  };
+  const resized = REQUEST_COLUMN_IDS.every((id) => layout.widths[id] != null);
+  const totalWidth = resized ? REQUEST_COLUMN_IDS.reduce((total, id) => total + (layout.widths[id] ?? 0), 0) : 0;
+  const captureWidths = (table: HTMLTableElement) => Object.fromEntries(Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]")).map((cell) => {
+    const id = cell.dataset.column as RequestColumnId;
+    return [id, Math.max(REQUEST_COLUMN_MIN_WIDTH[id], Math.round(cell.getBoundingClientRect().width))];
+  })) as Record<RequestColumnId, number>;
+  const moveColumn = (column: RequestColumnId, target: RequestColumnId, after = false) => setLayout((current) => ({ ...current, order: reorderColumns(current.order, column, target, after) }));
+  const moveColumnBy = (column: RequestColumnId, offset: number) => setLayout((current) => ({ ...current, order: shiftColumn(current.order, column, offset) }));
+  const { bind: bindColumnDrag, drag: columnDrag } = useColumnDrag(moveColumn, moveColumnBy);
+  const startResize = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
+    const table = event.currentTarget.closest("table");
+    const header = event.currentTarget.closest("th");
+    if (!(table instanceof HTMLTableElement) || !(header instanceof HTMLTableCellElement)) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setLayout((current) => ({ ...current, widths: captureWidths(table) }));
+    setResize({ column, pointerId: event.pointerId, startX: event.clientX, startWidth: header.getBoundingClientRect().width });
+  };
+  const resizeColumn = (event: PointerEvent<HTMLSpanElement>, column: RequestColumnId) => {
+    if (!resize || resize.column !== column || resize.pointerId !== event.pointerId) return;
+    const width = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], Math.round(resize.startWidth + event.clientX - resize.startX)));
+    setLayout((current) => current.widths[column] === width ? current : { ...current, widths: { ...current.widths, [column]: width } });
+  };
+  const resizeColumnByKeyboard = (event: KeyboardEvent<HTMLSpanElement>, column: RequestColumnId) => {
+    if (event.key === "Home") {
+      event.preventDefault();
+      setLayout((current) => ({ ...current, widths: {} }));
+      return;
+    }
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const table = event.currentTarget.closest("table");
+    if (!(table instanceof HTMLTableElement)) return;
+    event.preventDefault();
+    const widths = captureWidths(table);
+    widths[column] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[column], widths[column] + (event.key === "ArrowRight" ? 12 : -12)));
+    setLayout((current) => ({ ...current, widths }));
+  };
+
+  return <div className="relay-table-wrap"><table className="relay-table usage-request-table usage-sortable-table" data-resized={resized ? "true" : "false"}>
+    <colgroup>{layout.order.map((id) => <col key={id} data-column={id} style={resized ? { width: `${(layout.widths[id] ?? 0) / totalWidth * 100}%` } : undefined} />)}</colgroup>
+    <thead><tr>{layout.order.map((id) => <th key={id} data-column={id} data-dragging={columnDrag?.column === id ? "true" : undefined} data-drop={columnDrag?.target === id && columnDrag.column !== id ? columnDrag.after ? "after" : "before" : undefined}>
+      <button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bindColumnDrag(id)}><span>{columns[id].label}</span></button>
+      <span className="usage-column-resizer" role="separator" tabIndex={0} aria-orientation="vertical" aria-label={t("usage.resizeColumn", { column: columns[id].label })} aria-valuemin={REQUEST_COLUMN_MIN_WIDTH[id]} aria-valuemax={REQUEST_COLUMN_MAX_WIDTH} aria-valuenow={Math.round(layout.widths[id] ?? REQUEST_COLUMN_MIN_WIDTH[id])} onPointerDown={(event) => startResize(event, id)} onPointerMove={(event) => resizeColumn(event, id)} onPointerUp={(event) => { if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); setResize(null); }} onLostPointerCapture={() => setResize(null)} onDoubleClick={() => setLayout((current) => ({ ...current, widths: {} }))} onKeyDown={(event) => resizeColumnByKeyboard(event, id)} />
+    </th>)}</tr></thead>
+    <tbody>{rows.map((row) => <tr key={row.id}>{layout.order.map((id) => <td key={id} data-column={id} title={id === "model" ? row.model ?? undefined : id === "connection" ? row.connection : undefined}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+  </table></div>;
 }
 
 function UsageMetric({ icon, label, value, detail, title }: { icon?: ReactNode; label: string; value: ReactNode; detail?: ReactNode; title?: string }) {
-  return <div title={title}>{icon}<span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div>;
+  return <div title={title}>{icon}<div className="usage-metric-copy"><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div></div>;
 }
 
 function formatTiming(ttft: number | null, duration: number) { return `${ttft ?? "-"} / ${duration} ms`; }
@@ -235,14 +388,46 @@ type AggregateRow = {
 function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]; groups?: UsageGroup[]; field: "model" | "connection"; empty: string }) {
   const { t, i18n } = useTranslation();
   const aggregateRows = groups?.map(({ key, label, totals }) => aggregateRowFromTotals(label || key || t("common.unknown"), totals)) ?? aggregateRowsFromUsage(rows, field, t("common.unknown"));
+  const [order, setOrder] = useStoredColumnOrder(`relay.usage.${field}ColumnOrder`, AGGREGATE_COLUMN_IDS);
+  const moveColumn = (column: AggregateColumnId, target: AggregateColumnId, after: boolean) => setOrder((current) => reorderColumns(current, column, target, after));
+  const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
+  const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
+  const columns: Record<AggregateColumnId, { label: string; cell: (group: AggregateRow) => ReactNode }> = {
+    name: { label: field === "model" ? t("common.model") : t("usage.poolMember"), cell: (group) => <code>{group.name}</code> },
+    requests: { label: t("usage.requests"), cell: (group) => <CompactNumber value={group.requests} locale={i18n.language} /> },
+    success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
+    breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div> },
+    total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
+    speed: { label: t("usage.generationSpeed"), cell: (group) => formatTokenSpeed(group.generationSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
+    timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests)) },
+  };
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
-  return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table"><thead><tr><th>{field === "model" ? t("common.model") : t("usage.poolMember")}</th><th>{t("usage.requests")}</th><th>{t("common.success")}</th><th>{t("usage.tokens")}</th><th>{t("usage.totalTokens")}</th><th>{t("usage.generationSpeed")}</th><th>{t("usage.timing")}</th></tr></thead><tbody>{aggregateRows.map((group) => <tr key={group.name}><td><code>{group.name}</code></td><td><CompactNumber value={group.requests} locale={i18n.language} /></td><td>{Math.round(group.success / group.requests * 100)}%</td><td><div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div></td><td><CompactNumber value={group.tokens} locale={i18n.language} /></td><td>{formatTokenSpeed(group.generationSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</td><td>{formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests))}</td></tr>)}</tbody></table></div>;
+  return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table usage-sortable-table">
+    <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
+    <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
+    <tbody>{aggregateRows.map((group) => <tr key={group.name}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(group)}</td>)}</tr>)}</tbody>
+  </table></div>;
 }
 
 function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t } = useTranslation();
+  const [order, setOrder] = useStoredColumnOrder("relay.usage.errorColumnOrder", ERROR_COLUMN_IDS);
+  const moveColumn = (column: ErrorColumnId, target: ErrorColumnId, after: boolean) => setOrder((current) => reorderColumns(current, column, target, after));
+  const moveColumnBy = (column: ErrorColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
+  const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
+  const columns: Record<ErrorColumnId, { label: string; cell: (row: UsageRow) => ReactNode }> = {
+    time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
+    model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
+    connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
+    error: { label: t("usage.errorCategory"), cell: (row) => <span title={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
+    request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
+  };
   if (!rows.length) return <EmptyState title={t("usage.noErrors")} description={t("usage.noErrorsHint")} />;
-  return <div className="relay-table-wrap"><table className="relay-table"><thead><tr><th>{t("usage.time")}</th><th>{t("common.model")}</th><th>{t("usage.poolMember")}</th><th>{t("usage.errorCategory")}</th><th>{t("usage.requestId")}</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{formatTime(row.time)}</td><td><code>{row.model ?? "-"}</code></td><td>{row.connection}</td><td title={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</td><td><button type="button" className="request-link request-disclosure" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code><ChevronRight aria-hidden /></button></td></tr>)}</tbody></table></div>;
+  return <div className="relay-table-wrap"><table className="relay-table usage-error-table usage-sortable-table">
+    <colgroup>{order.map((id) => <col key={id} data-column={id} />)}</colgroup>
+    <thead><tr>{order.map((id) => <th key={id} data-column={id} data-dragging={drag?.column === id ? "true" : undefined} data-drop={drag?.target === id && drag.column !== id ? drag.after ? "after" : "before" : undefined}><button type="button" className="usage-column-heading" aria-label={t("usage.moveColumn", { column: columns[id].label })} {...bind(id)}><span>{columns[id].label}</span></button></th>)}</tr></thead>
+    <tbody>{rows.map((row) => <tr key={row.id}>{order.map((id) => <td key={id} data-column={id}>{columns[id].cell(row)}</td>)}</tr>)}</tbody>
+  </table></div>;
 }
 
 function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () => void }) {

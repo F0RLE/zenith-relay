@@ -1,6 +1,7 @@
 {
   "name": "zenith-relay",
-  "version": "1.0.5",
+  "version": "1.1.0",
+  "license": "AGPL-3.0-only",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +12,7 @@
     "test:e2e": "playwright test",
     "clean": "bun ../.github/tools/clean.mjs",
     "clean:all": "bun ../.github/tools/clean.mjs --all",
-    "verify": "bun run check && bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked",
+    "verify": "bun run check && bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked -- --test-threads=1",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "app:dev": "bun ../.github/tools/tauri-dev.mjs",
@@ -19,22 +20,24 @@
     "app:build:signed": "bun ../.github/tools/tauri-build.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.9.0",
+    "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "i18next": "^26.3.1",
-    "lucide-react": "^1.17.0",
+    "i18next": "^26.3.6",
+    "lucide-react": "^1.25.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "react-i18next": "^17.0.8"
+    "react-i18next": "^17.0.10",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
-    "@tauri-apps/cli": "^2.11.2",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
-    "typescript": "^6.0.3",
-    "vite": "^8.0.16"
+    "@vitejs/plugin-react": "^6.0.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
   }
 }

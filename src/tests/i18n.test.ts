@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
+import { formatRemainingTime, quotaWindowLabel } from "../src/features/relay/components/Ui";
 
 describe("Relay translations", () => {
   test("English and Russian expose the same keys", () => {
@@ -23,6 +24,22 @@ describe("Relay translations", () => {
     const nativeSelects = walk(join(import.meta.dir, "..", "src"))
       .filter((file) => readFileSync(file, "utf8").includes("<select"));
     expect(nativeSelects).toEqual([]);
+  });
+
+  test("remaining time keeps only the useful short units", () => {
+    const t = ((key: string, options: { count: number }) => ru.timeShort[key.replace("timeShort.", "") as keyof typeof ru.timeShort].replace("{{count}}", String(options.count))) as never;
+    const now = 1_000_000;
+    expect(formatRemainingTime(now + 2 * 86_400_000, now, t)).toBe("2 дн.");
+    expect(formatRemainingTime(now + 2 * 86_400_000 + 23 * 3_600_000, now, t)).toBe("3 дн.");
+    expect(formatRemainingTime(now + 5 * 3_600_000 + 24 * 60_000 + 59_000, now, t)).toBe("5 ч 24 мин");
+    expect(formatRemainingTime(now + 18 * 60_000 + 42_000, now, t)).toBe("18 мин 42 с");
+    expect(formatRemainingTime(now + 9_000, now, t)).toBe("9 с");
+  });
+
+  test("quota windows use ceiling-based units", () => {
+    const t = ((key: string, options?: { count?: number }) => `${key}:${options?.count ?? ""}`) as never;
+    expect(quotaWindowLabel({ windowMinutes: 43_800 } as never, "secondary", t)).toBe("quota.weeks:5");
+    expect(quotaWindowLabel({ windowMinutes: 10_080 } as never, "secondary", t)).toBe("quota.week:");
   });
 });
 

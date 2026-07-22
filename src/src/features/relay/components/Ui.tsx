@@ -3,13 +3,17 @@ import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
+import type { AccountSummary, OperationalStatus, QuotaSnapshot, QuotaWindow } from "../api/types";
+
+export function operationalStatusTone(status: OperationalStatus): "ready" | "warning" | "error" | "disabled" {
+  if (status === "rotation") return "ready";
+  if (status === "quotaWait") return "warning";
+  if (status === "unavailable") return "error";
+  return "disabled";
+}
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {
-  const authState = typeof account.authState === "string" ? account.authState : account.authState.state;
-  const quota = [account.quota.primary, account.quota.secondary]
-    .flatMap((window) => window?.availableBasisPoints == null ? [] : [window.availableBasisPoints]);
-  return account.enabled && account.inPool && !account.draining && account.secretAvailable && !account.routingExclusion && authState === "active" && quota.length > 0 && Math.min(...quota) > 100;
+  return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
 }
 
 export function formatAccountPlan(planType: string | null, unknown: string) {
@@ -110,8 +114,8 @@ export function useConfirm() {
   return confirm;
 }
 
-export function Button({ children, icon, variant = "secondary", busy, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
-  return <button type={props.type ?? "button"} className={`relay-button ${variant}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
+export function Button({ children, icon, variant = "secondary", busy, className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { icon?: ReactNode; variant?: "primary" | "secondary" | "ghost" | "danger"; busy?: boolean }) {
+  return <button type={props.type ?? "button"} className={`relay-button ${variant}${className ? ` ${className}` : ""}`} {...props} disabled={busy || props.disabled}>{busy ? <Loader2 className="spin" aria-hidden /> : icon}<span>{children}</span></button>;
 }
 
 function useTooltip<T extends HTMLElement>(label: string) {
@@ -185,7 +189,7 @@ function useTooltip<T extends HTMLElement>(label: string) {
     hide,
     hideAfterHover: () => { if (document.activeElement !== anchorRef.current) hide(); },
     show,
-    showAfterFocus: () => { if (!pointerDown.current) show(); },
+    showAfterFocus: () => { if (!pointerDown.current && anchorRef.current?.matches(":focus-visible")) show(); },
     pointerStart,
     tooltip,
   };
@@ -209,6 +213,14 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
     >
       {icon}
     </button>
+    {tooltip.tooltip}
+  </>;
+}
+
+export function StatusIcon({ status, label }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string }) {
+  const tooltip = useTooltip<HTMLSpanElement>(label);
+  return <>
+    <span ref={tooltip.anchorRef} className="relay-status-icon" role="img" tabIndex={0} aria-label={label} aria-describedby={tooltip.describedBy} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><StatusBadge status={status} label="" /></span>
     {tooltip.tooltip}
   </>;
 }
@@ -408,7 +420,30 @@ export function EmptyState({ title, description, action }: { title: string; desc
   return <div className="relay-empty"><CircleHelp aria-hidden /><strong>{title}</strong><p>{description}</p>{action}</div>;
 }
 
-export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string }) {
+export function SettingToggle({ label, description, checked, disabled = false, onChange, className = "", tone = "default" }: {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+  className?: string;
+  tone?: "default" | "warning";
+}) {
+  return <label className={`setting-toggle ${tone}${className ? ` ${className}` : ""}`}>
+    <span><strong>{label}</strong><small>{description}</small></span>
+    <input type="checkbox" checked={checked} disabled={disabled} aria-label={label} onChange={(event) => onChange(event.target.checked)} />
+  </label>;
+}
+
+export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
+  const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
+  if (totalSeconds >= 86_400) return t("timeShort.days", { count: Math.ceil(totalSeconds / 86_400) });
+  if (totalSeconds >= 3_600) return `${t("timeShort.hours", { count: Math.floor(totalSeconds / 3_600) })} ${t("timeShort.minutes", { count: Math.floor(totalSeconds % 3_600 / 60) })}`;
+  if (totalSeconds >= 60) return `${t("timeShort.minutes", { count: Math.floor(totalSeconds / 60) })} ${t("timeShort.seconds", { count: totalSeconds % 60 })}`;
+  return t("timeShort.seconds", { count: totalSeconds });
+}
+
+export function QuotaMeter({ window, kind, label, nowMs }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string; nowMs?: number }) {
   const { i18n, t } = useTranslation();
   const windowKind = kind ?? window?.kind ?? "primary";
   const resolvedLabel = label ?? quotaWindowLabel(window, windowKind, t);
@@ -417,15 +452,19 @@ export function QuotaMeter({ window, kind, label }: { window: QuotaWindow | null
     return <div className="quota-meter unavailable"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={unavailable}>{unavailable}</small><strong>-</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${unavailable}`} /></div>;
   }
   const percent = Math.round(window.availableBasisPoints / 100);
-  const reset = window.resetAtMs ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(window.resetAtMs)) : t("common.unknown");
+  const reset = window.resetAtMs
+    ? nowMs == null
+      ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(window.resetAtMs))
+      : formatRemainingTime(window.resetAtMs, nowMs, t)
+    : t("common.unknown");
   const resetLabel = t("quota.reset", { value: reset });
   const remainingLabel = t("quota.remainingPercent", { value: percent });
   return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
 }
 
-export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
+export function QuotaStack({ snapshot, nowMs }: { snapshot: QuotaSnapshot; nowMs?: number }) {
   const { t } = useTranslation();
-  const coreBlocked = [snapshot.primary, snapshot.secondary]
+  const coreBlocked = snapshot.limitReached || [snapshot.primary, snapshot.secondary]
     .some((window) => window?.availableBasisPoints === 0);
   const reported = [
     ...(["primary", "secondary"] as const).flatMap((kind) => {
@@ -435,19 +474,20 @@ export function QuotaStack({ snapshot }: { snapshot: QuotaSnapshot }) {
     }),
     ...(snapshot.supplemental ?? []),
   ];
-  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} />)}</div>;
+  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} /></div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} />)}</div>;
 }
 
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
   const minutes = window?.windowMinutes;
   if (!minutes) return t(`quota.${kind}`);
-  if (minutes >= 28 * 1_440 && minutes <= 31 * 1_440) return t("quota.month");
-  const weeks = Math.round(minutes / 10_080);
-  if (weeks > 0 && Math.abs(minutes - weeks * 10_080) <= 1) return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
-  if (minutes % 1_440 === 0) return t("quota.days", { count: minutes / 1_440 });
-  if (minutes % 60 === 0) return t("quota.hours", { count: minutes / 60 });
-  return t("quota.minutes", { count: minutes });
+  if (minutes >= 10_080 - 1) {
+    const weeks = Math.ceil(minutes / 10_080);
+    return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
+  }
+  if (minutes >= 1_440 - 1) return t("quota.days", { count: Math.ceil(minutes / 1_440) });
+  if (minutes >= 60 - 1) return t("quota.hours", { count: Math.ceil(minutes / 60) });
+  return t("quota.minutes", { count: Math.ceil(minutes) });
 }
 
 export function SecretField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {

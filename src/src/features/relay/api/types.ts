@@ -1,6 +1,7 @@
 export type RelayMode = "local" | "remote" | "zenith";
 export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings";
 export type DefaultServiceTier = "standard" | "fast";
+export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
 export type QuotaWindow = {
   kind: "primary" | "secondary";
@@ -21,6 +22,7 @@ export type QuotaSnapshot = {
   primary: QuotaWindow | null;
   secondary: QuotaWindow | null;
   supplemental?: SupplementalQuotaWindow[];
+  limitReached: boolean;
   resetCreditsAvailable: number | null;
   updatedAtMs: number | null;
   error: { code: string; observedAtMs: number } | null;
@@ -38,6 +40,7 @@ export type SourceSummary = {
   enabled: boolean;
   inPool: boolean;
   draining: boolean;
+  operationalStatus: OperationalStatus;
   baseUrl: string;
   wireApi: "responses" | "chat_completions" | "messages";
   models: string[];
@@ -50,6 +53,18 @@ export type SourceSummary = {
   lastErrorCode: string | null;
 };
 
+export type SourceStats = {
+  sourceId: string;
+  provider: "zenith" | "openrouter" | "unsupported";
+  supported: boolean;
+  balance: string | null;
+  spent: string | null;
+  requests: number | null;
+  requestsDisplay: string | null;
+  totalTokens: number | null;
+  totalTokensDisplay: string | null;
+};
+
 export type AccountSummary = {
   id: string;
   label: string;
@@ -57,8 +72,9 @@ export type AccountSummary = {
   enabled: boolean;
   inPool: boolean;
   draining: boolean;
-  authState: string | { state: string; reason?: string };
+  authState: { state: string; reason?: string };
   health: string;
+  operationalStatus: OperationalStatus;
   models: string[];
   allowedModels: string[];
   excludedModels: string[];
@@ -68,6 +84,7 @@ export type AccountSummary = {
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   secretAvailable: boolean;
+  remoteLocation?: { serverId: string; remoteAccountId: string } | null;
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
   routingExclusion?: "free_plan_policy" | null;
@@ -99,7 +116,9 @@ export type ModelSummary = {
   memberCount: number;
   catalogRank: number | null;
   inputMicroUsdPerMillion: number | null;
+  cachedInputMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
+  customPrice: boolean;
 };
 
 export type CandidateRuntimeSnapshot = {
@@ -147,17 +166,18 @@ export type RuntimeSnapshot = {
     baseUrl: string;
     candidateCount: number;
     visibleModelIds: string[];
-    maxRetryCandidates?: number | null;
-    routingStrategy?: RoutingStrategy | null;
-    defaultServiceTier?: DefaultServiceTier | null;
-    imageBaseModel?: string | null;
+    maxRetryCandidates: number;
+    routingStrategy: RoutingStrategy;
+    subscriptionPlanOrder?: string[];
+    defaultServiceTier: DefaultServiceTier;
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
     accountProxyRequired?: boolean;
     quotaRefreshIntervalSeconds?: number;
     quotaRequestTimeoutSeconds?: number;
-    useFreeAccounts?: boolean;
+    useFreeAccounts: boolean;
+    chatgptInterfaceQuotaReserveBasisPoints?: number;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
@@ -170,7 +190,7 @@ export type RuntimeSnapshot = {
   warnings: string[];
 };
 
-export type RoutingStrategy = "adaptive" | "oldest_account";
+export type RoutingStrategy = "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
 
 export type ProxyAssignmentResult = {
   assigned: number;
@@ -180,7 +200,9 @@ export type ProxyAssignmentResult = {
 export type ProxyPoolEntry = {
   id: string;
   endpoint: string;
-  assignedAccountId: string | null;
+  assignedAccountIds: string[];
+  countryCode: string | null;
+  region: string | null;
   createdAtMs: number;
 };
 
@@ -204,12 +226,13 @@ export type StoredProxyAssignmentResult = {
   pool: ProxyPoolSummary;
 };
 
-export type AccountExportFormat = "cpa" | "sub2api" | "cockpit" | "9router" | "codex" | "axon_hub" | "codex_manager";
+export type AccountExportFormat = "zenith" | "cpa" | "sub2api" | "cockpit" | "9router" | "codex" | "axon_hub" | "codex_manager";
 
 export type AccountExportInput = {
   accountIds: string[];
   format: AccountExportFormat;
   destination: "copy" | "download";
+  description?: string;
 };
 
 export type AccountExportResult = {
@@ -220,8 +243,13 @@ export type AccountExportResult = {
   path?: string;
 };
 
+export type MoveAccountsToRemoteResult = {
+  moved: number;
+  remoteAccountIds: string[];
+};
+
 export type RoutingDiagnostics = {
-  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "oldest_account" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
@@ -395,6 +423,7 @@ export type ImportSession = {
   prepared: boolean;
   preview: {
     format: string;
+    description?: string;
     rows: Array<{
       itemId: string;
       label: string;
@@ -424,6 +453,22 @@ export type ConfirmAccountImportResponse = {
     account?: { account: { id: string } };
     error?: { code: string; message: string };
   }>;
+};
+
+export type AccountImportProgress = {
+  sessionId: string;
+  completed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  currentLabel?: string;
+};
+
+export type AccountTransferProgress = {
+  completed: number;
+  total: number;
+  phase: "preparing" | "transferring" | "committing" | "complete";
+  currentAccountId?: string;
 };
 
 export type OAuthFlowStatus = "pending" | "callback_received" | "callback_rejected" | "canceled" | "completed" | "expired" | "failed";
@@ -462,9 +507,6 @@ export type ProfileBinding = {
 
 export type ProfileActivation = {
   binding: ProfileBinding;
-  previousCredentialKind: ProfileBinding["credentialKind"] | null;
-  repairRecommended: boolean;
-  stoppedRunningClient: boolean;
 };
 
 export type ProfileSnapshot = {
@@ -474,24 +516,6 @@ export type ProfileSnapshot = {
   createdAtMs: number;
   configAvailable: boolean;
   authAvailable: boolean;
-};
-
-export type HistoryRepairPreview = {
-  sessionId: string;
-  targetProvider: "openai" | "zenith_relay_local";
-  profileCount: number;
-  rolloutFileCount: number;
-  rolloutRecordCount: number;
-  sqliteRowCount: number;
-  codexRunning: boolean;
-  expiresAtMs: number;
-};
-
-export type HistoryRepairResult = {
-  backupId: string;
-  backupPath: string;
-  rolloutRecordsChanged: number;
-  sqliteRowsChanged: number;
 };
 
 export type SupportBundlePreview = {
@@ -513,11 +537,5 @@ export type SupportBundlePreview = {
 };
 
 export type RelayStorageInfo = {
-  rootPath: string;
   dataPath: string;
-  recoveryPath: string;
-  cachePath: string;
-  logsPath: string;
-  chatgptProfilePath: string;
-  legacyDataPath: string | null;
 };

@@ -1,21 +1,23 @@
-import { Activity, Cable, Check, ChevronDown, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, UserRoundCog, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, ChevronDown, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../../../tauri";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
-import { ConnectionsPage, ImportDialog } from "../pages/connections/ConnectionsPage";
-import { PoolPage } from "../pages/pool/PoolPage";
-import { GatewayPage } from "../pages/gateway/GatewayPage";
-import { UsagePage } from "../pages/usage/UsagePage";
-import { ProfilesPage } from "../pages/profiles/ProfilesPage";
-import { SettingsPage } from "../pages/settings/SettingsPage";
 import { useRelayState } from "../state/RelayStateProvider";
 import { Button, Dialog, IconButton } from "../components/Ui";
 
 const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
+
+const ConnectionsPage = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ConnectionsPage }));
+const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ImportDialog }));
+const PoolPage = lazy(async () => ({ default: (await import("../pages/pool/PoolPage")).PoolPage }));
+const GatewayPage = lazy(async () => ({ default: (await import("../pages/gateway/GatewayPage")).GatewayPage }));
+const UsagePage = lazy(async () => ({ default: (await import("../pages/usage/UsagePage")).UsagePage }));
+const ProfilesPage = lazy(async () => ({ default: (await import("../pages/profiles/ProfilesPage")).ProfilesPage }));
+const SettingsPage = lazy(async () => ({ default: (await import("../pages/settings/SettingsPage")).SettingsPage }));
 
 const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "overview", icon: LayoutDashboard },
@@ -23,7 +25,7 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "pool", icon: SlidersHorizontal },
   { id: "gateway", icon: Gauge },
   { id: "usage", icon: Activity },
-  { id: "profiles", icon: UserRoundCog },
+  { id: "profiles", icon: ArchiveRestore },
   { id: "settings", icon: Settings },
 ];
 
@@ -44,7 +46,7 @@ export function RelayShell() {
   const initialUpdateCheck = useRef(false);
   const modePickerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  const visiblePages = pages.filter((item) => !(item.id === "pool" && mode === "zenith"));
+  const visiblePages = pages.filter((item) => mode !== "zenith" || !(["pool", "gateway", "usage"] as PageId[]).includes(item.id));
   const openImport = useCallback((paths?: string[]) => {
     if (mode === "zenith") setMode("local");
     setPage("connections");
@@ -101,9 +103,12 @@ export function RelayShell() {
   }, [availableUpdate]);
 
   useEffect(() => {
-    if (initialUpdateCheck.current) return;
-    initialUpdateCheck.current = true;
-    void checkUpdates();
+    const timeout = window.setTimeout(() => {
+      if (initialUpdateCheck.current) return;
+      initialUpdateCheck.current = true;
+      void checkUpdates();
+    }, 1_500);
+    return () => window.clearTimeout(timeout);
   }, [checkUpdates]);
 
   useEffect(() => {
@@ -235,10 +240,10 @@ export function RelayShell() {
             <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
           </div>
         ) : null}
-        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} />}
+        {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
       </div>
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
-      {importRequest ? <ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /> : null}
+      {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /></Suspense> : null}
       {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={() => { if (!installingUpdate) setUpdateDialogOpen(false); }} /> : null}
     </div>
   );

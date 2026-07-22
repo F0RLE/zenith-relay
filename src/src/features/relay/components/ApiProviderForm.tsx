@@ -73,7 +73,7 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
         <div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={protocolOptions} /></div>
       </div> : <div className="api-provider-endpoint"><code>{value.baseUrl}</code>{value.kind === "openrouter" ? <OptionMenu className="api-provider-protocol-menu" label={t("sources.protocol")} value={value.wireApi} onChange={(wireApi) => onChange({ ...value, wireApi: wireApi as ApiProviderValue["wireApi"] })} options={protocolOptions} /> : <span>{t(`apiProviders.protocols.${protocol}.label`)}</span>}</div>}
-      <SecretField label={value.kind === "zenith" ? t("readyApi.key") : t("sources.apiKey")} value={value.apiKey} onChange={(apiKey) => onChange({ ...value, apiKey })} />
+      <SecretField label={t("sources.apiKey")} value={value.apiKey} onChange={(apiKey) => onChange({ ...value, apiKey })} />
       {value.kind !== "custom" ? <button type="button" className="api-key-link" onClick={() => void openApiKeyPage(value.kind as "zenith" | "openai" | "openrouter")}><ExternalLink aria-hidden />{t("apiProviders.getKey")}</button> : null}
     </> : null}
   </div>;

@@ -1,100 +1,99 @@
 import { useCallback, useEffect, useState } from "react";
-import { Camera, FolderOpen, Play, Plus, RotateCcw, Trash2, Wrench } from "lucide-react";
+import { Camera, FolderOpen, RotateCcw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { HistoryRepairPreview, HistoryRepairResult, ProfileBinding, ProfileSnapshot } from "../../api/types";
-import { Button, EmptyState, IconButton, OptionMenu, PageHeader, StatusBadge, Tabs, useConfirm } from "../../components/Ui";
+import type { ProfileBinding, ProfileSnapshot } from "../../api/types";
+import { Button, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
-  const { mode, runtime, busy, perform, activateCodexProfile, launchCodexProfile } = useRelayState();
+  const { mode, busy, perform } = useRelayState();
   const confirm = useConfirm();
-  const [view, setView] = useState("profiles");
   const [bindings, setBindings] = useState<ProfileBinding[]>([]);
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
-  const [selectedProfiles, setSelectedProfiles] = useState<string[]>([]);
-  const [repairTarget, setRepairTarget] = useState<"openai" | "zenith_relay_local">("zenith_relay_local");
-  const [repairPreview, setRepairPreview] = useState<HistoryRepairPreview | null>(null);
-  const [repairResult, setRepairResult] = useState<HistoryRepairResult | null>(null);
-  const account = runtime?.accounts[0];
-  const key = runtime?.keys[0];
 
-  const loadProfiles = useCallback(() => {
+  const loadRecovery = useCallback(() => {
     if (mode !== "local") {
-      setBindings([]); setSnapshots([]); return;
+      setBindings([]);
+      setSnapshots([]);
+      return;
     }
     void relayCommands.profileBindings().then(setBindings).catch(() => setBindings([]));
     void relayCommands.profileSnapshots().then(setSnapshots).catch(() => setSnapshots([]));
   }, [mode]);
-  useEffect(loadProfiles, [loadProfiles, runtime]);
-  useEffect(() => setSelectedProfiles((current) => current.length ? current.filter((path) => bindings.some((binding) => binding.profileDir === path)) : bindings.map((binding) => binding.profileDir)), [bindings]);
 
-  const attachCodex = async () => {
-    const work = account ? () => relayCommands.attachCodexAccount(account.id) : key ? () => relayCommands.attachCodexGateway(key.id) : null;
-    if (work && await activateCodexProfile("profile-attach", work)) loadProfiles();
-  };
-  const restore = async (work: () => Promise<unknown>, id: string) => {
-    if (await confirm(t("profiles.restoreConfirm")) && await perform(id, work, "feedback.restored")) loadProfiles();
-  };
+  useEffect(loadRecovery, [loadRecovery]);
+
   const createSnapshot = async () => {
     const name = snapshotName.trim();
     if (name && await perform("profile-snapshot-create", () => relayCommands.createProfileSnapshot(name), "feedback.snapshotCreated")) {
-      setSnapshotName(""); loadProfiles();
+      setSnapshotName("");
+      loadRecovery();
     }
   };
-  const restoreSnapshot = async (snapshot: ProfileSnapshot) => {
-    if (await confirm(t("profiles.snapshotRestoreConfirm", { name: snapshot.name })) && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, t("profiles.safetySnapshotName", { name: snapshot.name })), "feedback.snapshotRestored")) loadProfiles();
-  };
-  const deleteSnapshot = async (snapshot: ProfileSnapshot) => {
-    if (await confirm(t("profiles.snapshotDeleteConfirm", { name: snapshot.name }), { danger: true }) && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) loadProfiles();
-  };
-  const snapshotDate = (value: number) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
-  const hasProfiles = bindings.length > 0;
-  const headerAction = view === "profiles" && mode === "local" ? bindings.length
-    ? <Button variant="primary" icon={<Play aria-hidden />} busy={busy === "profile-launch" || busy === "profile-stop"} onClick={() => launchCodexProfile(bindings[0])}>{t("profiles.launchChatGPT")}</Button>
-    : <Button variant="primary" icon={<Plus aria-hidden />} disabled={!account && !key} onClick={attachCodex}>{t("profiles.attachChatGPT")}</Button>
-    : null;
-  const previewRepair = async () => {
-    const result: { current: HistoryRepairPreview | null } = { current: null };
-    const ok = await perform("history-repair-preview", async () => { result.current = await relayCommands.previewHistoryRepair(selectedProfiles, repairTarget); });
-    if (ok) { setRepairPreview(result.current); setRepairResult(null); }
-  };
-  const applyRepair = async () => {
-    if (!repairPreview || !await confirm(t("profiles.repairConfirm"))) return;
-    const result: { current: HistoryRepairResult | null } = { current: null };
-    const ok = await perform("history-repair-apply", async () => { result.current = await relayCommands.applyHistoryRepair(repairPreview.sessionId); }, "feedback.saved");
-    if (ok) { setRepairResult(result.current); setRepairPreview(null); }
-  };
-  const rollbackRepair = async () => {
-    if (!repairResult || !await confirm(t("profiles.rollbackConfirm"))) return;
-    const ok = await perform("history-repair-rollback", () => relayCommands.rollbackHistoryRepair(repairResult.backupId), "feedback.restored");
-    if (ok) setRepairResult(null);
-  };
-  const resetRepairPreview = () => { setRepairPreview(null); setRepairResult(null); };
 
-  return <section className="relay-page">
-    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} actions={headerAction} />
-    <Tabs value={view} onChange={setView} label={t("profiles.views")} items={[{id:"profiles",label:t("nav.profiles")},{id:"backups",label:t("profiles.backups")},{id:"repair",label:t("profiles.repair")}]} />
-    {view === "profiles" ? mode !== "local" ? <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} /> : hasProfiles ? <div className="relay-table-wrap profile-bindings"><table className="relay-table"><thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("profiles.connection")}</th><th>{t("profiles.backup")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>
-      {bindings.map((binding) => {
-        const boundAccount = runtime?.accounts.find((account) => account.id === binding.boundOauthAccountId);
-        return <tr key={binding.profileDir}><td><StatusBadge status={binding.active ? "ready" : "warning"} label={t(binding.active ? "profiles.attached" : "profiles.changed")} /></td><td><strong>ChatGPT</strong><small title={binding.profileDir}>{binding.profileDir}</small></td><td><strong>{binding.credentialKind === "local_gateway" ? t("profiles.localPool") : t("profiles.openAiAccount")}</strong>{binding.credentialKind === "local_gateway" ? <small>{binding.boundOauthAccountId ? t("profiles.oauthBinding", { account: boundAccount?.label ?? binding.boundOauthAccountId }) : t("profiles.oauthBindingNone")}</small> : null}</td><td>{t("profiles.available")}</td><td><IconButton label={t("profiles.restore")} icon={<RotateCcw aria-hidden />} onClick={() => restore(binding.credentialKind === "local_gateway" ? relayCommands.restoreCodex : () => relayCommands.restoreAccountProfile(binding.profileDir), `restore-${binding.profileDir}`)} /></td></tr>;
-      })}
-    </tbody></table></div> : <EmptyState title={t("profiles.emptyTitle")} description={t("profiles.emptyDescription")} /> : null}
-    {view === "backups" ? <section className="flat-section profile-snapshots"><p className="profile-snapshot-intro">{t("profiles.snapshotHint")}</p><div className="profile-snapshot-create"><label className="relay-field"><span>{t("profiles.snapshotName")}</span><input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.snapshotNamePlaceholder")} /></label><Button variant="primary" icon={<Camera aria-hidden />} busy={busy === "profile-snapshot-create"} disabled={mode !== "local" || !snapshotName.trim()} onClick={createSnapshot}>{t("profiles.createSnapshot")}</Button></div>{snapshots.length ? <div className="relay-table-wrap"><table className="relay-table profile-snapshot-table"><thead><tr><th>{t("common.name")}</th><th>{t("profiles.created")}</th><th>{t("profiles.contents")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead><tbody>{snapshots.map((snapshot) => <tr key={snapshot.id}><td><strong title={snapshot.name}>{snapshot.name}</strong><small title={snapshot.profileDir}>{snapshot.profileDir}</small></td><td>{snapshotDate(snapshot.createdAtMs)}</td><td><StatusBadge status={snapshot.configAvailable && snapshot.authAvailable ? "ready" : "info"} label={snapshot.configAvailable && snapshot.authAvailable ? t("profiles.snapshotComplete") : t("profiles.snapshotPartial")} /></td><td><div className="inline-actions"><IconButton label={t("profiles.restoreSnapshot", { name: snapshot.name })} icon={<RotateCcw aria-hidden />} disabled={busy !== null} onClick={() => restoreSnapshot(snapshot)} /><IconButton label={t("profiles.deleteSnapshot", { name: snapshot.name })} icon={<Trash2 aria-hidden />} disabled={busy !== null} onClick={() => deleteSnapshot(snapshot)} /></div></td></tr>)}</tbody></table></div> : <EmptyState title={t("profiles.noSnapshots")} description={t("profiles.noSnapshotsHint")} />}<div className="inline-actions profile-backup-tools"><Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button><Button variant="secondary" icon={<RotateCcw aria-hidden />} disabled={mode !== "local" || !bindings.length} onClick={() => restore(relayCommands.restoreCodex, "profile-restore")}>{t("profiles.restoreAutomatic")}</Button></div></section> : null}
-    {view === "repair" ? <section className="flat-section history-repair">
-      <header className="history-repair-intro"><span><Wrench aria-hidden /></span><div><h2>{t("profiles.historyRepair")}</h2><p>{t("profiles.historyRepairHint")}</p></div></header>
-      <div className="history-repair-form">
-        <div className="history-repair-controls">
-          {bindings.length ? <fieldset><legend>{t("profiles.instances")}</legend><div className="scope-grid">{bindings.map((binding) => <label key={binding.profileDir}><input type="checkbox" checked={selectedProfiles.includes(binding.profileDir)} onChange={() => { setSelectedProfiles((current) => current.includes(binding.profileDir) ? current.filter((path) => path !== binding.profileDir) : [...current, binding.profileDir]); resetRepairPreview(); }} /><span title={binding.profileDir}>{binding.profileDir}</span></label>)}</div></fieldset> : <div className="history-repair-default"><strong>{t("profiles.instances")}</strong><span>{t("profiles.defaultInstance")}</span></div>}
-          <div className="relay-field"><span>{t("profiles.targetProvider")}</span><OptionMenu className="field-option-menu" label={t("profiles.targetProvider")} value={repairTarget} onChange={(value) => { setRepairTarget(value as typeof repairTarget); resetRepairPreview(); }} options={[{ value: "zenith_relay_local", label: "Zenith Relay Local" }, { value: "openai", label: "OpenAI" }]} /></div>
-        </div>
-        {repairPreview ? <section className="history-repair-result" role="status"><StatusBadge status={repairPreview.rolloutRecordCount + repairPreview.sqliteRowCount ? "warning" : "ready"} label={t("profiles.previewReady")} /><dl><div><dt>{t("profiles.rolloutFiles")}</dt><dd>{repairPreview.rolloutFileCount}</dd></div><div><dt>{t("profiles.rolloutRecords")}</dt><dd>{repairPreview.rolloutRecordCount}</dd></div><div><dt>{t("profiles.databaseRows")}</dt><dd>{repairPreview.sqliteRowCount}</dd></div></dl>{repairPreview.codexRunning ? <p className="warning-box">{t("profiles.runningWarning")}</p> : null}</section> : null}
-        {repairResult ? <section className="history-repair-result history-repair-complete" role="status"><div><StatusBadge status="ready" label={t("profiles.repairComplete")} /><code title={repairResult.backupPath}>{repairResult.backupPath}</code></div><Button variant="secondary" busy={busy === "history-repair-rollback"} onClick={rollbackRepair}>{t("profiles.rollbackRepair")}</Button></section> : null}
-        <div className="inline-actions history-repair-actions"><Button variant="secondary" busy={busy === "history-repair-preview"} disabled={mode !== "local" || (bindings.length > 0 && selectedProfiles.length === 0)} onClick={previewRepair}>{t("profiles.previewRepair")}</Button>{repairPreview ? <Button variant="primary" busy={busy === "history-repair-apply"} disabled={repairPreview.codexRunning || repairPreview.rolloutRecordCount + repairPreview.sqliteRowCount === 0} title={repairPreview.codexRunning ? t("profiles.runningWarning") : undefined} onClick={applyRepair}>{t("profiles.applyRepair")}</Button> : null}</div>
+  const restoreSnapshot = async (snapshot: ProfileSnapshot) => {
+    if (await confirm(t("profiles.snapshotRestoreConfirm", { name: snapshot.name }))
+      && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, t("profiles.safetySnapshotName", { name: snapshot.name })), "feedback.snapshotRestored")) {
+      loadRecovery();
+    }
+  };
+
+  const deleteSnapshot = async (snapshot: ProfileSnapshot) => {
+    if (await confirm(t("profiles.snapshotDeleteConfirm", { name: snapshot.name }), { danger: true })
+      && await perform("profile-snapshot-delete", () => relayCommands.deleteProfileSnapshot(snapshot.id), "feedback.deleted")) {
+      loadRecovery();
+    }
+  };
+
+  const restoreAutomatic = async (binding: ProfileBinding) => {
+    if (await confirm(t("profiles.restoreConfirm", { profile: binding.profileDir }))
+      && await perform("profile-restore", () => binding.credentialKind === "oauth_account"
+        ? relayCommands.restoreAccountProfile(binding.profileDir)
+        : relayCommands.restoreCodex(), "feedback.restored")) {
+      loadRecovery();
+    }
+  };
+
+  const snapshotDate = (value: number) => new Intl.DateTimeFormat(i18n.language, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+
+  const snapshotForm = <form className="profile-snapshot-create" onSubmit={(event) => { event.preventDefault(); void createSnapshot(); }}>
+    <label className="relay-field">
+      <span>{t("profiles.snapshotName")}</span>
+      <input value={snapshotName} maxLength={80} onChange={(event) => setSnapshotName(event.target.value)} placeholder={t("profiles.snapshotNamePlaceholder")} />
+    </label>
+    <Button type="submit" variant="primary" icon={<Camera aria-hidden />} busy={busy === "profile-snapshot-create"} disabled={!snapshotName.trim()}>{t("profiles.createSnapshot")}</Button>
+  </form>;
+
+  return <section className="relay-page profile-recovery-page">
+    <PageHeader title={t("nav.profiles")} subtitle={t("profiles.subtitle")} />
+    {mode !== "local" ? <EmptyState title={t("profiles.localOnlyTitle")} description={t("profiles.localOnlyDescription")} /> : <section className={`profile-recovery${snapshots.length ? "" : " is-empty"}`}>
+      {snapshots.length ? <>{snapshotForm}<div className="relay-table-wrap profile-snapshot-table-wrap"><table className="relay-table profile-snapshot-table"><thead><tr>
+        <th>{t("common.name")}</th>
+        <th>{t("profiles.created")}</th>
+        <th>{t("profiles.contents")}</th>
+        <th><span className="sr-only">{t("common.actions")}</span></th>
+      </tr></thead><tbody>{snapshots.map((snapshot) => <tr key={snapshot.id}>
+        <td><strong title={snapshot.name}>{snapshot.name}</strong><small title={snapshot.profileDir}>{snapshot.profileDir}</small></td>
+        <td>{snapshotDate(snapshot.createdAtMs)}</td>
+        <td><StatusIcon status={snapshot.configAvailable && snapshot.authAvailable ? "ready" : "info"} label={snapshot.configAvailable && snapshot.authAvailable ? t("profiles.snapshotComplete") : t("profiles.snapshotPartial")} /></td>
+        <td><div className="inline-actions"><IconButton label={t("profiles.restoreSnapshot", { name: snapshot.name })} icon={<RotateCcw aria-hidden />} disabled={busy !== null} onClick={() => restoreSnapshot(snapshot)} /><IconButton label={t("profiles.deleteSnapshot", { name: snapshot.name })} icon={<Trash2 aria-hidden />} disabled={busy !== null} onClick={() => deleteSnapshot(snapshot)} /></div></td>
+      </tr>)}</tbody></table></div></> : <><EmptyState title={t("profiles.noSnapshots")} description={t("profiles.noSnapshotsHint")} />{snapshotForm}</>}
+
+      {bindings.length ? <div className="profile-automatic-backups">{bindings.map((binding) => <div className="profile-automatic-backup" key={`${binding.credentialKind}:${binding.profileDir}`}>
+        <div><strong>{t("profiles.automaticBackup")}</strong><small><code title={binding.profileDir}>{binding.profileDir}</code></small></div>
+        <StatusIcon status={binding.active ? "ready" : "warning"} label={t(binding.active ? "profiles.automaticBackupReady" : "profiles.automaticBackupChanged")} />
+        <Button variant="secondary" icon={<RotateCcw aria-hidden />} busy={busy === "profile-restore"} disabled={!binding.active || busy !== null} title={!binding.active ? t("profiles.automaticBackupChanged") : undefined} onClick={() => void restoreAutomatic(binding)}>{t("profiles.restoreAutomatic")}</Button>
+      </div>)}</div> : null}
+
+      <div className="inline-actions profile-backup-tools">
+        <Button variant="secondary" icon={<FolderOpen aria-hidden />} busy={busy === "profile-open-folder"} onClick={() => perform("profile-open-folder", () => relayCommands.openFolder("profile_backups"), "feedback.opened")}>{t("profiles.openFolder")}</Button>
       </div>
-    </section> : null}
+    </section>}
   </section>;
 }

@@ -1,9 +1,8 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getSavedKeyStats, getSavedKeyUsageHistory, getState, KeyStats, UiState, UsageLogEntry } from "../../../tauri";
+import { getState, onStateChanged, setWindowBackgroundColor, type KeyStats, type UiState, type UsageLogEntry } from "../../../tauri";
 import { relayCommands } from "../api/commands";
-import type { HistoryRepairPreview, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
-import { useConfirm } from "../components/Ui";
+import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
 
@@ -18,6 +17,11 @@ type RelayContextValue = {
   page: PageId;
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
+  accountIdentitiesVisible: boolean;
+  accountIdentitiesBusy: boolean;
+  canRevealAccountIdentities: boolean;
+  setAccountIdentitiesVisible: (visible: boolean) => void;
+  accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
   localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;
   loadLocalUsage: (query: RemoteUsageQuery) => Promise<void>;
@@ -40,10 +44,6 @@ type RelayContextValue = {
   resetOnboarding: () => void;
   theme: "system" | "light" | "dark";
   setTheme: (theme: "system" | "light" | "dark") => void;
-  compact: boolean;
-  setCompact: (compact: boolean) => void;
-  snapshotBeforeSwitch: boolean;
-  setSnapshotBeforeSwitch: (enabled: boolean) => void;
   codexPoolOauthSelection: string;
   setCodexPoolOauthSelection: (selection: string) => void;
 };
@@ -51,8 +51,7 @@ type RelayContextValue = {
 const RelayContext = createContext<RelayContextValue | null>(null);
 
 export function RelayStateProvider({ children }: { children: ReactNode }) {
-  const { i18n, t } = useTranslation();
-  const confirm = useConfirm();
+  const { i18n } = useTranslation();
   const [mode, setModeState] = useState<RelayMode>(() => stored("relay.mode", "local") as RelayMode);
   const [page, setPage] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
@@ -68,60 +67,64 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
-  const [compact, setCompactState] = useState(() => stored("relay.compact", "0") === "1");
-  const [snapshotBeforeSwitch, setSnapshotBeforeSwitchState] = useState(() => stored("relay.snapshotBeforeSwitch", "1") === "1");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
+  const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => stored("relay.accountIdentitiesVisible", "0") === "1");
+  const [accountIdentitiesBusy, setAccountIdentitiesBusy] = useState(false);
+  const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
+  const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
+  const revealableAccountIds = canRevealAccountIdentities ? (runtime?.accounts ?? []).filter((account) => account.secretAvailable).map((account) => account.id) : [];
+  const revealableAccountSignature = revealableAccountIds.join("\0");
 
   const refresh = useCallback(async () => {
     if (mode === "local") {
-      const [snapshot, usagePage] = await Promise.all([
-        relayCommands.localState(),
-        relayCommands.localUsagePage({ page: 1, pageSize: 100, range: "daily" }).catch(() => null),
-      ]);
+      const request = ++localUsageRequest.current;
+      ++remoteUsageRequest.current;
+      const usage = relayCommands.localUsagePage({ page: 1, pageSize: 100, range: "daily" }).catch(() => null);
+      const snapshot = await relayCommands.localState();
       setRuntime(snapshot);
-      setLocalUsage(usagePage?.events ?? []);
-      setLocalUsagePage(usagePage);
       setRemoteUsage([]);
       setRemoteUsagePage(null);
+      void usage.then((usagePage) => {
+        if (request !== localUsageRequest.current || !usagePage) return;
+        setLocalUsage(usagePage.events);
+        setLocalUsagePage(usagePage);
+      });
       return;
     }
     if (mode === "remote") {
-      const [snapshot, usage] = await Promise.all([
-        relayCommands.remoteState(),
-        relayCommands.remoteUsage({ page: 1, pageSize: 50, range: "daily" }).catch(() => null),
-      ]);
+      const request = ++remoteUsageRequest.current;
+      ++localUsageRequest.current;
+      const usage = relayCommands.remoteUsage({ page: 1, pageSize: 50, range: "daily" }).catch(() => null);
+      const snapshot = await relayCommands.remoteState();
       setRuntime(snapshot);
       setLocalUsage([]);
       setLocalUsagePage(null);
-      setRemoteUsage(usage?.events ?? []);
-      setRemoteUsagePage(usage);
+      void usage.then((usagePage) => {
+        if (request !== remoteUsageRequest.current || !usagePage) return;
+        setRemoteUsage(usagePage.events);
+        setRemoteUsagePage(usagePage);
+      });
       return;
     }
-    const state = await getState();
+    ++localUsageRequest.current;
+    ++remoteUsageRequest.current;
+    const [state, snapshot] = await Promise.all([getState(), relayCommands.localState()]);
     setReadyState(state);
-    setRuntime(null);
+    setRuntime(snapshot);
     setLocalUsagePage(null);
     setRemoteUsage([]);
     setRemoteUsagePage(null);
-    if (state.hasSavedApiKey) {
-      const [stats, history] = await Promise.all([
-        getSavedKeyStats().catch(() => null),
-        getSavedKeyUsageHistory().then((value) => value.usage).catch(() => []),
-      ]);
-      setReadyStats(stats);
-      setReadyUsage(history);
-    } else {
-      setReadyStats(null);
-      setReadyUsage([]);
-    }
+    setReadyStats(null);
+    setReadyUsage([]);
   }, [mode]);
 
   const loadLocalUsage = useCallback(async (query: RemoteUsageQuery) => {
     const request = ++localUsageRequest.current;
     const usage = await relayCommands.localUsagePage(query);
     if (request !== localUsageRequest.current) return;
+    setLocalUsage(usage.events);
     setLocalUsagePage(usage);
   }, []);
 
@@ -138,14 +141,54 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     refresh()
       .catch(() => active && setFeedback({ kind: "error", key: "feedback.refreshFailed" }))
-      .finally(() => active && setLoading(false));
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+        if (performance.getEntriesByName("zenith:interactive", "mark").length) return;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          performance.mark("zenith:interactive");
+          performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
+        }));
+      });
     return () => {
       active = false;
     };
   }, [refresh]);
 
   useEffect(() => {
-    if (page !== "pool" || !runtime?.gateway.running || mode === "zenith") return;
+    if (!accountIdentitiesVisible) {
+      setAccountIdentitiesBusy(false);
+      return;
+    }
+    if (!canRevealAccountIdentities || !revealableAccountSignature) {
+      const prefix = `${mode}:`;
+      setRevealedAccountIdentities((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix))));
+      setAccountIdentitiesBusy(false);
+      return;
+    }
+    let active = true;
+    const accountIds = revealableAccountSignature.split("\0");
+    const prefix = `${mode}:`;
+    setAccountIdentitiesBusy(true);
+    void Promise.allSettled(accountIds.map((accountId) => mode === "local"
+      ? relayCommands.revealLocalAccountIdentity(accountId)
+      : relayCommands.revealRemoteAccountIdentity(accountId)))
+      .then((results) => {
+        if (!active) return;
+        setRevealedAccountIdentities((current) => {
+          const next = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix)));
+          for (const result of results) {
+            if (result.status === "fulfilled") next[`${prefix}${result.value.accountId}`] = result.value.identity;
+          }
+          return next;
+        });
+      })
+      .finally(() => { if (active) setAccountIdentitiesBusy(false); });
+    return () => { active = false; };
+  }, [accountIdentitiesVisible, canRevealAccountIdentities, mode, revealableAccountSignature]);
+
+  useEffect(() => {
+    if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith") return;
     if (mode === "remote" && !runtime.capabilities.features.includes("runtime_routing")) return;
     let active = true;
     let pending = false;
@@ -190,9 +233,38 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    document.documentElement.dataset.compact = compact ? "true" : "false";
-  }, [theme, compact]);
+    let active = true;
+    let queued = false;
+    let unlisten: (() => void) | undefined;
+    void onStateChanged(() => {
+      if (!active || queued || document.visibilityState !== "visible") return;
+      queued = true;
+      window.setTimeout(() => {
+        if (!active) return;
+        void refresh().catch(() => undefined).finally(() => { queued = false; });
+      }, 200);
+    }).then((stop) => {
+      if (active) unlisten = stop;
+      else stop();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
+    const applyTheme = () => {
+      document.documentElement.dataset.theme = theme;
+      const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
+      void setWindowBackgroundColor(dark ? "#121719" : "#f2f5f6");
+    };
+    applyTheme();
+    if (theme !== "system") return;
+    systemTheme.addEventListener("change", applyTheme);
+    return () => systemTheme.removeEventListener("change", applyTheme);
+  }, [theme]);
 
   useEffect(() => {
     if (!feedback) return;
@@ -233,58 +305,19 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     "feedback.launched",
   ), [perform]);
 
-  const inspectProfileHistory = useCallback(async (binding: ProfileBinding, launchAfter: boolean) => {
-    const result: { current: HistoryRepairPreview | null } = { current: null };
-    const target = binding.credentialKind === "local_gateway" ? "zenith_relay_local" : "openai";
-    const previewed = await perform("history-repair-preview", async () => {
-      result.current = await relayCommands.previewHistoryRepair([binding.profileDir], target);
-    });
-    const preview = result.current;
-    if (!previewed || !preview) return launchAfter ? launchAttachedCodex() : false;
-    if (preview.rolloutRecordCount + preview.sqliteRowCount > 0) {
-      if (preview.codexRunning && !await perform("history-repair-stop", relayCommands.stopManagedCodex)) return false;
-      const repaired = await perform(
-        "history-repair-apply",
-        () => relayCommands.applyHistoryRepair(preview.sessionId),
-        launchAfter ? undefined : "feedback.saved",
-      );
-      if (!repaired) return false;
-    }
-    return launchAfter ? launchAttachedCodex() : true;
-  }, [launchAttachedCodex, perform]);
-
-  const offerProfileSnapshot = useCallback(async () => {
-    if (!snapshotBeforeSwitch || !await confirm(t("profiles.switchSnapshotConfirm"))) return true;
-    const date = new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date());
-    return perform(
-      "profile-snapshot-switch",
-      () => relayCommands.createProfileSnapshot(t("profiles.switchSnapshotName", { date })),
-      "feedback.snapshotCreated",
-    );
-  }, [confirm, i18n.language, perform, snapshotBeforeSwitch, t]);
-
   const activateCodexProfile = useCallback(async (
     id: string,
     work: () => Promise<ProfileActivation>,
     launchAfter = false,
   ) => {
-    if (!await offerProfileSnapshot()) return false;
-    const result: { current: ProfileActivation | null } = { current: null };
-    const activated = await perform(id, async () => {
-      result.current = await work();
-    }, launchAfter ? undefined : "feedback.profileAttached");
-    const activation = result.current;
-    if (!activated || !activation) return false;
-    if (activation.repairRecommended || launchAfter) {
-      return inspectProfileHistory(activation.binding, launchAfter);
-    }
-    return true;
-  }, [inspectProfileHistory, offerProfileSnapshot, perform]);
+    const activated = await perform(id, work, launchAfter ? undefined : "feedback.profileAttached");
+    return activated && (!launchAfter || await launchAttachedCodex());
+  }, [launchAttachedCodex, perform]);
 
-  const launchCodexProfile = useCallback(async (binding: ProfileBinding) => {
+  const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
     const stopped = await perform("profile-stop", relayCommands.stopManagedCodex);
-    return stopped && inspectProfileHistory(binding, true);
-  }, [inspectProfileHistory, perform]);
+    return stopped && launchAttachedCodex();
+  }, [launchAttachedCodex, perform]);
 
   const finishOnboarding = useCallback((nextMode: RelayMode) => {
     localStorage.setItem("relay.onboarding", "1");
@@ -303,28 +336,47 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setThemeState(next);
   }, []);
 
-  const setCompact = useCallback((next: boolean) => {
-    localStorage.setItem("relay.compact", next ? "1" : "0");
-    setCompactState(next);
-  }, []);
-
-  const setSnapshotBeforeSwitch = useCallback((enabled: boolean) => {
-    localStorage.setItem("relay.snapshotBeforeSwitch", enabled ? "1" : "0");
-    setSnapshotBeforeSwitchState(enabled);
-  }, []);
-
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
     localStorage.setItem("relay.codexPoolOauthSelection", selection);
     localStorage.removeItem("relay.codexPoolOauthAccountId");
     setCodexPoolOauthSelectionState(selection);
   }, []);
 
+  const setAccountIdentitiesVisible = useCallback((visible: boolean) => {
+    localStorage.setItem("relay.accountIdentitiesVisible", visible ? "1" : "0");
+    setAccountIdentitiesVisibleState(visible);
+    if (!visible) setRevealedAccountIdentities({});
+  }, []);
+
+  const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
+    const accounts = runtime?.accounts ?? [];
+    const matches = accountId
+      ? accounts.filter((account) => account.id === accountId)
+      : fallbackLabel ? accounts.filter((account) => account.label === fallbackLabel) : [];
+    const account = matches.length === 1 ? matches[0] : null;
+    if (!account) return fallbackLabel ?? null;
+    return accountIdentitiesVisible && canRevealAccountIdentities && account.secretAvailable ? revealedAccountIdentities[`${mode}:${account.id}`] ?? account.label : account.label;
+  }, [accountIdentitiesVisible, canRevealAccountIdentities, mode, revealedAccountIdentities, runtime?.accounts]);
+
+  const displayRuntime = useMemo<RuntimeSnapshot | null>(() => runtime ? {
+    ...runtime,
+    accounts: runtime.accounts.map((account): AccountSummary => {
+      const displayName = accountDisplayName(account.id, account.label) ?? account.label;
+      return { ...account, label: displayName, identityHint: displayName };
+    }),
+  } : null, [accountDisplayName, runtime]);
+
   const value = useMemo<RelayContextValue>(() => ({
     mode,
     setMode,
     page,
     setPage,
-    runtime,
+    runtime: displayRuntime,
+    accountIdentitiesVisible,
+    accountIdentitiesBusy,
+    canRevealAccountIdentities,
+    setAccountIdentitiesVisible,
+    accountDisplayName,
     localUsage,
     localUsagePage,
     loadLocalUsage,
@@ -347,13 +399,9 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     resetOnboarding,
     theme,
     setTheme,
-    compact,
-    setCompact,
-    snapshotBeforeSwitch,
-    setSnapshotBeforeSwitch,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, runtime, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, compact, setCompact, snapshotBeforeSwitch, setSnapshotBeforeSwitch, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

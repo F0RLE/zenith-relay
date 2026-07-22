@@ -1,10 +1,24 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { installTauriMock } from "./tauri-mock";
 
 const modes = ["local", "remote", "zenith"] as const;
 const themes = ["light", "dark"] as const;
 const locales = ["en", "ru"] as const;
 const viewports = [{ width: 1160, height: 760 }, { width: 840, height: 560 }] as const;
+
+async function expectTopLevelEmptyCentered(page: Page) {
+  const [pageBox, headerBox, emptyBox, paddingBottom] = await Promise.all([
+    page.locator(".relay-page").boundingBox(),
+    page.locator(".relay-page-header").boundingBox(),
+    page.locator(".relay-page > .relay-empty").boundingBox(),
+    page.locator(".relay-page").evaluate((element) => Number.parseFloat(getComputedStyle(element).paddingBottom)),
+  ]);
+  expect(pageBox).not.toBeNull();
+  expect(headerBox).not.toBeNull();
+  expect(emptyBox).not.toBeNull();
+  const availableCenter = (headerBox!.y + headerBox!.height + pageBox!.y + pageBox!.height - paddingBottom) / 2;
+  expect(Math.abs(emptyBox!.y + emptyBox!.height / 2 - availableCenter)).toBeLessThanOrEqual(2);
+}
 
 for (const locale of locales) {
   for (const mode of modes) {
@@ -15,10 +29,11 @@ for (const locale of locales) {
           await page.setViewportSize(viewport);
           await page.goto("/");
           const nav = page.locator(".relay-sidebar nav button");
-          const expectedPages = mode === "zenith" ? 6 : 7;
+          const expectedPages = mode === "zenith" ? 4 : 7;
           await expect(nav).toHaveCount(expectedPages);
           for (let index = 0; index < expectedPages; index += 1) {
             await nav.nth(index).click();
+            await expect(page.locator(".relay-page-header h1")).toBeVisible();
             const settingsSections = page.locator(".settings-layout > nav button");
             const tabControls = page.locator(".relay-tabs [role=tab]");
             const stateControls = await settingsSections.count() ? settingsSections : tabControls;
@@ -26,7 +41,6 @@ for (const locale of locales) {
 
             for (let state = 0; state < stateCount; state += 1) {
               if (await stateControls.count()) await stateControls.nth(state).click();
-              await expect(page.locator(".relay-page-header h1")).toBeVisible();
               expect(await page.locator(".relay-page-actions .relay-button.primary").count()).toBeLessThanOrEqual(1);
               await expect(page.locator("body")).not.toContainText(/(?:common|nav|overview|connections|pool|gateway|usage|profiles|settings|updates)\.[a-z]/);
               expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -68,11 +82,6 @@ for (const locale of locales) {
                 const header = subtitle.closest<HTMLElement>(".relay-page-header")?.getBoundingClientRect();
                 return Boolean(header && header.bottom - subtitle.getBoundingClientRect().bottom >= 8);
               }))).toBe(true);
-              expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>(".history-repair > .inline-actions")].every((actions) => {
-                const field = actions.previousElementSibling?.getBoundingClientRect();
-                return Boolean(field && actions.getBoundingClientRect().top - field.bottom >= 8);
-              }))).toBe(true);
-
               const stateSuffix = stateCount > 1 ? `-tab-${state + 1}` : "";
               await page.screenshot({ path: `output/playwright/${locale}-${mode}-${theme}-${viewport.width}x${viewport.height}-page-${index + 1}${stateSuffix}.png` });
               if (state === 0 && stateCount > 1) {
@@ -90,23 +99,26 @@ for (const scenario of [
   { theme: "light", viewport: { width: 1160, height: 760 } },
   { theme: "dark", viewport: { width: 840, height: 560 } },
 ] as const) {
-  test(`API connection redesign ${scenario.theme} ${scenario.viewport.width}x${scenario.viewport.height}`, async ({ page }) => {
+  test(`Choose API source library ${scenario.theme} ${scenario.viewport.width}x${scenario.viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "zenith", theme: scenario.theme, populated: false, readyConnected: false });
     await page.setViewportSize(scenario.viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Подключения", exact: true }).click();
-    await expect(page.getByText("API пока не подключён", { exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Подключить API", exact: true })).toHaveCount(1);
+    await expect(page.getByRole("tab", { name: "Источники API", exact: true })).toBeVisible();
+    await expect(page.getByText("Нет источников API", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Добавить источник", exact: true })).toHaveCount(1);
     await page.screenshot({ path: `output/playwright/api-empty-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
-    await page.getByRole("button", { name: "Подключить API", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Подключить API" });
+    await page.getByRole("button", { name: "Добавить источник", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Добавить источник" });
     await expect(dialog).toBeVisible();
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
     })).toBe(true);
     expect(await dialog.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
+    await expect(dialog.getByRole("button", { name: "Получить API-ключ", exact: true })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Сохранить", exact: true })).toBeDisabled();
     await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
     await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
@@ -132,7 +144,7 @@ for (const scenario of [
   });
 }
 
-test("API source form keeps optional controls compact", async ({ page }) => {
+test("API source entry uses the shared compact provider picker", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: false });
   await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
@@ -140,13 +152,67 @@ test("API source form keeps optional controls compact", async ({ page }) => {
   await page.getByRole("tab", { name: "Источники API" }).click();
   await page.getByRole("button", { name: "Добавить источник", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Добавить источник" });
-  await expect(dialog.getByText("Модели и маршрутизация", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("Модели", { exact: true })).toBeHidden();
+  await expect(dialog.getByRole("radio")).toHaveCount(4);
+  await dialog.getByRole("radio", { name: /Свой API/ }).click();
+  await expect(dialog.getByText("Модели и маршрутизация", { exact: true })).toHaveCount(0);
+  expect(await dialog.getByLabel("Ключ внешнего API").evaluate((input) => input.closest(".secret-field")!.getBoundingClientRect().bottom <= input.closest("section")!.querySelector("footer")!.getBoundingClientRect().top)).toBe(true);
   await page.screenshot({ path: "output/playwright/api-source-compact-ru-light-840x560.png" });
-  await dialog.locator("summary").click();
-  await dialog.getByLabel("Модели", { exact: true }).scrollIntoViewIfNeeded();
-  await expect(dialog.getByLabel("Модели", { exact: true })).toBeVisible();
-  await page.screenshot({ path: "output/playwright/api-source-advanced-ru-light-840x560.png" });
+});
+
+for (const scenario of [
+  { theme: "light", viewport: { width: 1160, height: 760 } },
+  { theme: "dark", viewport: { width: 840, height: 560 } },
+] as const) {
+  test(`proxy storage ${scenario.theme} ${scenario.viewport.width}x${scenario.viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: scenario.theme, populated: true, accountCount: 3, proxyCount: 5 });
+    await page.setViewportSize(scenario.viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Подключения", exact: true }).click();
+    await page.getByRole("tab", { name: "Прокси" }).click();
+
+    const list = page.locator(".proxy-storage-list");
+    await expect(list).toBeVisible();
+    await expect(list.locator(".proxy-storage-account-count").first()).toHaveText("Business Workspace");
+    await expect(list.locator(".proxy-storage-endpoint small").first()).toHaveAttribute("title", /country\/region/);
+    expect(await list.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.locator(".proxy-storage-row").evaluateAll((rows) => rows.every((row) => [...row.children].every((child) => {
+      const rowRect = row.getBoundingClientRect();
+      const childRect = child.getBoundingClientRect();
+      return childRect.left >= rowRect.left - 1 && childRect.right <= rowRect.right + 1;
+    })))).toBe(true);
+    await page.screenshot({ path: `output/playwright/proxy-storage-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+
+    await page.getByRole("button", { name: "Управлять привязанными аккаунтами" }).first().click();
+    const dialog = page.getByRole("dialog", { name: "Аккаунты прокси" });
+    await expect(dialog).toBeVisible();
+    expect(await dialog.locator(".account-plan-badge").evaluateAll((badges) => badges.every((badge) => ["flex", "inline-flex"].includes(getComputedStyle(badge).display) && badge.getBoundingClientRect().height <= 21))).toBe(true);
+    expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
+    await page.screenshot({ path: `output/playwright/proxy-accounts-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
+  });
+}
+
+test("API source routing editor stays readable in the standard window", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Пул", exact: true }).click();
+  await page.getByRole("button", { name: "Правила участника пула: Example compatible API" }).click();
+
+  const dialog = page.getByRole("dialog", { name: /Правила участника пула.*Example compatible API/ });
+  await expect(dialog.getByRole("radiogroup", { name: "Роль API-источника" }).getByRole("radio")).toHaveCount(3);
+  await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
+  await expect(dialog.getByText("Доля трафика", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel("Не назначать запросы")).toHaveCount(0);
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-840x560.png" });
+  await page.setViewportSize({ width: 1024, height: 681 });
+  await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-1024x681.png" });
+  await dialog.locator('[data-member-model-id="gpt-5.4"]').scrollIntoViewIfNeeded();
+  await expect(dialog.locator('[data-member-model-id="gpt-5.4"]')).toBeVisible();
+  await page.screenshot({ path: "output/playwright/api-source-models-ru-dark-1024x681.png" });
 });
 
 test("overview analytics remain readable through the full scroll", async ({ page }) => {
@@ -172,7 +238,7 @@ test("overview analytics remain readable through the full scroll", async ({ page
 for (const theme of themes) {
   for (const viewport of viewports) {
     test(`account import ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
-      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, importPreviewDelayMs: 500 });
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, importPreviewDelayMs: 500, importDescription: "## Состав пакета\n\n- Два Business-аккаунта\n- Подписка активна до августа" });
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
@@ -187,11 +253,13 @@ for (const theme of themes) {
       expect(await dialog.locator("button span").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
       await page.screenshot({ path: `output/playwright/account-import-empty-ru-${theme}-${viewport.width}x${viewport.height}.png` });
 
-      await dialog.getByRole("button", { name: "Выбрать JSON-файлы" }).click();
-      await expect(dialog.getByText("Читаем файлы учётных записей", { exact: true })).toBeVisible();
+      await dialog.getByRole("button", { name: "Выбрать файлы аккаунтов" }).click();
+      await expect(dialog.getByText("Подготавливаем импорт", { exact: true })).toBeVisible();
       await page.screenshot({ path: `output/playwright/account-import-loading-ru-${theme}-${viewport.width}x${viewport.height}.png` });
       await expect(dialog.getByLabel("Выбрать Imported account для импорта")).toBeChecked();
       await expect(dialog.getByLabel("Выбрать Second imported account для импорта")).toBeChecked();
+      await expect(dialog.getByText("Описание пакета", { exact: true })).toBeVisible();
+      await expect(dialog.getByRole("heading", { name: "Состав пакета" })).toBeVisible();
       await expect(dialog.locator('.account-plan-badge[data-plan="k12"]')).toHaveCount(3);
       expect(await dialog.locator(".relay-dialog-body").evaluate((body) => {
         const preview = body.querySelector<HTMLElement>(".import-preview")!;
@@ -207,32 +275,40 @@ for (const theme of themes) {
   }
 }
 
-for (const viewport of [{ width: 1344, height: 900 }, { width: 840, height: 560 }] as const) {
-  test(`settings layout ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
-    await page.setViewportSize(viewport);
-    await page.goto("/");
-    await page.getByRole("button", { name: "Настройки", exact: true }).click();
-    await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay", { exact: true })).toBeVisible();
-    await expect(page.locator(".settings-path-grid dt")).toHaveText(["Рабочие данные", "Восстановление и снимки", "Временные файлы и кэш", "Журналы", "Профиль ChatGPT"]);
+for (const theme of ["light", "dark"] as const) {
+  for (const viewport of [{ width: 1344, height: 900 }, { width: 1160, height: 760 }, { width: 840, height: 560 }] as const) {
+    test(`settings layout ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+      await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
+      await page.setViewportSize(viewport);
+      await page.goto("/");
+      await page.getByRole("button", { name: "Настройки", exact: true }).click();
+      await expect(page.getByText("C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data", { exact: true })).toBeVisible();
 
-    const groups = page.locator(".settings-group");
-    await expect(groups).toHaveCount(6);
-    const boxes = await groups.evaluateAll((items) => items.map((item) => {
-      const rect = item.getBoundingClientRect();
-      return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
-    }));
-    expect(boxes.every((box) => box.overflow === 0)).toBe(true);
-    if (viewport.width > 900) {
-      expect(boxes[0].width).toBeGreaterThan(boxes[1].width * 1.9);
-      expect(Math.abs(boxes[1].top - boxes[2].top)).toBeLessThanOrEqual(1);
-      expect(Math.abs(boxes[3].top - boxes[4].top)).toBeLessThanOrEqual(1);
-      expect(boxes[5].width).toBeCloseTo(boxes[0].width, 0);
-    } else {
+      const groups = page.locator(".settings-group");
+      const pageBox = await page.locator(".settings-page").boundingBox();
+      const headerBox = await page.locator(".settings-page > .relay-page-header").boundingBox();
+      const groupsBox = await page.locator(".settings-groups").boundingBox();
+      expect(pageBox).not.toBeNull();
+      expect(headerBox).not.toBeNull();
+      expect(groupsBox).not.toBeNull();
+      expect(Math.abs(groupsBox!.x + groupsBox!.width / 2 - (pageBox!.x + pageBox!.width / 2))).toBeLessThanOrEqual(2);
+      const availableBottom = pageBox!.y + pageBox!.height - 32;
+      const availableHeight = availableBottom - (headerBox!.y + headerBox!.height);
+      if (groupsBox!.height <= availableHeight) {
+        const topGap = groupsBox!.y - (headerBox!.y + headerBox!.height);
+        const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
+        expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
+      }
+      await expect(groups).toHaveCount(3);
+      const boxes = await groups.evaluateAll((items) => items.map((item) => {
+        const rect = item.getBoundingClientRect();
+        return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
+      }));
+      expect(boxes.every((box) => box.overflow === 0)).toBe(true);
       expect(Math.max(...boxes.map((box) => box.width)) - Math.min(...boxes.map((box) => box.width))).toBeLessThanOrEqual(1);
-    }
-    await page.screenshot({ path: `output/playwright/settings-ru-light-${viewport.width}x${viewport.height}.png` });
-  });
+      await page.screenshot({ path: `output/playwright/settings-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    });
+  }
 }
 
 test("disabled model state stays readable in the compact dark window", async ({ page }) => {
@@ -241,14 +317,45 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.goto("/");
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await page.getByRole("tab", { name: "Правила моделей" }).click();
-  const model = page.locator('.model-rules li[data-model-id="gpt-5.4-mini"]');
+  const table = page.locator(".model-rules-table");
+  await expect(table.getByRole("columnheader")).toHaveCount(5);
+  expect(await table.locator("th, td").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
+  expect(await table.locator("th").evaluateAll((headers) => new Set(headers.map((header) => header.getBoundingClientRect().height)).size)).toBe(1);
+  const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
   await expect(model).toHaveAttribute("data-enabled", "false");
-  await expect(model).toContainText("Отключена");
-  expect(await page.locator(".model-rules li").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+  await expect(model.locator('.relay-status-icon[aria-label="Отключена"]')).toBeVisible();
+  expect(await page.locator(".model-rules tbody tr").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   await expect(page.locator(".model-sort-select")).toHaveCount(0);
   await page.screenshot({ path: "output/playwright/model-rules-disabled-ru-dark-840x560.png" });
 });
+
+for (const viewport of viewports) {
+  test(`custom model price ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 2 });
+    await page.setViewportSize(viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Пул", exact: true }).click();
+    await page.getByRole("tab", { name: "Правила моделей" }).click();
+    const model = page.locator('.model-rules tbody tr[data-model-id="o3"]');
+    await model.getByRole("button", { name: "Изменить цену o3" }).click();
+    const dialog = page.getByRole("dialog", { name: "Цена o3" });
+    await dialog.getByLabel("Вход", { exact: true }).fill("1.25");
+    await dialog.getByLabel("Кэшированный вход").fill("0.125");
+    await dialog.getByLabel("Выход", { exact: true }).fill("7.5");
+    expect(await dialog.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
+    })).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-price-dialog-ru-dark-${viewport.width}x${viewport.height}.png` });
+    await dialog.getByRole("button", { name: "Сохранить" }).click();
+    await expect(model).toContainText("Своя цена за 1 млн токенов");
+    await expect(model).toContainText("Кэш 0,125 $");
+    expect(await model.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/model-price-saved-ru-dark-${viewport.width}x${viewport.height}.png` });
+  });
+}
 
 for (const viewport of viewports) {
   test(`empty pool and quota policy ${viewport.width}x${viewport.height}`, async ({ page }) => {
@@ -305,11 +412,12 @@ for (const viewport of viewports) {
     await page.screenshot({ path: `output/playwright/pool-header-actions-ru-dark-${viewport.width}x${viewport.height}.png` });
 
     await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-    await expect(page.locator(".pool-priority-label")).toContainText("Маршрутизация");
+    await expect(page.locator(".pool-priority-label")).toContainText("Порядок использования");
     await expect(page.getByRole("button", { name: "Настройки распределения", exact: true })).toBeVisible();
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
+    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Режим запросов" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения", "Настройки обновления квот"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label") ?? item.textContent?.trim()))).resolves.toEqual(["Обновить квоты"]);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
@@ -335,62 +443,75 @@ for (const viewport of viewports) {
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   });
 
-  test(`pool members use one fixed list ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`pool member cards ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 4, usageAccountIndex: 3 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
+    await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
     const speed = page.getByRole("switch", { name: "Режим запросов" });
     await speed.check();
     await expect(speed).toBeChecked();
+    await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
+    const distribution = page.getByRole("dialog", { name: "Распределение" });
+    await expect(distribution).not.toContainText("Режим запросов");
+    await distribution.getByRole("button", { name: /^Как выбирать аккаунт:/ }).click();
+    await page.locator('[role="option"][data-value="subscription_plan"]').click();
+    await expect(distribution.locator("[data-subscription-plan]")).toHaveCount(4);
+    expect(await distribution.evaluate((element) => element.scrollWidth <= element.clientWidth && element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
+    await page.screenshot({ path: `output/playwright/pool-subscription-order-${viewport.width}x${viewport.height}.png` });
+    await distribution.getByRole("button", { name: "Отмена", exact: true }).click();
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
     const members = page.locator(".pool-member-list");
     await expect(members.locator(".pool-member-card")).toHaveCount(5);
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
-    await expect(members).toHaveAttribute("data-layout", "list");
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
     await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
     await expect(members).toContainText("API-экв.");
     await expect(members).not.toContainText("Доля");
-    expect(await page.locator(".pool-speed-control").evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
-    await page.screenshot({ path: `output/playwright/pool-layout-list-${viewport.width}x${viewport.height}.png` });
-    await expect(page.getByRole("button", { name: "Компактный вид пула" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Сетка участников пула" })).toHaveCount(0);
-    expect(await page.evaluate(() => localStorage.getItem("relay.pool.memberLayout"))).toBeNull();
+    expect(await page.getByRole("button", { name: "Настройки распределения", exact: true }).evaluate((control) => control.scrollWidth <= control.clientWidth)).toBe(true);
+    await expect(page.getByRole("radio", { name: "Компактный вид пула" })).toHaveCount(0);
+    await expect(members.locator(".pool-member-card-quota").first()).toBeVisible();
+    await page.mouse.move(1, 1);
+    await page.screenshot({ path: `output/playwright/pool-members-${viewport.width}x${viewport.height}.png` });
+    if (viewport.width === 1160) {
+      await page.setViewportSize({ width: 2048, height: 1152 });
+      await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
+      await page.waitForTimeout(200);
+      expect(await members.locator(".pool-member-card").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+      await page.screenshot({ path: "output/playwright/pool-members-ru-light-2048x1152.png" });
+    }
+    expect(await page.evaluate(() => localStorage.getItem("relay.poolLayout"))).toBeNull();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    expect(await members.locator(".pool-member-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
-    expect(await members.locator(".quota-meter-heading small").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+    expect(await members.locator(".pool-member-card").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   });
 
-  test(`pool members use one fixed list en light ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`pool member cards en light ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true, accountCount: 4, usageAccountIndex: 3 });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Members", "Model Rules"]);
     const members = page.locator(".pool-member-list");
 
-    await expect(members).toHaveAttribute("data-layout", "list");
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
     await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
     await expect(members).toContainText("API equiv.");
-    await expect(page.getByRole("button", { name: "Compact pool view" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Pool card grid" })).toHaveCount(0);
-    expect(await page.evaluate(() => localStorage.getItem("relay.pool.memberLayout"))).toBeNull();
-    await page.screenshot({ path: `output/playwright/pool-layout-list-en-light-${viewport.width}x${viewport.height}.png` });
+    await expect(page.getByRole("radio", { name: "Compact pool view" })).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("relay.poolLayout"))).toBeNull();
+    await page.mouse.move(1, 1);
+    await page.screenshot({ path: `output/playwright/pool-members-en-light-${viewport.width}x${viewport.height}.png` });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    expect(await members.locator(".pool-member-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+    expect(await members.locator(".pool-member-card").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   });
 
   test(`proxy controls ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", theme: "light", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
-    await page.getByRole("button", { name: "Gateway", exact: true }).click();
-    await page.locator(".proxy-settings").scrollIntoViewIfNeeded();
-    await expect(page.locator(".proxy-settings")).toBeVisible();
-    await page.screenshot({ path: `output/playwright/proxy-common-${viewport.width}x${viewport.height}.png` });
-
     await page.getByRole("button", { name: "Connections", exact: true }).click();
-    await page.getByRole("button", { name: "Common", exact: true }).click();
+    await page.locator(".account-card .account-row-menu").first().locator("summary").click();
+    await page.getByRole("menuitem", { name: "Proxy: Common", exact: true }).click();
     const accountProxy = page.getByRole("dialog", { name: "Account proxy" });
     await expect(accountProxy).toBeVisible();
     await expect(accountProxy.getByRole("radio", { name: /Assign automatically/ })).toBeVisible();
@@ -399,7 +520,7 @@ for (const viewport of viewports) {
     await accountProxy.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("tab", { name: "Proxies" }).click();
-    await expect(page.locator(".proxy-storage-summary")).toContainText("Total3");
+    await expect(page.locator(".proxy-storage-counts")).toContainText("Total3");
     await page.screenshot({ path: `output/playwright/proxy-storage-${viewport.width}x${viewport.height}.png` });
     await page.getByRole("button", { name: "Import", exact: true }).click();
     const proxyImport = page.getByRole("dialog", { name: "Import proxies" });
@@ -433,6 +554,9 @@ for (const viewport of viewports) {
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Copy JSON" })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Download JSON" })).toBeVisible();
+    await dialog.getByLabel("Markdown description").fill("## Package contents\n\n- Two Business accounts\n- Active subscription");
+    await dialog.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(dialog.getByRole("heading", { name: "Package contents" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/account-export-${viewport.width}x${viewport.height}.png` });
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -448,7 +572,7 @@ for (const viewport of viewports) {
     await page.locator(".account-card .account-row-menu summary").click();
     const menu = page.locator(".account-card .account-row-menu [role=menu]");
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("menuitem")).toHaveText(["Export", "Disable", "Delete"]);
+    await expect(menu.getByRole("menuitem")).toHaveText(["Proxy: Common", "Export", "Disable", "Delete"]);
     await page.screenshot({ path: `output/playwright/account-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -457,14 +581,15 @@ for (const viewport of viewports) {
   });
 
   test(`account error details ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3, quotaAvailable: true, accountAuthReason: "invalid_grant" });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Подключения", exact: true }).click();
-    await page.getByRole("group", { name: "Фильтр по подписке" }).getByRole("button", { name: "С ошибками (1)" }).click();
-    await page.locator(".account-error-line").click();
+    await page.locator('.account-filter-menu').filter({ has: page.getByRole("button", { name: /^Фильтр по подписке:/ }) }).getByRole("button").click();
+    await page.locator('[role="option"][data-value="errors"]').click();
+    await page.locator(".account-status-button").click();
     const dialog = page.getByRole("dialog", { name: "Технические детали ошибки" });
-    await expect(dialog.locator("pre")).toContainText('"code": "quota_transport"');
+    await expect(dialog.locator("pre")).toContainText('"code": "auth_invalid_grant"');
     await page.screenshot({ path: `output/playwright/account-error-details-${viewport.width}x${viewport.height}.png` });
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -477,9 +602,12 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Connections", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Refresh all quotas" })).toBeVisible();
     await page.locator(".account-bulk-menu summary").click();
     const menu = page.locator(".account-bulk-menu [role=menu]");
-    await expect(menu.getByRole("menuitem")).toHaveCount(2);
+    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.getByRole("menuitem", { name: "Refresh all quotas" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "Refresh and delete non-working accounts" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/account-bulk-actions-${viewport.width}x${viewport.height}.png` });
     expect(await menu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -493,7 +621,7 @@ for (const viewport of viewports) {
       await page.setViewportSize(viewport);
       await page.goto("/");
       await page.getByRole("button", { name: "Подключения", exact: true }).click();
-      await page.getByRole("button", { name: "Обновить и удалить нерабочие записи" }).hover();
+      await page.getByRole("button", { name: "Обновить все квоты" }).hover();
       const tooltip = page.getByRole("tooltip");
       await expect(tooltip).toBeVisible();
       await page.screenshot({ path: `output/playwright/icon-tooltip-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -534,11 +662,11 @@ for (const viewport of viewports) {
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.locator(".relay-sidebar nav button").nth(1).click();
-    await page.getByRole("button", { name: "Показать имя полностью" }).click();
+    await page.getByRole("button", { name: "Показать все аккаунты полностью" }).click();
     const identity = page.locator(".account-card").first().locator(".account-identity > strong");
     await expect(identity).toHaveText("person@example.test");
     await expect(page.locator(".account-card").first().getByText("Personal Plus", { exact: true })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Скрыть полное имя" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Скрыть все аккаунты" })).toBeVisible();
     await page.screenshot({ path: `output/playwright/account-identity-ru-${viewport.width}x${viewport.height}.png` });
     expect(await identity.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   });
@@ -550,57 +678,30 @@ for (const viewport of viewports) {
     await page.locator(".relay-sidebar nav button").nth(1).click();
     const cards = page.locator(".account-card");
     await expect(cards).toHaveCount(3);
-    await expect(page.getByRole("group", { name: "Фильтр по подписке" }).getByRole("button")).toHaveCount(5);
+    await expect(page.locator(".account-filter-menu")).toHaveCount(2);
     const business = cards.filter({ has: page.getByText("Business Workspace", { exact: true }) });
     const backup = cards.filter({ has: page.getByText("Backup account", { exact: true }) });
     await expect(business).toContainText("Business");
     await expect(business).toContainText("5 недель");
     await expect(business.locator(".quota-meter")).toHaveCount(1);
     await expect(backup.locator(".quota-meter")).toHaveCount(1);
-    await expect(backup.locator(".account-error-line")).toContainText("Ошибка подключения");
-    await expect(backup.locator(".account-error-line code")).toHaveText("quota_transport");
-    await expect(business.locator(".account-subscription-line")).toContainText("Действует до");
-    await expect(business.locator(".account-subscription-countdown")).toHaveText(/через \d+/);
+    await expect(backup.locator(".account-status-button")).toHaveCount(0);
+    await expect(backup.locator(".relay-status-icon")).toHaveAttribute("aria-label", "Не маршрутизируется: Free");
+    await expect(backup).not.toContainText("quota_transport");
+    await expect(business.locator(".account-subscription-line")).toContainText(/\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}/);
+    await expect(business.locator(".account-subscription-countdown")).toHaveText(/^\d+ дн\.$/);
     await expect(backup.locator(".account-subscription-line")).toHaveText("Дата окончания подписки не указана");
     expect(await cards.evaluateAll((items) => items.every((item) => !item.textContent?.includes("Модели")))).toBe(true);
     await page.screenshot({ path: `output/playwright/multiple-accounts-ru-${viewport.width}x${viewport.height}.png` });
-    expect(await cards.evaluateAll((items) => {
-      const columns = items.map((item) => [".account-identity", ".account-facts", ".account-row-action-list"].map((selector) => item.querySelector<HTMLElement>(selector)?.getBoundingClientRect().left ?? -1));
-      return columns.every((row) => row.every((left, index) => Math.abs(left - columns[0][index]) <= 1));
-    })).toBe(true);
-    expect(await cards.evaluateAll((items, narrow) => items.every((item) => {
-      const identity = item.querySelector<HTMLElement>(".account-identity")?.getBoundingClientRect();
-      const facts = item.querySelector<HTMLElement>(".account-facts")?.getBoundingClientRect();
-      if (!identity || !facts) return false;
-      return narrow
-        ? facts.top >= identity.bottom
-        : Math.abs(identity.top - facts.top) <= 1 && Math.abs(identity.height - facts.height) <= 1;
-    }), viewport.width <= 1050)).toBe(true);
-    expect(await page.locator(".account-plan-filters").evaluateAll((items) => items.every((element) => element.scrollWidth >= element.clientWidth))).toBe(true);
-    expect(await page.locator(".account-error-line").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await page.locator(".account-list").evaluate((list, narrow) => getComputedStyle(list).gridTemplateColumns.split(" ").length === (narrow ? 2 : 3), viewport.width <= 900)).toBe(true);
+    expect(await page.locator(".account-filter-stack").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     expect(await page.locator(".account-subscription-line").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
-    expect(await cards.evaluateAll((items) => {
-      const rows = items.map((item) => [...item.querySelectorAll<HTMLElement>(".account-facts > div")].map((fact) => fact.getBoundingClientRect().width));
-      return rows.every((row) => row.length === 3 && row.every((width, index) => Math.abs(width - rows[0][index]) <= 1));
-    })).toBe(true);
-    const overflowingLabels = await page.locator(".account-facts span").evaluateAll((labels) => labels.flatMap((label) => {
-      if (label.scrollWidth <= label.clientWidth) return [];
-      const style = getComputedStyle(label);
-      return [{
-        text: label.textContent?.trim() ?? "",
-        className: label.className,
-        clientWidth: label.clientWidth,
-        scrollWidth: label.scrollWidth,
-        renderedWidth: label.getBoundingClientRect().width,
-        fontFamily: style.fontFamily,
-        fontSize: style.fontSize,
-      }];
-    }));
-    expect(overflowingLabels).toEqual([]);
-    await expect(page.locator(".proxy-status-button > svg")).toHaveCount(0);
+    await expect(cards.locator(".account-card-tools")).toHaveCount(3);
+    await expect(cards.locator(".account-row-action-list > .relay-icon-button")).toHaveCount(3);
+    await expect(cards.locator('.account-pool-action input[role="switch"]')).toHaveCount(3);
 
-    await expect(page.locator(".account-list")).toHaveAttribute("data-layout", "list");
-    await expect(page.locator(".view-layout-switcher")).toHaveCount(0);
+    await expect(page.locator(".account-list")).toHaveAttribute("data-layout", "grid");
+    await expect(page.getByRole("group", { name: "Вид учётных записей" })).toBeVisible();
     expect(await cards.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   });
 
@@ -612,12 +713,16 @@ for (const viewport of viewports) {
     const accounts = page.locator(".account-list");
     await expect(accounts.locator(".account-card")).toHaveCount(4);
 
-    await expect(accounts).toHaveAttribute("data-layout", "list");
+    await expect(accounts).toHaveAttribute("data-layout", "grid");
     await expect(accounts).toContainText("Pro account");
-    await page.screenshot({ path: `output/playwright/account-layout-list-en-light-${viewport.width}x${viewport.height}.png` });
+    await page.screenshot({ path: `output/playwright/account-layout-grid-en-light-${viewport.width}x${viewport.height}.png` });
 
-    await expect(page.locator(".view-layout-switcher")).toHaveCount(0);
+    await page.getByRole("button", { name: "List view" }).click();
+    await expect(accounts).toHaveAttribute("data-layout", "list");
+    await page.mouse.move(1, 1);
+    await page.screenshot({ path: `output/playwright/account-layout-list-en-light-${viewport.width}x${viewport.height}.png` });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    expect(await accounts.locator(".account-card").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     expect(await accounts.locator(".account-card-main").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     expect(await accounts.locator(".quota-meter-heading small").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   });
@@ -654,13 +759,16 @@ for (const viewport of viewports) {
       const strategy = dialog.getByRole("button", { name: /^Как выбирать аккаунт:/ });
       await expect(strategy).toHaveAttribute("data-value", "adaptive");
       await strategy.click();
-      await expect(page.getByRole("option", { name: "По квоте и нагрузке", exact: true })).toBeVisible();
-      await expect(page.getByRole("option", { name: "Сначала старые", exact: true })).toBeVisible();
-      await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(2);
+      await expect(page.getByRole("option", { name: "Автоматически", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "Максимальная квота", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "По окончанию подписки", exact: true })).toBeVisible();
+      await expect(page.getByRole("option", { name: "По группам подписок", exact: true })).toBeVisible();
+      await expect(page.getByRole("listbox").getByRole("option")).toHaveCount(4);
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).toContainText("Среди свободных аккаунтов выбирает максимальный остаток квоты, а при равенстве чередует их.");
+      await expect(dialog).not.toContainText("Режим запросов");
+      await expect(dialog).toContainText("Сначала сравнивает остаток квоты, затем нагрузку и равномерность распределения.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
       await page.screenshot({ path: `output/playwright/routing-distribution-ru-${theme}-${viewport.width}x${viewport.height}.png` });
@@ -695,7 +803,7 @@ for (const viewport of viewports) {
     }
     await expect(shell).not.toHaveClass(/sidebar-collapsed/);
     await expect(page.locator(".relay-sidebar nav button span").first()).toBeVisible();
-    await expect(page.locator(".sidebar-help-copy small")).toHaveText("v1.0.5");
+    await expect(page.locator(".sidebar-help-copy small")).toHaveText("v1.1.0");
     expect(await page.locator(".sidebar-footer").evaluate((footer) => {
       const bounds = footer.getBoundingClientRect();
       return [...footer.children].every((child) => {
@@ -723,10 +831,10 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Sources" }).click();
     const sourceActions = page.locator(".relay-table .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Test", "Edit", "Actions"]);
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch in ChatGPT", "Edit", "Actions"]);
     await sourceActions.locator("summary").click();
     const sourceMenu = page.getByRole("menu");
-    await expect(sourceMenu.getByRole("menuitem")).toHaveCount(2);
+    await expect(sourceMenu.getByRole("menuitem")).toHaveCount(3);
     await expect(sourceMenu.getByRole("menuitem", { name: "Delete" })).toBeVisible();
     expect(await sourceMenu.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -756,17 +864,6 @@ for (const viewport of viewports) {
     })).toBe(true);
     await page.screenshot({ path: `output/playwright/request-details-dialog-${viewport.width}x${viewport.height}.png` });
     await dialog.getByRole("button", { name: "Close" }).first().click();
-
-    await page.getByRole("button", { name: "Gateway", exact: true }).click();
-    await page.getByRole("tab", { name: "Diagnostics" }).click();
-    await page.getByRole("button", { name: "Preview" }).click();
-    dialog = page.getByRole("dialog", { name: "Support bundle preview" });
-    await expect(dialog).toBeVisible();
-    await page.screenshot({ path: `output/playwright/support-preview-dialog-${viewport.width}x${viewport.height}.png` });
-    expect(await dialog.evaluate((element) => {
-      const rect = element.getBoundingClientRect();
-      return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-    })).toBe(true);
   });
 }
 
@@ -871,62 +968,94 @@ for (const theme of themes) {
 }
 
 for (const viewport of viewports) {
-  test(`profile switch repairs automatically ${viewport.width}x${viewport.height}`, async ({ page }) => {
+  test(`profile switch ${viewport.width}x${viewport.height}`, async ({ page }) => {
     await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
     await page.getByRole("button", { name: "Подключения", exact: true }).click();
     await page.getByRole("button", { name: "Запустить в ChatGPT" }).click();
 
-    await page.getByRole("dialog", { name: "Подтверждение действия" }).getByRole("button", { name: "Отмена" }).click();
     await expect(page.getByText("Клиент запущен.")).toBeVisible();
     await expect(page.getByRole("dialog", { name: /видимость чатов/i })).toHaveCount(0);
-    const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((item) => item.command).filter((command) => ["launch_codex_account", "preview_codex_history_repair", "apply_codex_history_repair", "launch_managed_codex_profile"].includes(command)));
-    expect(commands).toEqual(["launch_codex_account", "preview_codex_history_repair", "apply_codex_history_repair", "launch_managed_codex_profile"]);
-    await page.screenshot({ path: `output/playwright/profile-switch-auto-repair-ru-dark-${viewport.width}x${viewport.height}.png` });
+    const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((item) => item.command).filter((command) => ["launch_codex_account", "launch_managed_codex_profile"].includes(command)));
+    expect(commands).toEqual(["launch_codex_account", "launch_managed_codex_profile"]);
+    await page.screenshot({ path: `output/playwright/profile-switch-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }
 
-for (const viewport of viewports) {
-  test(`profile history repair ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "light", populated: true });
+for (const theme of themes) {
+  for (const viewport of viewports) {
+    test(`profile recovery ${theme} ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
-    await page.getByRole("button", { name: "Профили", exact: true }).click();
-    await page.getByRole("tab", { name: "Исправление" }).click();
+    await page.getByRole("button", { name: "Восстановление", exact: true }).click();
 
-    const repair = page.locator(".history-repair");
-    const instances = repair.locator("fieldset");
-    const provider = repair.locator(".history-repair-controls > .relay-field");
-    expect(await repair.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
-    const [instancesBox, providerBox] = await Promise.all([instances.boundingBox(), provider.boundingBox()]);
-    expect(instancesBox).not.toBeNull();
-    expect(providerBox).not.toBeNull();
-    if (viewport.width > 900) {
-      expect(Math.abs(instancesBox!.y - providerBox!.y)).toBeLessThanOrEqual(4);
-    } else {
-      expect(providerBox!.y).toBeGreaterThanOrEqual(instancesBox!.y + instancesBox!.height + 12);
+    const recovery = page.locator(".profile-recovery");
+    const form = page.locator(".profile-snapshot-create");
+    const table = page.locator(".profile-snapshot-table");
+    await expect(page.getByRole("tab")).toHaveCount(0);
+    await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
+    const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
+    await page.getByLabel("Название снимка").fill(snapshotName);
+    await page.getByLabel("Название снимка").press("Enter");
+    await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
+    await page.locator(".global-feedback .relay-icon-button").click();
+    await page.getByLabel("Название снимка").fill("Новый снимок");
+    const createButton = page.getByRole("button", { name: "Создать снимок" });
+    await expect(createButton).toBeEnabled();
+    expect(await createButton.evaluate((element) => {
+      const parse = (value: string) => value.match(/[\d.]+/g)!.slice(0, 3).map(Number).map((channel) => channel / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+      const luminance = (value: string) => { const [red, green, blue] = parse(value); return 0.2126 * red + 0.7152 * green + 0.0722 * blue; };
+      const style = getComputedStyle(element);
+      const values = [luminance(style.color), luminance(style.backgroundColor)].sort((left, right) => right - left);
+      return (values[0] + 0.05) / (values[1] + 0.05);
+    })).toBeGreaterThanOrEqual(4.5);
+    expect(await recovery.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await table.locator("th:visible, td:visible").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
+    await expect(table.getByRole("columnheader", { name: "Содержимое" })).toBeVisible();
+    await expect(table.locator("tbody .relay-status-icon").first()).toHaveAttribute("aria-label", "Настройки и вход");
+    const actionButtons = table.locator("tbody tr").first().locator("td:last-child .relay-icon-button");
+    expect(await actionButtons.evaluateAll((buttons) => {
+      const [first, second] = buttons.map((button) => button.getBoundingClientRect());
+      return first.width >= 38 && second.width >= 38 && second.left - first.right >= 8;
+    })).toBe(true);
+    if (viewport.width === 840) {
+      const longName = table.getByText(snapshotName, { exact: true });
+      expect(await longName.evaluate((element) => getComputedStyle(element).textOverflow)).toBe("ellipsis");
+      expect(await longName.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
     }
-
-    await repair.getByRole("button", { name: "Проверить изменения" }).click();
-    const result = repair.locator(".history-repair-result");
-    await expect(result.locator("dd")).toHaveText(["2", "2", "1"]);
-    expect(await result.evaluate((element) => element.scrollWidth - element.clientWidth)).toBe(0);
-    const [resultBox, actionsBox] = await Promise.all([result.boundingBox(), repair.locator(".history-repair-actions").boundingBox()]);
-    expect(actionsBox!.y).toBeGreaterThanOrEqual(resultBox!.y + resultBox!.height);
-    await page.screenshot({ path: `output/playwright/profile-history-repair-ru-light-${viewport.width}x${viewport.height}.png` });
-  });
+    const [recoveryBox, formBox] = await Promise.all([recovery.boundingBox(), form.boundingBox()]);
+    expect(recoveryBox).not.toBeNull();
+    expect(formBox).not.toBeNull();
+    expect(Math.abs((formBox!.x - recoveryBox!.x) - (recoveryBox!.x + recoveryBox!.width - formBox!.x - formBox!.width))).toBeLessThanOrEqual(2);
+    await page.screenshot({ path: `output/playwright/profile-recovery-ru-${theme}-${viewport.width}x${viewport.height}.png` });
+    });
+  }
 }
 
 for (const viewport of viewports) {
-  test(`single ChatGPT profile action ${viewport.width}x${viewport.height}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, codexBindings: false });
+  test(`empty profile recovery is centered ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, profileSnapshotsEmpty: true });
     await page.setViewportSize(viewport);
     await page.goto("/");
-    await page.getByRole("button", { name: "Профили", exact: true }).click();
-    await expect(page.getByRole("button", { name: "Подключить ChatGPT" })).toBeEnabled();
-    await expect(page.getByText("OpenCode")).toHaveCount(0);
-    await page.screenshot({ path: `output/playwright/chatgpt-profile-${viewport.width}x${viewport.height}.png` });
+    await page.getByRole("button", { name: "Восстановление", exact: true }).click();
+
+    const recovery = page.locator(".profile-recovery.is-empty");
+    const [recoveryBox, ...boxes] = await Promise.all([
+      recovery.boundingBox(),
+      recovery.locator(".relay-empty").boundingBox(),
+      recovery.locator(".profile-snapshot-create").boundingBox(),
+      recovery.locator(".profile-automatic-backups").boundingBox(),
+      recovery.locator(".profile-backup-tools").boundingBox(),
+    ]);
+    expect(recoveryBox).not.toBeNull();
+    expect(boxes).toHaveLength(4);
+    expect(boxes.every(Boolean)).toBe(true);
+    const contentCenter = (Math.min(...boxes.map((box) => box!.y)) + Math.max(...boxes.map((box) => box!.y + box!.height))) / 2;
+    expect(Math.abs(contentCenter - (recoveryBox!.y + recoveryBox!.height / 2))).toBeLessThanOrEqual(2);
+    expect(await recovery.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    await page.screenshot({ path: `output/playwright/profile-recovery-empty-ru-dark-${viewport.width}x${viewport.height}.png` });
   });
 }
 
@@ -936,24 +1065,91 @@ for (const theme of themes) {
       await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, accountCount: 4 });
       await page.setViewportSize(viewport);
       await page.goto("/");
-      await page.getByRole("button", { name: "Адрес API", exact: true }).click();
-      await page.getByRole("tab", { name: "Настройка ChatGPT" }).click();
+      await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
+      await expect(page.locator(".gateway-settings-panel")).toBeVisible();
+      await expect(page.getByText("В сети", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Остановить API" })).toHaveClass(/secondary/);
+      const portInput = page.getByRole("spinbutton", { name: "Порт" });
+      const portSave = page.getByRole("button", { name: "Сохранить и перезапустить" });
+      const [portBox, saveBox] = await Promise.all([portInput.boundingBox(), portSave.boundingBox()]);
+      expect(portBox).not.toBeNull();
+      expect(saveBox).not.toBeNull();
+      expect(Math.abs(portBox!.y - saveBox!.y)).toBeLessThanOrEqual(2);
 
       const setup = page.locator(".client-oauth-binding");
-      await expect(setup.getByRole("heading", { name: "ChatGPT в режиме пула" })).toBeVisible();
-      await expect(page.getByRole("button", { name: /^Аккаунт интерфейса ChatGPT:/ })).toHaveAttribute("data-value", "auto");
-      await expect(setup).not.toContainText("Выбран");
-      await expect(page.locator(".codex-oauth-account-summary")).toHaveCount(0);
-      await expect(page.locator(".client-setup button")).toHaveCount(1);
+      await expect(setup.getByRole("heading", { name: "Аккаунт ChatGPT" })).toBeVisible();
+      await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "auto");
+      await expect(setup.getByRole("checkbox", { name: "Резерв 1%" })).toBeChecked();
+      await expect(setup.getByText("Сохранять последний 1% выбранного аккаунта для прямого запуска ChatGPT.", { exact: true })).toBeVisible();
+      const accountSelect = setup.getByRole("button", { name: /^Аккаунт:/ });
+      const switchButton = setup.getByRole("button", { name: "Переключить" });
+      const reserveToggle = setup.getByRole("checkbox", { name: "Резерв 1%" });
+      const [accountBox, switchBox, reserveBox] = await Promise.all([accountSelect.boundingBox(), switchButton.boundingBox(), reserveToggle.boundingBox()]);
+      expect(accountBox).not.toBeNull();
+      expect(switchBox).not.toBeNull();
+      expect(reserveBox).not.toBeNull();
+      expect(switchBox!.x).toBeGreaterThanOrEqual(accountBox!.x + accountBox!.width + 8);
+      expect(reserveBox!.y).toBeGreaterThanOrEqual(accountBox!.y + accountBox!.height + 8);
+      expect(reserveBox!.width).toBeGreaterThanOrEqual(34);
+      expect(reserveBox!.height).toBeGreaterThanOrEqual(20);
+      await setup.getByRole("button", { name: /^Аккаунт:/ }).click();
+      await page.locator('[role="option"][data-value="account_synthetic_2"]').click();
+      await expect(setup.getByRole("button", { name: /^Аккаунт:/ })).toHaveAttribute("data-value", "account_synthetic_2");
+      await expect(setup.locator(".oauth-binding-selection-hint")).toHaveCount(0);
+      await expect(setup.locator(".oauth-binding-outcome")).toHaveCount(0);
       expect(await setup.evaluate((element) => {
         const rect = element.getBoundingClientRect();
         return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
       })).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+      expect(await setup.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+      await page.mouse.move(1, 1);
+      await page.waitForTimeout(180);
       await page.screenshot({ path: `output/playwright/codex-pool-account-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
 }
+
+test("remote connection choices use clear switches in a centered dialog", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("button", { name: "Подключить существующий сервер" }).click();
+  await page.getByLabel("Адрес сервера").fill("http://127.0.0.1:14999");
+
+  const dialog = page.getByRole("dialog", { name: "Подключить существующий сервер" });
+  await expect(dialog.locator(".setting-toggle")).toHaveCount(2);
+  await expect(dialog.getByLabel("Разрешить HTTP без шифрования")).toBeVisible();
+  await expect(dialog.getByLabel("Доверять новой идентичности")).toBeVisible();
+  await expect(dialog.getByText("Токен и трафик передаются открыто. Используйте только в доверенной локальной сети.", { exact: true })).toBeVisible();
+  const [backdropBox, dialogBox] = await Promise.all([page.locator(".relay-modal-backdrop").boundingBox(), dialog.boundingBox()]);
+  expect(backdropBox).not.toBeNull();
+  expect(dialogBox).not.toBeNull();
+  expect(Math.abs(dialogBox!.y + dialogBox!.height / 2 - (backdropBox!.y + backdropBox!.height / 2))).toBeLessThanOrEqual(2);
+  expect(await dialog.locator(".setting-toggle").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
+  await page.screenshot({ path: "output/playwright/remote-connect-options-ru-dark-840x560.png" });
+});
+
+test("unconfigured API empty state uses the available page center", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteConnected: false });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "API и ChatGPT", exact: true }).click();
+  await expect(page.getByText("API не настроен", { exact: true })).toBeVisible();
+  await expectTopLevelEmptyCentered(page);
+  await page.screenshot({ path: "output/playwright/gateway-empty-centered-ru-dark-1160x760.png" });
+});
+
+test("unsupported usage empty state uses the available page center", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "remote", theme: "dark", populated: true, remoteFeatures: ["accounts"] });
+  await page.setViewportSize({ width: 1160, height: 760 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Использование", exact: true }).click();
+  await expect(page.getByText("Не поддерживается", { exact: true })).toBeVisible();
+  await expectTopLevelEmptyCentered(page);
+  await page.screenshot({ path: "output/playwright/usage-unsupported-centered-ru-dark-1160x760.png" });
+});
 
 test("automation table fits the standard window without horizontal scrolling", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
@@ -999,7 +1195,7 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
 
   await page.locator(".relay-sidebar nav button").nth(4).click();
-  await page.locator(".request-disclosure").click();
+  await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
   await expect(dialog).toContainText("req_synthetic_local");
   await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
@@ -1012,17 +1208,6 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/request-details-dialog-ru-840x560.png" });
   await dialog.getByRole("button", { name: "Закрыть" }).first().click();
-
-  await page.locator(".relay-sidebar nav button").nth(3).click();
-  await page.getByRole("tab", { name: "Диагностика" }).click();
-  await page.getByRole("button", { name: "Предпросмотр" }).click();
-  dialog = page.getByRole("dialog", { name: "Предпросмотр пакета поддержки" });
-  await expect(dialog).toBeVisible();
-  await page.screenshot({ path: "output/playwright/support-preview-dialog-ru-840x560.png" });
-  expect(await dialog.evaluate((element) => {
-    const rect = element.getBoundingClientRect();
-    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
-  })).toBe(true);
 });
 
 for (const scenario of [
@@ -1035,28 +1220,28 @@ for (const scenario of [
     await page.goto("/");
     await page.locator(".relay-sidebar nav button").nth(4).click();
 
+    if (scenario.width === 840) {
+      await page.locator(".usage-metrics > div").nth(2).evaluate((card) => {
+        card.querySelector("strong")!.textContent = "49,3 млн";
+        card.querySelector("small")!.textContent = "Вх. 49,2 млн · Кэш ↓ 43,6 млн · Вых. 137,3 тыс.";
+      });
+      await page.locator(".usage-metrics > div").nth(3).evaluate((card) => {
+        card.querySelector("strong")!.textContent = "≈54,0431 $";
+        card.querySelector("small")!.textContent = "Оценено токенов: 49,3 млн";
+      });
+    }
     await expect(page.getByRole("columnheader", { name: scenario.label })).toBeVisible();
-    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator("td:nth-child(5)");
+    expect(await page.locator(".usage-metrics").evaluate((grid) => getComputedStyle(grid).gridTemplateColumns.split(" ").length)).toBe(scenario.width === 840 ? 2 : 4);
+    expect(await page.locator(".usage-metrics > div").evaluateAll((cards) => cards.every((card) => card.scrollWidth <= card.clientWidth))).toBe(true);
+    expect(await page.locator(".usage-overview strong").evaluateAll((values) => new Set(values.map((value) => getComputedStyle(value).fontSize)).size)).toBe(1);
+    expect(await page.locator(".usage-metrics > div, .usage-performance > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
+    const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
     await expect(timing).toHaveText("128 / 428 ms");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));
     expect(clippedHeaders).toEqual([]);
     await page.screenshot({ path: `output/playwright/${scenario.file}` });
-  });
-}
-
-for (const theme of themes) {
-  test(`usage source mismatch ${theme}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, codexBindingActive: false });
-    await page.setViewportSize({ width: 840, height: 560 });
-    await page.goto("/");
-    await page.getByRole("button", { name: "Использование", exact: true }).click();
-
-    const source = page.locator(".usage-source-status");
-    await expect(source).toContainText("ChatGPT сейчас использует другого провайдера");
-    await expect(source.getByRole("button", { name: "Открыть пул" })).toBeVisible();
-    expect(await source.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
-    await page.screenshot({ path: `output/playwright/usage-source-mismatch-ru-${theme}-840x560.png` });
   });
 }
 
