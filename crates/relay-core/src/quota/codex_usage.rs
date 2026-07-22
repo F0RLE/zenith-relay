@@ -563,6 +563,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_secondary_provider_window_is_not_reported() {
+        let data = parse_codex_usage(
+            br#"{
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 30,
+                        "limit_window_seconds": 2628000,
+                        "reset_after_seconds": 1000
+                    },
+                    "secondary_window": {
+                        "used_percent": 0,
+                        "limit_window_seconds": 0,
+                        "reset_after_seconds": 0
+                    }
+                }
+            }"#,
+            1_000,
+        )
+        .unwrap();
+        let (quota, _) = data.quota.normalize(&QuotaSnapshot::default()).unwrap();
+
+        assert!(quota.primary.is_some());
+        assert!(quota.secondary.is_none());
+    }
+
     #[tokio::test]
     async fn shared_client_sends_safe_headers_and_refreshes_subscription() {
         let router = Router::new()

@@ -211,7 +211,8 @@ fn normalize_window(
     if input.kind != expected {
         return Err(QuotaNormalizationError::MismatchedWindowKind);
     }
-    QuotaWindow::normalize(input, previous).map(Some)
+    let window = QuotaWindow::normalize(input, previous)?;
+    Ok((!window.is_empty_provider_placeholder()).then_some(window))
 }
 
 fn safe_code(value: &str) -> String {

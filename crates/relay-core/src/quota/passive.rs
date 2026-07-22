@@ -15,8 +15,16 @@ pub fn merge_codex_quota_headers(
         QuotaWindowKind::Secondary,
         observed_at_ms,
     );
+    let mut merged = previous.clone();
+    let removed_placeholder = merged
+        .secondary
+        .as_ref()
+        .is_some_and(QuotaWindow::is_empty_provider_placeholder);
+    if removed_placeholder {
+        merged.secondary = None;
+    }
     if primary.is_none() && secondary.is_none() {
-        return None;
+        return removed_placeholder.then_some(merged);
     }
     let new_cycle = primary
         .as_ref()
@@ -25,7 +33,6 @@ pub fn merge_codex_quota_headers(
             .as_ref()
             .is_some_and(|observed| is_new_cycle(previous.secondary.as_ref(), observed));
 
-    let mut merged = previous.clone();
     if let Some(window) = primary {
         merged.primary = merge_window(previous.primary.as_ref(), window);
     }
@@ -75,6 +82,7 @@ fn parse_window(
         None,
     )
     .ok()
+    .filter(|window| !window.is_empty_provider_placeholder())
 }
 
 fn merge_window(previous: Option<&QuotaWindow>, mut observed: QuotaWindow) -> Option<QuotaWindow> {
@@ -209,5 +217,38 @@ mod tests {
 
         let merged = merge_codex_quota_headers(&previous, &headers, 2_000).unwrap();
         assert!(merged.limit_reached);
+    }
+
+    #[test]
+    fn empty_secondary_placeholder_is_ignored_and_removed_from_saved_quota() {
+        let placeholder = QuotaWindow {
+            kind: QuotaWindowKind::Secondary,
+            available_basis_points: Some(10_000),
+            explicitly_full: None,
+            reset_at_ms: Some(1_000),
+            window_minutes: Some(0),
+            observed_at_ms: 1_000,
+            full_transition_fingerprint: None,
+        };
+        let previous = QuotaSnapshot {
+            secondary: Some(placeholder),
+            ..QuotaSnapshot::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-secondary-used-percent",
+            HeaderValue::from_static("0"),
+        );
+        headers.insert(
+            "x-codex-secondary-reset-after-seconds",
+            HeaderValue::from_static("0"),
+        );
+        headers.insert(
+            "x-codex-secondary-window-minutes",
+            HeaderValue::from_static("0"),
+        );
+
+        let merged = merge_codex_quota_headers(&previous, &headers, 2_000).unwrap();
+        assert!(merged.secondary.is_none());
     }
 }

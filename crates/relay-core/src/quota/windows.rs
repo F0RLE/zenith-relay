@@ -112,6 +112,15 @@ impl QuotaWindow {
         })
     }
 
+    pub(crate) fn is_empty_provider_placeholder(&self) -> bool {
+        self.kind == QuotaWindowKind::Secondary
+            && self.available_basis_points == Some(10_000)
+            && self.window_minutes.unwrap_or_default() == 0
+            && self
+                .reset_at_ms
+                .is_none_or(|reset_at_ms| reset_at_ms <= self.observed_at_ms)
+    }
+
     pub fn full_transition_from(&self, previous: Option<&Self>) -> Option<QuotaTransition> {
         let previous = previous?;
         (previous.kind == self.kind && !previous.is_fully_available() && self.is_fully_available())
