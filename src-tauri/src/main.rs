@@ -1560,11 +1560,13 @@ fn main() {
             local_pool::commands::remote_server::reveal_remote_account_identity,
             local_pool::commands::remote_server::export_remote_accounts,
             local_pool::commands::remote_server::refresh_remote_server_capabilities,
+            local_pool::commands::remote_server::get_remote_linked_account_count,
             local_pool::commands::remote_server::disconnect_remote_server,
             local_pool::commands::remote_server::prepare_remote_server_deployment,
             local_pool::commands::remote_server::preview_remote_account_import_files,
             local_pool::commands::remote_server::move_local_accounts_to_remote,
             local_pool::commands::remote_server::return_remote_account_to_local,
+            local_pool::commands::remote_server::force_activate_remote_account_locally,
             local_pool::commands::remote_server::execute_remote_server_action
         ])
         .build(tauri::generate_context!())

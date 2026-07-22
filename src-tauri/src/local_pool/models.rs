@@ -83,6 +83,7 @@ pub struct RemoteTargetRecord {
 pub enum OwnershipOperationKind {
     MoveToRemote,
     ReturnToLocal,
+    ForceActivateLocal,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,6 +97,8 @@ pub enum OwnershipOperationPhase {
     ReturnLocalStaged,
     ReturnRemoteRemoved,
     ReturnLocalCommitted,
+    ForcePrepared,
+    ForceLocalCommitted,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -180,6 +183,10 @@ impl OwnershipOperationRecord {
                     | OwnershipOperationPhase::ReturnLocalStaged
                     | OwnershipOperationPhase::ReturnRemoteRemoved
                     | OwnershipOperationPhase::ReturnLocalCommitted
+            ) | (
+                OwnershipOperationKind::ForceActivateLocal,
+                OwnershipOperationPhase::ForcePrepared
+                    | OwnershipOperationPhase::ForceLocalCommitted
             )
         );
         if !valid_phase {

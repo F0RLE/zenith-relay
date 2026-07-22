@@ -34,6 +34,7 @@ pub(crate) fn start(app: AppHandle) {
     let _ownership_recovery = tauri::async_runtime::spawn(async move {
         let state = recovery_app.state::<DesktopState>();
         let _ = super::commands::remote_server::recover_pending_remote_ownership(&state).await;
+        let _ = super::commands::remote_server::reconcile_saved_remote_ownership(&state).await;
     });
     let quota_app = app.clone();
     let _quota_worker = tauri::async_runtime::spawn(async move {

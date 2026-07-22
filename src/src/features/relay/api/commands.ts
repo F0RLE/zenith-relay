@@ -84,6 +84,7 @@ export const relayCommands = {
   exportRemoteAccounts: (input: AccountExportInput) => invoke<AccountExportResult>("export_remote_accounts", { input }),
   moveAccountsToRemote: (accountIds: string[]) => invoke<MoveAccountsToRemoteResult>("move_local_accounts_to_remote", { input: { accountIds } }),
   returnAccountToLocal: (localAccountId: string) => invoke<{ localAccountId: string }>("return_remote_account_to_local", { input: { localAccountId } }),
+  forceActivateRemoteAccountLocally: (localAccountId: string) => invoke<{ localAccountId: string }>("force_activate_remote_account_locally", { input: { localAccountId, confirmRemoteMayStillBeRunning: true } }),
   onAccountTransferProgress: (callback: (event: AccountTransferProgress) => void) => listen<AccountTransferProgress>("relay-account-transfer-progress", (event) => callback(event.payload)),
   revealLocalAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_local_account_identity", { accountId }),
   revealRemoteAccountIdentity: (accountId: string) => invoke<RevealedAccountIdentity>("reveal_remote_account_identity", { accountId }),
@@ -130,6 +131,7 @@ export const relayCommands = {
   launchCodexSource: (sourceId: string) => invoke<ProfileActivation>("launch_codex_source", { sourceId }),
   profileBindings: () => invoke<ProfileBinding[]>("list_codex_account_bindings"),
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
+  restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
   profileSnapshots: () => invoke<ProfileSnapshot[]>("list_codex_profile_snapshots"),
   createProfileSnapshot: (name: string) => invoke<ProfileSnapshot>("create_codex_profile_snapshot", { name }),
   restoreProfileSnapshot: (snapshotId: string, safetyName: string) => invoke<ProfileSnapshot>("restore_codex_profile_snapshot", { snapshotId, safetyName }),
@@ -142,6 +144,7 @@ export const relayCommands = {
   previewSupportBundle: (context: SupportExportContext) => invoke<SupportBundlePreview>("preview_support_bundle", { context }),
 
   connectRemote: (input: Record<string, unknown>) => invoke<{ target: RemoteTarget }>("connect_remote_server", { input }),
+  remoteLinkedAccountCount: () => invoke<number>("get_remote_linked_account_count"),
   disconnectRemote: () => invoke("disconnect_remote_server"),
   refreshRemoteCapabilities: () => invoke("refresh_remote_server_capabilities"),
   prepareRemoteDeployment: (publicBaseUrl: string) => invoke<{ directory: string; publicBaseUrl: string; managementToken: string; vaultKey: string; composeCommand: string }>("prepare_remote_server_deployment", { input: { publicBaseUrl } }),

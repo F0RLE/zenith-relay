@@ -22,6 +22,7 @@ export type MockOptions = {
   codexBindingKind?: "oauth_account" | "local_gateway";
   codexBoundOauthAccountId?: string | null;
   profileSwitchError?: boolean;
+  moveAccountsError?: boolean;
   profileSnapshotsEmpty?: boolean;
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
@@ -613,6 +614,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
               : { ...result, path: `C:\\Temp\\${result.fileName}` };
           }
           case "move_local_accounts_to_remote": {
+            if (input.moveAccountsError) throw { code: "gateway_unavailable", message: "Synthetic remote move failure" };
             const accountIds = (args.input as { accountIds: string[] }).accountIds;
             emitEvent("relay-account-transfer-progress", { completed: 0, total: accountIds.length, phase: "preparing", currentAccountId: accountIds[0] });
             for (let index = 0; index < accountIds.length; index += 1) {
@@ -650,6 +652,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             account.operationalStatus = "rotation";
             refreshGatewayModels(localRuntime);
             refreshGatewayModels(remoteRuntime);
+            return { localAccountId };
+          }
+          case "force_activate_remote_account_locally": {
+            const localAccountId = (args.input as { localAccountId: string }).localAccountId;
+            const account = localRuntime.accounts.find((item) => item.id === localAccountId);
+            if (!account?.remoteLocation) throw new Error("account is not managed by a server");
+            account.remoteLocation = null;
+            account.enabled = true;
+            account.inPool = true;
+            account.operationalStatus = "rotation";
+            account.lastErrorCode = null;
+            refreshGatewayModels(localRuntime);
             return { localAccountId };
           }
           case "reveal_local_account_identity":
@@ -747,6 +761,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_support_bundle": return "C:\\Temp\\support.json";
           case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: input.codexBindingKind ?? "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.1.0", protocolVersion: 2, allowInsecureHttp: false, connectedAtMs: Date.now() } };
+          case "get_remote_linked_account_count": return localRuntime.accounts.filter((account) => account.remoteLocation?.serverId === "server-synthetic").length;
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
           case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };

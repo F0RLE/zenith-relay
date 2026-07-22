@@ -28,13 +28,15 @@ use zenith_relay_core::CandidateRuntimeSnapshot;
 use super::{
     accounts::{
         build_local_account_export_document, mark_local_accounts_moved,
-        pick_account_import_documents, read_import_documents, stage_returned_remote_account,
+        pick_account_import_documents, prepare_preserved_remote_account_credentials,
+        read_import_documents, stage_returned_remote_account,
     },
     restart_or_rollback,
 };
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
 const ACCOUNT_TRANSFER_PROGRESS_EVENT: &str = "relay-account-transfer-progress";
+const REMOTE_MISSING_ERROR: &str = "remote_missing";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,6 +133,19 @@ pub struct ReturnRemoteAccountToLocalResult {
     pub local_account_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForceActivateRemoteAccountLocallyInput {
+    pub local_account_id: String,
+    pub confirm_remote_may_still_be_running: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForceActivateRemoteAccountLocallyResult {
+    pub local_account_id: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountTransferProgressEvent {
@@ -203,6 +218,7 @@ pub async fn connect_remote_server(
     input: ConnectRemoteServerInput,
     state: State<'_, DesktopState>,
 ) -> Result<RemoteConnectionState, CommandError> {
+    let _mutation = state.setup_guard().await;
     let client = RemoteClient::new(
         &input.base_url,
         &input.management_token,
@@ -217,6 +233,29 @@ pub async fn connect_remote_server(
         )
         .into());
     }
+    let pending_operation = state.store()?.ownership_operation().cloned();
+    if pending_operation
+        .as_ref()
+        .is_some_and(|operation| operation.server_id != negotiated.server_id)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "the pending account ownership operation belongs to another server",
+        )
+        .into());
+    }
+    let needs_reconciliation = pending_operation.is_none()
+        && state.store()?.accounts().iter().any(|account| {
+            account
+                .remote_location
+                .as_ref()
+                .is_some_and(|location| location.server_id == negotiated.server_id)
+        });
+    let remote_snapshot = if needs_reconciliation {
+        Some(client.state().await.map_err(remote_error)?)
+    } else {
+        None
+    };
     let previous = state.store()?.remote_target().cloned();
     if previous.as_ref().is_some_and(|record| {
         record.origin == client.origin()
@@ -261,6 +300,9 @@ pub async fn connect_remote_server(
             let _ = remote::delete_token(&previous);
         }
     }
+    if let Some(snapshot) = &remote_snapshot {
+        reconcile_remote_account_locations(&state, &target, snapshot)?;
+    }
     Ok(RemoteConnectionState {
         target,
         health,
@@ -273,10 +315,13 @@ pub async fn get_remote_server_state(
     state: State<'_, DesktopState>,
 ) -> Result<Option<RuntimeStateSnapshot>, CommandError> {
     recover_pending_remote_ownership(&state).await?;
-    let Some((_, client)) = active_client(&state)? else {
+    let _mutation = state.setup_guard().await;
+    let Some((target, client)) = active_client(&state)? else {
         return Ok(None);
     };
-    client.state().await.map(Some).map_err(remote_error)
+    let snapshot = client.state().await.map_err(remote_error)?;
+    reconcile_remote_account_locations(&state, &target, &snapshot)?;
+    Ok(Some(snapshot))
 }
 
 #[tauri::command]
@@ -387,7 +432,9 @@ pub async fn refresh_remote_server_capabilities(
 }
 
 #[tauri::command]
-pub fn disconnect_remote_server(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+pub async fn disconnect_remote_server(state: State<'_, DesktopState>) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    ensure_no_pending_ownership_operation(&state)?;
     let Some(target) = state.store()?.remote_target().cloned() else {
         return Ok(());
     };
@@ -400,6 +447,26 @@ pub fn disconnect_remote_server(state: State<'_, DesktopState>) -> Result<(), Co
         return Err(error.into());
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn get_remote_linked_account_count(
+    state: State<'_, DesktopState>,
+) -> Result<usize, CommandError> {
+    let store = state.store()?;
+    let Some(target) = store.remote_target() else {
+        return Ok(0);
+    };
+    Ok(store
+        .accounts()
+        .iter()
+        .filter(|account| {
+            account
+                .remote_location
+                .as_ref()
+                .is_some_and(|location| location.server_id == target.server_id)
+        })
+        .count())
 }
 
 #[tauri::command]
@@ -525,6 +592,58 @@ pub async fn return_remote_account_to_local(
     Ok(ReturnRemoteAccountToLocalResult { local_account_id })
 }
 
+#[tauri::command]
+pub async fn force_activate_remote_account_locally(
+    input: ForceActivateRemoteAccountLocallyInput,
+    state: State<'_, DesktopState>,
+) -> Result<ForceActivateRemoteAccountLocallyResult, CommandError> {
+    if !input.confirm_remote_may_still_be_running {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "explicit confirmation is required for lost-server recovery",
+        )
+        .into());
+    }
+    let local_account_id = normalize_account_ids(vec![input.local_account_id])?
+        .pop()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::InvalidState, "account id is required"))?;
+    let _mutation = state.setup_guard().await;
+    ensure_no_pending_ownership_operation(&state)?;
+    let remote_location = state
+        .store()?
+        .account(&local_account_id)
+        .and_then(|account| account.remote_location.clone())
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "account is not managed by a server",
+            )
+        })?;
+    // A missing management channel is the reason this explicit recovery path exists.
+    if let Ok(Some((target, client))) = active_client(&state) {
+        if target.server_id == remote_location.server_id
+            && client.state().await.ok().is_some_and(|snapshot| {
+                snapshot
+                    .accounts
+                    .iter()
+                    .any(|account| account.id == remote_location.remote_account_id)
+            })
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "the remote account is reachable; return it through the normal operation",
+            )
+            .into());
+        }
+    }
+    let operation = new_force_activation_operation(&remote_location, local_account_id.clone());
+    state
+        .store()?
+        .replace_ownership_operation(Some(operation.clone()))?;
+    execute_force_activation(&state, operation).await?;
+    Ok(ForceActivateRemoteAccountLocallyResult { local_account_id })
+}
+
 fn ensure_no_pending_ownership_operation(state: &DesktopState) -> Result<(), LocalPoolError> {
     if state.store()?.ownership_operation().is_some() {
         return Err(LocalPoolError::new(
@@ -566,6 +685,24 @@ fn new_return_operation(
         server_id: target.server_id.clone(),
         local_account_ids: vec![local_account_id],
         remote_account_ids: vec![remote_location.remote_account_id],
+        created_remote_account_ids: Vec::new(),
+        created_at_ms: now,
+        updated_at_ms: now,
+    }
+}
+
+fn new_force_activation_operation(
+    remote_location: &RemoteAccountLocation,
+    local_account_id: String,
+) -> OwnershipOperationRecord {
+    let now = now_ms();
+    OwnershipOperationRecord {
+        id: format!("ownership_{}", uuid::Uuid::new_v4().simple()),
+        kind: OwnershipOperationKind::ForceActivateLocal,
+        phase: OwnershipOperationPhase::ForcePrepared,
+        server_id: remote_location.server_id.clone(),
+        local_account_ids: vec![local_account_id],
+        remote_account_ids: vec![remote_location.remote_account_id.clone()],
         created_remote_account_ids: Vec::new(),
         created_at_ms: now,
         updated_at_ms: now,
@@ -728,7 +865,7 @@ async fn execute_return_operation(
     }
 
     if operation.phase == OwnershipOperationPhase::ReturnLocalStaged {
-        ensure_return_is_staged(state, &local_account_id, &operation)?;
+        ensure_local_ownership_is_staged(state, &local_account_id, &operation)?;
         remove_remote_account_for_return(client, &remote_account_id).await?;
         operation.phase = OwnershipOperationPhase::ReturnRemoteRemoved;
         operation.updated_at_ms = now_ms();
@@ -744,7 +881,45 @@ async fn execute_return_operation(
     Ok(())
 }
 
-fn ensure_return_is_staged(
+async fn execute_force_activation(
+    state: &DesktopState,
+    mut operation: OwnershipOperationRecord,
+) -> Result<(), LocalPoolError> {
+    let local_account_id = operation
+        .local_account_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "forced recovery operation has no local account",
+            )
+        })?;
+    if operation.local_account_ids.len() != 1 || operation.remote_account_ids.len() != 1 {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "forced recovery operation must contain one account",
+        ));
+    }
+    if operation.phase == OwnershipOperationPhase::ForceLocalCommitted {
+        if !local_return_is_committed(state, &local_account_id)? {
+            ensure_local_ownership_is_staged(state, &local_account_id, &operation)?;
+            activate_local_account_with_operation(state, &local_account_id, operation.clone())
+                .await?;
+        }
+        state.store()?.replace_ownership_operation(None)?;
+        return Ok(());
+    }
+    ensure_local_ownership_is_staged(state, &local_account_id, &operation)?;
+    prepare_preserved_remote_account_credentials(state, &local_account_id).await?;
+    operation.phase = OwnershipOperationPhase::ForceLocalCommitted;
+    operation.updated_at_ms = now_ms();
+    activate_local_account_with_operation(state, &local_account_id, operation).await?;
+    state.store()?.replace_ownership_operation(None)?;
+    Ok(())
+}
+
+fn ensure_local_ownership_is_staged(
     state: &DesktopState,
     local_account_id: &str,
     operation: &OwnershipOperationRecord,
@@ -763,7 +938,7 @@ fn ensure_return_is_staged(
     {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
-            "returned account credentials are not staged on the inactive local record",
+            "account recovery credentials are not staged on the inactive local record",
         ));
     }
     Ok(())
@@ -817,6 +992,17 @@ async fn activate_returned_local_account(
     local_account_id: &str,
     operation: &OwnershipOperationRecord,
 ) -> Result<(), LocalPoolError> {
+    let mut committed = operation.clone();
+    committed.phase = OwnershipOperationPhase::ReturnLocalCommitted;
+    committed.updated_at_ms = now_ms();
+    activate_local_account_with_operation(state, local_account_id, committed).await
+}
+
+async fn activate_local_account_with_operation(
+    state: &DesktopState,
+    local_account_id: &str,
+    committed_operation: OwnershipOperationRecord,
+) -> Result<(), LocalPoolError> {
     let (old_accounts, old_keys, old_operation) = {
         let store = state.store()?;
         (
@@ -834,15 +1020,15 @@ async fn activate_returned_local_account(
     account.account.enabled = true;
     account.account.in_pool = true;
     account.account.draining = false;
-    let mut committed = operation.clone();
-    committed.phase = OwnershipOperationPhase::ReturnLocalCommitted;
-    committed.updated_at_ms = now_ms();
+    if account.account.last_error_code.as_deref() == Some(REMOTE_MISSING_ERROR) {
+        account.account.last_error_code = None;
+    }
     state
         .store()?
         .replace_accounts_keys_and_ownership_operation(
             accounts,
             old_keys.clone(),
-            Some(committed),
+            Some(committed_operation),
         )?;
     restart_or_rollback(state, || {
         state
@@ -908,6 +1094,10 @@ pub(crate) async fn recover_pending_remote_ownership(
     let Some(operation) = state.store()?.ownership_operation().cloned() else {
         return Ok(());
     };
+    if operation.kind == OwnershipOperationKind::ForceActivateLocal {
+        execute_force_activation(state, operation).await?;
+        return Ok(());
+    }
     let Some((target, client)) = active_client(state)? else {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
@@ -960,8 +1150,92 @@ pub(crate) async fn recover_pending_remote_ownership(
             }
             execute_return_operation(state, &client, operation).await?;
         }
+        OwnershipOperationKind::ForceActivateLocal => unreachable!(),
     }
     Ok(())
+}
+
+pub(crate) async fn reconcile_saved_remote_ownership(
+    state: &DesktopState,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    let (has_pending_operation, has_linked_accounts) = {
+        let store = state.store()?;
+        let Some(target) = store.remote_target() else {
+            return Ok(());
+        };
+        (
+            store.ownership_operation().is_some(),
+            store.accounts().iter().any(|account| {
+                account
+                    .remote_location
+                    .as_ref()
+                    .is_some_and(|location| location.server_id == target.server_id)
+            }),
+        )
+    };
+    if has_pending_operation || !has_linked_accounts {
+        return Ok(());
+    }
+    let Some((target, client)) = active_client(state)? else {
+        return Ok(());
+    };
+    let snapshot = client.state().await.map_err(remote_error)?;
+    reconcile_remote_account_locations(state, &target, &snapshot)?;
+    Ok(())
+}
+
+fn reconcile_remote_account_locations(
+    state: &DesktopState,
+    target: &RemoteTargetRecord,
+    snapshot: &RuntimeStateSnapshot,
+) -> Result<(), LocalPoolError> {
+    let remote_ids = snapshot
+        .accounts
+        .iter()
+        .map(|account| account.id.as_str())
+        .collect::<HashSet<_>>();
+    let (mut accounts, keys) = {
+        let store = state.store()?;
+        (store.accounts().to_vec(), store.keys().to_vec())
+    };
+    let mut changed = false;
+    for account in &mut accounts {
+        let Some(location) = account
+            .remote_location
+            .as_ref()
+            .filter(|location| location.server_id == target.server_id)
+        else {
+            continue;
+        };
+        let next_error = reconciled_remote_error(
+            account.account.last_error_code.as_deref(),
+            remote_ids.contains(location.remote_account_id.as_str()),
+        );
+        if account.account.last_error_code != next_error {
+            account.account.last_error_code = next_error;
+            changed = true;
+        }
+        if account.account.enabled || account.account.in_pool {
+            account.account.enabled = false;
+            account.account.in_pool = false;
+            changed = true;
+        }
+    }
+    if changed {
+        state.store()?.replace_accounts_and_keys(accounts, keys)?;
+    }
+    Ok(())
+}
+
+fn reconciled_remote_error(current: Option<&str>, remote_exists: bool) -> Option<String> {
+    if remote_exists {
+        current
+            .filter(|code| *code != REMOTE_MISSING_ERROR)
+            .map(str::to_string)
+    } else {
+        Some(REMOTE_MISSING_ERROR.to_string())
+    }
 }
 
 fn ensure_move_accounts_still_present(
@@ -1084,6 +1358,25 @@ pub async fn execute_remote_server_action(
     input: ExecuteRemoteServerActionInput,
     state: State<'_, DesktopState>,
 ) -> Result<serde_json::Value, CommandError> {
+    let _mutation = state.setup_guard().await;
+    if let RemoteServerAction::DeleteAccount { id } = &input.action {
+        if state
+            .store()?
+            .ownership_operation()
+            .is_some_and(|operation| {
+                operation
+                    .remote_account_ids
+                    .iter()
+                    .any(|account_id| account_id == id)
+            })
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "account ownership recovery must finish before deleting this server record",
+            )
+            .into());
+        }
+    }
     let Some((_, client)) = active_client(&state)? else {
         return Err(
             LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
@@ -1577,6 +1870,37 @@ mod tests {
             &["remote-one".into()]
         ));
         assert!(!remote_accounts_are_validated(&[], &["remote-one".into()]));
+    }
+
+    #[test]
+    fn remote_reconciliation_is_fail_closed_and_clears_only_its_own_error() {
+        assert_eq!(
+            reconciled_remote_error(None, false).as_deref(),
+            Some(REMOTE_MISSING_ERROR)
+        );
+        assert_eq!(
+            reconciled_remote_error(Some(REMOTE_MISSING_ERROR), true),
+            None
+        );
+        assert_eq!(
+            reconciled_remote_error(Some("token_invalidated"), true).as_deref(),
+            Some("token_invalidated")
+        );
+    }
+
+    #[test]
+    fn forced_local_recovery_is_a_valid_persisted_ownership_operation() {
+        let operation = new_force_activation_operation(
+            &RemoteAccountLocation {
+                server_id: "server-one".into(),
+                remote_account_id: "account-remote".into(),
+            },
+            "account-local".into(),
+        );
+
+        assert!(operation.validate().is_ok());
+        assert_eq!(operation.kind, OwnershipOperationKind::ForceActivateLocal);
+        assert_eq!(operation.phase, OwnershipOperationPhase::ForcePrepared);
     }
 
     fn preview(first_existing: bool, second_existing: bool) -> RemoteBatchImportSession {

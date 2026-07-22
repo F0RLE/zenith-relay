@@ -3,7 +3,7 @@ import type { TFunction } from "i18next";
 import { CalendarDays, Check, Clock3, Copy, Download, ExternalLink, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, MapPin, Network, Pencil, Play, Plus, Power, RefreshCw, Server, Trash2, Upload, UserRound, UserRoundX, UsersRound, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
-import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
+import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
   Button,
@@ -376,7 +376,12 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   };
   const deleteSelected = async () => {
     const accountIds = selectedAccounts.map((account) => account.id);
-    if (accountIds.length && await confirm(t("accounts.deleteSelectedConfirm", { count: accountIds.length }), { danger: true })) {
+    const message = mode === "remote"
+      ? t("accounts.deleteRemoteSelectedConfirm", { count: accountIds.length })
+      : selectedOnServer
+        ? t("accounts.deleteSelectedRecoveryConfirm", { count: accountIds.length })
+        : t("accounts.deleteSelectedConfirm", { count: accountIds.length });
+    if (accountIds.length && await confirm(message, { danger: true })) {
       await deleteAccounts(accountIds, "delete-selected-accounts");
     }
   };
@@ -386,9 +391,26 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       confirmLabel: t("accounts.moveToServerAction"),
     })) return;
     const accountIds = [...selectedIds];
+    let bindings: ProfileBinding[] = [];
+    const bindingsLoaded = await perform("move-profile-check", async () => { bindings = await relayCommands.profileBindings(); });
+    if (!bindingsLoaded) return;
+    const usesSelectedAccount = bindings.some((binding) => binding.active
+      && (accountIds.includes(binding.credentialId) || (binding.boundOauthAccountId != null && accountIds.includes(binding.boundOauthAccountId))));
+    let switchedProfile = false;
+    if (usesSelectedAccount) {
+      if (!await confirm(t("accounts.moveActiveProfileConfirm"), {
+        title: t("accounts.moveActiveProfileTitle"),
+        confirmLabel: t("accounts.moveActiveProfileAction"),
+      })) return;
+      switchedProfile = await activateCodexProfile("move-profile-switch", relayCommands.attachCodexRemoteGateway, true);
+      if (!switchedProfile) return;
+    }
     setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", currentAccountId: accountIds[0] } });
     const ok = await perform("move-accounts-to-remote", () => relayCommands.moveAccountsToRemote(accountIds), "feedback.accountsMovedToServer");
     setTransfer(null);
+    if (!ok && switchedProfile) {
+      await relayCommands.restoreDefaultAccountProfile().then(() => refresh()).catch(() => undefined);
+    }
     if (ok) setSelected([]);
   };
   const returnToComputer = async (account: AccountSummary) => {
@@ -397,6 +419,14 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       confirmLabel: t("accounts.returnToComputerAction"),
     })) return;
     await perform(`return-account-${account.id}`, () => relayCommands.returnAccountToLocal(account.id), "feedback.accountReturnedToComputer");
+  };
+  const recoverLocally = async (account: AccountSummary) => {
+    if (!await confirm(t("accounts.forceActivateLocalConfirm", { name: account.label }), {
+      title: t("accounts.forceActivateLocal"),
+      confirmLabel: t("accounts.forceActivateLocalAction"),
+      danger: true,
+    })) return;
+    await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally");
   };
   const refreshAndDeleteNonWorking = async () => {
     const refreshedSnapshot: { current: RuntimeSnapshot | null } = { current: null };
@@ -459,7 +489,6 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
       {accounts.map((account, index) => {
         const plan = accountPlanOption(account.subscription.planType, t("common.unknown"));
         const previousPlan = index ? accountPlanOption(accounts[index - 1].subscription.planType, t("common.unknown")).id : null;
-        const errorCode = currentAccountErrorCode(account);
         const participates = accountParticipates(account);
         const excludedByFreePolicy = account.routingExclusion === "free_plan_policy";
         const subscriptionEnded = account.subscription.activeUntilMs != null && account.subscription.activeUntilMs <= Date.now();
@@ -468,8 +497,12 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           : { date: subscriptionExpiryFormat.format(account.subscription.activeUntilMs), relative: formatRemainingTime(account.subscription.activeUntilMs, nowMs, t) };
         const latestSpeed = accountSpeeds.get(account.id);
         const onServer = mode === "local" && Boolean(account.remoteLocation);
+        const errorCode = onServer
+          ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
+          : currentAccountErrorCode(account);
+        const remoteMissing = onServer && errorCode === "remote_missing";
         const operationalStatus = account.operationalStatus;
-        const operationalLabel = onServer ? t("accounts.onServerHint") : excludedByFreePolicy ? t("accounts.participation.freePolicy") : t(`connections.status.${operationalStatus}`);
+        const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : excludedByFreePolicy ? t("accounts.participation.freePolicy") : t(`connections.status.${operationalStatus}`);
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
         const poolLabel = excludedByFreePolicy && participates ? t("accounts.participation.freePolicy") : participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
         return <Fragment key={account.id}>
@@ -479,7 +512,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
             <div className="account-kind-icon" aria-hidden><UserRound /></div>
             <div className="account-identity">
               <strong title={account.label}>{account.label}</strong>
-              <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /><span className="account-identity-state">{onServer ? <StatusIcon status="info" label={operationalLabel} /> : errorCode ? <IconButton className="account-status-button" label={accountErrorLabel(errorCode, t)} icon={<StatusBadge status="error" label="" />} onClick={() => setErrorDetails(account)} /> : <StatusIcon status={operationalStatusTone(operationalStatus)} label={operationalLabel} />}</span></div>
+              <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /><span className="account-identity-state">{errorCode ? <IconButton className="account-status-button" label={accountErrorLabel(errorCode, t)} icon={<StatusBadge status="error" label="" />} onClick={() => setErrorDetails(account)} /> : onServer ? <StatusIcon status="info" label={operationalLabel} /> : <StatusIcon status={operationalStatusTone(operationalStatus)} label={operationalLabel} />}</span></div>
             </div>
             <input className="account-select" type="checkbox" aria-label={t("accounts.select", { name: account.label })} checked={selected.includes(account.id)} onChange={() => toggleSelected(account.id)} />
           </div>
@@ -488,10 +521,11 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           <footer className="account-card-footer"><div className="account-card-tools">{onServer ? <span className="account-remote-location" title={t("accounts.onServerHint")}><Server aria-hidden />{t("accounts.onServer")}</span> : <label className="account-pool-action" title={excludedByFreePolicy ? t("accounts.participation.freePolicyHint") : poolLabel}><span>{t("accounts.poolParticipation")}</span><input type="checkbox" role="switch" checked={participates} disabled={busy === `pool-${account.id}`} aria-label={t("accounts.poolParticipationFor", { name: account.label })} onChange={(event) => void perform(`pool-${account.id}`, () => updateParticipation(account, event.target.checked), "feedback.saved")} /></label>}{latestSpeed != null && !onServer ? <span className="account-token-speed" title={t("usage.latestSpeed")}>{formatTokenSpeed(latestSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</span> : null}</div><div className="account-row-action-list">
               <ActionMenu className="account-row-menu">
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
+                {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
                 {!onServer ? <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onProxy(account)}>{`${t("proxies.proxy")}: ${proxyLabel}`}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
                 {!onServer ? <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved"); }}>{account.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem> : null}
-                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("accounts.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t(onServer ? "accounts.deleteLocalRecoveryConfirm" : mode === "remote" ? "accounts.deleteRemoteConfirm" : "accounts.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
               {mode === "local" ? <IconButton label={t("accounts.launchAccount")} icon={<Play aria-hidden />} disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`} title={onServer ? t("accounts.onServerHint") : !account.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchAccount")} onClick={() => void activateCodexProfile(`launch-account-${account.id}`, () => relayCommands.launchCodexAccount(account.id), true)} /> : null}
           </div></footer>
@@ -868,10 +902,21 @@ function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: Wak
 
 function RemoteView({ onConnect, onDeploy }: { onConnect: () => void; onDeploy: () => void }) {
   const { t } = useTranslation();
-  const { runtime, perform } = useRelayState();
+  const { runtime, perform, busy } = useRelayState();
   const confirm = useConfirm();
   if (!runtime) return <EmptyState title={t("remote.emptyTitle")} description={t("remote.emptyDescription")} action={<div className="inline-actions"><Button variant="primary" onClick={onConnect}>{t("remote.connectExisting")}</Button><Button variant="secondary" onClick={onDeploy}>{t("remote.deployNew")}</Button></div>} />;
-  return <section className="remote-summary"><div className="remote-status"><StatusBadge status={runtime.runtimeTarget.connected ? "ready" : "error"} label={runtime.runtimeTarget.connected ? t("common.connected") : t("common.offline")} /><div><strong>{runtime.runtimeTarget.origin}</strong><small>{runtime.runtimeTarget.serverId}</small></div></div><dl className="detail-list"><div><dt>{t("remote.version")}</dt><dd>{runtime.runtimeTarget.version}</dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code>{runtime.gateway.baseUrl}</code></dd></div><div><dt>{t("remote.capabilities")}</dt><dd>{runtime.capabilities.features.length}</dd></div></dl><div className="inline-actions"><Button variant="danger" onClick={() => void confirm(t("remote.disconnectConfirm"), { danger: true }).then((accepted) => accepted && perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected"))}>{t("remote.disconnect")}</Button></div></section>;
+  const disconnect = async () => {
+    let linkedAccounts = 0;
+    const counted = await perform("remote-disconnect-check", async () => { linkedAccounts = await relayCommands.remoteLinkedAccountCount(); });
+    if (!counted) return;
+    const message = linkedAccounts
+      ? t("remote.disconnectLinkedConfirm", { count: linkedAccounts })
+      : t("remote.disconnectConfirm");
+    if (await confirm(message, { danger: true })) {
+      await perform("remote-disconnect", relayCommands.disconnectRemote, "feedback.disconnected");
+    }
+  };
+  return <section className="remote-summary"><div className="remote-status"><StatusBadge status={runtime.runtimeTarget.connected ? "ready" : "error"} label={runtime.runtimeTarget.connected ? t("common.connected") : t("common.offline")} /><div><strong>{runtime.runtimeTarget.origin}</strong><small>{runtime.runtimeTarget.serverId}</small></div></div><dl className="detail-list"><div><dt>{t("remote.version")}</dt><dd>{runtime.runtimeTarget.version}</dd></div><div><dt>{t("gateway.endpoint")}</dt><dd><code>{runtime.gateway.baseUrl}</code></dd></div><div><dt>{t("remote.capabilities")}</dt><dd>{runtime.capabilities.features.length}</dd></div></dl><div className="inline-actions"><Button variant="danger" busy={busy === "remote-disconnect-check" || busy === "remote-disconnect"} onClick={() => void disconnect()}>{t("remote.disconnect")}</Button></div></section>;
 }
 
 export function SourceDialog({ source, onClose, addToPool = false }: { source: SourceSummary | null; onClose: () => void; addToPool?: boolean }) {
@@ -1278,6 +1323,7 @@ function accountIsTerminallyUnusable(account: AccountSummary) {
 
 function accountErrorLabel(code: string, t: TFunction) {
   const normalized = code.toLocaleLowerCase();
+  if (normalized === "remote_missing") return t("accounts.errors.remoteMissing");
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return t("accounts.errors.reusedRefreshToken");
   if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return t("accounts.errors.expiredRefreshToken");
   if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return t("accounts.errors.invalidatedRefreshToken");

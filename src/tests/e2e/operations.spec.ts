@@ -870,7 +870,7 @@ test("bulk account actions stay compact and delete the selected records", async 
 });
 
 test("selected local accounts move to the server and remain as inactive local records", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2 });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2, codexBoundOauthAccountId: "account_synthetic" });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByLabel("Select all accounts").check();
@@ -879,6 +879,10 @@ test("selected local accounts move to the server and remain as inactive local re
   const dialog = page.getByRole("dialog", { name: "Move to server" });
   await expect(dialog).toContainText("They will join its pool and stop participating in local routing.");
   await dialog.getByRole("button", { name: "Move", exact: true }).click();
+
+  const profileDialog = page.getByRole("dialog", { name: "Switch ChatGPT to the server" });
+  await expect(profileDialog).toContainText("currently uses one of the selected accounts directly");
+  await profileDialog.getByRole("button", { name: "Switch and continue", exact: true }).click();
 
   const progress = page.locator(".account-transfer-progress");
   await expect(progress).toBeVisible();
@@ -893,6 +897,7 @@ test("selected local accounts move to the server and remain as inactive local re
   await expect(page.getByRole("button", { name: "Move to server", exact: true })).toBeDisabled();
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { accountIds?: string[] } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "move_local_accounts_to_remote"));
   expect([...(call?.args.input?.accountIds ?? [])].sort()).toEqual(["account_synthetic", "account_synthetic_2"].sort());
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "attach_codex_to_remote_gateway").length)).toBe(1);
 
   await page.locator(".account-card").filter({ hasText: "Personal Plus" }).locator(".account-row-menu summary").click();
   await page.getByRole("menuitem", { name: "Return to this computer" }).click();
@@ -902,6 +907,36 @@ test("selected local accounts move to the server and remain as inactive local re
   await expect(page.getByText("On server", { exact: true })).toHaveCount(1);
   const returned = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { localAccountId?: string } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "return_remote_account_to_local"));
   expect(returned?.args.input?.localAccountId).toBe("account_synthetic");
+
+  await page.locator(".account-card").filter({ hasText: "Business Workspace" }).locator(".account-row-menu summary").click();
+  await page.getByRole("menuitem", { name: "Use local recovery copy" }).click();
+  const recoveryDialog = page.getByRole("dialog", { name: "Use local recovery copy" });
+  await expect(recoveryDialog).toContainText("two copies may briefly use the same session");
+  await recoveryDialog.getByRole("button", { name: "Activate locally", exact: true }).click();
+  await expect(page.getByText("On server", { exact: true })).toHaveCount(0);
+  const recovered = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { localAccountId?: string; confirmRemoteMayStillBeRunning?: boolean } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "force_activate_remote_account_locally"));
+  expect(recovered?.args.input).toEqual({ localAccountId: "account_synthetic_2", confirmRemoteMayStillBeRunning: true });
+});
+
+test("failed server move restores the direct ChatGPT profile", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    codexBoundOauthAccountId: "account_synthetic",
+    moveAccountsError: true,
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByLabel("Select all accounts").check();
+  await page.getByRole("button", { name: "Move to server", exact: true }).click();
+  await page.getByRole("dialog", { name: "Move to server" }).getByRole("button", { name: "Move", exact: true }).click();
+  await page.getByRole("dialog", { name: "Switch ChatGPT to the server" }).getByRole("button", { name: "Switch and continue", exact: true }).click();
+
+  await expect(page.getByText("On server", { exact: true })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((item) => item.command === "restore_codex_account_profile").length)).toBe(1);
+  const commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((item) => item.command));
+  expect(commands).toEqual(expect.arrayContaining(["attach_codex_to_remote_gateway", "move_local_accounts_to_remote", "restore_codex_account_profile"]));
 });
 
 test("filtered bulk deletion never includes a previously selected hidden account", async ({ page }) => {

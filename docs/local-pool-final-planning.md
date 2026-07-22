@@ -134,11 +134,11 @@ Implementation status (2026-07-22):
   weakening the all-or-nothing local routing commit;
 - [x] persist the local-account to remote-account mapping and render the local
   copy as `On server` instead of disabled or unavailable;
-- [ ] return a moved account to the computer through a compensated operation:
+- [x] return a moved account to the computer through a compensated operation:
   fetch and store the latest server credential in an inactive local record,
   validate it without routing, remove the remote copy, and only then activate
   local execution. An incomplete step must leave the local copy inactive;
-- [ ] protect a selected account that currently owns a managed direct ChatGPT
+- [x] protect a selected account that currently owns a managed direct ChatGPT
   profile: before transfer commit, use the existing reversible profile flow to
   attach that profile to the remote endpoint or explicitly restore/detach it.
   Failure rolls back the profile and transfer before remote ownership changes;
@@ -166,27 +166,29 @@ Implementation status (2026-07-22):
 
 ### Remote Ownership Reconciliation And Recovery
 
-- [ ] persist a redacted ownership-operation journal before the first cross-host
+Implementation status (2026-07-22):
+
+- [x] persist a redacted ownership-operation journal before the first cross-host
   side effect. It records operation id, local account ids, pinned server id,
   confirmed remote ids, and phase, but no credential. Startup resumes or
   compensates interrupted move/return work instead of relying on in-memory
   rollback;
-- [ ] reconcile every saved `(server_id, remote_account_id)` after connect,
+- [x] reconcile every saved `(server_id, remote_account_id)` after connect,
   restart, and manual refresh. A matching remote record stays `On server`; a
   missing record becomes `remote_missing`/recovery-required and is never
   automatically re-enabled locally;
-- [ ] keep identity changes fail-closed. Reconnecting to the same stable server
+- [x] keep identity changes fail-closed. Reconnecting to the same stable server
   restores links, while a new server identity never adopts mappings merely
   because labels or account positions match;
-- [ ] make destructive actions unambiguous: deleting the inactive local record
+- [x] make destructive actions unambiguous: deleting the inactive local record
   removes only that recovery copy, deleting the remote record never silently
   activates an older local credential, and `Return to computer` remains the
   only normal operation that transfers active ownership back;
-- [ ] before forgetting a server connection, show the count of linked local
+- [x] before forgetting a server connection, show the count of linked local
   recovery records and preserve their server ids. Disconnect removes the local
   management token but does not claim that remote accounts were deleted or
   returned;
-- [ ] provide an explicit lost-server recovery path for a preserved local
+- [x] provide an explicit lost-server recovery path for a preserved local
   credential. It stays inactive by default and may be force-activated only
   after warning that an unreachable remote copy could still be running.
 

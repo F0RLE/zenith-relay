@@ -1156,6 +1156,7 @@ pub async fn delete_local_account(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
+    ensure_accounts_not_in_ownership_operation(&state, std::slice::from_ref(&account_id))?;
     delete_local_account_inner(&account_id, &state).await?;
     state.snapshot().await.map_err(Into::into)
 }
@@ -1167,10 +1168,34 @@ pub async fn delete_local_accounts(
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = normalize_account_ids(account_ids)?;
     let _mutation = state.setup_guard().await;
+    ensure_accounts_not_in_ownership_operation(&state, &account_ids)?;
     for account_id in account_ids {
         delete_local_account_inner(&account_id, &state).await?;
     }
     state.snapshot().await.map_err(Into::into)
+}
+
+fn ensure_accounts_not_in_ownership_operation(
+    state: &DesktopState,
+    account_ids: &[String],
+) -> CommandResult<()> {
+    if state
+        .store()?
+        .ownership_operation()
+        .is_some_and(|operation| {
+            operation
+                .local_account_ids
+                .iter()
+                .any(|account_id| account_ids.contains(account_id))
+        })
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "account ownership recovery must finish before deleting this local record",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn delete_local_account_inner(account_id: &str, state: &DesktopState) -> CommandResult<()> {
@@ -1467,13 +1492,28 @@ pub(crate) async fn prepare_account_credentials(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<PreparedAccountCredentials> {
+    prepare_account_credentials_with_remote_policy(state, account_id, false).await
+}
+
+pub(crate) async fn prepare_preserved_remote_account_credentials(
+    state: &DesktopState,
+    account_id: &str,
+) -> LocalResult<PreparedAccountCredentials> {
+    prepare_account_credentials_with_remote_policy(state, account_id, true).await
+}
+
+async fn prepare_account_credentials_with_remote_policy(
+    state: &DesktopState,
+    account_id: &str,
+    allow_remote_location: bool,
+) -> LocalResult<PreparedAccountCredentials> {
     let remote_location = state
         .store()?
         .account(account_id)
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?
         .remote_location
         .clone();
-    if remote_location.is_some() {
+    if remote_location.is_some() && !allow_remote_location {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "account is managed by a remote server",
