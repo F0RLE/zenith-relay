@@ -1,35 +1,51 @@
-mod migrations;
-mod quarantine;
 pub mod secret_store;
-pub(crate) mod settings_store;
 pub mod telemetry_db;
 pub(crate) mod vault;
 
-use self::{
-    migrations::migrate,
-    settings_store::{load_json, save_json},
-};
+use self::telemetry_db::TelemetryDb;
 use crate::local_pool::{
     error::{ErrorCode, LocalPoolError, Result},
     models::{
         AutomationRecords, GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord,
-        ProviderSourceRecord, StoreMetadata, MAX_LOCAL_ACCOUNTS,
+        OwnershipOperationRecord, ProviderSourceRecord, RemoteTargetRecord, CURRENT_SCHEMA_VERSION,
+        MAX_LOCAL_ACCOUNTS,
     },
 };
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use zenith_relay_core::normalize_image_base_model;
+use zenith_relay_core::{normalize_image_base_model, normalize_subscription_plan_order};
+
+const STATE_GATEWAY: &str = "gateway";
+const STATE_SOURCES: &str = "sources";
+const STATE_ACCOUNTS: &str = "accounts";
+const STATE_KEYS: &str = "keys";
+const STATE_AUTOMATIONS: &str = "automations";
+const STATE_REMOTE_TARGET: &str = "remote_target";
+const STATE_OWNERSHIP_OPERATION: &str = "ownership_operation";
+const LEGACY_STATE_FILES: [&str; 7] = [
+    "metadata.json",
+    "settings.json",
+    "connections.json",
+    "accounts.json",
+    "pool-keys.json",
+    "automations.json",
+    "remote-target.json",
+];
+const MAX_LEGACY_JSON_BYTES: u64 = 16 * 1024 * 1024;
 
 pub struct LocalPoolStore {
-    root: PathBuf,
-    metadata: StoreMetadata,
+    database: Arc<TelemetryDb>,
     gateway: GatewaySettings,
     sources: Vec<ProviderSourceRecord>,
     accounts: Vec<LocalAccountRecord>,
     keys: Vec<LocalGatewayKeyRecord>,
     automations: AutomationRecords,
+    remote_target: Option<RemoteTargetRecord>,
+    ownership_operation: Option<OwnershipOperationRecord>,
 }
 
 impl LocalPoolStore {
@@ -41,54 +57,41 @@ impl LocalPoolStore {
                 format!("failed to create local pool store: {err}"),
             )
         })?;
-        let recovery_root = app_root.join("recovery");
-        let metadata = migrate(&root, &recovery_root)?;
-        let gateway_path = root.join("settings.json");
-        let gateway = match load_json(&gateway_path) {
-            Ok(Some(gateway)) => gateway,
-            Ok(None) => {
-                let gateway = GatewaySettings::default();
-                save_json(&gateway_path, &gateway)?;
-                gateway
-            }
-            Err(error) => {
-                let quarantined = quarantine::move_file(&recovery_root, &gateway_path)?;
-                return Err(LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    format!(
-                        "invalid gateway settings were moved to {}: {}",
-                        quarantined.display(),
-                        error
-                    ),
-                ));
-            }
-        };
+        migrate_database_file(&root)?;
+        let database = Arc::new(TelemetryDb::open(&root.join("relay.sqlite"))?);
+        let state = load_or_initialize_state(&root, &database)?;
+        let gateway = state.gateway;
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        let sources = load_record_file(&root, "connections.json")?;
-        let accounts = load_record_file(&root, "accounts.json")?;
+        let sources = state.sources;
+        let accounts = state.accounts;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
                 format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
             ));
         }
-        let keys = load_record_file(&root, "pool-keys.json")?;
-        let automations = load_value_file(&root, "automations.json")?;
+        if let Some(operation) = &state.ownership_operation {
+            operation
+                .validate()
+                .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
+        }
+        cleanup_legacy_state_files(&root)?;
         Ok(Self {
-            root,
-            metadata,
+            database,
             gateway,
             sources,
             accounts,
-            keys,
-            automations,
+            keys: state.keys,
+            automations: state.automations,
+            remote_target: state.remote_target,
+            ownership_operation: state.ownership_operation,
         })
     }
 
-    pub fn metadata(&self) -> &StoreMetadata {
-        &self.metadata
+    pub fn database(&self) -> Arc<TelemetryDb> {
+        self.database.clone()
     }
 
     pub fn gateway(&self) -> &GatewaySettings {
@@ -109,6 +112,14 @@ impl LocalPoolStore {
 
     pub fn automations(&self) -> &AutomationRecords {
         &self.automations
+    }
+
+    pub fn remote_target(&self) -> Option<&RemoteTargetRecord> {
+        self.remote_target.as_ref()
+    }
+
+    pub fn ownership_operation(&self) -> Option<&OwnershipOperationRecord> {
+        self.ownership_operation.as_ref()
     }
 
     pub fn source(&self, id: &str) -> Option<&ProviderSourceRecord> {
@@ -234,35 +245,20 @@ impl LocalPoolStore {
             return Ok(());
         }
 
-        let sources_path = self.root.join("connections.json");
-        let accounts_path = self.root.join("accounts.json");
-        let keys_path = self.root.join("pool-keys.json");
-        let automations_path = self.root.join("automations.json");
-
-        let write_result = (|| {
-            if changed.sources {
-                save_json(&sources_path, &sources)?;
-            }
-            if changed.accounts {
-                save_json(&accounts_path, &accounts)?;
-            }
-            if changed.keys {
-                save_json(&keys_path, &keys)?;
-            }
-            if changed.automations {
-                save_json(&automations_path, &automations)?;
-            }
-            Ok(())
-        })();
-        if let Err(error) = write_result {
-            if let Err(rollback) = self.restore_record_files(&changed) {
-                return Err(LocalPoolError::new(
-                    ErrorCode::RecoveryRequired,
-                    format!("{error}; failed to restore local records: {rollback}"),
-                ));
-            }
-            return Err(error);
+        let mut values = Vec::with_capacity(4);
+        if changed.sources {
+            values.push((STATE_SOURCES, serialize_state(&sources)?));
         }
+        if changed.accounts {
+            values.push((STATE_ACCOUNTS, serialize_state(&accounts)?));
+        }
+        if changed.keys {
+            values.push((STATE_KEYS, serialize_state(&keys)?));
+        }
+        if changed.automations {
+            values.push((STATE_AUTOMATIONS, serialize_state(&automations)?));
+        }
+        self.database.replace_state_json(&values)?;
 
         self.sources = sources;
         self.accounts = accounts;
@@ -271,24 +267,16 @@ impl LocalPoolStore {
         Ok(())
     }
 
-    fn restore_record_files(&self, changed: &RecordChanges) -> Result<()> {
-        if changed.sources {
-            save_json(&self.root.join("connections.json"), &self.sources)?;
-        }
-        if changed.accounts {
-            save_json(&self.root.join("accounts.json"), &self.accounts)?;
-        }
-        if changed.keys {
-            save_json(&self.root.join("pool-keys.json"), &self.keys)?;
-        }
-        if changed.automations {
-            save_json(&self.root.join("automations.json"), &self.automations)?;
-        }
-        Ok(())
-    }
-
     pub fn replace_gateway(&mut self, mut gateway: GatewaySettings) -> Result<()> {
         gateway.hidden_models = crate::local_pool::models::normalized_values(gateway.hidden_models);
+        gateway.model_price_overrides = gateway
+            .model_price_overrides
+            .into_iter()
+            .map(|(model, price)| (model.trim().to_ascii_lowercase(), price))
+            .collect();
+        gateway.subscription_plan_order =
+            normalize_subscription_plan_order(gateway.subscription_plan_order)
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.image_base_model = normalize_image_base_model(gateway.image_base_model)
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
         if gateway == self.gateway {
@@ -297,8 +285,65 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        save_json(&self.root.join("settings.json"), &gateway)?;
+        self.database
+            .replace_state_json(&[(STATE_GATEWAY, serialize_state(&gateway)?)])?;
         self.gateway = gateway;
+        Ok(())
+    }
+
+    pub fn replace_remote_target(&mut self, target: Option<RemoteTargetRecord>) -> Result<()> {
+        if target == self.remote_target {
+            return Ok(());
+        }
+        self.database
+            .replace_state_json(&[(STATE_REMOTE_TARGET, serialize_state(&target)?)])?;
+        self.remote_target = target;
+        Ok(())
+    }
+
+    pub fn replace_ownership_operation(
+        &mut self,
+        operation: Option<OwnershipOperationRecord>,
+    ) -> Result<()> {
+        if let Some(operation) = &operation {
+            operation
+                .validate()
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        }
+        if operation == self.ownership_operation {
+            return Ok(());
+        }
+        self.database
+            .replace_state_json(&[(STATE_OWNERSHIP_OPERATION, serialize_state(&operation)?)])?;
+        self.ownership_operation = operation;
+        Ok(())
+    }
+
+    pub fn replace_accounts_keys_and_ownership_operation(
+        &mut self,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        operation: Option<OwnershipOperationRecord>,
+    ) -> Result<()> {
+        if accounts.len() > MAX_LOCAL_ACCOUNTS {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("local account count exceeds the supported limit of {MAX_LOCAL_ACCOUNTS}"),
+            ));
+        }
+        if let Some(operation) = &operation {
+            operation
+                .validate()
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        }
+        self.database.replace_state_json(&[
+            (STATE_ACCOUNTS, serialize_state(&accounts)?),
+            (STATE_KEYS, serialize_state(&keys)?),
+            (STATE_OWNERSHIP_OPERATION, serialize_state(&operation)?),
+        ])?;
+        self.accounts = accounts;
+        self.keys = keys;
+        self.ownership_operation = operation;
         Ok(())
     }
 
@@ -349,11 +394,6 @@ impl LocalPoolStore {
             AutomationRecords::default(),
         )
     }
-
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -370,66 +410,223 @@ impl RecordChanges {
     }
 }
 
-fn load_record_file<T: serde::de::DeserializeOwned + serde::Serialize>(
-    root: &Path,
-    name: &str,
-) -> Result<Vec<T>> {
-    let path = root.join(name);
-    match load_json(&path) {
-        Ok(Some(records)) => Ok(records),
-        Ok(None) => {
-            let records = Vec::new();
-            save_json(&path, &records)?;
-            Ok(records)
-        }
-        Err(error) => {
-            let quarantined = quarantine::move_file(&recovery_root(root), &path)?;
-            Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!(
-                    "invalid record file was moved to {}: {error}",
-                    quarantined.display()
-                ),
-            ))
-        }
-    }
+#[derive(Default)]
+struct PersistedState {
+    gateway: GatewaySettings,
+    sources: Vec<ProviderSourceRecord>,
+    accounts: Vec<LocalAccountRecord>,
+    keys: Vec<LocalGatewayKeyRecord>,
+    automations: AutomationRecords,
+    remote_target: Option<RemoteTargetRecord>,
+    ownership_operation: Option<OwnershipOperationRecord>,
 }
 
-fn load_value_file<T>(root: &Path, name: &str) -> Result<T>
-where
-    T: Default + serde::de::DeserializeOwned + serde::Serialize,
-{
-    let path = root.join(name);
-    match load_json(&path) {
-        Ok(Some(value)) => Ok(value),
-        Ok(None) => {
-            let value = T::default();
-            save_json(&path, &value)?;
-            Ok(value)
-        }
-        Err(error) => {
-            let quarantined = quarantine::move_file(&recovery_root(root), &path)?;
-            Err(LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!(
-                    "invalid record file was moved to {}: {error}",
-                    quarantined.display()
-                ),
-            ))
-        }
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyMetadata {
+    schema_version: u32,
 }
 
-fn recovery_root(data_root: &Path) -> PathBuf {
-    data_root
-        .parent()
-        .map(|root| root.join("recovery"))
-        .unwrap_or_else(|| data_root.join("recovery"))
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyRemoteTargets {
+    active: Option<RemoteTargetRecord>,
+}
+
+fn load_or_initialize_state(root: &Path, database: &TelemetryDb) -> Result<PersistedState> {
+    if database.state_count()? == 0 {
+        let state = load_legacy_state(root)?.unwrap_or_default();
+        persist_state(database, &state)?;
+        return Ok(state);
+    }
+    Ok(PersistedState {
+        gateway: load_state(database, STATE_GATEWAY)?,
+        sources: load_state(database, STATE_SOURCES)?,
+        accounts: load_state(database, STATE_ACCOUNTS)?,
+        keys: load_state(database, STATE_KEYS)?,
+        automations: load_state(database, STATE_AUTOMATIONS)?,
+        remote_target: load_state(database, STATE_REMOTE_TARGET)?,
+        ownership_operation: load_optional_state(database, STATE_OWNERSHIP_OPERATION)?,
+    })
+}
+
+fn persist_state(database: &TelemetryDb, state: &PersistedState) -> Result<()> {
+    database.replace_state_json(&[
+        (STATE_GATEWAY, serialize_state(&state.gateway)?),
+        (STATE_SOURCES, serialize_state(&state.sources)?),
+        (STATE_ACCOUNTS, serialize_state(&state.accounts)?),
+        (STATE_KEYS, serialize_state(&state.keys)?),
+        (STATE_AUTOMATIONS, serialize_state(&state.automations)?),
+        (STATE_REMOTE_TARGET, serialize_state(&state.remote_target)?),
+        (
+            STATE_OWNERSHIP_OPERATION,
+            serialize_state(&state.ownership_operation)?,
+        ),
+    ])
+}
+
+fn load_optional_state<T: DeserializeOwned>(
+    database: &TelemetryDb,
+    key: &str,
+) -> Result<Option<T>> {
+    let Some(content) = database.state_json(key)? else {
+        return Ok(None);
+    };
+    serde_json::from_str(&content).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("local database state '{key}' is invalid: {error}"),
+        )
+    })
+}
+
+fn load_state<T: DeserializeOwned>(database: &TelemetryDb, key: &str) -> Result<T> {
+    let content = database.state_json(key)?.ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("local database state '{key}' is missing"),
+        )
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("local database state '{key}' is invalid: {error}"),
+        )
+    })
+}
+
+fn serialize_state<T: Serialize>(value: &T) -> Result<String> {
+    serde_json::to_string(value).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            format!("local state serialization failed: {error}"),
+        )
+    })
+}
+
+fn load_legacy_state(root: &Path) -> Result<Option<PersistedState>> {
+    let metadata_path = root.join("metadata.json");
+    if !metadata_path.exists() {
+        if LEGACY_STATE_FILES
+            .iter()
+            .skip(1)
+            .any(|name| root.join(name).exists())
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "legacy local data exist but metadata.json is missing",
+            ));
+        }
+        return Ok(None);
+    }
+    let metadata: LegacyMetadata = read_legacy_json(&metadata_path)?;
+    if metadata.schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(LocalPoolError::new(
+            ErrorCode::UnsupportedSchema,
+            format!(
+                "legacy local data schema {} is unsupported; expected {CURRENT_SCHEMA_VERSION}",
+                metadata.schema_version
+            ),
+        ));
+    }
+    let remote_target = if root.join("remote-target.json").exists() {
+        read_legacy_json::<LegacyRemoteTargets>(&root.join("remote-target.json"))?.active
+    } else {
+        None
+    };
+    Ok(Some(PersistedState {
+        gateway: read_legacy_json(&root.join("settings.json"))?,
+        sources: read_legacy_json(&root.join("connections.json"))?,
+        accounts: read_legacy_json(&root.join("accounts.json"))?,
+        keys: read_legacy_json(&root.join("pool-keys.json"))?,
+        automations: read_legacy_json(&root.join("automations.json"))?,
+        remote_target,
+        ownership_operation: None,
+    }))
+}
+
+fn read_legacy_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    let metadata = fs::symlink_metadata(path).map_err(legacy_io_error)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_LEGACY_JSON_BYTES
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("legacy local state file is unsafe: {}", path.display()),
+        ));
+    }
+    let content = fs::read_to_string(path).map_err(legacy_io_error)?;
+    serde_json::from_str(&content).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "legacy local state is invalid in {}: {error}",
+                path.display()
+            ),
+        )
+    })
+}
+
+fn cleanup_legacy_state_files(root: &Path) -> Result<()> {
+    for name in LEGACY_STATE_FILES {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                fs::remove_file(&path).map_err(legacy_io_error)?;
+            }
+            Ok(_) => {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    format!("legacy local state path is unsafe: {}", path.display()),
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(legacy_io_error(error)),
+        }
+    }
+    Ok(())
+}
+
+fn migrate_database_file(root: &Path) -> Result<()> {
+    let legacy = root.join("usage.sqlite");
+    let target = root.join("relay.sqlite");
+    if legacy.exists() && target.exists() {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "both usage.sqlite and relay.sqlite exist",
+        ));
+    }
+    if !legacy.exists() {
+        return Ok(());
+    }
+    fs::rename(&legacy, &target).map_err(legacy_io_error)?;
+    for suffix in ["-wal", "-shm"] {
+        let source = companion_path(&legacy, suffix);
+        if source.exists() {
+            fs::rename(&source, companion_path(&target, suffix)).map_err(legacy_io_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn companion_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn legacy_io_error(error: std::io::Error) -> LocalPoolError {
+    LocalPoolError::new(
+        ErrorCode::Io,
+        format!("local data migration failed: {error}"),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_pool::models::{OwnershipOperationKind, OwnershipOperationPhase};
     use std::collections::{BTreeMap, BTreeSet};
     use std::{
         env,
@@ -459,11 +656,10 @@ mod tests {
     fn fresh_store_is_versioned_and_restart_safe() {
         let root = temp_root();
         let store = LocalPoolStore::open(root.clone()).unwrap();
-        assert_eq!(
-            store.metadata().schema_version,
-            crate::local_pool::models::CURRENT_SCHEMA_VERSION
-        );
         assert_eq!(store.gateway().port, 14998);
+        assert_eq!(store.database().state_count().unwrap(), 7);
+        assert!(root.join("data/relay.sqlite").exists());
+        assert!(!root.join("data/metadata.json").exists());
         drop(store);
         assert_eq!(
             LocalPoolStore::open(root.clone()).unwrap().gateway().port,
@@ -480,8 +676,18 @@ mod tests {
         gateway.quota_refresh_interval_seconds = 120;
         gateway.quota_request_timeout_seconds = 10;
         gateway.use_free_accounts = true;
-        gateway.routing_strategy = RoutingStrategy::OldestAccount;
+        gateway.chatgpt_interface_quota_reserve_basis_points = 700;
+        gateway.routing_strategy = RoutingStrategy::SubscriptionExpiry;
+        gateway.subscription_plan_order = vec!["business".into(), "plus".into()];
         gateway.image_base_model = Some("gpt-5.4-mini".into());
+        gateway.model_price_overrides.insert(
+            "GPT-5.4".into(),
+            zenith_relay_core::ApiModelPriceOverride {
+                input_micro_usd_per_million: 1_250_000,
+                cached_input_micro_usd_per_million: Some(125_000),
+                output_micro_usd_per_million: 7_500_000,
+            },
+        );
         store.replace_gateway(gateway).unwrap();
         drop(store);
 
@@ -490,30 +696,148 @@ mod tests {
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
         assert!(reopened.gateway().use_free_accounts);
         assert_eq!(
+            reopened
+                .gateway()
+                .chatgpt_interface_quota_reserve_basis_points,
+            700
+        );
+        assert_eq!(
             reopened.gateway().routing_strategy,
-            RoutingStrategy::OldestAccount
+            RoutingStrategy::SubscriptionExpiry
+        );
+        assert_eq!(
+            reopened.gateway().subscription_plan_order,
+            ["business", "plus"]
         );
         assert_eq!(
             reopened.gateway().image_base_model.as_deref(),
             Some("gpt-5.4-mini")
         );
+        assert_eq!(
+            reopened.gateway().model_price_overrides.get("gpt-5.4"),
+            Some(&zenith_relay_core::ApiModelPriceOverride {
+                input_micro_usd_per_million: 1_250_000,
+                cached_input_micro_usd_per_million: Some(125_000),
+                output_micro_usd_per_million: 7_500_000,
+            })
+        );
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn corrupt_settings_are_quarantined() {
+    fn remote_target_survives_restart() {
         let root = temp_root();
-        fs::create_dir_all(root.join("data")).unwrap();
-        save_json(&root.join("data/metadata.json"), &StoreMetadata::default()).unwrap();
-        fs::write(root.join("data/settings.json"), "not-json").unwrap();
+        let target = RemoteTargetRecord {
+            origin: "https://relay.example.test".into(),
+            server_id: "server_1".into(),
+            identity_fingerprint: "sha256:test".into(),
+            server_version: "1.1.0".into(),
+            protocol_version: 1,
+            allow_insecure_http: false,
+            secret_ref: "remote:server_1".into(),
+            connected_at_ms: 123,
+        };
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        store.replace_remote_target(Some(target.clone())).unwrap();
+        drop(store);
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(reopened.remote_target(), Some(&target));
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ownership_operation_survives_restart_without_secret_material() {
+        let root = temp_root();
+        let operation = OwnershipOperationRecord {
+            id: "ownership_0123456789abcdef0123456789abcdef".into(),
+            kind: OwnershipOperationKind::MoveToRemote,
+            phase: OwnershipOperationPhase::MoveRemoteCommitted,
+            server_id: "server_1".into(),
+            local_account_ids: vec!["account_local".into()],
+            remote_account_ids: vec!["account_remote".into()],
+            created_remote_account_ids: vec!["account_remote".into()],
+            created_at_ms: 100,
+            updated_at_ms: 200,
+        };
+        let mut store = LocalPoolStore::open(root.clone()).unwrap();
+        store
+            .replace_ownership_operation(Some(operation.clone()))
+            .unwrap();
+        drop(store);
+
+        let reopened = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(reopened.ownership_operation(), Some(&operation));
+        let stored = reopened
+            .database()
+            .state_json(STATE_OWNERSHIP_OPERATION)
+            .unwrap()
+            .unwrap();
+        assert!(!stored.contains("access_token"));
+        assert!(!stored.contains("refresh_token"));
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn corrupt_database_state_is_rejected_without_deleting_the_database() {
+        let root = temp_root();
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        store
+            .database()
+            .replace_state_json(&[(STATE_GATEWAY, "not-json".to_string())])
+            .unwrap();
+        drop(store);
         let error = LocalPoolStore::open(root.clone()).err().unwrap();
         assert!(matches!(error.code, ErrorCode::RecoveryRequired));
-        assert!(root
-            .join("recovery/quarantine")
-            .read_dir()
-            .unwrap()
-            .next()
-            .is_some());
+        assert!(root.join("data/relay.sqlite").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_json_store_is_imported_once_and_removed() {
+        let root = temp_root();
+        let data = root.join("data");
+        fs::create_dir_all(&data).unwrap();
+        write_json(
+            &data.join("metadata.json"),
+            &serde_json::json!({"schemaVersion": CURRENT_SCHEMA_VERSION}),
+        );
+        write_json(&data.join("settings.json"), &GatewaySettings::default());
+        write_json(
+            &data.join("connections.json"),
+            &Vec::<ProviderSourceRecord>::new(),
+        );
+        write_json(
+            &data.join("accounts.json"),
+            &vec![account_record("imported")],
+        );
+        write_json(
+            &data.join("pool-keys.json"),
+            &Vec::<LocalGatewayKeyRecord>::new(),
+        );
+        write_json(
+            &data.join("automations.json"),
+            &AutomationRecords::default(),
+        );
+        rusqlite::Connection::open(data.join("usage.sqlite")).unwrap();
+
+        let store = LocalPoolStore::open(root.clone()).unwrap();
+        assert_eq!(store.accounts()[0].account.id, "imported");
+        assert!(data.join("relay.sqlite").exists());
+        assert!(!data.join("usage.sqlite").exists());
+        for name in LEGACY_STATE_FILES {
+            assert!(!data.join(name).exists());
+        }
+        drop(store);
+        assert_eq!(
+            LocalPoolStore::open(root.clone()).unwrap().accounts()[0]
+                .account
+                .id,
+            "imported"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -563,8 +887,13 @@ mod tests {
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(reopened.sources()[0].models, ["gpt-test"]);
         assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
-        let records = fs::read_to_string(root.join("data/connections.json")).unwrap();
+        let records = reopened
+            .database()
+            .state_json(STATE_SOURCES)
+            .unwrap()
+            .unwrap();
         assert!(!records.contains("upstream-secret"));
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -618,11 +947,12 @@ mod tests {
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         assert!(reopened.sources().is_empty());
         assert_eq!(reopened.keys()[0].source_ids, Some(Vec::new()));
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn failed_key_write_restores_source_file_and_memory() {
+    fn failed_transaction_preserves_all_state_and_memory() {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let source = ProviderSourceRecord {
@@ -661,20 +991,20 @@ mod tests {
         store
             .replace_records(vec![source.clone()], vec![key.clone()])
             .unwrap();
-        fs::create_dir(root.join("data/pool-keys.tmp")).unwrap();
         let mut changed_source = source;
         changed_source.name = "After".into();
         let mut changed_key = key;
-        changed_key.label = "After".into();
+        changed_key.label = "x".repeat(17 * 1024 * 1024);
 
         assert!(store
             .replace_records(vec![changed_source], vec![changed_key])
             .is_err());
         assert_eq!(store.sources()[0].name, "Before");
-        let persisted: Vec<ProviderSourceRecord> = load_json(&root.join("data/connections.json"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(persisted[0].name, "Before");
+        drop(store);
+        assert_eq!(
+            LocalPoolStore::open(root.clone()).unwrap().sources()[0].name,
+            "Before"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -725,6 +1055,7 @@ mod tests {
         assert!(reopened.automations().tasks.is_empty());
         assert!(!reopened.gateway().enabled);
         assert_eq!(fs::read_to_string(backup).unwrap(), "preserved");
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -759,6 +1090,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
@@ -768,5 +1100,9 @@ mod tests {
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
         }
+    }
+
+    fn write_json(path: &Path, value: &impl Serialize) {
+        fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
 }

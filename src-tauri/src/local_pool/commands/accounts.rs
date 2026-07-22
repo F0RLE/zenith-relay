@@ -15,9 +15,9 @@ use crate::local_pool::{
             ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
         },
         imports::{
-            combine_import_documents, ImportAuthMode, ImportIssue, ImportIssueCode, ImportPreview,
-            ImportPreviewStatus, ImportQuotaStatus, ParsedImportItem, MAX_IMPORT_BYTES,
-            MAX_IMPORT_ITEMS,
+            combine_import_documents, parse_import, ImportAuthMode, ImportIssue, ImportIssueCode,
+            ImportPreview, ImportPreviewStatus, ImportQuotaStatus, ParsedImport, ParsedImportItem,
+            MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS,
         },
         models::{CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode},
         oauth::{collect_limited, CodexOAuthClient, LimitedBodyError},
@@ -35,6 +35,7 @@ use crate::local_pool::{
     state::DesktopState,
     store::secret_store,
 };
+use crate::platform::default_codex_home;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::{TimeZone, Utc};
 use reqwest::{header::HeaderValue, redirect::Policy};
@@ -47,17 +48,20 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
-    accounts::{build_account_export, AccountExportCredential, TokenPersistenceAdapter},
+    accounts::{
+        build_account_export, AccountExportCredential, AccountExportDocument, AccountExportFormat,
+        TokenPersistenceAdapter,
+    },
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState, TokenSet},
     automations::AccountSelector,
     discover_source_models,
-    protocol::RevealedAccountIdentity,
-    quota::{QuotaRefreshFailure, QuotaTransition},
+    protocol::{RemoteAccountLocation, RevealedAccountIdentity},
+    quota::{QuotaRefreshFailure, QuotaTransition, Subscription},
     ProviderSource, ProxyConfig, WireApi,
 };
 
@@ -75,6 +79,7 @@ const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
 const QUOTA_REFRESH_RETRY_MS: u64 = 60_000;
 const QUOTA_REFRESH_LEAD_MS: u64 = 60_000;
 const QUOTA_REFRESH_MIN_DELAY_MS: u64 = 30_000;
+const ACCOUNT_IMPORT_PROGRESS_EVENT: &str = "relay-account-import-progress";
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 type ItemResult<T> = std::result::Result<T, ImportItemError>;
@@ -173,6 +178,14 @@ fn revealable_account_identity(credentials: &StoredCodexCredentials) -> Option<&
         .or_else(|| credentials.provider_user_id())
 }
 
+fn export_account_label(label: &str, credentials: &StoredCodexCredentials) -> String {
+    if credentials.snapshot().identity.as_deref() == Some(label) {
+        credentials.email().unwrap_or(label).to_string()
+    } else {
+        label.to_string()
+    }
+}
+
 #[tauri::command]
 pub fn export_local_accounts(
     input: AccountExportInput,
@@ -180,6 +193,21 @@ pub fn export_local_accounts(
     state: State<'_, DesktopState>,
 ) -> CommandResult<AccountExportResult> {
     let account_ids = normalize_account_ids(input.account_ids)?;
+    let document = build_local_account_export_document(
+        &account_ids,
+        input.format,
+        input.description.as_deref(),
+        &state,
+    )?;
+    finish_account_export(document, input.destination, &app)
+}
+
+pub(super) fn build_local_account_export_document(
+    account_ids: &[String],
+    format: AccountExportFormat,
+    description: Option<&str>,
+    state: &DesktopState,
+) -> LocalResult<AccountExportDocument> {
     let records = {
         let store = state.store()?;
         account_ids
@@ -199,7 +227,7 @@ pub fn export_local_accounts(
                 .require(&record.account.id)
                 .map_err(credential_local_error)?;
             Ok(AccountExportCredential {
-                label: record.account.label.clone(),
+                label: export_account_label(&record.account.label, &credentials),
                 email: credentials.email().map(str::to_string),
                 access_token: credentials.access_token().to_string(),
                 refresh_token: credentials.refresh_token().map(str::to_string),
@@ -222,9 +250,31 @@ pub fn export_local_accounts(
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;
-    let document = build_account_export(input.format, &accounts, current_time_ms())
+    let document = build_account_export(format, &accounts, current_time_ms(), description)
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-    finish_account_export(document, input.destination, &app)
+    Ok(document)
+}
+
+pub(super) fn mark_local_accounts_moved(
+    accounts: &mut [LocalAccountRecord],
+    remote_locations: &HashMap<String, RemoteAccountLocation>,
+) -> LocalResult<()> {
+    let mut updated = 0;
+    for account in accounts {
+        if let Some(location) = remote_locations.get(&account.account.id) {
+            account.account.enabled = false;
+            account.account.in_pool = false;
+            account.remote_location = Some(location.clone());
+            updated += 1;
+        }
+    }
+    if updated != remote_locations.len() {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            "an account selected for transfer was not found",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -401,10 +451,23 @@ pub struct AccountQuotaRefreshItemResult {
 
 #[derive(Clone)]
 struct ImportRowContext {
+    label: String,
     auth_mode: ImportAuthMode,
     selectable: bool,
     plan: Option<String>,
     subscription_active_until_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountImportProgressEvent {
+    session_id: String,
+    completed: usize,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_label: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -526,6 +589,54 @@ pub async fn preview_local_account_import_files(
     let Some(documents) = documents else {
         return Ok(None);
     };
+    preview_account_import_documents(documents, &state)
+        .await
+        .map(Some)
+}
+
+#[tauri::command]
+pub async fn preview_current_codex_account_import(
+    state: State<'_, DesktopState>,
+) -> CommandResult<ImportSessionResponse> {
+    let codex_home = default_codex_home();
+    let bindings = codex::profile_bindings(&codex_home, &state.profile_backup_root())?;
+    let documents = current_codex_import_documents(&codex_home, &bindings)?;
+    preview_account_import_documents(documents, &state).await
+}
+
+#[tauri::command]
+pub async fn current_chatgpt_profile_available(
+    state: State<'_, DesktopState>,
+) -> CommandResult<bool> {
+    let codex_home = default_codex_home();
+    let bindings = codex::profile_bindings(&codex_home, &state.profile_backup_root())?;
+    if current_codex_profile_is_managed(&bindings) {
+        return Ok(false);
+    }
+    let auth_path = codex_home.join("auth.json");
+    if !auth_path.is_file() {
+        return Ok(false);
+    }
+    let documents = read_import_documents(vec![auth_path])?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let existing = existing_identity_index(&state, &credentials)?;
+    let Ok(parsed) = parse_import(
+        &documents[0],
+        Some("auth.json"),
+        &existing.keys().cloned().collect::<Vec<_>>(),
+    ) else {
+        return Ok(false);
+    };
+    Ok(is_usable_current_chatgpt_profile(
+        &parsed,
+        current_time_ms(),
+    ))
+}
+
+async fn preview_account_import_documents(
+    documents: Vec<String>,
+    state: &DesktopState,
+) -> CommandResult<ImportSessionResponse> {
     let _mutation = state.setup_guard().await;
     let (content, _) = normalize_import_input(StartAccountImportInput {
         content: None,
@@ -533,7 +644,7 @@ pub async fn preview_local_account_import_files(
         source_file: None,
     })?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let existing = existing_identity_index(&state, &credentials)?;
+    let existing = existing_identity_index(state, &credentials)?;
     let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
     let session = sessions
         .start(
@@ -543,10 +654,9 @@ pub async fn preview_local_account_import_files(
         )
         .map_err(import_session_error)?;
     let session_id = session.session_id.clone();
-    let probe_quota = should_probe_import_quota(true, session.preview.rows.len());
     let prepared = async {
         let (content, preview) =
-            prepare_import_preview(&state, &credentials, session, probe_quota).await?;
+            prepare_import_preview(state, &credentials, session, false).await?;
         sessions
             .prepare(
                 &session_id,
@@ -558,7 +668,7 @@ pub async fn preview_local_account_import_files(
     }
     .await;
     match prepared {
-        Ok(session) => Ok(Some(session.into())),
+        Ok(session) => Ok(session.into()),
         Err(error) => {
             let _ = sessions.cancel(&session_id);
             Err(error)
@@ -566,11 +676,54 @@ pub async fn preview_local_account_import_files(
     }
 }
 
+fn current_codex_import_documents(
+    codex_home: &Path,
+    bindings: &[codex::ProfileBinding],
+) -> LocalResult<Vec<String>> {
+    if current_codex_profile_is_managed(bindings) {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "the current ChatGPT profile is already managed by the local gateway",
+        ));
+    }
+    let auth_path = codex_home.join("auth.json");
+    if !auth_path.is_file() {
+        return Err(LocalPoolError::new(
+            ErrorCode::NotFound,
+            "the current ChatGPT profile was not found",
+        ));
+    }
+    read_import_documents(vec![auth_path])
+}
+
+fn current_codex_profile_is_managed(bindings: &[codex::ProfileBinding]) -> bool {
+    bindings.iter().any(|binding| {
+        binding.active && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
+    })
+}
+
+fn is_usable_current_chatgpt_profile(parsed: &ParsedImport, now_ms: u64) -> bool {
+    let ([row], [item]) = (parsed.preview.rows.as_slice(), parsed.items.as_slice()) else {
+        return false;
+    };
+    let identity = imported_identity(item.secrets().id_token(), item.secrets().access_token());
+    let refreshable = item.secrets().refresh_token().is_some()
+        || identity.access_expires_at_ms.is_some_and(|expires_at_ms| {
+            expires_at_ms > now_ms.saturating_add(TOKEN_REFRESH_SKEW_MS)
+        });
+    row.auth_mode == ImportAuthMode::OAuth
+        && row.status == ImportPreviewStatus::Ready
+        && row.selectable
+        && !row.existing
+        && refreshable
+        && (item.account_id.is_some() || identity.provider_account_id.is_some())
+}
+
 pub(crate) fn pick_account_import_documents(app: &AppHandle) -> CommandResult<Option<Vec<String>>> {
     let Some(files) = app
         .dialog()
         .file()
-        .add_filter("JSON", &["json"])
+        .add_filter("Account files", &["json", "txt"])
         .blocking_pick_files()
     else {
         return Ok(None);
@@ -599,11 +752,13 @@ pub(crate) fn read_import_documents(paths: Vec<PathBuf>) -> LocalResult<Vec<Stri
         if !path
             .extension()
             .and_then(|value| value.to_str())
-            .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+            .is_some_and(|value| {
+                value.eq_ignore_ascii_case("json") || value.eq_ignore_ascii_case("txt")
+            })
         {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
-                "selected import file must use the .json extension",
+                "selected import file must use the .json or .txt extension",
             ));
         }
         let metadata = std::fs::metadata(&path).map_err(|_| {
@@ -648,6 +803,16 @@ fn normalize_import_input(
                 "paste content and file documents cannot be imported together",
             )
             .into());
+        }
+        if input.documents.len() == 1 {
+            return Ok((
+                input
+                    .documents
+                    .into_iter()
+                    .next()
+                    .expect("one document exists"),
+                None,
+            ));
         }
         let content = combine_import_documents(&input.documents)
             .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.message))?;
@@ -714,15 +879,17 @@ pub async fn cancel_local_account_import(
 #[tauri::command]
 pub async fn confirm_local_account_import(
     input: ConfirmAccountImportInput,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let _mutation = state.setup_guard().await;
-    confirm_local_account_import_inner(input, &state).await
+    confirm_local_account_import_inner(input, &state, Some(&app)).await
 }
 
 async fn confirm_local_account_import_inner(
     input: ConfirmAccountImportInput,
     state: &DesktopState,
+    app: Option<&AppHandle>,
 ) -> CommandResult<ConfirmAccountImportResponse> {
     let selected_item_ids = normalize_selected_item_ids(input.selected_item_ids)?;
     let configured_models = normalize_models(input.models.clone())?;
@@ -766,6 +933,7 @@ async fn confirm_local_account_import_inner(
             (
                 row.item_id.clone(),
                 ImportRowContext {
+                    label: row.label.clone(),
                     auth_mode: row.auth_mode,
                     selectable: row.selectable,
                     plan: row.plan.clone(),
@@ -783,73 +951,124 @@ async fn confirm_local_account_import_inner(
         .map(|item| (item.item_id.clone(), item))
         .collect::<HashMap<_, _>>();
     let mut results = Vec::with_capacity(selected_item_ids.len());
+    let total = selected_item_ids.len();
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    emit_account_import_progress(app, &input.session_id, 0, total, succeeded, failed, None);
 
-    for item_id in selected_item_ids {
-        let Some(context) = row_context.get(&item_id) else {
-            results.push(ImportItemResult::failure(
+    for (completed, item_id) in selected_item_ids.into_iter().enumerate() {
+        let label = row_context
+            .get(&item_id)
+            .map(|context| context.label.clone())
+            .unwrap_or_else(|| item_id.clone());
+        emit_account_import_progress(
+            app,
+            &input.session_id,
+            completed,
+            total,
+            succeeded,
+            failed,
+            Some(label),
+        );
+        let result = match row_context.get(&item_id) {
+            None => ImportItemResult::failure(
                 item_id,
                 ImportItemError::new("item_not_found", "import item was not found"),
-            ));
-            continue;
-        };
-        if !context.selectable {
-            results.push(ImportItemResult::failure(
+            ),
+            Some(context) if !context.selectable => ImportItemResult::failure(
                 item_id,
                 ImportItemError::new("item_not_selectable", "import item cannot be selected"),
-            ));
-            continue;
-        }
-        let Some(item) = items.remove(&item_id) else {
-            results.push(ImportItemResult::failure(
-                item_id,
-                ImportItemError::new(
-                    "item_not_selectable",
-                    "import item has no usable credentials",
+            ),
+            Some(context) => match items.remove(&item_id) {
+                None => ImportItemResult::failure(
+                    item_id,
+                    ImportItemError::new(
+                        "item_not_selectable",
+                        "import item has no usable credentials",
+                    ),
                 ),
-            ));
-            continue;
-        };
-        if context.auth_mode == ImportAuthMode::ApiKey {
-            match import_source_item(
-                state,
-                item,
-                input.add_to_pool,
-                input.discover_models,
-                &configured_models,
-            )
-            .await
-            {
-                Ok(source) => results.push(ImportItemResult::source_success(item_id, source)),
-                Err(error) => results.push(ImportItemResult::failure(item_id, error)),
-            }
-        } else {
-            match import_account_item(
-                state,
-                &credentials,
-                item,
-                context,
-                input.add_to_pool,
-                input.discover_models,
-                probe_quota,
-                &configured_models,
-            )
-            .await
-            {
-                Ok((account, quota)) => {
-                    results.push(ImportItemResult::account_success(item_id, account, quota));
+                Some(item) if context.auth_mode == ImportAuthMode::ApiKey => {
+                    match import_source_item(
+                        state,
+                        item,
+                        input.add_to_pool,
+                        input.discover_models,
+                        &configured_models,
+                    )
+                    .await
+                    {
+                        Ok(source) => ImportItemResult::source_success(item_id, source),
+                        Err(error) => ImportItemResult::failure(item_id, error),
+                    }
                 }
-                Err(error) => results.push(ImportItemResult::failure(item_id, error)),
-            }
+                Some(item) => match import_account_item(
+                    state,
+                    &credentials,
+                    item,
+                    context,
+                    input.add_to_pool,
+                    input.discover_models,
+                    probe_quota,
+                    &configured_models,
+                )
+                .await
+                {
+                    Ok((account, quota)) => {
+                        ImportItemResult::account_success(item_id, account, quota)
+                    }
+                    Err(error) => ImportItemResult::failure(item_id, error),
+                },
+            },
+        };
+        match result.status {
+            ImportItemStatus::Succeeded => succeeded += 1,
+            ImportItemStatus::Failed => failed += 1,
         }
+        results.push(result);
+        emit_account_import_progress(
+            app,
+            &input.session_id,
+            completed + 1,
+            total,
+            succeeded,
+            failed,
+            None,
+        );
     }
 
-    sessions
-        .complete(&input.session_id)
-        .map_err(import_session_error)?;
+    if failed == 0 {
+        sessions
+            .complete(&input.session_id)
+            .map_err(import_session_error)?;
+    }
     Ok(ConfirmAccountImportResponse {
         session_id: input.session_id,
         results,
     })
+}
+
+fn emit_account_import_progress(
+    app: Option<&AppHandle>,
+    session_id: &str,
+    completed: usize,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    current_label: Option<String>,
+) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            ACCOUNT_IMPORT_PROGRESS_EVENT,
+            AccountImportProgressEvent {
+                session_id: session_id.to_string(),
+                completed,
+                total,
+                succeeded,
+                failed,
+                current_label,
+            },
+        );
+    }
 }
 
 #[tauri::command]
@@ -866,10 +1085,10 @@ pub async fn update_local_account(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
     apply_account_patch(&mut account, input)?;
     validate_account_record(&account)?;
-    state.mark_quota_refresh(&account_id, current_time_ms())?;
     let (old_accounts, old_keys) = current_account_records(&state)?;
     state.store()?.upsert_account(account)?;
     sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -905,6 +1124,7 @@ pub async fn set_local_account_enabled(
     let (old_accounts, old_keys) = current_account_records(&state)?;
     state.store()?.upsert_account(account)?;
     sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    state.sync_account_quota_refresh(&account_id, current_time_ms())?;
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -936,8 +1156,26 @@ pub async fn delete_local_account(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
+    delete_local_account_inner(&account_id, &state).await?;
+    state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn delete_local_accounts(
+    account_ids: Vec<String>,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let account_ids = normalize_account_ids(account_ids)?;
+    let _mutation = state.setup_guard().await;
+    for account_id in account_ids {
+        delete_local_account_inner(&account_id, &state).await?;
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+async fn delete_local_account_inner(account_id: &str, state: &DesktopState) -> CommandResult<()> {
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
-    let (old_accounts, old_keys, _) = current_account_state(&state)?;
+    let (old_accounts, old_keys, _) = current_account_state(state)?;
     if !old_accounts
         .iter()
         .any(|account| account.account.id == account_id)
@@ -945,7 +1183,7 @@ pub async fn delete_local_account(
         return Err(LocalPoolError::new(ErrorCode::NotFound, "account not found").into());
     }
     let old_credential = credentials
-        .load(&account_id)
+        .load(account_id)
         .map_err(credential_local_error)?;
     let old_automations = state.store()?.automations().clone();
     let previous_quota_refresh = state.quota_refresh_snapshot()?;
@@ -962,12 +1200,12 @@ pub async fn delete_local_account(
         .into());
     }
     let restored_bindings =
-        restore_bound_account_profiles(&state, &bindings, old_credential.as_ref())?;
-    if let Err(error) = state.remove_pending_wakes_for_account(&account_id) {
+        restore_bound_account_profiles(state, &bindings, old_credential.as_ref())?;
+    if let Err(error) = state.remove_pending_wakes_for_account(account_id) {
         rollback_deleted_account_side_effects(
-            &state,
+            state,
             &credentials,
-            &account_id,
+            account_id,
             old_credential.as_ref(),
             previous_quota_refresh,
             previous_wake,
@@ -984,15 +1222,15 @@ pub async fn delete_local_account(
         .collect::<Vec<_>>();
     let mut keys = old_keys.clone();
     prune_key_account_scopes(&mut keys, &accounts);
-    let automations = prune_account_task_selectors(old_automations.clone(), &account_id);
+    let automations = prune_account_task_selectors(old_automations.clone(), account_id);
     if let Err(error) = credentials
-        .delete(&account_id)
+        .delete(account_id)
         .map_err(credential_local_error)
     {
         rollback_deleted_account_side_effects(
-            &state,
+            state,
             &credentials,
-            &account_id,
+            account_id,
             old_credential.as_ref(),
             previous_quota_refresh,
             previous_wake,
@@ -1002,13 +1240,13 @@ pub async fn delete_local_account(
         )?;
         return Err(error.into());
     }
-    match state.remove_quota_refresh(&account_id) {
+    match state.remove_quota_refresh(account_id) {
         Ok(_) => {}
         Err(error) => {
             rollback_deleted_account_side_effects(
-                &state,
+                state,
                 &credentials,
-                &account_id,
+                account_id,
                 old_credential.as_ref(),
                 previous_quota_refresh,
                 previous_wake,
@@ -1024,9 +1262,9 @@ pub async fn delete_local_account(
         .replace_account_state(accounts, keys, automations)
     {
         rollback_deleted_account_side_effects(
-            &state,
+            state,
             &credentials,
-            &account_id,
+            account_id,
             old_credential.as_ref(),
             previous_quota_refresh,
             previous_wake,
@@ -1036,30 +1274,11 @@ pub async fn delete_local_account(
         )?;
         return Err(error.into());
     }
-    if let Err(error) = sync_account_state_or_rollback(
-        &state,
-        old_accounts.clone(),
-        old_keys.clone(),
-        old_automations.clone(),
-    )
-    .await
-    {
-        rollback_deleted_account_side_effects(
-            &state,
-            &credentials,
-            &account_id,
-            old_credential.as_ref(),
-            previous_quota_refresh,
-            previous_wake,
-            old_automations,
-            &restored_bindings,
-            &error,
-        )?;
-        repair_gateway_after_credential_restore(&state, old_accounts, old_keys, &error).await?;
-        return Err(error.into());
+    if let Some(runtime) = state.gateway.runtime().await {
+        runtime.remove_candidate(account_id);
     }
-    state.token_authority().remove(&account_id);
-    state.snapshot().await.map_err(Into::into)
+    state.token_authority().remove(account_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1080,20 +1299,7 @@ pub async fn refresh_all_local_account_quotas(
         .store()?
         .accounts()
         .iter()
-        .map(|account| account.account.id.clone())
-        .collect::<Vec<_>>();
-    Ok(refresh_account_quotas(&state, account_ids).await)
-}
-
-#[tauri::command]
-pub async fn refresh_local_pool_account_quotas(
-    state: State<'_, DesktopState>,
-) -> CommandResult<Vec<AccountQuotaRefreshItemResult>> {
-    let account_ids = state
-        .store()?
-        .accounts()
-        .iter()
-        .filter(|account| account.account.in_pool && account.account.enabled)
+        .filter(|account| account.remote_location.is_none())
         .map(|account| account.account.id.clone())
         .collect::<Vec<_>>();
     Ok(refresh_account_quotas(&state, account_ids).await)
@@ -1143,7 +1349,7 @@ async fn refresh_manual_account_quota(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
-    match refresh_account_quota_once(state, account_id, false).await {
+    match refresh_account_quota_once(state, account_id, true, true).await {
         Ok(response) => {
             settle_manual_quota_refresh(state, account_id, &response)?;
             Ok(response)
@@ -1261,6 +1467,18 @@ pub(crate) async fn prepare_account_credentials(
     state: &DesktopState,
     account_id: &str,
 ) -> LocalResult<PreparedAccountCredentials> {
+    let remote_location = state
+        .store()?
+        .account(account_id)
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?
+        .remote_location
+        .clone();
+    if remote_location.is_some() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "account is managed by a remote server",
+        ));
+    }
     sync_managed_account_profile(state, account_id).await?;
     let credentials = CredentialStore::from_backend(NativeSecretBackend);
     let initial_account = state
@@ -1358,6 +1576,7 @@ pub(crate) async fn refresh_account_quota_once(
     state: &DesktopState,
     account_id: &str,
     force_subscription_refresh: bool,
+    refresh_models: bool,
 ) -> LocalResult<AccountQuotaRefreshResponse> {
     let quota_lock = state.quota_account_lock(account_id)?;
     let _quota_guard = quota_lock.lock().await;
@@ -1388,46 +1607,46 @@ pub(crate) async fn refresh_account_quota_once(
             );
         }
     }
-    let quota = CodexQuotaClient::new_with_proxy_and_timeout(prepared.proxy(), request_timeout)
-        .map_err(|failure| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                format!("failed to initialize quota client: {}", failure.code),
-            )
-        })?;
     let refresh_subscription = force_subscription_refresh
         || zenith_relay_core::quota::subscription_refresh_due(
             subscription.active_until_ms,
             subscription.updated_at_ms,
             now_ms,
         );
-    let model_discovery = async {
-        match CodexModelsClient::new_with_proxy(prepared.proxy()) {
-            Ok(client) => {
-                client
-                    .discover(
-                        prepared.tokens().access_token(),
-                        prepared.provider_account_id(),
-                        zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
-                    )
-                    .await
+    let refresh_models = refresh_models || account_before_refresh.models.is_empty();
+    let (mut refreshed, mut discovered_models) = request_account_metadata(
+        &prepared,
+        request_timeout,
+        now_ms,
+        &subscription,
+        refresh_subscription,
+        refresh_models,
+    )
+    .await?;
+    if quota_refresh_was_unauthorized(&refreshed)
+        || model_discovery_was_unauthorized(&discovered_models)
+    {
+        match recover_account_authorization(state, account_id, current_time_ms()).await {
+            Ok(recovered) => {
+                (refreshed, discovered_models) = request_account_metadata(
+                    &recovered,
+                    request_timeout,
+                    current_time_ms(),
+                    &subscription,
+                    refresh_subscription,
+                    refresh_models,
+                )
+                .await?;
             }
-            Err(error) => Err(error),
+            Err(_) if !account_auth_is_terminal(state, account_id)? => {
+                refreshed = Ok(QuotaRefreshOutcome::Failed {
+                    failure: QuotaRefreshFailure::new("quota_token_refresh", true),
+                    subscription: subscription.clone(),
+                });
+            }
+            Err(_) => {}
         }
-    };
-    let (refreshed, discovered_models) = tokio::join!(
-        tokio::time::timeout(
-            request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
-            quota.refresh_quota(
-                prepared.tokens().access_token(),
-                prepared.provider_account_id(),
-                now_ms,
-                &subscription,
-                refresh_subscription,
-            ),
-        ),
-        model_discovery,
-    );
+    }
 
     let _mutation = state.setup_guard().await;
     let (old_accounts, old_keys, account, outcome, models_changed) = {
@@ -1456,13 +1675,10 @@ pub(crate) async fn refresh_account_quota_once(
                 }
             }
         };
-        apply_model_discovery(&mut account, discovered_models);
-        preserve_newer_routing_failure(
-            &mut account,
-            &account_before_refresh,
-            &current_account,
-            now_ms,
-        );
+        if let Some(discovered_models) = discovered_models {
+            apply_model_discovery(&mut account, discovered_models);
+        }
+        preserve_newer_account_state(&mut account, &account_before_refresh, &current_account);
         let models_changed =
             account.models.iter().cloned().collect::<BTreeSet<_>>() != previous_models;
         store.upsert_account(account.clone())?;
@@ -1476,6 +1692,110 @@ pub(crate) async fn refresh_account_quota_once(
     })
 }
 
+async fn request_account_metadata(
+    prepared: &PreparedAccountCredentials,
+    request_timeout: Duration,
+    now_ms: u64,
+    subscription: &Subscription,
+    refresh_subscription: bool,
+    refresh_models: bool,
+) -> LocalResult<(
+    std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
+    Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
+)> {
+    let quota = CodexQuotaClient::new_with_proxy_and_timeout(prepared.proxy(), request_timeout)
+        .map_err(|failure| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("failed to initialize quota client: {}", failure.code),
+            )
+        })?;
+    let model_discovery = async {
+        if !refresh_models {
+            return None;
+        }
+        Some(match CodexModelsClient::new_with_proxy(prepared.proxy()) {
+            Ok(client) => {
+                client
+                    .discover(
+                        prepared.tokens().access_token(),
+                        prepared.provider_account_id(),
+                        zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        })
+    };
+    Ok(tokio::join!(
+        tokio::time::timeout(
+            request_timeout.saturating_add(QUOTA_COMMAND_TIMEOUT_OVERHEAD),
+            quota.refresh_quota(
+                prepared.tokens().access_token(),
+                prepared.provider_account_id(),
+                now_ms,
+                subscription,
+                refresh_subscription,
+            ),
+        ),
+        model_discovery,
+    ))
+}
+
+fn quota_refresh_was_unauthorized(
+    result: &std::result::Result<QuotaRefreshOutcome, tokio::time::error::Elapsed>,
+) -> bool {
+    matches!(
+        result,
+        Ok(QuotaRefreshOutcome::Failed { failure, .. })
+            if failure.http_status() == Some(401)
+    )
+}
+
+fn model_discovery_was_unauthorized(
+    result: &Option<std::result::Result<Vec<String>, ModelDiscoveryFailure>>,
+) -> bool {
+    matches!(
+        result,
+        Some(Err(ModelDiscoveryFailure {
+            code: ModelDiscoveryFailureCode::Unauthorized,
+            ..
+        }))
+    )
+}
+
+async fn recover_account_authorization(
+    state: &DesktopState,
+    account_id: &str,
+    now_ms: u64,
+) -> LocalResult<PreparedAccountCredentials> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let persistence = CredentialPersistence::new(credentials, state.account_metadata_sink());
+    state
+        .token_authority()
+        .invalidate_access_and_persist(account_id, now_ms, &persistence)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("failed to invalidate rejected account access: {error}"),
+            )
+        })?;
+    prepare_account_credentials(state, account_id).await
+}
+
+fn account_auth_is_terminal(state: &DesktopState, account_id: &str) -> LocalResult<bool> {
+    let auth_state = state
+        .store()?
+        .account(account_id)
+        .map(|account| account.account.auth_state)
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    Ok(matches!(
+        auth_state,
+        AccountAuthState::RequiresReauth(_) | AccountAuthState::DegradedAccessOnly
+    ))
+}
+
 fn settle_manual_quota_refresh(
     state: &DesktopState,
     account_id: &str,
@@ -1486,7 +1806,7 @@ fn settle_manual_quota_refresh(
     if let Some(due_at_ms) =
         next_quota_refresh_at(response, current_time_ms(), refresh_interval_seconds)
     {
-        state.mark_quota_refresh(account_id, due_at_ms)?;
+        state.sync_account_quota_refresh(account_id, due_at_ms)?;
     }
     Ok(())
 }
@@ -1498,7 +1818,7 @@ fn settle_manual_quota_error(
 ) -> LocalResult<()> {
     state.remove_quota_refresh(account_id)?;
     if !matches!(&error.code, ErrorCode::NotFound) {
-        state.mark_quota_refresh(
+        state.sync_account_quota_refresh(
             account_id,
             current_time_ms().saturating_add(QUOTA_REFRESH_RETRY_MS),
         )?;
@@ -1923,6 +2243,7 @@ async fn import_source_item(
     runtime_source
         .validate()
         .map_err(|_| ImportItemError::new("source_invalid", "imported source is invalid"))?;
+    let discover_models = discover_models || runtime_source.models.is_empty();
     runtime_source.models = if discover_models {
         discover_source_models(&runtime_source).await.map_err(|_| {
             ImportItemError::new(
@@ -2064,11 +2385,10 @@ fn canonical_source_base_url(value: &str) -> ItemResult<String> {
 
 fn source_identity_key(base_url: &str, api_key: &str) -> ItemResult<String> {
     let base_url = canonical_source_base_url(base_url)?;
-    let secret_hash = format!("{:x}", Sha256::digest(api_key.as_bytes()));
-    Ok(format!(
-        "{:x}",
-        Sha256::digest(format!("source\0{base_url}\0{secret_hash}").as_bytes())
-    ))
+    let secret_hash = hex::encode(Sha256::digest(api_key.as_bytes()));
+    Ok(hex::encode(Sha256::digest(
+        format!("source\0{base_url}\0{secret_hash}").as_bytes(),
+    )))
 }
 
 fn find_existing_source(
@@ -2182,6 +2502,79 @@ fn restore_source_secret(secret_ref: &str, previous: Option<&str>) -> ItemResult
     .map_err(|_| ImportItemError::recovery("failed to restore previous source credentials"))
 }
 
+pub(super) async fn stage_returned_remote_account(
+    state: &DesktopState,
+    local_account_id: &str,
+    content: &str,
+) -> LocalResult<LocalAccountRecord> {
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let existing = existing_identity_index(state, &credentials)?;
+    let mut parsed = parse_import(content, None, &existing.keys().cloned().collect::<Vec<_>>())
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    if parsed.items.len() != 1 || parsed.preview.rows.len() != 1 {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "remote account export must contain exactly one account",
+        ));
+    }
+    let row = parsed.preview.rows.remove(0);
+    if !row.selectable {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "remote account export is not usable",
+        ));
+    }
+    let existing_record = state
+        .store()?
+        .account(local_account_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local account not found"))?;
+    let context = ImportRowContext {
+        label: row.label,
+        auth_mode: row.auth_mode,
+        selectable: row.selectable,
+        plan: row.plan,
+        subscription_active_until_ms: row
+            .subscription_expires_at
+            .as_deref()
+            .and_then(parse_subscription_timestamp_ms),
+    };
+    let configured_models = existing_record.models.clone();
+    let item = parsed.items.remove(0);
+    let (account, _) = import_account_item(
+        state,
+        &credentials,
+        item,
+        &context,
+        false,
+        true,
+        true,
+        &configured_models,
+    )
+    .await
+    .map_err(|error| {
+        LocalPoolError::new(
+            if error.code == "recovery_required" {
+                ErrorCode::RecoveryRequired
+            } else {
+                ErrorCode::InvalidState
+            },
+            error.message,
+        )
+    })?;
+    if account.account.id != local_account_id
+        || account.remote_location != existing_record.remote_location
+        || account.account.enabled
+        || account.account.in_pool
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "returned credentials did not stage on the expected inactive local account",
+        ));
+    }
+    Ok(account)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn import_account_item(
     state: &DesktopState,
@@ -2206,7 +2599,7 @@ async fn import_account_item(
     let hinted_proxy = hinted_import_proxy(state, credential_store, &settings, &item)?;
     let import_proxy = hinted_proxy.as_ref().or(common_proxy.as_ref());
     ensure_account_proxy(&settings, import_proxy).map_err(proxy_item_error)?;
-    let material = build_import_credential_material(
+    let mut material = build_import_credential_material(
         item,
         issued_at_ms,
         context.plan.as_deref(),
@@ -2235,6 +2628,17 @@ async fn import_account_item(
     let old_credential = credential_store
         .load(&local_account_id)
         .map_err(credential_item_error)?;
+    let preserved_refresh_token = material.refresh_token.is_none()
+        && old_credential
+            .as_ref()
+            .and_then(StoredCodexCredentials::refresh_token)
+            .is_some();
+    if preserved_refresh_token {
+        material.refresh_token = old_credential
+            .as_ref()
+            .and_then(StoredCodexCredentials::refresh_token)
+            .map(str::to_string);
+    }
     let generation = old_credential
         .as_ref()
         .map(StoredCodexCredentials::generation)
@@ -2286,12 +2690,16 @@ async fn import_account_item(
     } else if let Some(existing) = &existing_account {
         existing.models.clone()
     } else {
-        return Err(ImportItemError::new(
-            "models_required",
-            "models are required when discovery is disabled",
-        ));
+        Vec::new()
     };
-    let auth_mode = account_auth_mode(context.auth_mode)?;
+    let auth_mode = if preserved_refresh_token {
+        existing_account
+            .as_ref()
+            .map(|account| account.account.auth_mode)
+            .unwrap_or(account_auth_mode(context.auth_mode)?)
+    } else {
+        account_auth_mode(context.auth_mode)?
+    };
     let priority = existing_account
         .as_ref()
         .map(|value| value.priority)
@@ -2736,7 +3144,15 @@ fn apply_model_discovery(
         Ok(_) if account.models.is_empty() => {
             apply_model_discovery_failure(account, "models_empty", false)
         }
-        Err(error) if account.models.is_empty() => {
+        Err(error)
+            if account.models.is_empty()
+                || matches!(
+                    error.code,
+                    ModelDiscoveryFailureCode::Unauthorized
+                        | ModelDiscoveryFailureCode::InvalidAccessToken
+                        | ModelDiscoveryFailureCode::InvalidAccountId
+                ) =>
+        {
             apply_model_discovery_failure(account, model_failure_code(&error), error.retryable)
         }
         Ok(_) | Err(_) => {}
@@ -2766,6 +3182,7 @@ async fn persist_imported_account(
     let (old_accounts, old_keys) = current_account_records(state).map_err(|_| {
         ImportItemError::new("account_store_failed", "account store is unavailable")
     })?;
+    let sync_gateway = !account.models.is_empty();
     credential_store
         .save(credentials)
         .map_err(credential_item_error)?;
@@ -2784,9 +3201,10 @@ async fn persist_imported_account(
             "failed to save account record",
         ));
     }
-    if sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone())
-        .await
-        .is_err()
+    if sync_gateway
+        && sync_accounts_or_rollback(state, old_accounts.clone(), old_keys.clone())
+            .await
+            .is_err()
     {
         restore_credential_item(
             credential_store,
@@ -2824,7 +3242,7 @@ async fn persist_imported_account(
         ));
     }
     if state
-        .mark_quota_refresh(credentials.local_account_id(), current_time_ms())
+        .sync_account_quota_refresh(credentials.local_account_id(), current_time_ms())
         .is_err()
     {
         rollback_after_authority_failure(
@@ -2940,46 +3358,27 @@ fn merge_existing_account(account: &mut LocalAccountRecord, existing: Option<&Lo
     account.account.quota = existing.account.quota.clone();
     account.account.subscription = existing.account.subscription.clone();
     account.account.last_error_code = existing.account.last_error_code.clone();
+    account.remote_location = existing.remote_location.clone();
     account.allowed_models = existing.allowed_models.clone();
     account.excluded_models = existing.excluded_models.clone();
     account.priority = existing.priority;
     account.weight = existing.weight;
-    account.cooldowns = existing.cooldowns.clone();
-    account.consecutive_failures = existing.consecutive_failures;
 }
 
-fn preserve_newer_routing_failure(
+fn preserve_newer_account_state(
     account: &mut LocalAccountRecord,
     before_refresh: &LocalAccountRecord,
     current: &LocalAccountRecord,
-    now_ms: u64,
 ) {
-    let routing_state_changed = current.cooldowns != before_refresh.cooldowns
-        || current.consecutive_failures != before_refresh.consecutive_failures
-        || current.account.auth_state != before_refresh.account.auth_state
-        || current.account.health != before_refresh.account.health
-        || current.account.last_error_code != before_refresh.account.last_error_code;
-    let has_active_failure = current.consecutive_failures > 0
-        || current
-            .cooldowns
-            .values()
-            .any(|retry_at_ms| *retry_at_ms > now_ms);
-    if !routing_state_changed || !has_active_failure {
-        return;
+    if current.account.auth_state != before_refresh.account.auth_state {
+        account.account.auth_state = current.account.auth_state;
     }
-    for (scope, retry_at_ms) in &current.cooldowns {
-        account
-            .cooldowns
-            .entry(scope.clone())
-            .and_modify(|saved| *saved = (*saved).max(*retry_at_ms))
-            .or_insert(*retry_at_ms);
+    if current.account.health != before_refresh.account.health {
+        account.account.health = current.account.health;
     }
-    account.consecutive_failures = account
-        .consecutive_failures
-        .max(current.consecutive_failures);
-    account.account.auth_state = current.account.auth_state;
-    account.account.health = current.account.health;
-    account.account.last_error_code = current.account.last_error_code.clone();
+    if current.account.last_error_code != before_refresh.account.last_error_code {
+        account.account.last_error_code = current.account.last_error_code.clone();
+    }
 }
 
 fn apply_account_patch(
@@ -3020,6 +3419,20 @@ fn apply_account_patch(
 
 fn validate_account_record(account: &LocalAccountRecord) -> LocalResult<()> {
     validate_label(&account.account.label)?;
+    if let Some(location) = &account.remote_location {
+        if location.server_id.is_empty() || location.remote_account_id.is_empty() {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "remote account location is invalid",
+            ));
+        }
+        if account.account.enabled || account.account.in_pool {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "an account managed by a remote server cannot run locally",
+            ));
+        }
+    }
     if !account_model_state_is_valid(account) {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -3178,10 +3591,7 @@ fn provider_identity_key(
         (None, Some(user)) => format!("account:{account}:user:{user}"),
         (None, None) => format!("account:{account}"),
     };
-    format!(
-        "{:x}",
-        Sha256::digest(format!("account:{identity}").as_bytes())
-    )
+    hex::encode(Sha256::digest(format!("account:{identity}").as_bytes()))
 }
 
 fn find_existing_account(
@@ -3279,10 +3689,10 @@ fn imported_identity(id_token: Option<&str>, access_token: Option<&str>) -> Impo
             .or_else(|| auth_string(id_auth, |auth| &auth.user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_user_id))
             .or_else(|| auth_string(access_auth, |auth| &auth.user_id)),
-        provider_account_id: auth_string(id_auth, |auth| &auth.chatgpt_account_id)
-            .or_else(|| auth_string(id_auth, |auth| &auth.account_id))
-            .or_else(|| auth_string(access_auth, |auth| &auth.chatgpt_account_id))
-            .or_else(|| auth_string(access_auth, |auth| &auth.account_id)),
+        provider_account_id: auth_string(access_auth, |auth| &auth.chatgpt_account_id)
+            .or_else(|| auth_string(access_auth, |auth| &auth.account_id))
+            .or_else(|| auth_string(id_auth, |auth| &auth.chatgpt_account_id))
+            .or_else(|| auth_string(id_auth, |auth| &auth.account_id)),
         account_is_fedramp: id_auth
             .or(access_auth)
             .is_some_and(|auth| auth.chatgpt_account_is_fedramp),
@@ -3390,20 +3800,6 @@ fn current_account_state(
         store.keys().to_vec(),
         store.automations().clone(),
     ))
-}
-
-async fn sync_account_state_or_rollback(
-    state: &DesktopState,
-    old_accounts: Vec<LocalAccountRecord>,
-    old_keys: Vec<LocalGatewayKeyRecord>,
-    old_automations: AutomationRecords,
-) -> LocalResult<()> {
-    super::restart_or_rollback(state, || {
-        state
-            .store()?
-            .replace_account_state(old_accounts, old_keys, old_automations)
-    })
-    .await
 }
 
 fn prune_account_task_selectors(
@@ -3576,25 +3972,6 @@ async fn repair_gateway_after_item_restore(
         })
 }
 
-async fn repair_gateway_after_credential_restore(
-    state: &DesktopState,
-    old_accounts: Vec<LocalAccountRecord>,
-    old_keys: Vec<LocalGatewayKeyRecord>,
-    cause: &LocalPoolError,
-) -> LocalResult<()> {
-    sync_accounts_or_rollback(state, old_accounts, old_keys)
-        .await
-        .map_err(|repair| {
-            LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                format!(
-                    "{}; failed to rebuild gateway after credential rollback: {}",
-                    cause.message, repair.message
-                ),
-            )
-        })
-}
-
 fn credential_item_error(error: CredentialError) -> ImportItemError {
     let code = match error.code {
         CredentialErrorCode::InvalidIdentity => "invalid_account_identity",
@@ -3687,7 +4064,6 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_pool::accounts::imports::parse_import;
     use axum::{routing::get, Json, Router};
     use std::collections::BTreeSet;
     use tokio::net::TcpListener;
@@ -3747,6 +4123,40 @@ mod tests {
     }
 
     #[test]
+    fn moved_accounts_remain_stored_but_leave_local_routing() {
+        let mut moved = account_record("account-moved");
+        moved.account.in_pool = true;
+        let untouched = account_record("account-untouched");
+        let mut accounts = vec![moved, untouched.clone()];
+
+        let location = RemoteAccountLocation {
+            server_id: "server-one".into(),
+            remote_account_id: "account-remote".into(),
+        };
+        mark_local_accounts_moved(
+            &mut accounts,
+            &HashMap::from([("account-moved".to_string(), location.clone())]),
+        )
+        .unwrap();
+
+        assert!(!accounts[0].account.enabled);
+        assert!(!accounts[0].account.in_pool);
+        assert_eq!(accounts[0].remote_location, Some(location));
+        assert_eq!(accounts[1], untouched);
+        assert!(mark_local_accounts_moved(
+            &mut accounts,
+            &HashMap::from([(
+                "account-missing".to_string(),
+                RemoteAccountLocation {
+                    server_id: "server-one".into(),
+                    remote_account_id: "account-missing".into(),
+                },
+            )]),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn revealable_identity_prefers_email_and_falls_back_to_provider_account() {
         let with_email = StoredCodexCredentials::new(
             "account_email",
@@ -3792,6 +4202,33 @@ mod tests {
     }
 
     #[test]
+    fn export_restores_generated_identity_but_preserves_custom_labels() {
+        let credentials = StoredCodexCredentials::new(
+            "account_export",
+            "access-private".into(),
+            None,
+            None,
+            None,
+            1,
+            0,
+            Some("private@example.test".into()),
+            Some("provider-account".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let masked = credentials.snapshot().identity.unwrap();
+
+        assert_eq!(
+            export_account_label(&masked, &credentials),
+            "private@example.test"
+        );
+        assert_eq!(export_account_label("Work Plus", &credentials), "Work Plus");
+    }
+
+    #[test]
     fn selected_ids_are_validated_and_deduplicated_in_order() {
         let selected = normalize_selected_item_ids(vec![
             "import_0123456789abcdef".into(),
@@ -3819,15 +4256,65 @@ mod tests {
         current.consecutive_failures = 2;
         let mut refreshed = before_refresh.clone();
 
-        preserve_newer_routing_failure(&mut refreshed, &before_refresh, &current, 100);
+        preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
 
-        assert_eq!(refreshed.cooldowns.get("*"), Some(&500));
-        assert_eq!(refreshed.consecutive_failures, 2);
+        assert!(refreshed.cooldowns.is_empty());
+        assert_eq!(refreshed.consecutive_failures, 0);
         assert_eq!(refreshed.account.health, AccountHealthState::Degraded);
         assert_eq!(
             refreshed.account.last_error_code.as_deref(),
             Some("upstream_rate_limited")
         );
+    }
+
+    #[test]
+    fn quota_refresh_merges_auth_and_probe_state_independently() {
+        let before_refresh = account_record("account-auth-race");
+        let mut current = before_refresh.clone();
+        current.account.auth_state = AccountAuthState::RequiresReauth(
+            zenith_relay_core::accounts::ReauthReason::ReusedRefreshToken,
+        );
+        let mut refreshed = before_refresh.clone();
+        refreshed.account.health = AccountHealthState::Unhealthy;
+        refreshed.account.last_error_code = Some("token_invalidated".into());
+
+        preserve_newer_account_state(&mut refreshed, &before_refresh, &current);
+
+        assert!(matches!(
+            refreshed.account.auth_state,
+            AccountAuthState::RequiresReauth(
+                zenith_relay_core::accounts::ReauthReason::ReusedRefreshToken
+            )
+        ));
+        assert_eq!(refreshed.account.health, AccountHealthState::Unhealthy);
+        assert_eq!(
+            refreshed.account.last_error_code.as_deref(),
+            Some("token_invalidated")
+        );
+    }
+
+    #[test]
+    fn quota_recovery_uses_http_401_instead_of_a_fixed_error_list() {
+        for body in [
+            br#"{"detail":{"code":"token_invalidated"}}"#.as_slice(),
+            br#"{"detail":{"code":"future_auth_error"}}"#.as_slice(),
+            b"".as_slice(),
+        ] {
+            let result = Ok(QuotaRefreshOutcome::Failed {
+                failure: zenith_relay_core::quota::classify_quota_http_failure(401, body),
+                subscription: Subscription::default(),
+            });
+            assert!(quota_refresh_was_unauthorized(&result));
+        }
+
+        let payment = Ok(QuotaRefreshOutcome::Failed {
+            failure: zenith_relay_core::quota::classify_quota_http_failure(
+                402,
+                br#"{"detail":{"code":"future_billing_error"}}"#,
+            ),
+            subscription: Subscription::default(),
+        });
+        assert!(!quota_refresh_was_unauthorized(&payment));
     }
 
     #[test]
@@ -3874,6 +4361,29 @@ mod tests {
     }
 
     #[test]
+    fn model_unauthorized_removes_an_account_with_cached_models_from_routing() {
+        let mut account = account_record("account_models_unauthorized");
+        let failure = ModelDiscoveryFailure {
+            code: ModelDiscoveryFailureCode::Unauthorized,
+            retryable: false,
+            http_status: Some(401),
+        };
+        assert!(model_discovery_was_unauthorized(&Some(
+            Err(failure.clone())
+        )));
+
+        apply_model_discovery(&mut account, Err(failure));
+
+        assert!(!account.models.is_empty());
+        assert_eq!(account.account.auth_state, AccountAuthState::Error);
+        assert_eq!(account.account.health, AccountHealthState::Unhealthy);
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("models_unauthorized")
+        );
+    }
+
+    #[test]
     fn selected_import_files_are_read_and_combined_only_in_rust() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-import-files-{}",
@@ -3905,14 +4415,89 @@ mod tests {
     }
 
     #[test]
-    fn dropped_import_rejects_non_json_files() {
-        let path = std::env::temp_dir().join(format!(
+    fn dropped_import_accepts_txt_tokens_and_rejects_other_extensions() {
+        let txt_path = std::env::temp_dir().join(format!(
             "zenith-relay-import-{}.txt",
             Uuid::new_v4().simple()
         ));
-        std::fs::write(&path, "{}").unwrap();
-        assert!(read_import_documents(vec![path.clone()]).is_err());
-        std::fs::remove_file(path).unwrap();
+        std::fs::write(&txt_path, "at-synthetic-token").unwrap();
+        assert_eq!(
+            read_import_documents(vec![txt_path.clone()]).unwrap(),
+            ["at-synthetic-token"]
+        );
+        std::fs::remove_file(txt_path).unwrap();
+
+        let unsupported_path = std::env::temp_dir().join(format!(
+            "zenith-relay-import-{}.md",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::write(&unsupported_path, "at-synthetic-token").unwrap();
+        assert!(read_import_documents(vec![unsupported_path.clone()]).is_err());
+        std::fs::remove_file(unsupported_path).unwrap();
+    }
+
+    #[test]
+    fn current_codex_profile_reads_only_its_auth_document() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-current-codex-import-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let content = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-current-key"}"#;
+        std::fs::write(root.join("auth.json"), content).unwrap();
+
+        let documents = current_codex_import_documents(&root, &[]).unwrap();
+
+        assert_eq!(documents, [content]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_codex_profile_rejects_an_active_local_gateway_projection() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-managed-codex-import-{}",
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("auth.json"),
+            r#"{"auth_mode":"apikey","OPENAI_API_KEY":"synthetic-local-key"}"#,
+        )
+        .unwrap();
+        let binding = codex::ProfileBinding {
+            profile_dir: root.to_string_lossy().into_owned(),
+            credential_kind: codex::ProfileCredentialKind::LocalGateway,
+            credential_id: "local_gateway".into(),
+            bound_oauth_account_id: None,
+            active: true,
+        };
+
+        let error = current_codex_import_documents(&root, &[binding]).unwrap_err();
+
+        assert!(matches!(error.code, ErrorCode::Conflict));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_chatgpt_profile_visibility_requires_refreshable_oauth_identity() {
+        let oauth = parse_import(
+            r#"{"auth_mode":"chatgpt","account_id":"provider-current","access_token":"access-current","refresh_token":"refresh-current"}"#,
+            Some("auth.json"),
+            &[],
+        )
+        .unwrap();
+        let api_key = parse_import(
+            r#"{"auth_mode":"apikey","account_id":"provider-key","OPENAI_API_KEY":"key-current"}"#,
+            Some("auth.json"),
+            &[],
+        )
+        .unwrap();
+
+        assert!(is_usable_current_chatgpt_profile(&oauth, current_time_ms()));
+        assert!(!is_usable_current_chatgpt_profile(
+            &api_key,
+            current_time_ms()
+        ));
     }
 
     #[tokio::test]
@@ -3962,6 +4547,7 @@ mod tests {
                 models: vec!["gpt-test".into()],
             },
             &state,
+            None,
         )
         .await
         .unwrap();
@@ -3995,7 +4581,134 @@ mod tests {
             .active_until_ms
             .is_some()));
         assert!(accounts.iter().all(|account| account.account.in_pool));
+        assert!(state.next_quota_refresh_due().unwrap().is_some());
 
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn access_only_reimport_preserves_existing_refresh_token() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-refresh-preserve-{}",
+            Uuid::new_v4().simple()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let first = sessions
+            .start(
+                r#"{"auth_mode":"chatgpt","account_id":"provider-preserve","access_token":"access-original","refresh_token":"refresh-original"}"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let first_item_id = first.preview.rows[0].item_id.clone();
+        let response = confirm_local_account_import_inner(
+            ConfirmAccountImportInput {
+                session_id: first.session_id,
+                selected_item_ids: vec![first_item_id],
+                add_to_pool: false,
+                discover_models: false,
+                probe_quota: false,
+                models: vec!["gpt-test".into()],
+            },
+            &state,
+            None,
+        )
+        .await
+        .unwrap();
+        let account_id = response.results[0]
+            .account
+            .as_ref()
+            .unwrap()
+            .account
+            .id
+            .clone();
+
+        let second = sessions
+            .start(
+                r#"{"account_id":"provider-preserve","access_token":"access-replacement"}"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let second_item_id = second.preview.rows[0].item_id.clone();
+        let response = confirm_local_account_import_inner(
+            ConfirmAccountImportInput {
+                session_id: second.session_id,
+                selected_item_ids: vec![second_item_id],
+                add_to_pool: false,
+                discover_models: false,
+                probe_quota: false,
+                models: vec!["gpt-test".into()],
+            },
+            &state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
+        let credential_store = CredentialStore::from_backend(NativeSecretBackend);
+        let credentials = credential_store.require(&account_id).unwrap();
+        assert_eq!(credentials.access_token(), "access-replacement");
+        assert_eq!(credentials.refresh_token(), Some("refresh-original"));
+        assert_eq!(
+            state
+                .store()
+                .unwrap()
+                .account(&account_id)
+                .unwrap()
+                .account
+                .auth_mode,
+            AccountAuthMode::OAuth
+        );
+        credential_store.delete(&account_id).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_outside_pool_waits_for_manual_refresh() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-import-retry-{}",
+            Uuid::new_v4().simple()
+        ));
+        let state = DesktopState::open(root.clone()).unwrap();
+        let sessions = ImportSessionStore::new(state.transient_root(), NativeSecretBackend);
+        let session = sessions
+            .start(
+                r#"{"account_id":"provider-retry","access_token":"access-retry"}"#,
+                None,
+                &[],
+            )
+            .unwrap();
+        let item_id = session.preview.rows[0].item_id.clone();
+        let session_id = session.session_id.clone();
+
+        let response = confirm_local_account_import_inner(
+            ConfirmAccountImportInput {
+                session_id: session_id.clone(),
+                selected_item_ids: vec![item_id],
+                add_to_pool: false,
+                discover_models: false,
+                probe_quota: false,
+                models: Vec::new(),
+            },
+            &state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.results[0].status, ImportItemStatus::Succeeded);
+        let account = response.results[0].account.as_ref().unwrap();
+        assert!(account.models.is_empty());
+        assert!(state.next_quota_refresh_due().unwrap().is_none());
+        assert!(sessions.resume(&session_id, &[]).is_err());
+        CredentialStore::from_backend(NativeSecretBackend)
+            .delete(&account.account.id)
+            .unwrap();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -4030,6 +4743,7 @@ mod tests {
                 models: vec!["gpt-test".into()],
             },
             &state,
+            None,
         )
         .await
         .unwrap();
@@ -4160,8 +4874,13 @@ mod tests {
         let mut existing = account_record("account_existing");
         existing.account.label = "My account".into();
         existing.account.token_generation = 7;
-        existing.account.in_pool = true;
+        existing.account.enabled = false;
+        existing.account.in_pool = false;
         existing.priority = 9;
+        existing.remote_location = Some(RemoteAccountLocation {
+            server_id: "server-one".into(),
+            remote_account_id: "account-remote".into(),
+        });
         existing.cooldowns.insert("gpt-test".into(), 900);
         existing.consecutive_failures = 2;
         let resolved = existing.clone();
@@ -4195,10 +4914,12 @@ mod tests {
         assert_eq!(updated.account.id, "account_existing");
         assert_eq!(updated.account.label, "My account");
         assert_eq!(updated.account.token_generation, 8);
-        assert!(updated.account.in_pool);
+        assert!(!updated.account.enabled);
+        assert!(!updated.account.in_pool);
         assert_eq!(updated.priority, 9);
-        assert_eq!(updated.cooldowns.get("gpt-test"), Some(&900));
-        assert_eq!(updated.consecutive_failures, 2);
+        assert_eq!(updated.remote_location, existing.remote_location);
+        assert!(updated.cooldowns.is_empty());
+        assert_eq!(updated.consecutive_failures, 0);
         assert_ne!(
             updated.account.identity.stable_index,
             existing.account.identity.stable_index
@@ -4566,7 +5287,28 @@ mod tests {
             Some(1_767_225_600_000)
         );
         assert_eq!(identity.access_expires_at_ms, Some(123_000));
-        assert!(!format!("{:x}", Sha256::digest(token.as_bytes())).contains("private"));
+        assert!(!hex::encode(Sha256::digest(token.as_bytes())).contains("private"));
+    }
+
+    #[test]
+    fn imported_identity_prefers_the_access_token_workspace() {
+        let token = |account_id: &str| {
+            let payload = URL_SAFE_NO_PAD.encode(
+                serde_json::json!({
+                    "https://api.openai.com/auth": { "chatgpt_account_id": account_id }
+                })
+                .to_string(),
+            );
+            format!("header.{payload}.signature")
+        };
+        let identity = imported_identity(
+            Some(&token("workspace-old")),
+            Some(&token("workspace-live")),
+        );
+        assert_eq!(
+            identity.provider_account_id.as_deref(),
+            Some("workspace-live")
+        );
     }
 
     #[tokio::test]

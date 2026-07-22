@@ -6,13 +6,16 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 use url::Url;
-use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::{accounts::CodexIdentityEnvelope, ProxyConfig};
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
+#[cfg(test)]
 const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
+#[cfg(test)]
 const ORIGINATOR_HEADER: &str = "originator";
-const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+#[cfg(test)]
+const CODEX_ORIGINATOR: &str = zenith_relay_core::accounts::CODEX_ORIGINATOR;
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_CLIENT_VERSION_BYTES: usize = 64;
@@ -70,18 +73,18 @@ impl CodexModelsClient {
             HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
                 ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccessToken)
             })?;
-        let account_id = HeaderValue::from_str(chatgpt_account_id)
+        let identity = CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
             .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId))?;
         let mut request_url = self.endpoint.clone();
         request_url
             .query_pairs_mut()
             .append_pair("client_version", client_version);
-        let response = self
-            .http
-            .get(request_url)
-            .header(AUTHORIZATION, authorization)
-            .header(ACCOUNT_ID_HEADER, account_id)
-            .header(ORIGINATOR_HEADER, CODEX_ORIGINATOR)
+        let response = identity
+            .apply(
+                self.http
+                    .get(request_url)
+                    .header(AUTHORIZATION, authorization),
+            )
             .send()
             .await
             .map_err(|_| ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport))?;
@@ -189,6 +192,8 @@ struct ModelEntry {
     supported_in_api: Option<bool>,
     #[serde(default)]
     visibility: Option<String>,
+    #[serde(default)]
+    upgrade: Option<serde_json::Value>,
 }
 
 fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
@@ -209,6 +214,7 @@ fn parse_models(body: &[u8]) -> Result<Vec<String>, ModelDiscoveryFailure> {
                 .visibility
                 .as_deref()
                 .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
+                || model.upgrade.is_some()
         })
         .filter_map(|model| {
             let slug = model.slug.trim();
@@ -304,7 +310,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(models, vec!["gpt-5", "gpt-5-mini"]);
+        assert_eq!(models, vec!["gpt-5", "gpt-legacy", "gpt-5-mini"]);
         let rendered = format!("{models:?}");
         assert!(!rendered.contains("description-secret"));
         assert!(!rendered.contains("instructions-secret"));
@@ -376,7 +382,15 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some(CODEX_ORIGINATOR)
         );
-        assert_eq!(uri.query(), Some("client_version=1.0.0"));
+        let expected_query = format!(
+            "client_version={}",
+            zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION
+        );
+        assert_eq!(uri.query(), Some(expected_query.as_str()));
+        assert_eq!(
+            headers.get("version").and_then(|value| value.to_str().ok()),
+            Some(zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION)
+        );
         Json(json!({
             "models": [
                 {
@@ -388,6 +402,7 @@ mod tests {
                 { "slug": " gpt-5 " },
                 { "slug": "gpt-hidden", "supported_in_api": false },
                 { "slug": "gpt-internal", "visibility": "hide" },
+                { "slug": "gpt-legacy", "visibility": "hide", "upgrade": { "model": "gpt-5" } },
                 { "slug": "" },
                 { "slug": "gpt-5-mini" }
             ]

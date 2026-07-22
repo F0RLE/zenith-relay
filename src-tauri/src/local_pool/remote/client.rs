@@ -1,6 +1,6 @@
 use super::origin::{OriginError, PinnedOrigin};
 use reqwest::{header::LOCATION, Method};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::accounts::{AccountExportDocument, AccountExportRequest};
 use zenith_relay_core::protocol::{
@@ -54,6 +54,14 @@ pub struct RemoteClient {
     http: reqwest::Client,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RemoteProfileCredential {
+    pub key_id: String,
+    pub base_url: String,
+    pub secret: String,
+}
+
 impl RemoteClient {
     pub fn new(
         base_url: &str,
@@ -103,6 +111,20 @@ impl RemoteClient {
     pub async fn state(&self) -> Result<RuntimeStateSnapshot, RemoteClientError> {
         self.request(Method::GET, "/state", Option::<&()>::None, true)
             .await
+    }
+
+    pub(crate) async fn profile_credential(
+        &self,
+    ) -> Result<RemoteProfileCredential, RemoteClientError> {
+        let credential: RemoteProfileCredential = self
+            .request(
+                Method::GET,
+                "/profile/credential",
+                Option::<&()>::None,
+                true,
+            )
+            .await?;
+        validate_profile_credential(&self.origin, credential)
     }
 
     pub async fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, RemoteClientError> {
@@ -236,6 +258,33 @@ impl RemoteClient {
         }
         serde_json::from_slice(&bytes).map_err(|_| RemoteClientError::InvalidResponse)
     }
+}
+
+fn validate_profile_credential(
+    origin: &PinnedOrigin,
+    credential: RemoteProfileCredential,
+) -> Result<RemoteProfileCredential, RemoteClientError> {
+    let expected_base_url = origin.endpoint("/v1")?;
+    let actual_base_url =
+        url::Url::parse(&credential.base_url).map_err(|_| RemoteClientError::InvalidResponse)?;
+    if actual_base_url != expected_base_url
+        || credential.key_id.is_empty()
+        || credential.key_id.len() > 128
+        || !credential
+            .key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !credential.secret.starts_with("zrs_")
+        || credential.secret.len() < 24
+        || credential.secret.len() > 256
+        || credential
+            .secret
+            .bytes()
+            .any(|byte| byte.is_ascii_control())
+    {
+        return Err(RemoteClientError::InvalidResponse);
+    }
+    Ok(credential)
 }
 
 fn usage_path(query: &UsageQuery) -> String {
@@ -433,6 +482,20 @@ mod tests {
         let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
         assert!(matches!(
             client.reveal_account_identity("account-1").await,
+            Err(RemoteClientError::InvalidResponse)
+        ));
+    }
+
+    #[test]
+    fn profile_credential_cannot_redirect_codex_to_another_origin() {
+        let origin = PinnedOrigin::parse("https://relay.example.test", false).unwrap();
+        let credential = RemoteProfileCredential {
+            key_id: "key_system".to_string(),
+            base_url: "https://other.example.test/v1".to_string(),
+            secret: format!("zrs_{}", "a".repeat(40)),
+        };
+        assert!(matches!(
+            validate_profile_credential(&origin, credential),
             Err(RemoteClientError::InvalidResponse)
         ));
     }

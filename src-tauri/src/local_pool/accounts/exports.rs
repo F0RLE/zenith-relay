@@ -22,6 +22,8 @@ pub struct AccountExportInput {
     pub account_ids: Vec<String>,
     pub format: AccountExportFormat,
     pub destination: AccountExportDestination,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -96,7 +98,8 @@ mod tests {
     #[test]
     fn every_export_format_round_trips_through_the_account_import_parser() {
         for format in formats() {
-            let document = build_account_export(format, &[fixture()], 1_788_000_000_000).unwrap();
+            let document =
+                build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
             let parsed = parse_import(&document.content, None, &[]).unwrap();
             assert_eq!(parsed.items.len(), 1, "{format:?}");
             assert_eq!(
@@ -115,8 +118,9 @@ mod tests {
         assert!(normalize_account_ids(Vec::new()).is_err());
     }
 
-    fn formats() -> [AccountExportFormat; 7] {
+    fn formats() -> [AccountExportFormat; 8] {
         [
+            AccountExportFormat::Zenith,
             AccountExportFormat::Cpa,
             AccountExportFormat::Sub2api,
             AccountExportFormat::Cockpit,

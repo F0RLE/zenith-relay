@@ -434,7 +434,7 @@ fn ensure_lock_dir(path: &Path) -> Result<(), ProcessLockError> {
 }
 
 fn lock_path(lock_dir: &Path, local_account_id: &str) -> PathBuf {
-    let digest = format!("{:x}", Sha256::digest(local_account_id.as_bytes()));
+    let digest = hex::encode(Sha256::digest(local_account_id.as_bytes()));
     lock_dir.join(format!("{}.refresh.lock", &digest[..32]))
 }
 

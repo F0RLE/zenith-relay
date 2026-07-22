@@ -1,13 +1,12 @@
 use serde::Serialize;
 use std::{
     env, fs,
-    io::ErrorKind,
     path::{Path, PathBuf},
 };
 use tauri::{AppHandle, Manager};
 
 const RELAY_DIRECTORY: &str = "Zenith Relay";
-const LEGACY_WEBVIEW_DIRECTORY: &str = "com.zenith.codex";
+const WEBVIEW_DIRECTORY: &str = "com.zenith.codex";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,32 +63,31 @@ fn user_home() -> PathBuf {
     }
 }
 
-fn roaming_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map_err(|err| format!("failed to resolve app data directory: {err}"))
-}
-
 fn local_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_local_data_dir()
-        .map_err(|err| format!("failed to resolve local app data directory: {err}"))
-}
-
-pub fn legacy_roaming_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(roaming_app_data_dir(app)?.join("local-pool"))
-}
-
-pub fn legacy_local_pool_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(local_app_data_dir(app)?.join("local-pool"))
-}
-
-pub fn legacy_app_local_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    local_app_data_dir(app)
+        .map_err(|error| format!("failed to resolve local app data directory: {error}"))
 }
 
 pub fn relay_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
+    if let Some(root) = relay_dir_override(env::var_os("ZENITH_RELAY_DEV_DATA_DIR"))? {
+        return Ok(root);
+    }
     relay_dir_from_local(&local_app_data_dir(app)?)
+}
+
+#[cfg(debug_assertions)]
+fn relay_dir_override(value: Option<std::ffi::OsString>) -> Result<Option<PathBuf>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let root = PathBuf::from(value);
+    if !root.is_absolute() {
+        return Err("ZENITH_RELAY_DEV_DATA_DIR must be an absolute path".to_string());
+    }
+    ensure_real_directory(&root)?;
+    Ok(Some(root))
 }
 
 fn relay_dir_from_local(local_app_data: &Path) -> Result<PathBuf, String> {
@@ -99,85 +97,37 @@ fn relay_dir_from_local(local_app_data: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "local app data directory has no parent".to_string())
 }
 
-pub fn webview_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(webview_cache_dir_from_root(&relay_dir(app)?))
+pub fn webview_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    webview_data_dir_from_root(&relay_dir(app)?)
 }
 
-fn webview_cache_dir_from_root(root: &Path) -> PathBuf {
-    root.join("cache")
-        .join(LEGACY_WEBVIEW_DIRECTORY)
-        .join("EBWebView")
+fn webview_data_dir_from_root(root: &Path) -> Result<PathBuf, String> {
+    let directory = root.join("cache").join(WEBVIEW_DIRECTORY);
+    ensure_real_directory(&directory)?;
+    if cfg!(windows) {
+        Ok(directory)
+    } else {
+        let profile = directory.join("EBWebView");
+        ensure_real_directory(&profile)?;
+        Ok(profile)
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StorageMigration {
-    Current,
-    Moved,
-    Conflict,
-}
-
-pub(crate) fn migrate_directory(legacy: &Path, target: &Path) -> Result<StorageMigration, String> {
-    if legacy == target {
-        validate_storage_directory(target)?;
-        return Ok(StorageMigration::Current);
-    }
-
-    let legacy_exists = validate_storage_directory(legacy)?;
-    let target_exists = validate_storage_directory(target)?;
-    if target_exists {
-        return Ok(if legacy_exists {
-            StorageMigration::Conflict
-        } else {
-            StorageMigration::Current
-        });
-    }
-    if !legacy_exists {
-        return Ok(StorageMigration::Current);
-    }
-
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("local app data path has no parent: {}", target.display()))?;
-    fs::create_dir_all(parent).map_err(|error| {
+fn ensure_real_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| {
         format!(
-            "failed to create local app data directory {}: {error}",
-            parent.display()
+            "failed to create local data directory {}: {error}",
+            path.display()
         )
     })?;
-    fs::rename(legacy, target).map_err(|error| {
-        format!(
-            "failed to move local data from {} to {}: {error}",
-            legacy.display(),
-            target.display()
-        )
-    })?;
-    Ok(StorageMigration::Moved)
-}
-
-fn validate_storage_directory(path: &Path) -> Result<bool, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(format!(
-                "failed to inspect local data path {}: {error}",
-                path.display()
-            ))
-        }
-    };
-    if metadata.file_type().is_symlink() {
+    let metadata = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
         return Err(format!(
-            "local data path must not be a symbolic link: {}",
+            "local data path must be a real directory: {}",
             path.display()
         ));
     }
-    if !metadata.is_dir() {
-        return Err(format!(
-            "local data path is not a directory: {}",
-            path.display()
-        ));
-    }
-    Ok(true)
+    Ok(())
 }
 
 pub fn capabilities() -> PlatformCapabilities {
@@ -196,112 +146,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn branded_data_root_owns_the_legacy_named_webview_cache() {
-        let legacy = PathBuf::from("local").join("com.zenith.codex");
-        let root = relay_dir_from_local(&legacy).unwrap();
+    fn branded_data_and_webview_paths_are_stable() {
+        let local = PathBuf::from("local").join("com.zenith.codex");
+        let root = relay_dir_from_local(&local).unwrap();
         assert_eq!(root, PathBuf::from("local").join("Zenith Relay"));
-        assert_eq!(
-            webview_cache_dir_from_root(&root),
+        let expected = if cfg!(windows) {
+            root.join("cache/com.zenith.codex")
+        } else {
             root.join("cache/com.zenith.codex/EBWebView")
-        );
+        };
+        assert_eq!(webview_data_dir_from_root(&root).unwrap(), expected);
+        fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn migration_leaves_missing_legacy_storage_uncreated() {
-        let root = temp_root("missing");
-        let legacy = root.join("roaming/local-pool");
-        let target = root.join("local/local-pool");
-
-        assert_eq!(
-            migrate_directory(&legacy, &target).unwrap(),
-            StorageMigration::Current
-        );
-        assert!(!legacy.exists());
-        assert!(!target.exists());
-        cleanup(root);
-    }
-
-    #[test]
-    fn migration_moves_legacy_storage_without_copying() {
-        let root = temp_root("move");
-        let legacy = root.join("roaming/local-pool");
-        let target = root.join("local/local-pool");
-        fs::create_dir_all(&legacy).unwrap();
-        fs::write(legacy.join("metadata.json"), "legacy").unwrap();
-
-        assert_eq!(
-            migrate_directory(&legacy, &target).unwrap(),
-            StorageMigration::Moved
-        );
-        assert!(!legacy.exists());
-        assert_eq!(
-            fs::read_to_string(target.join("metadata.json")).unwrap(),
-            "legacy"
-        );
-        cleanup(root);
-    }
-
-    #[test]
-    fn migration_does_not_merge_conflicting_stores() {
-        let root = temp_root("conflict");
-        let legacy = root.join("roaming/local-pool");
-        let target = root.join("local/local-pool");
-        fs::create_dir_all(&legacy).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        fs::write(legacy.join("origin"), "legacy").unwrap();
-        fs::write(target.join("origin"), "current").unwrap();
-
-        assert_eq!(
-            migrate_directory(&legacy, &target).unwrap(),
-            StorageMigration::Conflict
-        );
-        assert_eq!(fs::read_to_string(legacy.join("origin")).unwrap(), "legacy");
-        assert_eq!(
-            fs::read_to_string(target.join("origin")).unwrap(),
-            "current"
-        );
-        cleanup(root);
-    }
-
-    #[test]
-    fn migration_rejects_symbolic_link_storage() {
-        let root = temp_root("symlink");
-        let real = root.join("real");
-        let legacy = root.join("roaming/local-pool");
-        let target = root.join("local/local-pool");
-        fs::create_dir_all(&real).unwrap();
-        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        if create_directory_symlink(&real, &legacy).is_err() {
-            cleanup(root);
-            return;
-        }
-
-        let error = migrate_directory(&legacy, &target).unwrap_err();
-        assert!(error.contains("symbolic link"));
-        assert!(!target.exists());
-        cleanup(root);
-    }
-
-    fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "zenith-relay-storage-{name}-{}",
-            uuid::Uuid::new_v4().simple()
-        ))
-    }
-
-    fn cleanup(root: PathBuf) {
-        if root.exists() {
-            fs::remove_dir_all(root).unwrap();
-        }
-    }
-
-    #[cfg(unix)]
-    fn create_directory_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::unix::fs::symlink(original, link)
-    }
-
-    #[cfg(windows)]
-    fn create_directory_symlink(original: &Path, link: &Path) -> std::io::Result<()> {
-        std::os::windows::fs::symlink_dir(original, link)
+    fn debug_data_override_requires_an_absolute_path() {
+        assert!(relay_dir_override(Some("relative".into())).is_err());
+        assert_eq!(relay_dir_override(None).unwrap(), None);
     }
 }

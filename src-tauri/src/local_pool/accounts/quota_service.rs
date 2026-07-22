@@ -1,8 +1,7 @@
-use super::quota::CodexQuotaRefreshData;
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState},
-    quota::{QuotaErrorState, QuotaRefreshFailure, QuotaTransition, QuotaWindowKind},
+    accounts::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate},
+    quota::{CodexQuotaRefreshData, QuotaRefreshFailure, QuotaTransition},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -12,99 +11,24 @@ pub struct AppliedQuota {
 
 pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
-    mut data: CodexQuotaRefreshData,
+    data: CodexQuotaRefreshData,
 ) -> Result<AppliedQuota, &'static str> {
     let observed_at_ms = data.quota.observed_at_ms;
-    let active_model_cooldown = account
-        .cooldowns
-        .iter()
-        .any(|(scope, retry_at_ms)| scope != "*" && *retry_at_ms > observed_at_ms);
-    let previous_health = account.account.health;
-    let previous_error = account.account.last_error_code.clone();
-    let previous_failures = account.consecutive_failures;
-    let previous = account.account.quota.clone();
-    data.quota
-        .preserve_subscription_metadata(&account.account.subscription);
-    let (quota, subscription) = data
-        .quota
-        .normalize(&previous)
-        .map_err(|_| "quota response could not be normalized")?;
-    let transitions = [QuotaWindowKind::Primary, QuotaWindowKind::Secondary]
-        .into_iter()
-        .filter_map(|kind| {
-            quota
-                .window(kind)
-                .and_then(|window| window.full_transition_from(previous.window(kind)))
-        })
-        .collect();
-    account.account.quota = quota;
-    if let Some(subscription) = subscription {
-        account.account.subscription = subscription;
-    }
-    account.account.health = if data.allowed == Some(false) && data.limit_reached != Some(true) {
-        AccountHealthState::Blocked
-    } else {
-        AccountHealthState::Healthy
+    let update = reduce_account_quota(
+        &account.account.quota,
+        &account.account.subscription,
+        account.account.health,
+        account.account.last_error_code.as_deref(),
+        Ok(data),
+        observed_at_ms,
+    )
+    .map_err(|_| "quota response could not be normalized")?;
+    let transitions = match &update.outcome {
+        AccountQuotaOutcome::Updated { transitions } => transitions.clone(),
+        AccountQuotaOutcome::Failed { .. } => return Err("quota result kind is invalid"),
     };
-    if account.account.health == AccountHealthState::Healthy {
-        if let Some(retry_at_ms) =
-            exhausted_quota_retry_at(account, data.limit_reached, observed_at_ms)
-        {
-            account
-                .cooldowns
-                .entry("*".into())
-                .and_modify(|current| *current = (*current).max(retry_at_ms))
-                .or_insert(retry_at_ms);
-        } else {
-            account.cooldowns.remove("*");
-        }
-        if active_model_cooldown {
-            account.account.health = match previous_health {
-                AccountHealthState::Blocked | AccountHealthState::Unhealthy => previous_health,
-                _ => AccountHealthState::Degraded,
-            };
-            account.account.last_error_code = previous_error;
-            account.consecutive_failures = previous_failures.max(1);
-        } else {
-            account.account.last_error_code = None;
-            account.consecutive_failures = 0;
-        }
-    } else {
-        account.account.last_error_code = Some("quota_forbidden".to_string());
-    }
+    apply_update(account, update);
     Ok(AppliedQuota { transitions })
-}
-
-fn exhausted_quota_retry_at(
-    account: &LocalAccountRecord,
-    limit_reached: Option<bool>,
-    now_ms: u64,
-) -> Option<u64> {
-    let reset_at_ms = account
-        .account
-        .quota
-        .primary
-        .iter()
-        .chain(account.account.quota.secondary.iter())
-        .filter(|window| window.available_basis_points == Some(0))
-        .filter_map(|window| window.reset_at_ms)
-        .filter(|reset_at_ms| *reset_at_ms > now_ms)
-        .max();
-    reset_at_ms.or_else(|| {
-        (limit_reached == Some(true))
-            .then(|| {
-                account
-                    .account
-                    .quota
-                    .primary
-                    .iter()
-                    .chain(account.account.quota.secondary.iter())
-                    .filter_map(|window| window.reset_at_ms)
-                    .filter(|reset_at_ms| *reset_at_ms > now_ms)
-                    .max()
-            })
-            .flatten()
-    })
 }
 
 pub fn apply_quota_failure(
@@ -112,17 +36,23 @@ pub fn apply_quota_failure(
     failure: &QuotaRefreshFailure,
     now_ms: u64,
 ) {
-    account.account.quota.error = Some(QuotaErrorState::new(&failure.code, now_ms));
-    account.account.last_error_code = Some(failure.code.clone());
-    match failure.code.as_str() {
-        "quota_forbidden" => account.account.health = AccountHealthState::Blocked,
-        "quota_unauthorized" => {
-            account.account.auth_state = AccountAuthState::Error;
-            account.account.health = AccountHealthState::Unhealthy;
-        }
-        _ if failure.retryable => account.account.health = AccountHealthState::Degraded,
-        _ => account.account.health = AccountHealthState::Unhealthy,
-    }
+    let update = reduce_account_quota(
+        &account.account.quota,
+        &account.account.subscription,
+        account.account.health,
+        account.account.last_error_code.as_deref(),
+        Err(failure.clone()),
+        now_ms,
+    )
+    .expect("quota failure reduction does not normalize provider data");
+    apply_update(account, update);
+}
+
+fn apply_update(account: &mut LocalAccountRecord, update: AccountQuotaUpdate) {
+    account.account.quota = update.quota;
+    account.account.subscription = update.subscription;
+    account.account.health = update.health;
+    account.account.last_error_code = update.last_error_code;
 }
 
 #[cfg(test)]
@@ -130,9 +60,10 @@ mod tests {
     use super::*;
     use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
     use zenith_relay_core::{
-        accounts::AccountAuthMode,
+        accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
         quota::{
-            QuotaRefreshData, QuotaWindowInput, ResetTime, SubscriptionInput, SubscriptionStatus,
+            QuotaRefreshData, QuotaWindowInput, QuotaWindowKind, ResetTime, SubscriptionInput,
+            SubscriptionStatus,
         },
     };
 
@@ -177,6 +108,7 @@ mod tests {
                 }),
                 secondary: None,
                 supplemental: Vec::new(),
+                limit_reached: false,
                 subscription: Some(SubscriptionInput {
                     plan_type: Some("plus".into()),
                     active_until_ms: None,
@@ -188,7 +120,6 @@ mod tests {
             },
             allowed: Some(true),
             limit_reached: Some(false),
-            rate_limit_reached_type: None,
         }
     }
 
@@ -223,10 +154,88 @@ mod tests {
         );
         assert_eq!(account.account.quota.primary, previous_quota.primary);
         assert_eq!(account.account.subscription, previous_subscription);
-        assert_eq!(account.account.health, AccountHealthState::Degraded);
+        assert_eq!(account.account.health, AccountHealthState::Healthy);
+        assert_eq!(account.account.auth_state, AccountAuthState::Active);
+        assert_eq!(account.account.last_error_code, None);
         assert_eq!(
             account.account.quota.error.as_ref().unwrap().code,
             "quota_transport"
+        );
+    }
+
+    #[test]
+    fn quota_failure_does_not_hide_an_active_routing_failure() {
+        let mut account = account();
+        account.account.health = AccountHealthState::Blocked;
+        account.account.last_error_code = Some("upstream_rate_limited".into());
+
+        apply_quota_failure(
+            &mut account,
+            &QuotaRefreshFailure::new("quota_transport", true),
+            20,
+        );
+
+        assert_eq!(
+            account.account.last_error_code.as_deref(),
+            Some("upstream_rate_limited")
+        );
+        assert_eq!(account.account.health, AccountHealthState::Blocked);
+        assert_eq!(
+            account.account.quota.error.as_ref().unwrap().code,
+            "quota_transport"
+        );
+    }
+
+    #[test]
+    fn terminal_quota_probe_failure_does_not_disable_a_working_account() {
+        for code in ["quota_forbidden", "quota_unauthorized"] {
+            let mut account = account();
+            apply_quota_success(&mut account, refresh(40.0, 10)).unwrap();
+
+            apply_quota_failure(&mut account, &QuotaRefreshFailure::new(code, false), 20);
+
+            assert_eq!(account.account.auth_state, AccountAuthState::Active);
+            assert_eq!(account.account.health, AccountHealthState::Healthy);
+            assert_eq!(account.account.last_error_code, None);
+            assert_eq!(account.account.quota.error.as_ref().unwrap().code, code);
+        }
+    }
+
+    #[test]
+    fn exact_provider_failure_excludes_an_unusable_account() {
+        let mut invalidated = account();
+        apply_quota_failure(
+            &mut invalidated,
+            &QuotaRefreshFailure::new("token_invalidated", false),
+            20,
+        );
+        assert_eq!(invalidated.account.auth_state, AccountAuthState::Active);
+        assert_eq!(invalidated.account.health, AccountHealthState::Unhealthy);
+
+        let mut deactivated = account();
+        apply_quota_failure(
+            &mut deactivated,
+            &QuotaRefreshFailure::new("deactivated_workspace", false),
+            20,
+        );
+        assert_eq!(deactivated.account.health, AccountHealthState::Blocked);
+
+        let mut future_unauthorized = account();
+        apply_quota_failure(
+            &mut future_unauthorized,
+            &zenith_relay_core::quota::classify_quota_http_failure(
+                401,
+                br#"{"detail":{"code":"future_auth_error"}}"#,
+            ),
+            20,
+        );
+        assert_eq!(
+            future_unauthorized.account.health,
+            AccountHealthState::Unhealthy
+        );
+        assert_eq!(
+            future_unauthorized.account.last_error_code.as_deref(),
+            Some("future_auth_error")
         );
     }
 
@@ -251,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_quota_refresh_clears_only_global_failure_state() {
+    fn successful_quota_refresh_preserves_runtime_failure_state() {
         let mut account = account();
         account.account.health = AccountHealthState::Degraded;
         account.account.last_error_code = Some("upstream_rate_limited".into());
@@ -261,7 +270,7 @@ mod tests {
 
         apply_quota_success(&mut account, refresh(40.0, 10)).unwrap();
 
-        assert!(!account.cooldowns.contains_key("*"));
+        assert_eq!(account.cooldowns.get("*"), Some(&60_000));
         assert_eq!(account.cooldowns.get("gpt-test"), Some(&30_000));
         assert_eq!(account.consecutive_failures, 3);
         assert_eq!(account.account.health, AccountHealthState::Degraded);
@@ -272,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_window_keeps_the_latest_reset_as_global_retry_time() {
+    fn exhausted_window_uses_quota_without_creating_a_cooldown() {
         let mut account = account();
         let mut data = refresh(0.0, 10);
         data.quota.primary.as_mut().unwrap().reset =
@@ -288,6 +297,16 @@ mod tests {
         });
         apply_quota_success(&mut account, data).unwrap();
 
-        assert_eq!(account.cooldowns.get("*"), Some(&5_000));
+        assert_eq!(
+            account
+                .account
+                .quota
+                .primary
+                .as_ref()
+                .unwrap()
+                .available_basis_points,
+            Some(0)
+        );
+        assert!(account.cooldowns.is_empty());
     }
 }

@@ -436,6 +436,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            remote_location: None,
             wire_api: WireApi::Responses,
             models: models.iter().map(|model| (*model).to_string()).collect(),
             allowed_models: Vec::new(),

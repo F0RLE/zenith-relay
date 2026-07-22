@@ -3,10 +3,13 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::HashSet, fmt};
 use url::Url;
+use zenith_relay_core::accounts::normalize_account_export_description;
 
 pub const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_IMPORT_ITEMS: usize = 1_024;
 pub const MAX_JSON_DEPTH: usize = 32;
+const MAX_RAW_TOKEN_BYTES: usize = 64 * 1024;
+const IMPORT_ERROR_MARKER: &str = "__zenith_import_error";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +18,7 @@ pub enum ImportFormat {
     JsonArray,
     JsonLines,
     PortableAccountBundleV1,
+    ZenithV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -171,6 +175,8 @@ pub struct ImportPreviewRow {
 #[serde(rename_all = "camelCase")]
 pub struct ImportPreview {
     pub format: ImportFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub rows: Vec<ImportPreviewRow>,
     pub warnings: Vec<ImportWarning>,
 }
@@ -321,7 +327,7 @@ pub fn parse_import(
         ));
     }
     let source_file = validate_source_file(source_file)?;
-    let (format, entries, warnings) = parse_entries(input)?;
+    let (format, entries, warnings, description) = parse_entries(input)?;
     if entries.len() > MAX_IMPORT_ITEMS {
         return Err(ImportError::new(
             ImportErrorCode::TooManyItems,
@@ -385,6 +391,7 @@ pub fn parse_import(
     Ok(ParsedImport {
         preview: ImportPreview {
             format,
+            description,
             rows,
             warnings,
         },
@@ -403,12 +410,6 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
     let mut total_bytes = 0usize;
     let mut values = Vec::new();
     for document in documents {
-        if document.trim().is_empty() {
-            return Err(ImportError::new(
-                ImportErrorCode::EmptyInput,
-                "import content is empty",
-            ));
-        }
         total_bytes = total_bytes.checked_add(document.len()).ok_or_else(|| {
             ImportError::new(
                 ImportErrorCode::InputTooLarge,
@@ -421,16 +422,28 @@ pub fn combine_import_documents(documents: &[String]) -> Result<String, ImportEr
                 "import content exceeds the size limit",
             ));
         }
+        if document.trim().is_empty() {
+            values.push(malformed_import_value());
+            check_item_count(values.len())?;
+            continue;
+        }
 
-        let (_, entries, _) = parse_entries(document)?;
+        let entries = match parse_entries(document) {
+            Ok((_, entries, _, _)) => entries,
+            Err(error)
+                if matches!(
+                    error.code,
+                    ImportErrorCode::EmptyInput | ImportErrorCode::MalformedJson
+                ) =>
+            {
+                values.push(malformed_import_value());
+                check_item_count(values.len())?;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         for entry in entries {
-            let Some(value) = entry.value else {
-                return Err(ImportError::new(
-                    ImportErrorCode::MalformedJson,
-                    "import JSON is malformed",
-                ));
-            };
-            values.push(value);
+            values.push(entry.value.unwrap_or_else(malformed_import_value));
             check_item_count(values.len())?;
         }
     }
@@ -456,18 +469,26 @@ struct InputEntry {
     issue: Option<ImportIssue>,
 }
 
+type ParsedEntries = (
+    ImportFormat,
+    Vec<InputEntry>,
+    Vec<ImportWarning>,
+    Option<String>,
+);
+
 struct ParsedItem {
     preview: ImportPreviewRow,
     item: ParsedImportItem,
 }
 
-fn parse_entries(
-    input: &str,
-) -> Result<(ImportFormat, Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
+fn parse_entries(input: &str) -> Result<ParsedEntries, ImportError> {
     match serde_json::from_str::<Value>(input) {
         Ok(value) => {
             ensure_depth(&value)?;
             if let Some(object) = value.as_object() {
+                if is_zenith_bundle(object) {
+                    return parse_zenith_bundle(object);
+                }
                 if is_portable_bundle(object) {
                     return parse_portable_bundle(object);
                 }
@@ -482,6 +503,7 @@ fn parse_entries(
                         issue: None,
                     }],
                     Vec::new(),
+                    None,
                 ));
             }
             if let Some(values) = value.as_array() {
@@ -492,41 +514,41 @@ fn parse_entries(
                     .enumerate()
                     .map(|(ordinal, value)| InputEntry {
                         ordinal,
-                        value: Some(value),
+                        value: Some(normalize_token_value(value)),
                         issue: None,
                     })
                     .collect();
-                return Ok((ImportFormat::JsonArray, entries, Vec::new()));
+                return Ok((ImportFormat::JsonArray, entries, Vec::new(), None));
             }
             Ok((
                 ImportFormat::JsonObject,
                 vec![InputEntry {
                     ordinal: 0,
-                    value: Some(value),
+                    value: Some(normalize_token_value(value)),
                     issue: None,
                 }],
                 Vec::new(),
+                None,
             ))
         }
         Err(_) => parse_json_lines(input),
     }
 }
 
-fn parse_json_lines(
-    input: &str,
-) -> Result<(ImportFormat, Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
+fn parse_json_lines(input: &str) -> Result<ParsedEntries, ImportError> {
     let lines = input
         .lines()
         .filter(|line| !line.trim().is_empty())
         .collect::<Vec<_>>();
-    if lines.len() <= 1 {
+    if lines.is_empty() {
         return Err(ImportError::new(
-            ImportErrorCode::MalformedJson,
-            "import content is not valid JSON",
+            ImportErrorCode::EmptyInput,
+            "import content is empty",
         ));
     }
     check_item_count(lines.len())?;
 
+    let multiple = lines.len() > 1;
     let mut entries = Vec::with_capacity(lines.len());
     for (ordinal, line) in lines.into_iter().enumerate() {
         match serde_json::from_str::<Value>(line) {
@@ -534,21 +556,144 @@ fn parse_json_lines(
                 ensure_depth(&value)?;
                 entries.push(InputEntry {
                     ordinal,
-                    value: Some(value),
+                    value: Some(normalize_token_value(value)),
                     issue: None,
                 });
             }
-            Err(_) => entries.push(InputEntry {
-                ordinal,
-                value: None,
-                issue: Some(ImportIssue::new(
-                    ImportIssueCode::MalformedJson,
-                    "malformed JSON line",
-                )),
-            }),
+            Err(_) => match raw_access_token(line) {
+                Some(token) => entries.push(InputEntry {
+                    ordinal,
+                    value: Some(access_token_value(token)),
+                    issue: None,
+                }),
+                None if multiple => entries.push(InputEntry {
+                    ordinal,
+                    value: None,
+                    issue: Some(ImportIssue::new(
+                        ImportIssueCode::MalformedJson,
+                        "malformed JSON or access token line",
+                    )),
+                }),
+                None => {
+                    return Err(ImportError::new(
+                        ImportErrorCode::MalformedJson,
+                        "import content is not valid JSON or an access token",
+                    ));
+                }
+            },
         }
     }
-    Ok((ImportFormat::JsonLines, entries, Vec::new()))
+    Ok((ImportFormat::JsonLines, entries, Vec::new(), None))
+}
+
+fn normalize_token_value(value: Value) -> Value {
+    match value {
+        Value::String(value) => raw_access_token(&value)
+            .map(access_token_value)
+            .unwrap_or(Value::String(value)),
+        value => value,
+    }
+}
+
+fn raw_access_token(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let token = value
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+        .and_then(|_| value.get(7..))
+        .map(str::trim)
+        .unwrap_or(value);
+    if token.is_empty()
+        || token.len() > MAX_RAW_TOKEN_BYTES
+        || !token.is_ascii()
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return None;
+    }
+    let mut parts = token.split('.');
+    let jwt = matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(header), Some(payload), Some(signature), None)
+            if !header.is_empty() && !payload.is_empty() && !signature.is_empty()
+    );
+    (jwt || token
+        .strip_prefix("at-")
+        .is_some_and(|value| !value.is_empty()))
+    .then_some(token)
+}
+
+fn access_token_value(token: &str) -> Value {
+    serde_json::json!({ "access_token": token })
+}
+
+fn malformed_import_value() -> Value {
+    serde_json::json!({ IMPORT_ERROR_MARKER: true })
+}
+
+fn is_zenith_bundle(object: &Map<String, Value>) -> bool {
+    object
+        .get("format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("zenith"))
+}
+
+fn parse_zenith_bundle(object: &Map<String, Value>) -> Result<ParsedEntries, ImportError> {
+    let version = object
+        .get("version")
+        .and_then(bundle_version)
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorCode::MalformedJson,
+                "Zenith account bundle version is missing",
+            )
+        })?;
+    if version != 1 {
+        return Err(ImportError::new(
+            ImportErrorCode::UnsupportedBundleVersion,
+            "Zenith account bundle version is unsupported",
+        ));
+    }
+    let accounts = object
+        .get("accounts")
+        .and_then(Value::as_array)
+        .filter(|accounts| !accounts.is_empty())
+        .ok_or_else(|| {
+            ImportError::new(
+                ImportErrorCode::MalformedJson,
+                "Zenith account bundle has no account list",
+            )
+        })?;
+    check_item_count(accounts.len())?;
+    let description = match object.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(description)) => normalize_account_export_description(Some(description))
+            .map_err(|_| {
+                ImportError::new(
+                    ImportErrorCode::MalformedJson,
+                    "Zenith account bundle description is invalid",
+                )
+            })?
+            .map(str::to_string),
+        Some(_) => {
+            return Err(ImportError::new(
+                ImportErrorCode::MalformedJson,
+                "Zenith account bundle description is invalid",
+            ));
+        }
+    };
+    let entries = accounts
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(ordinal, value)| InputEntry {
+            ordinal,
+            value: Some(value),
+            issue: None,
+        })
+        .collect();
+    Ok((ImportFormat::ZenithV1, entries, Vec::new(), description))
 }
 
 fn is_portable_bundle(object: &Map<String, Value>) -> bool {
@@ -566,9 +711,7 @@ fn is_portable_bundle(object: &Map<String, Value>) -> bool {
         })
 }
 
-fn parse_portable_bundle(
-    object: &Map<String, Value>,
-) -> Result<(ImportFormat, Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
+fn parse_portable_bundle(object: &Map<String, Value>) -> Result<ParsedEntries, ImportError> {
     let version = object.get("version").and_then(bundle_version).unwrap_or(1);
     if version != 1 {
         return Err(ImportError::new(
@@ -601,12 +744,15 @@ fn parse_portable_bundle(
         .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
         .into_iter()
         .collect();
-    Ok((ImportFormat::PortableAccountBundleV1, entries, warnings))
+    Ok((
+        ImportFormat::PortableAccountBundleV1,
+        entries,
+        warnings,
+        None,
+    ))
 }
 
-fn parse_account_container(
-    object: &Map<String, Value>,
-) -> Result<(ImportFormat, Vec<InputEntry>, Vec<ImportWarning>), ImportError> {
+fn parse_account_container(object: &Map<String, Value>) -> Result<ParsedEntries, ImportError> {
     let accounts = object
         .get("accounts")
         .and_then(Value::as_array)
@@ -627,7 +773,7 @@ fn parse_account_container(
         .then(|| ImportWarning::count(ImportWarningCode::ProxiesIgnored, proxy_count))
         .into_iter()
         .collect();
-    Ok((ImportFormat::JsonArray, entries, warnings))
+    Ok((ImportFormat::JsonArray, entries, warnings, None))
 }
 
 fn bundle_version(value: &Value) -> Option<u64> {
@@ -657,9 +803,23 @@ fn parse_item(
             "import item must be a JSON object",
         )
     })?;
+    if object
+        .get(IMPORT_ERROR_MARKER)
+        .is_some_and(Value::is_boolean)
+    {
+        return Err(ImportIssue::new(
+            ImportIssueCode::MalformedJson,
+            "import file or line is malformed",
+        ));
+    }
+    let auth = object.get("auth").and_then(Value::as_object);
+    let account = object.get("account").and_then(Value::as_object);
+    let identity = object.get("identity").and_then(Value::as_object);
+    let subscription = object.get("subscription").and_then(Value::as_object);
     let credentials = object
         .get("credentials")
         .and_then(Value::as_object)
+        .or_else(|| (format == ImportFormat::ZenithV1).then_some(auth).flatten())
         .unwrap_or(object);
     let provider_data = object
         .get("providerSpecificData")
@@ -678,7 +838,8 @@ fn parse_item(
     let id_token = credential_string(object, credentials, tokens, ID_TOKEN_FIELDS);
     let has_api_key = api_key.is_some();
     let has_tokens = access_token.is_some() || refresh_token.is_some() || id_token.is_some();
-    let explicit_auth_mode = string_field(object, &["auth_mode", "authMode", "authType"]);
+    let explicit_auth_mode = string_field(object, &["auth_mode", "authMode", "authType"])
+        .or_else(|| auth.and_then(|auth| string_field(auth, &["type"])));
     let explicit_oauth = explicit_auth_mode.is_some_and(is_oauth_mode);
     let explicit_api_key = explicit_auth_mode.is_some_and(is_api_key_mode);
     let mut warnings = Vec::new();
@@ -737,34 +898,59 @@ fn parse_item(
         warnings.push(ImportWarning::new(ImportWarningCode::ConcurrencyIgnored));
     }
 
-    let email = credential_string(object, credentials, None, EMAIL_FIELDS).or_else(|| {
-        provider_data
-            .and_then(|data| string_field(data, EMAIL_FIELDS))
-            .map(str::to_string)
-    });
+    let email = credential_string(object, credentials, None, EMAIL_FIELDS)
+        .or_else(|| {
+            account
+                .and_then(|data| string_field(data, EMAIL_FIELDS))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            provider_data
+                .and_then(|data| string_field(data, EMAIL_FIELDS))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            identity
+                .and_then(|data| string_field(data, EMAIL_FIELDS))
+                .map(str::to_string)
+        });
     let account_id_value = credential_str(object, credentials, None, ACCOUNT_ID_FIELDS)
+        .or_else(|| account.and_then(|data| string_field(data, &["id"])))
+        .or_else(|| account.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)))
         .or_else(|| provider_data.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)))
-        .or_else(|| meta.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)));
+        .or_else(|| meta.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)))
+        .or_else(|| identity.and_then(|data| string_field(data, ACCOUNT_ID_FIELDS)));
     let account_id = safe_identifier(account_id_value);
     let chatgpt_user_id_value = credential_str(object, credentials, None, USER_ID_FIELDS)
+        .or_else(|| account.and_then(|data| string_field(data, USER_ID_FIELDS)))
         .or_else(|| provider_data.and_then(|data| string_field(data, USER_ID_FIELDS)))
-        .or_else(|| meta.and_then(|data| string_field(data, USER_ID_FIELDS)));
+        .or_else(|| meta.and_then(|data| string_field(data, USER_ID_FIELDS)))
+        .or_else(|| identity.and_then(|data| string_field(data, USER_ID_FIELDS)));
     let chatgpt_user_id = safe_identifier(chatgpt_user_id_value);
     let organization_id_value = credential_str(object, credentials, None, ORGANIZATION_ID_FIELDS)
+        .or_else(|| account.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)))
         .or_else(|| provider_data.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)))
-        .or_else(|| meta.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)));
+        .or_else(|| meta.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)))
+        .or_else(|| identity.and_then(|data| string_field(data, ORGANIZATION_ID_FIELDS)));
     let organization_id = safe_identifier(organization_id_value);
     let plan_value = credential_value(object, credentials, None, PLAN_FIELDS)
+        .or_else(|| account.and_then(|data| value_field(data, PLAN_FIELDS)))
         .or_else(|| provider_data.and_then(|data| value_field(data, PLAN_FIELDS)))
-        .or_else(|| meta.and_then(|data| value_field(data, PLAN_FIELDS)));
+        .or_else(|| meta.and_then(|data| value_field(data, PLAN_FIELDS)))
+        .or_else(|| subscription.and_then(|data| value_field(data, PLAN_FIELDS)));
     let mut plan = safe_metadata(plan_value.and_then(Value::as_str));
     let expires_at_value = credential_value(object, credentials, None, EXPIRES_AT_FIELDS)
         .or_else(|| provider_data.and_then(|data| value_field(data, EXPIRES_AT_FIELDS)));
     let mut expires_at = safe_expiry(expires_at_value);
     let subscription_expires_at_value =
-        credential_value(object, credentials, None, SUBSCRIPTION_EXPIRES_AT_FIELDS).or_else(|| {
-            provider_data.and_then(|data| value_field(data, SUBSCRIPTION_EXPIRES_AT_FIELDS))
-        });
+        credential_value(object, credentials, None, SUBSCRIPTION_EXPIRES_AT_FIELDS)
+            .or_else(|| account.and_then(|data| value_field(data, SUBSCRIPTION_EXPIRES_AT_FIELDS)))
+            .or_else(|| {
+                provider_data.and_then(|data| value_field(data, SUBSCRIPTION_EXPIRES_AT_FIELDS))
+            })
+            .or_else(|| {
+                subscription.and_then(|data| value_field(data, &["expiresAt", "expires_at"]))
+            });
     let mut subscription_expires_at = safe_expiry(subscription_expires_at_value);
     let base_url_value = value_field(
         object,
@@ -906,6 +1092,7 @@ fn parse_item(
 
     let source_name = match format {
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
+        ImportFormat::ZenithV1 => "zenith",
         _ if explicit_auth_mode.is_some() => "codex_auth_json",
         _ if use_api_key => "api_key_json",
         _ => "token_json",
@@ -1336,7 +1523,7 @@ fn sha256_hex(seed: &str, secret: Option<&str>, scope: Option<&str>) -> String {
         digest.update([0]);
         digest.update(secret.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 fn is_oauth_mode(value: &str) -> bool {
@@ -1376,6 +1563,7 @@ fn format_name(value: ImportFormat) -> &'static str {
         ImportFormat::JsonArray => "json_array",
         ImportFormat::JsonLines => "json_lines",
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
+        ImportFormat::ZenithV1 => "zenith",
     }
 }
 
@@ -1391,7 +1579,14 @@ const ACCOUNT_ID_FIELDS: &[&str] = &[
     "accountId",
 ];
 const USER_ID_FIELDS: &[&str] = &["chatgpt_user_id", "chatgptUserId", "user_id", "userId"];
-const ORGANIZATION_ID_FIELDS: &[&str] = &["organization_id", "organizationId", "org_id", "orgId"];
+const ORGANIZATION_ID_FIELDS: &[&str] = &[
+    "organization_id",
+    "organizationId",
+    "org_id",
+    "orgId",
+    "poid",
+    "POID",
+];
 const PLAN_FIELDS: &[&str] = &[
     "chatgpt_plan_type",
     "chatgptPlanType",
@@ -1448,6 +1643,88 @@ mod tests {
                 .len(),
             4
         );
+    }
+
+    #[test]
+    fn combines_valid_files_with_malformed_files_as_error_rows() {
+        let documents = vec![
+            format!(r#"{{"account_id":"account-one","access_token":"{ACCESS}"}}"#),
+            r#"{"access_token":"truncated""#.to_string(),
+            "Bearer header.payload.signature".to_string(),
+        ];
+
+        let combined = combine_import_documents(&documents).unwrap();
+        let parsed = parse_import(&combined, None, &[]).unwrap();
+
+        assert_eq!(parsed.preview.rows.len(), 3);
+        assert_eq!(parsed.items.len(), 2);
+        assert_eq!(parsed.preview.rows[1].status, ImportPreviewStatus::Invalid);
+        assert_eq!(
+            parsed.preview.rows[1]
+                .error
+                .as_ref()
+                .map(|error| error.code),
+            Some(ImportIssueCode::MalformedJson)
+        );
+    }
+
+    #[test]
+    fn parses_raw_access_tokens_with_bearer_prefix_and_token_lines() {
+        let input = "Bearer header.payload.signature\nat-opaque-token\n\"at-quoted-token\"";
+        let parsed = parse_import(input, None, &[]).unwrap();
+
+        assert_eq!(parsed.preview.format, ImportFormat::JsonLines);
+        assert_eq!(parsed.items.len(), 3);
+        assert_eq!(
+            parsed.items[0].secrets().access_token(),
+            Some("header.payload.signature")
+        );
+        assert_eq!(
+            parsed.items[1].secrets().access_token(),
+            Some("at-opaque-token")
+        );
+        assert_eq!(
+            parsed.items[2].secrets().access_token(),
+            Some("at-quoted-token")
+        );
+        let preview = serde_json::to_string(&parsed.preview).unwrap();
+        assert!(!preview.contains("opaque-token"));
+
+        let array =
+            parse_import(r#"["at-array-token","Bearer one.two.three"]"#, None, &[]).unwrap();
+        assert_eq!(array.items.len(), 2);
+        assert_eq!(
+            array.items[1].secrets().access_token(),
+            Some("one.two.three")
+        );
+    }
+
+    #[test]
+    fn parses_nested_account_subscription_metadata_for_opaque_tokens() {
+        let parsed = parse_import(
+            r#"{
+                "access_token":"at-private-token",
+                "account":{
+                    "id":"account-team",
+                    "email":"team@example.test",
+                    "planType":"team",
+                    "subscriptionActiveUntil":"2026-10-19T14:17:45Z"
+                }
+            }"#,
+            None,
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(parsed.preview.rows[0].plan.as_deref(), Some("team"));
+        assert_eq!(
+            parsed.preview.rows[0].subscription_expires_at.as_deref(),
+            Some("2026-10-19T14:17:45Z")
+        );
+        assert_eq!(parsed.items[0].account_id.as_deref(), Some("account-team"));
+        assert!(!serde_json::to_string(&parsed.preview)
+            .unwrap()
+            .contains("at-private-token"));
     }
 
     #[test]
@@ -1601,6 +1878,69 @@ mod tests {
         let preview = serde_json::to_string(&parsed.preview).unwrap();
         assert!(!preview.to_ascii_lowercase().contains("sb2api"));
         assert!(!preview.contains("proxy-secret"));
+    }
+
+    #[test]
+    fn zenith_bundle_preserves_description_and_nested_account_data() {
+        let input = format!(
+            r#"{{
+                "format":"zenith",
+                "version":1,
+                "exportedAt":"2026-07-19T00:00:00Z",
+                "description":"Seller description",
+                "accounts":[{{
+                    "name":"Business account",
+                    "provider":"openai",
+                    "auth":{{
+                        "type":"oauth",
+                        "accessToken":"{ACCESS}",
+                        "refreshToken":"{REFRESH}",
+                        "idToken":"{ID}",
+                        "expiresAt":"2026-08-19T00:00:00Z"
+                    }},
+                    "identity":{{
+                        "email":"{EMAIL}",
+                        "accountId":"acct_zenith",
+                        "userId":"user_zenith",
+                        "organizationId":"org_zenith"
+                    }},
+                    "subscription":{{
+                        "plan":"business",
+                        "expiresAt":"2026-09-19T00:00:00Z"
+                    }}
+                }}]
+            }}"#
+        );
+        let parsed = parse_import(&input, Some("zenith-accounts.json"), &[]).unwrap();
+
+        assert_eq!(parsed.preview.format, ImportFormat::ZenithV1);
+        assert_eq!(
+            parsed.preview.description.as_deref(),
+            Some("Seller description")
+        );
+        assert_eq!(parsed.preview.rows[0].source_name, "zenith");
+        assert_eq!(parsed.preview.rows[0].plan.as_deref(), Some("business"));
+        assert_eq!(
+            parsed.preview.rows[0].subscription_expires_at.as_deref(),
+            Some("2026-09-19T00:00:00Z")
+        );
+        assert_eq!(parsed.items[0].secrets().access_token(), Some(ACCESS));
+        assert_eq!(parsed.items[0].secrets().refresh_token(), Some(REFRESH));
+        assert_eq!(parsed.items[0].account_id.as_deref(), Some("acct_zenith"));
+        assert_eq!(
+            parsed.items[0].chatgpt_user_id.as_deref(),
+            Some("user_zenith")
+        );
+        assert_eq!(
+            parsed.items[0].organization_id.as_deref(),
+            Some("org_zenith")
+        );
+
+        let unsupported = input.replacen("\"version\":1", "\"version\":2", 1);
+        assert_eq!(
+            parse_import(&unsupported, None, &[]).unwrap_err().code,
+            ImportErrorCode::UnsupportedBundleVersion
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@ use super::{
     accounts::{
         authority::{AccountMetadataSink, MetadataSinkError},
         credentials::CredentialStore,
+        import_session::ImportSessionStore,
         oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
         NativeSecretBackend,
     },
@@ -25,7 +26,10 @@ use std::{
 use tauri::{Emitter, Manager, UserAttentionType};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use zenith_relay_core::{
-    accounts::{AccountAuthState, AccountHealthState, AccountRecord, TokenAuthority},
+    accounts::{
+        reduce_account_usage, AccountAccessState, AccountAuthState, AccountRecord,
+        AccountUsageObservation, AccountUsageState, TokenAuthority,
+    },
     automations::{
         WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
         WakeTask,
@@ -68,20 +72,26 @@ pub struct DesktopState {
 
 impl DesktopState {
     pub fn open(root: PathBuf) -> Result<Self> {
-        let repair_previews = root.join("cache").join("repair_previews");
-        if repair_previews.exists() {
-            let repair_state_root = root.clone();
+        let transient_root = root.join("cache");
+        if transient_root.exists() {
             let _ = std::thread::Builder::new()
-                .name("history-repair-cleanup".to_string())
+                .name("transient-cleanup".to_string())
                 .spawn(move || {
-                    let _ = repair::cleanup_expired_previews(&repair_state_root.join("cache"));
+                    let _ = ImportSessionStore::new(transient_root.clone(), NativeSecretBackend)
+                        .cleanup_expired();
+                    let _ = repair::cleanup_expired_previews(&transient_root);
                 });
         }
         let mut store = LocalPoolStore::open(root.clone())?;
+        let telemetry = store.database();
         let mut quota_refresh =
             QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES).map_err(invalid_core_state)?;
         let startup_due_at_ms = now_ms();
-        for account in store.accounts() {
+        for account in store
+            .accounts()
+            .iter()
+            .filter(|account| account.account.is_automatic_quota_refresh_eligible())
+        {
             quota_refresh
                 .upsert(&account.account.id, startup_due_at_ms)
                 .map_err(invalid_core_state)?;
@@ -92,7 +102,6 @@ impl DesktopState {
             automations.state = wake.state().clone();
             store.replace_automations(automations)?;
         }
-        let telemetry = Arc::new(TelemetryDb::open(&root.join("data").join("usage.sqlite"))?);
         let failed_usage_writes = Arc::new(AtomicU64::new(0));
         let failed_affinity_writes = Arc::new(AtomicU64::new(0));
         let token_authority = Arc::new(
@@ -145,21 +154,6 @@ impl DesktopState {
         Ok(changed)
     }
 
-    pub(crate) fn replace_quota_refresh(
-        &self,
-        account_id: &str,
-        due_at_ms: u64,
-    ) -> Result<QuotaRefreshQueue> {
-        let mut queue = self.quota_refresh_queue()?;
-        let previous = queue.clone();
-        queue
-            .upsert(account_id, due_at_ms)
-            .map_err(invalid_core_state)?;
-        drop(queue);
-        self.quota_refresh_notify.notify_one();
-        Ok(previous)
-    }
-
     pub(crate) fn restore_quota_refresh(&self, previous: QuotaRefreshQueue) -> Result<()> {
         *self.quota_refresh_queue()? = previous;
         self.quota_refresh_notify.notify_one();
@@ -176,6 +170,24 @@ impl DesktopState {
             self.quota_refresh_notify.notify_one();
         }
         Ok(removed)
+    }
+
+    pub(crate) fn sync_account_quota_refresh(
+        &self,
+        account_id: &str,
+        due_at_ms: u64,
+    ) -> Result<bool> {
+        let active_pool_account = {
+            let store = self.store()?;
+            store
+                .account(account_id)
+                .is_some_and(|account| account.account.is_automatic_quota_refresh_eligible())
+        };
+        if active_pool_account {
+            self.mark_quota_refresh(account_id, due_at_ms)
+        } else {
+            self.remove_quota_refresh(account_id)
+        }
     }
 
     pub(crate) fn claim_due_quota_refreshes(
@@ -412,7 +424,8 @@ impl DesktopState {
                     observed_at_ms,
                     access_expiry,
                     successful_auth_state,
-                );
+                ) && account.account.enabled
+                    && account.account.in_pool;
                 let mut keys = store.keys().to_vec();
                 if let Some(key) = keys.iter_mut().find(|key| key.id == event.local_key_id) {
                     key.last_used_at = Some(observed_at);
@@ -484,10 +497,9 @@ impl DesktopState {
 
     async fn snapshot_with(&self, secrets: &impl SecretLookup) -> Result<LocalPoolSnapshot> {
         let running = self.gateway.address().await.is_some();
-        let (schema_version, gateway, sources, accounts, keys, automations) = {
+        let (gateway, sources, accounts, keys, automations) = {
             let store = self.store()?;
             (
-                store.metadata().schema_version,
                 store.gateway().clone(),
                 store.sources().to_vec(),
                 store.accounts().to_vec(),
@@ -563,7 +575,7 @@ impl DesktopState {
             }
         }
         Ok(LocalPoolSnapshot {
-            schema_version,
+            schema_version: crate::local_pool::models::CURRENT_SCHEMA_VERSION,
             runtime_target: RuntimeTarget {
                 kind: "local",
                 connected: running,
@@ -592,10 +604,6 @@ impl DesktopState {
         self.recovery_root().join("client-config")
     }
 
-    pub fn backup_root(&self) -> PathBuf {
-        self.recovery_root()
-    }
-
     pub fn data_root(&self) -> PathBuf {
         self.root.join("data")
     }
@@ -614,10 +622,6 @@ impl DesktopState {
 
     pub fn cache_root(&self) -> PathBuf {
         self.root.join("cache")
-    }
-
-    pub fn logs_root(&self) -> PathBuf {
-        self.root.join("logs")
     }
 
     #[allow(dead_code)]
@@ -662,29 +666,22 @@ impl ResponseAffinityStore for DesktopResponseAffinityStore {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AccountAccessExpiry {
-    Refreshable,
-    AccessOnly,
-    Failed,
-}
-
 fn expire_account_access(
     credentials: &CredentialStore<NativeSecretBackend>,
     account_id: &str,
     now_ms: u64,
-) -> AccountAccessExpiry {
+) -> AccountAccessState {
     let Ok(Some(mut stored)) = credentials.load(account_id) else {
-        return AccountAccessExpiry::Failed;
+        return AccountAccessState::Failed;
     };
     let refreshable = stored.refresh_token().is_some();
     stored.expire_access_at(now_ms);
     if credentials.save(&stored).is_err() {
-        AccountAccessExpiry::Failed
+        AccountAccessState::Failed
     } else if refreshable {
-        AccountAccessExpiry::Refreshable
+        AccountAccessState::Refreshable
     } else {
-        AccountAccessExpiry::AccessOnly
+        AccountAccessState::AccessOnly
     }
 }
 
@@ -705,146 +702,41 @@ fn apply_account_usage_state(
     account: &mut LocalAccountRecord,
     event: &UsageEvent,
     observed_at_ms: u64,
-    access_expiry: Option<AccountAccessExpiry>,
+    access_state: Option<AccountAccessState>,
     successful_auth_state: Option<AccountAuthState>,
 ) -> bool {
-    if event.success {
-        account.account.last_used_at_ms = Some(observed_at_ms);
-        if event.consecutive_failures != Some(0) {
-            return false;
-        }
-        account.cooldowns.retain(|scope, _| {
-            scope != "*"
-                && event
-                    .resolved_model
-                    .as_deref()
-                    .is_none_or(|model| !scope.eq_ignore_ascii_case(model))
-        });
-        account.consecutive_failures = 0;
-        account.account.health = AccountHealthState::Healthy;
-        account.account.last_error_code = None;
-        if matches!(
-            account.account.auth_state,
-            AccountAuthState::Error | AccountAuthState::RequiresReauth(_)
-        ) {
-            if let Some(auth_state) = successful_auth_state {
-                account.account.auth_state = auth_state;
-            }
-        }
-        return false;
+    if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
+        snapshot.updated_at_ms.unwrap_or_default()
+            >= account.account.quota.updated_at_ms.unwrap_or_default()
+    }) {
+        account.account.quota = snapshot.clone();
     }
-
-    if event.cooldown_scope.is_none()
-        && event.retry_at_ms.is_none()
-        && event.consecutive_failures.is_none()
-    {
-        return false;
-    }
-
-    if let (Some(scope), Some(retry_at_ms)) = (event.cooldown_scope.as_deref(), event.retry_at_ms) {
-        if valid_cooldown_scope(scope) {
-            let scope = if scope == "*" {
-                "*".to_string()
-            } else {
-                scope.to_ascii_lowercase()
-            };
-            account
-                .cooldowns
-                .entry(scope)
-                .and_modify(|current| *current = (*current).max(retry_at_ms))
-                .or_insert(retry_at_ms);
-        }
-    }
-    account.consecutive_failures = account.consecutive_failures.max(
-        event
-            .consecutive_failures
-            .unwrap_or_else(|| account.consecutive_failures.saturating_add(1)),
+    let update = reduce_account_usage(
+        AccountUsageState {
+            auth_state: account.account.auth_state,
+            health: account.account.health,
+            last_error_code: account.account.last_error_code.clone(),
+            last_used_at_ms: account.account.last_used_at_ms,
+        },
+        AccountUsageObservation {
+            success: event.success,
+            http_status: event.http_status,
+            error_category: event.error_category.as_deref(),
+            affects_account: event.affects_account_state(),
+        },
+        observed_at_ms,
+        access_state,
+        successful_auth_state,
     );
-
-    let explicit_state = matches!(
-        account.account.auth_state,
-        AccountAuthState::RequiresReauth(_)
-    ) || account.account.health == AccountHealthState::Blocked;
-    let failure_category = event
-        .error_category
-        .as_deref()
-        .filter(|category| *category != "upstream_status");
-    match event.http_status {
-        401 => {
-            if access_expiry == Some(AccountAccessExpiry::Refreshable) {
-                if !explicit_state {
-                    account.account.health = AccountHealthState::Degraded;
-                }
-                account.account.last_error_code = Some(
-                    failure_category
-                        .unwrap_or("upstream_unauthorized")
-                        .to_string(),
-                );
-            } else if access_expiry == Some(AccountAccessExpiry::AccessOnly) {
-                if !matches!(
-                    account.account.auth_state,
-                    AccountAuthState::RequiresReauth(_)
-                ) {
-                    account.account.auth_state = AccountAuthState::Error;
-                }
-                account.account.health = AccountHealthState::Unhealthy;
-                account.account.last_error_code = Some(
-                    failure_category
-                        .unwrap_or("upstream_unauthorized")
-                        .to_string(),
-                );
-            } else if !explicit_state {
-                account.account.auth_state = AccountAuthState::Error;
-                account.account.health = AccountHealthState::Unhealthy;
-                account.account.last_error_code =
-                    Some("credential_access_expiry_failed".to_string());
-            }
-        }
-        403 => {
-            let category = failure_category.unwrap_or("upstream_forbidden");
-            if matches!(
-                category,
-                "upstream_quota_exhausted"
-                    | "upstream_usage_not_included"
-                    | "upstream_region_unsupported"
-                    | "upstream_edge_challenge"
-            ) {
-                if !explicit_state {
-                    account.account.health = AccountHealthState::Degraded;
-                }
-            } else {
-                account.account.health = AccountHealthState::Blocked;
-            }
-            account.account.last_error_code = Some(category.to_string());
-        }
-        429 => {
-            if !explicit_state {
-                account.account.health = AccountHealthState::Degraded;
-            }
-            account.account.last_error_code = Some(
-                failure_category
-                    .unwrap_or("upstream_rate_limited")
-                    .to_string(),
-            );
-        }
-        _ => {
-            if !explicit_state {
-                account.account.health = AccountHealthState::Degraded;
-            }
-            account.account.last_error_code = Some(
-                event
-                    .error_category
-                    .clone()
-                    .unwrap_or_else(|| "upstream_failure".to_string()),
-            );
-        }
+    account.account.auth_state = update.state.auth_state;
+    account.account.health = update.state.health;
+    account.account.last_error_code = update.state.last_error_code;
+    account.account.last_used_at_ms = update.state.last_used_at_ms;
+    if update.reset_runtime_failures {
+        account.cooldowns.clear();
+        account.consecutive_failures = 0;
     }
-    event.http_status == 429
-        || (event.http_status == 401 && access_expiry == Some(AccountAccessExpiry::Refreshable))
-}
-
-fn valid_cooldown_scope(scope: &str) -> bool {
-    !scope.is_empty() && scope.len() <= 512 && !scope.chars().any(char::is_control)
+    update.refresh_quota
 }
 
 fn wake_coordinator(automations: &AutomationRecords) -> Result<WakeCoordinator> {
@@ -1043,6 +935,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: Some(3),
             total_tokens: Some(5),
+            quota_snapshot: None,
         });
 
         let logs = state.telemetry.list(10).unwrap();
@@ -1058,33 +951,6 @@ mod tests {
         assert!(reopened.source("source_1").unwrap().last_used_at.is_some());
         assert!(reopened.key("key_1").unwrap().last_used_at.is_some());
         drop(reopened);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn startup_preserves_existing_history_repair_backups() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-repair-backup-preservation-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let backup_root = root.join("recovery/history-repair");
-        let ids = [
-            format!("history_repair_{}", uuid::Uuid::new_v4().simple()),
-            format!("history_repair_{}", uuid::Uuid::new_v4().simple()),
-        ];
-        for id in &ids {
-            std::fs::create_dir_all(backup_root.join(id)).unwrap();
-            std::fs::write(backup_root.join(id).join("manifest.json"), "preserved").unwrap();
-        }
-
-        drop(DesktopState::open(root.clone()).unwrap());
-
-        for id in &ids {
-            assert_eq!(
-                std::fs::read_to_string(backup_root.join(id).join("manifest.json")).unwrap(),
-                "preserved"
-            );
-        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1138,15 +1004,15 @@ mod tests {
             account.account.last_error_code.as_deref(),
             Some("upstream_unauthorized")
         );
-        assert_eq!(account.cooldowns.get("*"), Some(&retry_at_ms));
-        assert_eq!(account.consecutive_failures, 1);
+        assert!(account.cooldowns.is_empty());
+        assert_eq!(account.consecutive_failures, 0);
         assert!(state.next_quota_refresh_due().unwrap().is_none());
         drop(state);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         let account = reopened.account(&account_id).unwrap();
-        assert_eq!(account.cooldowns.get("*"), Some(&retry_at_ms));
-        assert_eq!(account.consecutive_failures, 1);
+        assert!(account.cooldowns.is_empty());
+        assert_eq!(account.consecutive_failures, 0);
         drop(reopened);
         credentials.delete(&account_id).unwrap();
         std::fs::remove_dir_all(root).unwrap();
@@ -1179,8 +1045,8 @@ mod tests {
                 account.account.last_error_code.as_deref(),
                 Some("upstream_forbidden")
             );
-            assert_eq!(account.cooldowns.get("*"), Some(&retry_at_ms));
-            assert_eq!(account.consecutive_failures, 2);
+            assert!(account.cooldowns.is_empty());
+            assert_eq!(account.consecutive_failures, 0);
         }
         drop(state);
 
@@ -1208,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn late_success_and_older_failure_cannot_regress_persisted_cooldown_state() {
+    fn account_results_update_health_without_persisting_cooldowns() {
         let mut account = account_record("account-race");
         let failure = account_status_event("account-race", 429, Some("*"), Some(500), 2);
         assert!(apply_account_usage_state(
@@ -1237,8 +1103,8 @@ mod tests {
             None,
         ));
 
-        assert_eq!(account.cooldowns.get("*"), Some(&500));
-        assert_eq!(account.consecutive_failures, 2);
+        assert!(account.cooldowns.is_empty());
+        assert_eq!(account.consecutive_failures, 0);
         assert_eq!(account.account.health, AccountHealthState::Degraded);
         assert_eq!(
             account.account.last_error_code.as_deref(),
@@ -1267,12 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn quota_classification_does_not_turn_a_forbidden_response_into_a_block() {
+    fn quota_classification_queues_refresh_without_blocking_the_account() {
         let mut account = account_record("account-quota");
         let mut event = account_status_event("account-quota", 403, Some("*"), Some(60_000), 1);
         event.error_category = Some("upstream_quota_exhausted".into());
 
-        assert!(!apply_account_usage_state(
+        assert!(apply_account_usage_state(
             &mut account,
             &event,
             100,
@@ -1287,8 +1153,19 @@ mod tests {
     }
 
     #[test]
-    fn entitlement_and_edge_challenges_do_not_block_the_account() {
-        for category in ["upstream_usage_not_included", "upstream_edge_challenge"] {
+    fn model_entitlement_is_local_but_edge_challenges_degrade_the_account() {
+        for (category, expected_health, expected_error) in [
+            (
+                "upstream_usage_not_included",
+                AccountHealthState::Healthy,
+                None,
+            ),
+            (
+                "upstream_edge_challenge",
+                AccountHealthState::Degraded,
+                Some("upstream_edge_challenge"),
+            ),
+        ] {
             let mut account = account_record(category);
             let mut event = account_status_event(category, 403, Some("*"), Some(60_000), 1);
             event.error_category = Some(category.into());
@@ -1300,8 +1177,8 @@ mod tests {
                 None,
                 None,
             ));
-            assert_eq!(account.account.health, AccountHealthState::Degraded);
-            assert_eq!(account.account.last_error_code.as_deref(), Some(category));
+            assert_eq!(account.account.health, expected_health);
+            assert_eq!(account.account.last_error_code.as_deref(), expected_error);
         }
     }
 
@@ -1310,9 +1187,15 @@ mod tests {
         let root = temp_root("refresh-startup");
         {
             let mut store = LocalPoolStore::open(root.clone()).unwrap();
+            let mut outside_pool = account_record("account-3");
+            outside_pool.account.in_pool = false;
             store
                 .replace_accounts_and_keys(
-                    vec![account_record("account-1"), account_record("account-2")],
+                    vec![
+                        account_record("account-1"),
+                        account_record("account-2"),
+                        outside_pool,
+                    ],
                     Vec::new(),
                 )
                 .unwrap();
@@ -1691,6 +1574,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
@@ -1772,6 +1656,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: success.then_some(3),
             total_tokens: success.then_some(5),
+            quota_snapshot: None,
         }
     }
 
@@ -1808,6 +1693,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            quota_snapshot: None,
         }
     }
 

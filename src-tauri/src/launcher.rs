@@ -42,18 +42,6 @@ pub fn launch_codex_with_profile() -> Result<(), String> {
     launch_codex_checked(false)
 }
 
-pub fn restart_codex_if_running() -> Option<String> {
-    if !is_codex_running() {
-        return None;
-    }
-
-    if stop_codex_and_wait().is_err() {
-        return Some("ChatGPT не удалось остановить.".to_string());
-    }
-    let _ = launch_codex();
-    Some("Ключ сохранен.".to_string())
-}
-
 pub fn is_codex_running() -> bool {
     let system = codex_process_system();
     system.processes().values().any(is_codex_process)

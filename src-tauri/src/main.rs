@@ -11,19 +11,23 @@ mod tray;
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeSet, env, time::Duration};
+use std::{
+    collections::BTreeSet,
+    env,
+    time::{Duration, Instant},
+};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
 use crate::{
     codex_config::{
-        enable_provider, ensure_provider_on_launch, load_api_key_for_launch, provider_has_token,
-        reset_provider,
+        deactivate_provider, enable_provider, ensure_provider_on_launch, load_api_key_for_launch,
+        provider_has_token, reset_provider,
     },
     key_storage::{load_saved_app_key, save_app_key},
-    launcher::{is_codex_running, launch_codex, restart_codex_if_running},
-    platform::{platform_name, system_locale},
+    launcher::{is_codex_running, launch_codex, launch_codex_with_profile},
+    platform::{default_codex_home, platform_name, system_locale},
     tray::{build_tray, close_main_window, AppState},
 };
 
@@ -502,27 +506,59 @@ async fn create_top_up_intent(
 #[tauri::command]
 async fn save_key(
     api_key: String,
+    activate: Option<bool>,
     app: AppHandle,
     state: tauri::State<'_, local_pool::DesktopState>,
 ) -> Result<String, String> {
+    let api_key = normalize_api_key(&api_key)?;
+    if activate == Some(false) {
+        save_app_key(&api_key)?;
+        let _ = app.emit("zenith-state-changed", ());
+        return Ok("API key saved.".to_string());
+    }
     let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
         .await
         .map_err(|error| error.message)?;
-    let result = enable_provider(api_key.trim(), &state.ready_api_backup_root())
-        .and_then(|()| save_app_key(api_key.trim()));
-    if let Err(error) = result {
-        if stopped {
-            let _ = launch_codex();
-        }
-        return Err(error);
-    }
-    let message = if stopped {
-        launch_codex()
-    } else {
-        restart_codex_if_running().unwrap_or_else(|| "Ключ сохранен.".to_string())
-    };
+    let result = activate_ready_api_with_history(&api_key, true, &state);
+    let result = finish_ready_api_profile_change(stopped, result);
     let _ = app.emit("zenith-state-changed", ());
-    Ok(message)
+    result
+}
+
+#[tauri::command]
+async fn activate_ready_api_profile(
+    app: AppHandle,
+    state: tauri::State<'_, local_pool::DesktopState>,
+) -> Result<String, String> {
+    if provider_has_token() {
+        return Ok("Ready API profile is already active.".to_string());
+    }
+    let api_key = stored_api_key()?;
+    let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
+        .await
+        .map_err(|error| error.message)?;
+    let result = activate_ready_api_with_history(&api_key, false, &state);
+    let result = finish_ready_api_profile_change(stopped, result);
+    let _ = app.emit("zenith-state-changed", ());
+    result
+}
+
+#[tauri::command]
+async fn deactivate_ready_api_profile(
+    app: AppHandle,
+    state: tauri::State<'_, local_pool::DesktopState>,
+) -> Result<String, String> {
+    if !provider_has_token() {
+        return Ok("Chat profile is already active.".to_string());
+    }
+    let api_key = stored_api_key()?;
+    let stopped = local_pool::commands::profiles::prepare_ready_api_profile(&state)
+        .await
+        .map_err(|error| error.message)?;
+    let result = deactivate_ready_api_with_history(&api_key, false, &state);
+    let result = finish_ready_api_profile_change(stopped, result);
+    let _ = app.emit("zenith-state-changed", ());
+    result
 }
 
 #[tauri::command]
@@ -543,13 +579,96 @@ fn api_key_page_url(provider: &str) -> Option<&'static str> {
 }
 
 #[tauri::command]
-fn reset_key(
+async fn reset_key(
     app: AppHandle,
     state: tauri::State<'_, local_pool::DesktopState>,
 ) -> Result<String, String> {
-    reset_provider(&state.ready_api_backup_root())?;
+    let active = provider_has_token();
+    let api_key = active.then(stored_api_key).transpose()?;
+    let stopped = if active {
+        local_pool::commands::profiles::prepare_ready_api_profile(&state)
+            .await
+            .map_err(|error| error.message)?
+    } else {
+        false
+    };
+    let result = match api_key {
+        Some(api_key) => deactivate_ready_api_with_history(&api_key, true, &state),
+        None => reset_provider(&state.ready_api_backup_root()),
+    };
+    let result = finish_ready_api_profile_change(stopped, result);
     let _ = app.emit("zenith-state-changed", ());
-    Ok("Настройки восстановлены.".to_string())
+    result
+}
+
+fn finish_ready_api_profile_change(
+    stopped: bool,
+    result: Result<(), String>,
+) -> Result<String, String> {
+    let restart = stopped.then(launch_codex_with_profile).transpose();
+    match (result, restart) {
+        (Ok(()), Ok(_)) => Ok("ChatGPT profile updated.".to_string()),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(restart_error)) => Err(format!(
+            "ChatGPT profile was updated but could not be restarted: {restart_error}"
+        )),
+        (Err(error), Err(restart_error)) => Err(format!(
+            "{error}; failed to restart ChatGPT: {restart_error}"
+        )),
+    }
+}
+
+fn activate_ready_api_with_history(
+    api_key: &str,
+    save_key: bool,
+    state: &local_pool::DesktopState,
+) -> Result<(), String> {
+    enable_provider(api_key, &state.ready_api_backup_root())?;
+    let result = (|| {
+        if save_key {
+            save_app_key(api_key)?;
+        }
+        local_pool::commands::profiles::synchronize_codex_history(
+            state,
+            &default_codex_home(),
+            local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
+        )?;
+        Ok(())
+    })();
+    result.map_err(|error| {
+        profile_change_with_rollback(error, deactivate_provider(&state.ready_api_backup_root()))
+    })
+}
+
+fn deactivate_ready_api_with_history(
+    api_key: &str,
+    forget_key: bool,
+    state: &local_pool::DesktopState,
+) -> Result<(), String> {
+    if forget_key {
+        reset_provider(&state.ready_api_backup_root())?;
+    } else {
+        deactivate_provider(&state.ready_api_backup_root())?;
+    }
+    local_pool::commands::profiles::synchronize_codex_history(
+        state,
+        &default_codex_home(),
+        local_pool::commands::profiles::CodexHistoryProvider::ChatGpt,
+    )
+    .map(|_| ())
+    .map_err(|error| {
+        profile_change_with_rollback(
+            error,
+            enable_provider(api_key, &state.ready_api_backup_root()),
+        )
+    })
+}
+
+fn profile_change_with_rollback(error: String, rollback: Result<(), String>) -> String {
+    match rollback {
+        Ok(()) => error,
+        Err(rollback) => format!("{error}; profile rollback failed: {rollback}"),
+    }
 }
 
 #[tauri::command]
@@ -560,6 +679,13 @@ fn launch_saved_codex(
     let _ = ensure_provider_on_launch(&state.ready_api_backup_root());
     if !provider_has_token() {
         return Err("Сначала сохраните API key.".to_string());
+    }
+    if !is_codex_running() {
+        local_pool::commands::profiles::synchronize_codex_history(
+            &state,
+            &default_codex_home(),
+            local_pool::commands::profiles::CodexHistoryProvider::ReadyApi,
+        )?;
     }
     let message = launch_codex();
     close_main_window(&app);
@@ -1259,6 +1385,7 @@ mod tests {
 }
 
 fn main() {
+    let started = Instant::now();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             crate::tray::show_main_window(app);
@@ -1268,7 +1395,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::new())
-        .setup(|app| {
+        .setup(move |app| {
             let handle = app.handle().clone();
             let relay_state = local_pool::initialize(&handle)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -1281,22 +1408,28 @@ fn main() {
                 .find(|window| window.label == "main")
                 .cloned()
                 .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
-            let webview_cache =
-                platform::webview_cache_dir(&handle).map_err(std::io::Error::other)?;
-            std::fs::create_dir_all(&webview_cache)?;
+            let webview_data =
+                platform::webview_data_dir(&handle).map_err(std::io::Error::other)?;
             WebviewWindowBuilder::from_config(app, &window_config)?
-                .data_directory(webview_cache)
+                .data_directory(webview_data)
                 .build()?;
+            if cfg!(debug_assertions) {
+                eprintln!(
+                    "[startup] native_window={}ms",
+                    started.elapsed().as_millis()
+                );
+            }
             local_pool::background::start(handle.clone());
-            let startup_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let state = startup_handle.state::<local_pool::DesktopState>();
-                let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
-            });
             let relay_state = app.state::<local_pool::DesktopState>();
             let _ = ensure_provider_on_launch(&relay_state.ready_api_backup_root());
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
+            let startup_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = startup_handle.state::<local_pool::DesktopState>();
+                let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
+                crate::tray::refresh_tray(&startup_handle).await;
+            });
             start_key_stats_watcher(handle.clone());
 
             if env::args().any(|arg| arg == "--tray") {
@@ -1325,6 +1458,8 @@ fn main() {
             create_saved_top_up_intent_and_open,
             prepare_top_up_amount,
             save_key,
+            activate_ready_api_profile,
+            deactivate_ready_api_profile,
             reset_key,
             launch_saved_codex,
             open_api_key_page,
@@ -1338,8 +1473,11 @@ fn main() {
             local_pool::commands::connections::delete_local_source,
             local_pool::commands::connections::rotate_local_source_key,
             local_pool::commands::connections::test_local_source,
+            local_pool::commands::connections::get_local_source_stats,
             local_pool::commands::accounts::start_local_account_import,
             local_pool::commands::accounts::preview_local_account_import_files,
+            local_pool::commands::accounts::preview_current_codex_account_import,
+            local_pool::commands::accounts::current_chatgpt_profile_available,
             local_pool::commands::accounts::resume_local_account_import,
             local_pool::commands::accounts::prepare_local_account_import,
             local_pool::commands::accounts::cancel_local_account_import,
@@ -1351,14 +1489,16 @@ fn main() {
             local_pool::commands::proxies::get_local_proxy_pool,
             local_pool::commands::proxies::import_local_proxy_pool,
             local_pool::commands::proxies::delete_local_stored_proxy,
+            local_pool::commands::proxies::delete_local_stored_proxies,
             local_pool::commands::proxies::assign_local_stored_proxy,
+            local_pool::commands::proxies::set_local_stored_proxy_accounts,
             local_pool::commands::proxies::assign_free_local_account_proxies,
             local_pool::commands::accounts::set_local_account_enabled,
             local_pool::commands::accounts::set_local_account_draining,
             local_pool::commands::accounts::delete_local_account,
+            local_pool::commands::accounts::delete_local_accounts,
             local_pool::commands::accounts::refresh_local_account_quota,
             local_pool::commands::accounts::refresh_all_local_account_quotas,
-            local_pool::commands::accounts::refresh_local_pool_account_quotas,
             local_pool::commands::oauth::start_codex_oauth,
             local_pool::commands::oauth::resume_codex_oauth,
             local_pool::commands::oauth::get_codex_oauth_status,
@@ -1378,6 +1518,7 @@ fn main() {
             local_pool::commands::pool::rotate_local_gateway_key,
             local_pool::commands::pool::set_local_pool_membership,
             local_pool::commands::pool::set_local_model_enabled,
+            local_pool::commands::pool::set_local_model_price,
             local_pool::commands::pool::update_local_quota_policy,
             local_pool::commands::pool::update_local_routing,
             local_pool::commands::gateway::start_local_gateway,
@@ -1390,16 +1531,16 @@ fn main() {
             local_pool::commands::usage::get_local_usage,
             local_pool::commands::usage::get_local_usage_page,
             local_pool::commands::usage::clear_local_usage,
+            local_pool::commands::profiles::update_chatgpt_interface_quota_reserve,
             local_pool::commands::profiles::attach_codex_to_local_gateway,
+            local_pool::commands::profiles::attach_codex_to_remote_gateway,
             local_pool::commands::profiles::restore_codex_profile,
             local_pool::commands::profiles::stop_managed_codex_profile,
             local_pool::commands::profiles::launch_managed_codex_profile,
             local_pool::commands::profiles::attach_codex_to_account,
             local_pool::commands::profiles::launch_codex_account,
+            local_pool::commands::profiles::launch_codex_source,
             local_pool::commands::profiles::list_codex_account_bindings,
-            local_pool::commands::profiles::preview_codex_history_repair,
-            local_pool::commands::profiles::apply_codex_history_repair,
-            local_pool::commands::profiles::rollback_codex_history_repair,
             local_pool::commands::profiles::restore_codex_account_profile,
             local_pool::commands::profiles::list_codex_profile_snapshots,
             local_pool::commands::profiles::create_codex_profile_snapshot,
@@ -1422,6 +1563,8 @@ fn main() {
             local_pool::commands::remote_server::disconnect_remote_server,
             local_pool::commands::remote_server::prepare_remote_server_deployment,
             local_pool::commands::remote_server::preview_remote_account_import_files,
+            local_pool::commands::remote_server::move_local_accounts_to_remote,
+            local_pool::commands::remote_server::return_remote_account_to_local,
             local_pool::commands::remote_server::execute_remote_server_action
         ])
         .build(tauri::generate_context!())

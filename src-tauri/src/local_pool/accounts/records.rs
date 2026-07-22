@@ -6,16 +6,18 @@ use crate::local_pool::{
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use zenith_relay_core::{
+    account_candidate_health,
     accounts::{
         AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
     },
-    quota::{QuotaSnapshot, Subscription, SubscriptionInput, SubscriptionStatus},
+    quota::{QuotaSnapshot, Subscription, SubscriptionInput},
     CandidateHealth, CandidateQuota, WireApi,
 };
 
+pub use zenith_relay_core::quota_stale_after_ms_for_interval;
+
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const QUOTA_STALE_GRACE_MS: u64 = 5 * 60 * 1_000;
 
 pub fn new_account_record(
     credentials: &StoredCodexCredentials,
@@ -60,12 +62,13 @@ pub fn new_account_record(
     } else {
         AccountAuthState::DegradedAccessOnly
     };
-    let subscription = Subscription::normalize(SubscriptionInput {
+    let mut subscription = Subscription::normalize(SubscriptionInput {
         plan_type: snapshot.plan_type,
         active_until_ms: None,
         forbidden: false,
         observed_at_ms: now_ms,
     });
+    subscription.updated_at_ms = None;
     let mut record = LocalAccountRecord {
         account: AccountRecord {
             id: credentials.local_account_id().to_string(),
@@ -90,6 +93,7 @@ pub fn new_account_record(
             last_used_at_ms: None,
             last_error_code: None,
         },
+        remote_location: None,
         wire_api: WireApi::Responses,
         models,
         allowed_models: Vec::new(),
@@ -126,29 +130,12 @@ pub fn identity_hash(
 }
 
 pub fn candidate_health(account: &AccountRecord) -> CandidateHealth {
-    match account.auth_state {
-        AccountAuthState::RequiresReauth(_) => return CandidateHealth::ReauthRequired,
-        AccountAuthState::Error => return CandidateHealth::Unhealthy,
-        _ => {}
-    }
-    match account.last_error_code.as_deref() {
-        Some("upstream_unauthorized") => return CandidateHealth::ReauthRequired,
-        Some("checkpoint") => return CandidateHealth::Checkpoint,
-        Some("captcha") => return CandidateHealth::Captcha,
-        _ => {}
-    }
-    match account.subscription.status {
-        SubscriptionStatus::Forbidden => return CandidateHealth::Blocked,
-        SubscriptionStatus::Expired => return CandidateHealth::Expired,
-        _ => {}
-    }
-    match account.health {
-        AccountHealthState::Unknown => CandidateHealth::Unknown,
-        AccountHealthState::Healthy => CandidateHealth::Healthy,
-        AccountHealthState::Degraded => CandidateHealth::Degraded,
-        AccountHealthState::Unhealthy => CandidateHealth::Unhealthy,
-        AccountHealthState::Blocked => CandidateHealth::Blocked,
-    }
+    account_candidate_health(
+        account.auth_state,
+        account.health,
+        account.subscription.status,
+        account.last_error_code.as_deref(),
+    )
 }
 
 pub fn candidate_quota_with_stale_after(
@@ -156,36 +143,11 @@ pub fn candidate_quota_with_stale_after(
     now_ms: u64,
     stale_after_ms: u64,
 ) -> CandidateQuota {
-    if quota
-        .updated_at_ms
-        .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > stale_after_ms)
-    {
-        return CandidateQuota::Stale;
-    }
-    let remaining = quota
-        .primary
-        .iter()
-        .chain(quota.secondary.iter())
-        .filter_map(|window| window.available_basis_points)
-        .map(u64::from)
-        .min();
-    match remaining {
-        Some(0) => CandidateQuota::Exhausted,
-        Some(remaining) => CandidateQuota::Available(remaining),
-        None => CandidateQuota::Unknown,
-    }
-}
-
-pub fn quota_stale_after_ms_for_interval(refresh_interval_seconds: u64) -> u64 {
-    zenith_relay_core::QUOTA_STALE_AFTER_MS.max(
-        refresh_interval_seconds
-            .saturating_mul(1_000)
-            .saturating_add(QUOTA_STALE_GRACE_MS),
-    )
+    CandidateQuota::from_snapshot(quota, now_ms, stale_after_ms)
 }
 
 fn hash(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    hex::encode(Sha256::digest(value))
 }
 
 fn credential_error(error: super::credentials::CredentialError) -> LocalPoolError {
@@ -197,7 +159,7 @@ mod tests {
     use super::*;
     use zenith_relay_core::{
         accounts::ReauthReason,
-        quota::{QuotaWindow, QuotaWindowKind},
+        quota::{QuotaWindow, QuotaWindowKind, SubscriptionStatus},
     };
 
     fn credentials() -> StoredCodexCredentials {
@@ -232,6 +194,7 @@ mod tests {
         let serialized = serde_json::to_string(&record).unwrap();
         assert_eq!(record.account.id, "account_local");
         assert_eq!(record.priority, 10);
+        assert_eq!(record.account.subscription.updated_at_ms, None);
         assert!(!serialized.contains("provider-account"));
         assert!(!serialized.contains("access-secret"));
         assert!(!serialized.contains("refresh-secret"));
@@ -281,10 +244,7 @@ mod tests {
         record.account.subscription.status = SubscriptionStatus::Active;
         record.account.auth_state = AccountAuthState::DegradedAccessOnly;
         record.account.last_error_code = Some("upstream_unauthorized".into());
-        assert_eq!(
-            candidate_health(&record.account),
-            CandidateHealth::ReauthRequired
-        );
+        assert_eq!(candidate_health(&record.account), CandidateHealth::Healthy);
     }
 
     #[test]
@@ -309,6 +269,7 @@ mod tests {
                 full_transition_fingerprint: None,
             }),
             supplemental: Vec::new(),
+            limit_reached: false,
             reset_credits_available: None,
             updated_at_ms: Some(1),
             error: None,

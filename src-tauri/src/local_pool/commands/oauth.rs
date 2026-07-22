@@ -56,6 +56,7 @@ struct InitialModelIssue {
 #[tauri::command]
 pub async fn start_codex_oauth(
     app: AppHandle,
+    open_browser: Option<bool>,
     state: State<'_, DesktopState>,
 ) -> CommandResult<OAuthFlowStart> {
     let _mutation = state.setup_guard().await;
@@ -66,7 +67,7 @@ pub async fn start_codex_oauth(
     let flow = state.oauth_flow();
     let start = flow.start(&oauth).await.map_err(flow_error)?;
     let authorization_url = validated_authorization_url(&start)?;
-    if start.status == OAuthFlowStatus::Pending {
+    if open_browser.unwrap_or(true) && start.status == OAuthFlowStatus::Pending {
         // Browser launch is best effort; the returned URL is the manual fallback.
         let _ = app.opener().open_url(authorization_url, None::<&str>);
     }
@@ -356,7 +357,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
     };
     let schedule_result = match quota_refresh_at {
         Some(due_at_ms) => state
-            .replace_quota_refresh(&local_account_id, due_at_ms)
+            .sync_account_quota_refresh(&local_account_id, due_at_ms)
             .map(|_| ()),
         None => state.remove_quota_refresh(&local_account_id).map(|_| ()),
     };
@@ -779,6 +780,7 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.account.created_at_ms = current.account.created_at_ms;
     next.account.last_used_at_ms = current.account.last_used_at_ms;
     next.account.quota = current.account.quota.clone();
+    next.remote_location = current.remote_location.clone();
     if next.account.subscription.plan_type.is_none() {
         next.account.subscription.plan_type = current.account.subscription.plan_type.clone();
     }
@@ -789,8 +791,6 @@ fn preserve_existing_settings(next: &mut LocalAccountRecord, current: &LocalAcco
     next.excluded_models = current.excluded_models.clone();
     next.priority = current.priority;
     next.weight = current.weight;
-    next.cooldowns = current.cooldowns.clone();
-    next.consecutive_failures = current.consecutive_failures;
 }
 
 fn validated_authorization_url(start: &OAuthFlowStart) -> LocalResult<String> {
@@ -1031,26 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn oauth_quota_entry_replacement_can_be_rolled_back() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-oauth-queue-{}",
-            Uuid::new_v4().simple()
-        ));
-        let state = DesktopState::open(root.clone()).unwrap();
-        assert!(state
-            .mark_quota_refresh("account_existing", 60_000)
-            .unwrap());
-        let previous = state
-            .replace_quota_refresh("account_existing", 120_000)
-            .unwrap();
-        assert_eq!(state.next_quota_refresh_due().unwrap(), Some(120_000));
-        state.restore_quota_refresh(previous).unwrap();
-        assert_eq!(state.next_quota_refresh_due().unwrap(), Some(60_000));
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn failed_initial_probe_keeps_account_with_typed_error() {
         let mut record = account("account_saved", "provider-account", "refresh-token");
         record.models.clear();
@@ -1121,8 +1101,8 @@ mod tests {
         assert_eq!(next.excluded_models, vec!["excluded"]);
         assert_eq!(next.priority, -10);
         assert_eq!(next.weight, 4);
-        assert_eq!(next.cooldowns.get("gpt-test"), Some(&900));
-        assert_eq!(next.consecutive_failures, 3);
+        assert!(next.cooldowns.is_empty());
+        assert_eq!(next.consecutive_failures, 0);
         assert_eq!(next.models, vec!["new-model"]);
     }
 

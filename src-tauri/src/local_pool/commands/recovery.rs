@@ -7,9 +7,8 @@ use crate::local_pool::{
     },
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
-    store::{secret_store, settings_store::save_json},
+    store::secret_store,
 };
-use crate::platform;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 use tauri::{AppHandle, State};
@@ -96,38 +95,14 @@ pub struct SupportBundlePreview {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayStorageInfo {
-    root_path: String,
     data_path: String,
-    recovery_path: String,
-    cache_path: String,
-    logs_path: String,
-    chatgpt_profile_path: String,
-    legacy_data_path: Option<String>,
 }
 
 #[tauri::command]
-pub fn get_relay_storage_info(
-    app: AppHandle,
-    state: State<'_, DesktopState>,
-) -> Result<RelayStorageInfo, CommandError> {
-    let root = state.root();
-    let local_legacy = platform::legacy_local_pool_dir(&app).map_err(io_error)?;
-    let roaming_legacy = platform::legacy_roaming_local_pool_dir(&app).map_err(io_error)?;
-    let legacy_data_path = [local_legacy, roaming_legacy]
-        .into_iter()
-        .find(|legacy| legacy != root && fs::symlink_metadata(legacy).is_ok())
-        .map(|legacy| legacy.to_string_lossy().into_owned());
-    Ok(RelayStorageInfo {
-        root_path: root.to_string_lossy().into_owned(),
+pub fn get_relay_storage_info(state: State<'_, DesktopState>) -> RelayStorageInfo {
+    RelayStorageInfo {
         data_path: state.data_root().to_string_lossy().into_owned(),
-        recovery_path: state.recovery_root().to_string_lossy().into_owned(),
-        cache_path: state.cache_root().to_string_lossy().into_owned(),
-        logs_path: state.logs_root().to_string_lossy().into_owned(),
-        chatgpt_profile_path: platform::default_codex_home()
-            .to_string_lossy()
-            .into_owned(),
-        legacy_data_path,
-    })
+    }
 }
 
 #[tauri::command]
@@ -137,8 +112,8 @@ pub fn open_relay_folder(
     state: State<'_, DesktopState>,
 ) -> Result<(), CommandError> {
     let path = match folder {
-        RelayFolder::Data => state.root().to_path_buf(),
-        RelayFolder::ProfileBackups => state.backup_root(),
+        RelayFolder::Data => state.data_root(),
+        RelayFolder::ProfileBackups => state.profile_backup_root(),
     };
     fs::create_dir_all(&path).map_err(io_error)?;
     app.opener()
@@ -268,7 +243,13 @@ fn write_export(
     let path = path.into_path().map_err(|_| {
         LocalPoolError::new(ErrorCode::InvalidState, "selected export path is invalid")
     })?;
-    save_json(&path, value)?;
+    let content = serde_json::to_string_pretty(value).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            format!("failed to serialize export: {error}"),
+        )
+    })?;
+    atomic_write(&path, &format!("{content}\n")).map_err(io_error)?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
 

@@ -1726,7 +1726,7 @@ fn managed_auth_matches_snapshot(
 }
 
 fn key_hash(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn backup_path(root: &Path) -> std::path::PathBuf {

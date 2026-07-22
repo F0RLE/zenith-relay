@@ -4,7 +4,7 @@ use super::{
 };
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-    models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
+    models::{LocalGatewayKeyRecord, LocalPoolSnapshot, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
     state::DesktopState,
     store::secret_store,
 };
@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri::State;
 use uuid::Uuid;
-use zenith_relay_core::{DefaultServiceTier, RoutingStrategy};
+use zenith_relay_core::{ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
+const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,6 +32,42 @@ pub(super) fn ensure_local_gateway_key_secret(key: &LocalGatewayKeyRecord) -> Lo
     let secret = format!("zlr_{}", Uuid::new_v4().simple());
     secret_store::save(&key.secret_ref, &secret)?;
     Ok(secret)
+}
+
+pub(super) fn ensure_system_gateway_key(
+    state: &DesktopState,
+) -> LocalResult<LocalGatewayKeyRecord> {
+    let existing = { state.store()?.keys().iter().find(|key| key.system).cloned() };
+    if let Some(mut key) = existing {
+        if !key.enabled {
+            key.enabled = true;
+            state.store()?.upsert_key(key.clone())?;
+        }
+        ensure_local_gateway_key_secret(&key)?;
+        return Ok(key);
+    }
+
+    let id = format!("key_{}", Uuid::new_v4().simple());
+    let key = LocalGatewayKeyRecord {
+        secret_ref: format!("key:{id}"),
+        id,
+        label: SYSTEM_GATEWAY_KEY_LABEL.into(),
+        enabled: true,
+        system: true,
+        source_ids: None,
+        account_ids: None,
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        model_prefix: None,
+        created_at: Utc::now().to_rfc3339(),
+        last_used_at: None,
+    };
+    ensure_local_gateway_key_secret(&key)?;
+    if let Err(error) = state.store()?.upsert_key(key.clone()) {
+        cleanup_created_secret(&key.secret_ref, &error)?;
+        return Err(error);
+    }
+    Ok(key)
 }
 
 #[derive(Deserialize)]
@@ -52,10 +89,9 @@ pub struct UpdateGatewayKeyInput {
 pub struct UpdateRoutingInput {
     max_retry_candidates: u8,
     routing_strategy: RoutingStrategy,
+    subscription_plan_order: Option<Vec<String>>,
     #[serde(default)]
     default_service_tier: DefaultServiceTier,
-    #[serde(default)]
-    image_base_model: Option<Option<String>>,
 }
 
 #[derive(Deserialize)]
@@ -83,34 +119,22 @@ pub struct SetModelEnabledInput {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelPriceInput {
+    model_id: String,
+    input_micro_usd_per_million: Option<u64>,
+    cached_input_micro_usd_per_million: Option<u64>,
+    output_micro_usd_per_million: Option<u64>,
+}
+
 #[tauri::command]
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(LocalPoolError::new(ErrorCode::InvalidState, "model id is invalid").into());
-    }
     let _mutation = state.setup_guard().await;
-    let canonical = {
-        let store = state.store()?;
-        store
-            .sources()
-            .iter()
-            .filter(|source| source.in_pool)
-            .flat_map(|source| source.models.iter())
-            .chain(
-                store
-                    .accounts()
-                    .iter()
-                    .filter(|account| account.account.in_pool)
-                    .flat_map(|account| account.models.iter()),
-            )
-            .find(|model| model.eq_ignore_ascii_case(requested))
-            .cloned()
-            .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))?
-    };
+    let canonical = canonical_pool_model(&state, &input.model_id)?;
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
     gateway
@@ -125,6 +149,78 @@ pub async fn set_local_model_enabled(
     state.store()?.replace_gateway(gateway)?;
     sync_gateway_or_rollback(&state, old_gateway).await?;
     state.snapshot().await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn set_local_model_price(
+    input: SetModelPriceInput,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let price = match (
+        input.input_micro_usd_per_million,
+        input.cached_input_micro_usd_per_million,
+        input.output_micro_usd_per_million,
+    ) {
+        (Some(input), cached_input, Some(output))
+            if input <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+                && cached_input.unwrap_or(input) <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+                && output <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION =>
+        {
+            Some(ApiModelPriceOverride {
+                input_micro_usd_per_million: input,
+                cached_input_micro_usd_per_million: Some(cached_input.unwrap_or(input)),
+                output_micro_usd_per_million: output,
+            })
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "input, cached input, and output model prices must be valid",
+            )
+            .into())
+        }
+    };
+    let _mutation = state.setup_guard().await;
+    let canonical = canonical_pool_model(&state, &input.model_id)?;
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    let key = canonical.to_ascii_lowercase();
+    if let Some(price) = price {
+        gateway.model_price_overrides.insert(key, price);
+    } else {
+        gateway.model_price_overrides.remove(&key);
+    }
+    if gateway != old_gateway {
+        state.store()?.replace_gateway(gateway)?;
+    }
+    state.snapshot().await.map_err(Into::into)
+}
+
+fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
+    let requested = model_id.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "model id is invalid",
+        ));
+    }
+    let store = state.store()?;
+    store
+        .sources()
+        .iter()
+        .filter(|source| source.in_pool)
+        .flat_map(|source| source.models.iter())
+        .chain(
+            store
+                .accounts()
+                .iter()
+                .filter(|account| account.account.in_pool)
+                .flat_map(|account| account.models.iter()),
+        )
+        .find(|model| model.eq_ignore_ascii_case(requested))
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
 }
 
 #[tauri::command]
@@ -157,6 +253,7 @@ pub async fn update_local_quota_policy(
             .store()?
             .accounts()
             .iter()
+            .filter(|account| account.account.enabled && account.account.in_pool)
             .map(|account| account.account.id.clone())
             .collect::<Vec<_>>();
         let now_ms = super::current_time_ms();
@@ -200,6 +297,17 @@ pub async fn set_local_pool_membership(
     {
         return Err(LocalPoolError::new(ErrorCode::NotFound, "pool member not found").into());
     }
+    if input.in_pool
+        && old_accounts.iter().any(|record| {
+            account_ids.contains(&record.account.id) && record.remote_location.is_some()
+        })
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "an account managed by a remote server cannot join the local pool",
+        )
+        .into());
+    }
 
     let mut sources = old_sources.clone();
     let mut accounts = old_accounts.clone();
@@ -226,6 +334,10 @@ pub async fn set_local_pool_membership(
             .replace_pool_records(old_sources, old_accounts, old_keys)
     })
     .await?;
+    let now_ms = super::current_time_ms();
+    for account_id in account_ids {
+        state.sync_account_quota_refresh(&account_id, now_ms)?;
+    }
     state.snapshot().await.map_err(Into::into)
 }
 
@@ -233,7 +345,6 @@ pub async fn set_local_pool_membership(
 #[tauri::command]
 pub async fn create_local_gateway_key(
     label: String,
-    system: Option<bool>,
     source_ids: Option<Vec<String>>,
     account_ids: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
@@ -253,7 +364,7 @@ pub async fn create_local_gateway_key(
             label
         },
         enabled: true,
-        system: system.unwrap_or_default(),
+        system: false,
         secret_ref: secret_ref.clone(),
         source_ids,
         account_ids,
@@ -424,15 +535,25 @@ pub async fn update_local_routing(
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = input.max_retry_candidates;
     gateway.routing_strategy = input.routing_strategy;
-    gateway.default_service_tier = input.default_service_tier;
-    if let Some(image_base_model) = input.image_base_model {
-        gateway.image_base_model = image_base_model;
+    if let Some(subscription_plan_order) = input.subscription_plan_order {
+        gateway.subscription_plan_order = subscription_plan_order;
     }
+    gateway.default_service_tier = input.default_service_tier;
     if gateway == old_gateway {
         return state.snapshot().await.map_err(Into::into);
     }
+    let service_tier_only = gateway.max_retry_candidates == old_gateway.max_retry_candidates
+        && gateway.routing_strategy == old_gateway.routing_strategy
+        && gateway.subscription_plan_order == old_gateway.subscription_plan_order;
+    let default_service_tier = gateway.default_service_tier;
     state.store()?.replace_gateway(gateway)?;
-    sync_gateway_or_rollback(&state, old_gateway).await?;
+    if service_tier_only {
+        if let Some(runtime) = state.gateway.runtime().await {
+            runtime.set_default_service_tier(default_service_tier);
+        }
+    } else {
+        sync_gateway_or_rollback(&state, old_gateway).await?;
+    }
     state.snapshot().await.map_err(Into::into)
 }
 

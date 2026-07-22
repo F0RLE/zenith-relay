@@ -1,11 +1,19 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension};
+use rusqlite::{
+    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension,
+    TransactionBehavior,
+};
 use serde::Serialize;
-use std::{collections::HashMap, path::Path, sync::Mutex};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::Path,
+    sync::Mutex,
+};
 use zenith_relay_core::{
-    estimate_api_equivalent,
+    estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ResponseAffinityBinding, RoutingDiagnostics, UsageEvent, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, ResponseAffinityBinding, RoutingDiagnostics,
+    UsageEvent, WireApi,
 };
 
 const MIGRATION_001: &str = r#"
@@ -127,7 +135,56 @@ PRAGMA user_version = 12;
 COMMIT;
 "#;
 
-const USAGE_SCHEMA_VERSION: u32 = 12;
+const MIGRATION_013: &str = r#"
+BEGIN IMMEDIATE;
+CREATE INDEX response_affinity_updated_idx
+    ON response_affinity(updated_at_ms DESC, response_key DESC);
+DELETE FROM response_affinity
+WHERE response_key IN (
+    SELECT response_key FROM response_affinity
+    ORDER BY updated_at_ms DESC, response_key DESC
+    LIMIT -1 OFFSET 4096
+);
+CREATE TRIGGER response_affinity_retention
+AFTER INSERT ON response_affinity
+BEGIN
+    DELETE FROM response_affinity WHERE expires_at_ms <= NEW.updated_at_ms;
+    DELETE FROM response_affinity
+    WHERE response_key IN (
+        SELECT response_key FROM response_affinity
+        ORDER BY updated_at_ms DESC, response_key DESC
+        LIMIT -1 OFFSET 4096
+    );
+END;
+PRAGMA user_version = 13;
+COMMIT;
+"#;
+
+const MIGRATION_014: &str = r#"
+BEGIN IMMEDIATE;
+CREATE TABLE app_state (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL
+);
+PRAGMA user_version = 14;
+COMMIT;
+"#;
+
+const MIGRATION_015: &str = r#"
+BEGIN IMMEDIATE;
+DROP INDEX IF EXISTS request_logs_request_attempt_idx;
+DELETE FROM request_logs
+WHERE id NOT IN (
+    SELECT MAX(id) FROM request_logs GROUP BY request_id
+);
+CREATE UNIQUE INDEX request_logs_request_id_idx ON request_logs(request_id);
+PRAGMA user_version = 15;
+COMMIT;
+"#;
+
+const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 15;
+const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
+const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 const PRUNE_USAGE_SQL: &str =
     "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
 
@@ -193,11 +250,11 @@ impl TelemetryDb {
         let version: u32 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(db_error)?;
-        if version > USAGE_SCHEMA_VERSION {
+        if version > LOCAL_DATABASE_SCHEMA_VERSION {
             return Err(LocalPoolError::new(
                 ErrorCode::UnsupportedSchema,
                 format!(
-                    "usage database schema {version} is newer than supported schema {USAGE_SCHEMA_VERSION}"
+                    "local database schema {version} is newer than supported schema {LOCAL_DATABASE_SCHEMA_VERSION}"
                 ),
             ));
         }
@@ -237,10 +294,71 @@ impl TelemetryDb {
         if version <= 11 {
             connection.execute_batch(MIGRATION_012).map_err(db_error)?;
         }
+        if version <= 12 {
+            connection.execute_batch(MIGRATION_013).map_err(db_error)?;
+        }
+        if version <= 13 {
+            connection.execute_batch(MIGRATION_014).map_err(db_error)?;
+        }
+        if version <= 14 {
+            connection.execute_batch(MIGRATION_015).map_err(db_error)?;
+        }
         connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
+        validate_state_key(key)?;
+        self.connection
+            .lock()
+            .map_err(lock_error)?
+            .query_row(
+                "SELECT value_json FROM app_state WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)
+    }
+
+    pub(crate) fn state_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .connection
+            .lock()
+            .map_err(lock_error)?
+            .query_row("SELECT COUNT(*) FROM app_state", [], |row| row.get(0))
+            .map_err(db_error)?;
+        usize::try_from(count).map_err(|_| {
+            LocalPoolError::new(ErrorCode::RecoveryRequired, "local state count is invalid")
+        })
+    }
+
+    pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
+        for (key, value) in values {
+            validate_state_key(key)?;
+            if value.len() > MAX_STATE_JSON_BYTES {
+                return Err(LocalPoolError::new(
+                    ErrorCode::InvalidState,
+                    "local state value is too large",
+                ));
+            }
+        }
+        let mut connection = self.connection.lock().map_err(lock_error)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for (key, value) in values {
+            transaction
+                .execute(
+                    "INSERT INTO app_state(key, value_json) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                    params![key, value],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
     }
 
     pub fn record(&self, event: &UsageEvent) -> Result<()> {
@@ -265,12 +383,36 @@ impl TelemetryDb {
             .lock()
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
             .execute(
-                "INSERT OR IGNORE INTO request_logs (
+                "INSERT INTO request_logs (
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                ON CONFLICT(request_id) DO UPDATE SET
+                    created_at = CURRENT_TIMESTAMP,
+                    attempt = excluded.attempt,
+                    local_key_id = excluded.local_key_id,
+                    source_id = excluded.source_id,
+                    candidate_id = excluded.candidate_id,
+                    account_id = excluded.account_id,
+                    requested_model = excluded.requested_model,
+                    resolved_model = excluded.resolved_model,
+                    wire_api = excluded.wire_api,
+                    success = excluded.success,
+                    http_status = excluded.http_status,
+                    error_category = excluded.error_category,
+                    latency_ms = excluded.latency_ms,
+                    ttft_ms = excluded.ttft_ms,
+                    generation_ms = excluded.generation_ms,
+                    input_tokens = excluded.input_tokens,
+                    cached_input_tokens = excluded.cached_input_tokens,
+                    cache_write_input_tokens = excluded.cache_write_input_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens,
+                    output_tokens = excluded.output_tokens,
+                    total_tokens = excluded.total_tokens,
+                    routing_json = excluded.routing_json
+                WHERE excluded.attempt >= request_logs.attempt",
                 params![
                     event.request_id,
                     event.attempt,
@@ -323,7 +465,16 @@ impl TelemetryDb {
         Ok(logs)
     }
 
+    #[cfg(test)]
     pub fn usage_page(&self, query: &UsageQuery) -> Result<LocalUsagePage> {
+        self.usage_page_with_price_overrides(query, &BTreeMap::new())
+    }
+
+    pub fn usage_page_with_price_overrides(
+        &self,
+        query: &UsageQuery,
+        price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    ) -> Result<LocalUsagePage> {
         let page = query.page.max(1);
         let page_size = if query.page_size == 0 {
             50
@@ -343,7 +494,7 @@ impl TelemetryDb {
             "COALESCE(resolved_model, requested_model, '')",
         )?;
         for group in &mut models {
-            group.totals.api_equivalent = estimate_api_equivalent(
+            group.totals.api_equivalent = estimate_api_equivalent_with_price_override(
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
                 (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
@@ -351,6 +502,7 @@ impl TelemetryDb {
                     .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
+                configured_model_price(price_overrides, Some(group.key.as_str())),
             );
             totals.api_equivalent.merge(group.totals.api_equivalent);
         }
@@ -360,7 +512,7 @@ impl TelemetryDb {
             &values,
             "COALESCE(account_id, source_id, '')",
         )?;
-        let buckets = usage_buckets(&connection, &where_sql, &values, query)?;
+        let buckets = usage_buckets(&connection, &where_sql, &values, query, price_overrides)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
@@ -398,7 +550,15 @@ impl TelemetryDb {
         })
     }
 
+    #[cfg(test)]
     pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
+        self.api_equivalents_with_price_overrides(&BTreeMap::new())
+    }
+
+    pub fn api_equivalents_with_price_overrides(
+        &self,
+        price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    ) -> Result<UsageEquivalents> {
         let connection = self
             .connection
             .lock()
@@ -424,11 +584,12 @@ impl TelemetryDb {
                 let input_samples: i64 = row.get(8)?;
                 let cached_samples: i64 = row.get(9)?;
                 let cache_write_samples: i64 = row.get(10)?;
+                let model = row.get::<_, Option<String>>(2)?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    estimate_api_equivalent(
-                        row.get::<_, Option<String>>(2)?.as_deref(),
+                    estimate_api_equivalent_with_price_override(
+                        model.as_deref(),
                         input_tokens.map(rust_u64),
                         (input_samples > 0 && cached_samples == input_samples)
                             .then(|| cached_input_tokens.map(rust_u64))
@@ -438,6 +599,7 @@ impl TelemetryDb {
                             .flatten(),
                         output_tokens.map(rust_u64),
                         total_tokens.map(rust_u64),
+                        configured_model_price(price_overrides, model.as_deref()),
                     ),
                 ))
             })
@@ -478,11 +640,16 @@ impl TelemetryDb {
         let mut statement = connection
             .prepare(
                 "SELECT response_key, candidate_id, expires_at_ms
-                 FROM response_affinity ORDER BY updated_at_ms DESC",
+                 FROM response_affinity
+                 ORDER BY updated_at_ms DESC, response_key DESC
+                 LIMIT ?1",
             )
             .map_err(db_error)?;
         let bindings = statement
-            .query_map([], affinity_binding_from_row)
+            .query_map(
+                [MAX_RESPONSE_AFFINITY_ROWS as i64],
+                affinity_binding_from_row,
+            )
             .map_err(db_error)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_error)?;
@@ -666,6 +833,7 @@ fn usage_buckets(
     where_sql: &str,
     values: &[SqlValue],
     query: &UsageQuery,
+    price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<Vec<UsageBucket>> {
     let Some(bucket_ms) = query.bucket_ms else {
         return Ok(Vec::new());
@@ -710,10 +878,11 @@ fn usage_buckets(
             let total_tokens: Option<i64> = row.get(6)?;
             let cached_samples: i64 = row.get(7)?;
             let cache_write_samples: i64 = row.get(8)?;
+            let model = row.get::<_, Option<String>>(1)?;
             Ok((
                 rust_u64(row.get(0)?),
-                estimate_api_equivalent(
-                    row.get::<_, Option<String>>(1)?.as_deref(),
+                estimate_api_equivalent_with_price_override(
+                    model.as_deref(),
                     input_tokens.map(rust_u64),
                     (cached_samples > 0)
                         .then(|| cached_input_tokens.map(rust_u64))
@@ -723,6 +892,7 @@ fn usage_buckets(
                         .flatten(),
                     output_tokens.map(rust_u64),
                     total_tokens.map(rust_u64),
+                    configured_model_price(price_overrides, model.as_deref()),
                 ),
             ))
         })
@@ -736,6 +906,13 @@ fn usage_buckets(
         bucket.totals.api_equivalent = equivalents.remove(&bucket.start_ms).unwrap_or_default();
     }
     Ok(buckets)
+}
+
+fn configured_model_price(
+    price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    model: Option<&str>,
+) -> Option<ApiModelPriceOverride> {
+    model.and_then(|model| price_overrides.get(&model.to_ascii_lowercase()).copied())
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
@@ -840,8 +1017,27 @@ fn rust_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
 }
 
+fn validate_state_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.len() > 64
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "local state key is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn lock_error<T>(_: std::sync::PoisonError<T>) -> LocalPoolError {
+    LocalPoolError::new(ErrorCode::Io, "local database lock poisoned")
+}
+
 fn db_error(error: rusqlite::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, format!("usage database error: {error}"))
+    LocalPoolError::new(ErrorCode::Io, format!("local database error: {error}"))
 }
 
 fn io_error(error: std::io::Error) -> LocalPoolError {
@@ -890,6 +1086,7 @@ mod tests {
             reasoning_tokens: Some(2),
             output_tokens: Some(3),
             total_tokens: Some(5),
+            quota_snapshot: None,
         };
         TelemetryDb::open(&path).unwrap().record(&event).unwrap();
         let database = TelemetryDb::open(&path).unwrap();
@@ -937,6 +1134,44 @@ mod tests {
     }
 
     #[test]
+    fn response_affinity_storage_matches_the_runtime_capacity() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-affinity-capacity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "WITH RECURSIVE entries(value) AS (
+                    SELECT 0 UNION ALL SELECT value + 1 FROM entries WHERE value < {limit}
+                 )
+                 INSERT INTO response_affinity(
+                    response_key, candidate_id, expires_at_ms, updated_at_ms
+                 )
+                 SELECT printf('response-%05d', value), 'account-1', 999999, value
+                 FROM entries;",
+                limit = MAX_RESPONSE_AFFINITY_ROWS + 1
+            ))
+            .unwrap();
+
+        let bindings = database.affinity_bindings(0).unwrap();
+        assert_eq!(bindings.len(), MAX_RESPONSE_AFFINITY_ROWS);
+        assert_eq!(
+            bindings.first().map(|binding| binding.key.as_str()),
+            Some("response-04097")
+        );
+        assert_eq!(
+            bindings.last().map(|binding| binding.key.as_str()),
+            Some("response-00002")
+        );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn usage_page_aggregates_the_full_filtered_range_not_only_the_page() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-usage-page-{}", uuid::Uuid::new_v4()));
@@ -967,6 +1202,7 @@ mod tests {
             reasoning_tokens: Some(5),
             output_tokens: Some(8),
             total_tokens: Some(28),
+            quota_snapshot: None,
         };
         database.record(&event).unwrap();
         event.request_id = "req_page_2".into();
@@ -1034,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_keeps_each_fallback_attempt() {
+    fn usage_keeps_only_the_terminal_fallback_attempt() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-usage-attempts-{}",
             uuid::Uuid::new_v4()
@@ -1067,6 +1303,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            quota_snapshot: None,
         };
         database.record(&event).unwrap();
         event.attempt = 2;
@@ -1080,9 +1317,63 @@ mod tests {
         event.consecutive_failures = Some(0);
         database.record(&event).unwrap();
         let logs = database.list(10).unwrap();
-        assert_eq!(logs.len(), 2);
+        assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].attempt, 2);
-        assert_eq!(logs[1].attempt, 1);
+        assert!(logs[0].success);
+        assert_eq!(logs[0].source_id, "source_2");
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_keeps_only_the_last_failure_when_all_attempts_fail() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-failed-attempts-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = UsageEvent {
+            request_id: "req_failed".into(),
+            attempt: 1,
+            local_key_id: "key_1".into(),
+            source_id: "source_1".into(),
+            candidate_id: Some("source_1".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            wire_api: WireApi::Responses,
+            success: false,
+            http_status: 503,
+            error_category: Some("upstream_unavailable".into()),
+            cooldown_scope: Some("*".into()),
+            retry_at_ms: Some(60_000),
+            consecutive_failures: Some(1),
+            latency_ms: 5,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            quota_snapshot: None,
+        };
+        database.record(&event).unwrap();
+        event.attempt = 2;
+        event.source_id = "source_2".into();
+        event.candidate_id = Some("source_2".into());
+        event.http_status = 429;
+        event.error_category = Some("upstream_rate_limited".into());
+        database.record(&event).unwrap();
+
+        let logs = database.list(10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].attempt, 2);
+        assert!(!logs[0].success);
+        assert_eq!(logs[0].http_status, 429);
+        assert_eq!(logs[0].source_id, "source_2");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1120,6 +1411,7 @@ mod tests {
             reasoning_tokens: Some(3),
             output_tokens: Some(8),
             total_tokens: Some(28),
+            quota_snapshot: None,
         };
         database.record(&event).unwrap();
         let equivalents = database.api_equivalents().unwrap();
@@ -1132,6 +1424,80 @@ mod tests {
             })
         );
         assert!(equivalents.sources.is_empty());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_price_revalues_existing_unknown_model_usage() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-custom-price-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .record(&UsageEvent {
+                request_id: "req_custom_price".into(),
+                attempt: 1,
+                local_key_id: "key_1".into(),
+                source_id: "source_1".into(),
+                candidate_id: Some("source_1".into()),
+                account_id: None,
+                routing: None,
+                requested_model: Some("private-model".into()),
+                resolved_model: Some("private-model".into()),
+                wire_api: WireApi::Responses,
+                success: true,
+                http_status: 200,
+                error_category: None,
+                cooldown_scope: None,
+                retry_at_ms: None,
+                consecutive_failures: Some(0),
+                latency_ms: 100,
+                ttft_ms: Some(10),
+                generation_ms: Some(90),
+                input_tokens: Some(1_000_000),
+                cached_input_tokens: Some(0),
+                cache_write_input_tokens: Some(0),
+                reasoning_tokens: Some(0),
+                output_tokens: Some(100_000),
+                total_tokens: Some(1_100_000),
+                quota_snapshot: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            database
+                .usage_page(&UsageQuery::default())
+                .unwrap()
+                .totals
+                .api_equivalent
+                .unpriced_tokens,
+            1_100_000
+        );
+        let prices = BTreeMap::from([(
+            "private-model".into(),
+            ApiModelPriceOverride {
+                input_micro_usd_per_million: 2_000_000,
+                cached_input_micro_usd_per_million: Some(200_000),
+                output_micro_usd_per_million: 10_000_000,
+            },
+        )]);
+        let page = database
+            .usage_page_with_price_overrides(&UsageQuery::default(), &prices)
+            .unwrap();
+        assert_eq!(page.totals.api_equivalent.micro_usd, 3_000_000);
+        assert_eq!(page.totals.api_equivalent.priced_tokens, 1_100_000);
+        assert_eq!(page.totals.api_equivalent.unpriced_tokens, 0);
+        assert_eq!(
+            database
+                .api_equivalents_with_price_overrides(&prices)
+                .unwrap()
+                .sources
+                .get("source_1")
+                .map(|summary| summary.micro_usd),
+            Some(3_000_000)
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1164,7 +1530,62 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, USAGE_SCHEMA_VERSION);
+        assert_eq!(version, LOCAL_DATABASE_SCHEMA_VERSION);
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usage_v14_migration_keeps_the_latest_attempt_per_request() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-relay-usage-v14-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("usage.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        for migration in [
+            MIGRATION_001,
+            MIGRATION_002,
+            MIGRATION_003,
+            MIGRATION_004,
+            MIGRATION_005,
+            MIGRATION_006,
+            MIGRATION_007,
+            MIGRATION_008,
+            MIGRATION_009,
+            MIGRATION_010,
+            MIGRATION_011,
+            MIGRATION_012,
+            MIGRATION_013,
+            MIGRATION_014,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO request_logs (
+                    request_id, attempt, local_key_id, source_id, wire_api, success,
+                    http_status, latency_ms
+                ) VALUES ('req_duplicate', 1, 'key', 'source_1', 'responses', 0, 503, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_logs (
+                    request_id, attempt, local_key_id, source_id, wire_api, success,
+                    http_status, latency_ms
+                ) VALUES ('req_duplicate', 2, 'key', 'source_2', 'responses', 1, 200, 2)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let database = TelemetryDb::open(&path).unwrap();
+        let logs = database.list(10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].attempt, 2);
+        assert!(logs[0].success);
+        assert_eq!(logs[0].source_id, "source_2");
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1207,7 +1628,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("usage.sqlite");
         let connection = Connection::open(&path).unwrap();
-        let future_version = USAGE_SCHEMA_VERSION + 1;
+        let future_version = LOCAL_DATABASE_SCHEMA_VERSION + 1;
         connection
             .pragma_update(None, "user_version", future_version)
             .unwrap();
@@ -1289,6 +1710,7 @@ mod tests {
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                quota_snapshot: None,
             })
             .unwrap();
         assert_eq!(database.list(10).unwrap().len(), 1);

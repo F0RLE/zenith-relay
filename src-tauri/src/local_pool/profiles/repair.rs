@@ -26,6 +26,7 @@ const MAX_HISTORY_REPAIR_BACKUPS: usize = 1;
 pub enum TargetProvider {
     Openai,
     ZenithRelayLocal,
+    CodexLocalAccess,
 }
 
 impl TargetProvider {
@@ -33,6 +34,7 @@ impl TargetProvider {
         match self {
             Self::Openai => "openai",
             Self::ZenithRelayLocal => "zenith_relay_local",
+            Self::CodexLocalAccess => "codex_local_access",
         }
     }
 }
@@ -222,6 +224,7 @@ pub fn apply(
         });
     }
     let _ = fs::remove_file(snapshot_path(state_root, session_id)?);
+    let _ = fs::remove_dir(state_root.join("repair_previews"));
     let _ = cleanup_history_repair_backups_preserving(backup_root, Some(&backup_id));
     Ok(RepairResult {
         backup_id,
@@ -231,40 +234,32 @@ pub fn apply(
     })
 }
 
+pub fn synchronize(
+    state_root: &Path,
+    backup_root: &Path,
+    profile_root: &Path,
+    target_provider: TargetProvider,
+) -> Result<Option<RepairResult>, String> {
+    if !profile_root.is_dir() {
+        return Ok(None);
+    }
+    let preview = preview(
+        state_root,
+        &[profile_root.to_path_buf()],
+        target_provider,
+        false,
+    )?;
+    if preview.rollout_record_count == 0 && preview.sqlite_row_count == 0 {
+        let _ = fs::remove_file(snapshot_path(state_root, &preview.session_id)?);
+        let _ = fs::remove_dir(state_root.join("repair_previews"));
+        return Ok(None);
+    }
+    apply(state_root, backup_root, &preview.session_id).map(Some)
+}
+
 #[cfg(test)]
 pub fn cleanup_history_repair_backups(backup_root: &Path) -> Result<usize, String> {
     cleanup_history_repair_backups_preserving(backup_root, None)
-}
-
-pub fn migrate_history_repair_backups(
-    legacy_root: &Path,
-    target_root: &Path,
-) -> Result<usize, String> {
-    let entries = match fs::read_dir(legacy_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(io_error(error)),
-    };
-    let mut moved = 0;
-    for entry in entries {
-        let entry = entry.map_err(io_error)?;
-        let file_type = entry.file_type().map_err(io_error)?;
-        if !file_type.is_dir() || file_type.is_symlink() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        if validate_id(&name, "history_repair_").is_err() {
-            continue;
-        }
-        if crate::platform::migrate_directory(&entry.path(), &target_root.join(&name))?
-            == crate::platform::StorageMigration::Moved
-        {
-            moved += 1;
-        }
-    }
-    Ok(moved)
 }
 
 pub fn cleanup_expired_previews(state_root: &Path) -> Result<usize, String> {
@@ -509,7 +504,7 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     }
     Ok(RolloutSnapshot {
         path: path_string(path),
-        hash: format!("{:x}", hasher.finalize()),
+        hash: hex::encode(hasher.finalize()),
         records,
     })
 }
@@ -567,7 +562,7 @@ fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> 
     }
     Ok(DatabaseSnapshot {
         path: path_string(path),
-        hash: format!("{:x}", hasher.finalize()),
+        hash: hex::encode(hasher.finalize()),
         rows: rows.len(),
     })
 }
@@ -866,7 +861,10 @@ fn canonical_child(root: &Path, path: &Path) -> Result<PathBuf, String> {
 }
 
 fn validate_target_provider(value: &str) -> Result<(), String> {
-    if matches!(value, "openai" | "zenith_relay_local") {
+    if matches!(
+        value,
+        "openai" | "zenith_relay_local" | "codex_local_access"
+    ) {
         Ok(())
     } else {
         Err("repair target provider is invalid".to_string())
@@ -903,7 +901,7 @@ fn path_string(path: &Path) -> String {
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn now_ms() -> u64 {
@@ -961,6 +959,26 @@ mod tests {
     }
 
     #[test]
+    fn automatic_sync_supports_ready_api_and_reuses_matching_history() {
+        let (root, state, backups, profile, rollout, database) = fixture("automatic-ready-api");
+        let applied = synchronize(&state, &backups, &profile, TargetProvider::CodexLocalAccess)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rollout_provider_from_file(&rollout), "codex_local_access");
+        assert_eq!(database_provider(&database), "codex_local_access");
+        assert!(
+            synchronize(&state, &backups, &profile, TargetProvider::CodexLocalAccess,)
+                .unwrap()
+                .is_none()
+        );
+
+        rollback(&backups, &applied.backup_id).unwrap();
+        assert_eq!(rollout_provider_from_file(&rollout), "openai");
+        assert_eq!(database_provider(&database), "openai");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn changed_rollout_is_rejected_before_backup_or_write() {
         let (root, state, backups, profile, rollout, database) = fixture("changed");
         let preview = preview(&state, &[profile], TargetProvider::ZenithRelayLocal, false).unwrap();
@@ -1010,29 +1028,6 @@ mod tests {
             rollout_provider(b"{\"type\":\"session_meta\",\"payload\":{}}\n"),
             Some(None)
         );
-    }
-
-    #[test]
-    fn migration_moves_only_history_repairs_out_of_profile_backups() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-repair-layout-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
-        let legacy = root.join("profiles");
-        let target = root.join("history-repair");
-        let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
-        fs::create_dir_all(legacy.join(&backup_id)).unwrap();
-        fs::create_dir_all(legacy.join("snapshots")).unwrap();
-        fs::write(legacy.join(&backup_id).join("manifest.json"), "repair").unwrap();
-        fs::write(legacy.join("snapshots/index.json"), "snapshot").unwrap();
-
-        assert_eq!(migrate_history_repair_backups(&legacy, &target).unwrap(), 1);
-        assert_eq!(
-            fs::read_to_string(target.join(&backup_id).join("manifest.json")).unwrap(),
-            "repair"
-        );
-        assert!(legacy.join("snapshots/index.json").exists());
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

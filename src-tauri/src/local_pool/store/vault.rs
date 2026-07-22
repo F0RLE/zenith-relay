@@ -2,7 +2,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -108,8 +108,9 @@ impl Vault {
         let cipher = ChaCha20Poly1305::new((&self.key).into());
         let mut nonce_bytes = [0_u8; NONCE_BYTES];
         rand::rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_ref())
+            .encrypt(&nonce, plaintext.as_ref())
             .map_err(|_| "vault encryption failed")?;
         let mut bytes = Vec::with_capacity(MAGIC.len() + NONCE_BYTES + ciphertext.len());
         bytes.extend_from_slice(MAGIC);
@@ -135,10 +136,11 @@ fn decrypt_file(path: &Path, key: &[u8; 32]) -> Result<VaultData, String> {
     if bytes.len() <= MAGIC.len() + NONCE_BYTES || &bytes[..MAGIC.len()] != MAGIC {
         return Err("secret vault file header is invalid".to_string());
     }
-    let nonce = Nonce::from_slice(&bytes[MAGIC.len()..MAGIC.len() + NONCE_BYTES]);
+    let nonce = Nonce::try_from(&bytes[MAGIC.len()..MAGIC.len() + NONCE_BYTES])
+        .map_err(|_| "secret vault nonce is invalid".to_string())?;
     let cipher = ChaCha20Poly1305::new(key.into());
     let plaintext = cipher
-        .decrypt(nonce, &bytes[MAGIC.len() + NONCE_BYTES..])
+        .decrypt(&nonce, &bytes[MAGIC.len() + NONCE_BYTES..])
         .map_err(|_| "secret vault decryption failed")?;
     serde_json::from_slice(&plaintext).map_err(|_| "secret vault payload is invalid".to_string())
 }

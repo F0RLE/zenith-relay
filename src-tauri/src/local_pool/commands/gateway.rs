@@ -9,7 +9,7 @@ use crate::local_pool::{
 use reqwest::{redirect::Policy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 
@@ -46,28 +46,40 @@ pub struct SetAccountProxyPolicyInput {
 
 #[tauri::command]
 pub async fn start_local_gateway(
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
-    let _mutation = state.setup_guard().await;
-    let runtime = runtime_from_store(&state).await?;
-    let port = state.store()?.gateway().port;
-    state.gateway.start(runtime, port).await?;
-    let enable_result = { state.store()?.set_gateway_enabled(true) };
-    if let Err(error) = enable_result {
-        state.gateway.stop().await;
-        return Err(error.into());
+    let result = async {
+        let _mutation = state.setup_guard().await;
+        let runtime = runtime_from_store(&state).await?;
+        let port = state.store()?.gateway().port;
+        state.gateway.start(runtime, port).await?;
+        let enable_result = { state.store()?.set_gateway_enabled(true) };
+        if let Err(error) = enable_result {
+            state.gateway.stop().await;
+            return Err(error.into());
+        }
+        state.snapshot().await.map_err(Into::into)
     }
-    state.snapshot().await.map_err(Into::into)
+    .await;
+    crate::tray::refresh_tray(&app).await;
+    result
 }
 
 #[tauri::command]
 pub async fn stop_local_gateway(
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<LocalPoolSnapshot, CommandError> {
-    let _mutation = state.setup_guard().await;
-    state.store()?.set_gateway_enabled(false)?;
-    state.gateway.stop().await;
-    state.snapshot().await.map_err(Into::into)
+    let result = async {
+        let _mutation = state.setup_guard().await;
+        state.store()?.set_gateway_enabled(false)?;
+        state.gateway.stop().await;
+        state.snapshot().await.map_err(Into::into)
+    }
+    .await;
+    crate::tray::refresh_tray(&app).await;
+    result
 }
 
 #[tauri::command]

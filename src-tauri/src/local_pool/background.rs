@@ -12,7 +12,7 @@ use super::{
     state::DesktopState,
 };
 use std::{collections::HashMap, time::Duration};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::task::{Id as TaskId, JoinError, JoinSet};
 use zenith_relay_core::{
     accounts::AccountAuthState,
@@ -30,6 +30,11 @@ const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
 
 pub(crate) fn start(app: AppHandle) {
+    let recovery_app = app.clone();
+    let _ownership_recovery = tauri::async_runtime::spawn(async move {
+        let state = recovery_app.state::<DesktopState>();
+        let _ = super::commands::remote_server::recover_pending_remote_ownership(&state).await;
+    });
     let quota_app = app.clone();
     let _quota_worker = tauri::async_runtime::spawn(async move {
         quota_loop(quota_app).await;
@@ -124,7 +129,7 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
     let permits = app
         .state::<DesktopState>()
         .claim_due_quota_refreshes(current_time_ms(), QUOTA_BATCH_SIZE)?;
-    let claimed = permits.len();
+    let mut claimed = permits.len();
     let mut workers = JoinSet::new();
     let mut active_permits = HashMap::with_capacity(claimed);
     for permit in permits {
@@ -132,7 +137,7 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
         let account_id = permit.account_id.clone();
         let task = workers.spawn(async move {
             let state = worker_app.state::<DesktopState>();
-            refresh_account_quota_once(&state, &account_id, false).await
+            refresh_account_quota_once(&state, &account_id, false, false).await
         });
         active_permits.insert(task.id(), permit);
     }
@@ -171,6 +176,33 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
                 });
             }
         }
+        let open_slots = QUOTA_BATCH_SIZE.saturating_sub(workers.len());
+        if open_slots == 0 {
+            continue;
+        }
+        match app
+            .state::<DesktopState>()
+            .claim_due_quota_refreshes(current_time_ms(), open_slots)
+        {
+            Ok(permits) => {
+                claimed = claimed.saturating_add(permits.len());
+                for permit in permits {
+                    let worker_app = app.clone();
+                    let account_id = permit.account_id.clone();
+                    let task = workers.spawn(async move {
+                        let state = worker_app.state::<DesktopState>();
+                        refresh_account_quota_once(&state, &account_id, false, false).await
+                    });
+                    active_permits.insert(task.id(), permit);
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if claimed > 0 {
+        let _ = app.emit("zenith-state-changed", ());
     }
     first_error.map_or(Ok(claimed), Err)
 }
@@ -325,7 +357,7 @@ async fn execute_wake_permit(
         if !state.is_wake_permit_active(permit)? {
             return Ok(None);
         }
-        match refresh_account_quota_once(state, &permit.account_id, false).await {
+        match refresh_account_quota_once(state, &permit.account_id, false, false).await {
             Ok(response) => {
                 let _ = settle_verification_quota(state, &permit.account_id, &response);
                 let _ = evaluate_updated_transitions(state, &response);
@@ -352,7 +384,7 @@ fn settle_verification_quota(
     if let Some(due_at_ms) =
         next_quota_refresh_at(response, current_time_ms(), refresh_interval_seconds)
     {
-        state.mark_quota_refresh(account_id, due_at_ms)?;
+        state.sync_account_quota_refresh(account_id, due_at_ms)?;
     } else {
         state.remove_quota_refresh(account_id)?;
     }
@@ -647,6 +679,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            remote_location: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),
             allowed_models: Vec::new(),

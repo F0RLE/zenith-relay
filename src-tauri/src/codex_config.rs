@@ -20,8 +20,8 @@ const PROVIDER_NAME: &str = "Zenith";
 const BASE_URL: &str = "https://api.zenithmarket.dev/v1";
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
-const BACKUP_DIR: &str = "zenith-backups";
 const BACKUP_SUFFIX: &str = ".zenith.bak";
+const MAX_CONFIG_BACKUPS: usize = 3;
 const DEFAULT_MODEL_PROVIDER: &str = "openai";
 const LOCAL_POOL_PROVIDER_ID: &str = "zenith_relay_local";
 static CODEX_PROFILE_LOCK: Mutex<()> = Mutex::new(());
@@ -48,7 +48,7 @@ pub fn enable_provider(api_key: &str, backup_dir: &Path) -> Result<(), String> {
     ensure_ready_api_profile_is_inactive(original)?;
     fs::create_dir_all(&codex_home)
         .map_err(|err| format!("Не удалось создать {}: {err}", codex_home.display()))?;
-    migrate_legacy_backups(&codex_home, backup_dir)?;
+    prune_config_backups(backup_dir)?;
     let next = upsert_zenith_provider(original);
     if next != original {
         backup_config(backup_dir, original)?;
@@ -123,8 +123,12 @@ pub fn enable_provider(api_key: &str, backup_dir: &Path) -> Result<(), String> {
 }
 
 pub fn ensure_provider_on_launch(backup_dir: &Path) -> Result<(), String> {
-    migrate_legacy_backups(&default_codex_home(), backup_dir)?;
+    prune_config_backups(backup_dir)?;
     if current_config_uses_local_pool_provider()? {
+        return Ok(());
+    }
+    let config = read_optional_text(&default_codex_home().join(CONFIG_FILE))?.unwrap_or_default();
+    if !config_selects_zenith_provider(&config) {
         return Ok(());
     }
     if let Some(api_key) = load_saved_app_key() {
@@ -239,7 +243,15 @@ fn profile_changed_error(path: &Path) -> String {
     )
 }
 
+pub fn deactivate_provider(backup_dir: &Path) -> Result<(), String> {
+    restore_provider(backup_dir, false)
+}
+
 pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
+    restore_provider(backup_dir, true)
+}
+
+fn restore_provider(backup_dir: &Path, forget_key: bool) -> Result<(), String> {
     let _profile_guard = lock_codex_profile();
     let codex_home = default_codex_home();
     let config_path = codex_home.join(CONFIG_FILE);
@@ -248,15 +260,22 @@ pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
     let original_auth = read_optional_text(&auth_path)?;
     let original = original_config.as_deref().unwrap_or_default();
     ensure_ready_api_profile_is_inactive(original)?;
-    migrate_legacy_backups(&codex_home, backup_dir)?;
-    let previous_model_provider = latest_backup_model_provider(&codex_home, backup_dir);
+    if !config_selects_zenith_provider(original) {
+        if forget_key {
+            delete_saved_app_key()?;
+        }
+        return Ok(());
+    }
+    let previous_model_provider = latest_backup_model_provider(backup_dir);
     let mut next = remove_zenith_provider(original);
 
     let model_provider =
         previous_model_provider.unwrap_or_else(|| DEFAULT_MODEL_PROVIDER.to_string());
     next = with_model_provider(next, &model_provider);
     let saved_key = load_saved_app_key();
-    delete_saved_app_key()?;
+    if forget_key {
+        delete_saved_app_key()?;
+    }
     let reset_result = (|| {
         if next != original {
             replace_if_unchanged(&config_path, original_config.as_deref(), next.trim_start())?;
@@ -279,7 +298,11 @@ pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
     if let Err(error) = reset_result {
         return Err(with_cleanup(
             error,
-            saved_key.as_deref().map_or(Ok(()), save_app_key),
+            if forget_key {
+                saved_key.as_deref().map_or(Ok(()), save_app_key)
+            } else {
+                Ok(())
+            },
         ));
     }
     Ok(())
@@ -288,10 +311,8 @@ pub fn reset_provider(backup_dir: &Path) -> Result<(), String> {
 pub fn provider_has_token() -> bool {
     let config_path = default_codex_home().join(CONFIG_FILE);
     let content = fs::read_to_string(config_path).unwrap_or_default();
-    content.lines().any(|line| {
-        line.trim()
-            .eq_ignore_ascii_case(&format!("model_provider = \"{PROVIDER_ID}\""))
-    }) && content.contains(&format!("[model_providers.{PROVIDER_ID}]"))
+    config_selects_zenith_provider(&content)
+        && content.contains(&format!("[model_providers.{PROVIDER_ID}]"))
         && load_api_key_for_launch().is_some()
 }
 
@@ -475,6 +496,14 @@ fn config_uses_zenith_provider(content: &str) -> bool {
     })
 }
 
+fn config_selects_zenith_provider(content: &str) -> bool {
+    content.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{PROVIDER_ID}\""))
+            || trimmed.eq_ignore_ascii_case(&format!("model_provider = \"{LEGACY_PROVIDER_ID}\""))
+    })
+}
+
 fn is_zenith_customer_key(key: &str) -> bool {
     key.starts_with("znt_") || key.starts_with("zrk_")
 }
@@ -549,8 +578,8 @@ fn remove_zenith_openai_base_url_override(content: &str) -> String {
         .join("\n")
 }
 
-fn latest_backup_model_provider(codex_home: &Path, backup_dir: &Path) -> Option<String> {
-    backup_paths_newest_first(codex_home, backup_dir)
+fn latest_backup_model_provider(backup_dir: &Path) -> Option<String> {
+    backup_paths_newest_first(backup_dir)
         .into_iter()
         .find_map(|path| {
             let content = fs::read_to_string(path).ok()?;
@@ -558,8 +587,12 @@ fn latest_backup_model_provider(codex_home: &Path, backup_dir: &Path) -> Option<
         })
 }
 
-fn backup_paths_newest_first(codex_home: &Path, backup_dir: &Path) -> Vec<PathBuf> {
-    let mut backups = backup_search_dirs(codex_home, backup_dir)
+fn backup_paths_newest_first(backup_dir: &Path) -> Vec<PathBuf> {
+    backup_paths_from_directories([backup_dir.to_path_buf()])
+}
+
+fn backup_paths_from_directories(directories: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut backups = directories
         .into_iter()
         .flat_map(|directory| {
             fs::read_dir(directory)
@@ -625,25 +658,35 @@ fn backup_config(backup_dir: &Path, content: &str) -> Result<(), String> {
     }
     fs::create_dir_all(backup_dir)
         .map_err(|err| format!("Не удалось создать {}: {err}", backup_dir.display()))?;
+    let redacted = redact_config_secrets(content);
+    let existing = backup_paths_from_directories([backup_dir.to_path_buf()]);
+    if existing
+        .first()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .as_deref()
+        == Some(redacted.as_str())
+    {
+        return prune_config_backups(backup_dir);
+    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("Ошибка времени: {err}"))?
         .as_secs();
     let backup_path = next_backup_path(backup_dir, timestamp);
-    fs::write(&backup_path, redact_config_secrets(content))
-        .map_err(|err| format!("Не удалось создать backup {}: {err}", backup_path.display()))
+    fs::write(&backup_path, redacted)
+        .map_err(|err| format!("Не удалось создать backup {}: {err}", backup_path.display()))?;
+    prune_config_backups(backup_dir)
 }
 
-fn legacy_backup_dir(codex_home: &Path) -> PathBuf {
-    codex_home.join(BACKUP_DIR)
-}
-
-fn backup_search_dirs(codex_home: &Path, backup_dir: &Path) -> Vec<PathBuf> {
-    vec![
-        backup_dir.to_path_buf(),
-        legacy_backup_dir(codex_home),
-        codex_home.to_path_buf(),
-    ]
+fn prune_config_backups(backup_dir: &Path) -> Result<(), String> {
+    for path in backup_paths_from_directories([backup_dir.to_path_buf()])
+        .into_iter()
+        .skip(MAX_CONFIG_BACKUPS)
+    {
+        fs::remove_file(&path)
+            .map_err(|err| format!("Не удалось удалить старый backup {}: {err}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn is_zenith_backup_name(name: &str) -> bool {
@@ -670,56 +713,6 @@ fn next_backup_path(backup_dir: &Path, timestamp: u64) -> PathBuf {
         .map(|index| backup_dir.join(format!("{CONFIG_FILE}.{timestamp}-{index}{BACKUP_SUFFIX}")))
         .find(|path| !path.exists())
         .unwrap_or(first)
-}
-
-fn migrate_legacy_backups(codex_home: &Path, backup_dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(backup_dir)
-        .map_err(|err| format!("Не удалось создать {}: {err}", backup_dir.display()))?;
-    for source in [legacy_backup_dir(codex_home), codex_home.to_path_buf()] {
-        let entries = match fs::read_dir(&source) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(format!(
-                    "Не удалось прочитать {}: {error}",
-                    source.display()
-                ))
-            }
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_file() || file_type.is_symlink() {
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            if !is_zenith_backup_name(name) {
-                continue;
-            }
-            let target = backup_dir.join(name);
-            let target = if target.exists() {
-                next_backup_path(backup_dir, backup_timestamp_from_name(name))
-            } else {
-                target
-            };
-            if fs::rename(&path, &target).is_err() {
-                fs::copy(&path, &target).map_err(|err| {
-                    format!("Не удалось перенести backup {}: {err}", path.display())
-                })?;
-                fs::remove_file(&path).map_err(|err| {
-                    format!("Не удалось удалить старый backup {}: {err}", path.display())
-                })?;
-            }
-        }
-        if source != codex_home {
-            let _ = fs::remove_dir(&source);
-        }
-    }
-    Ok(())
 }
 
 fn redact_config_secrets(content: &str) -> String {
@@ -942,6 +935,19 @@ name = "OpenAI"
     }
 
     #[test]
+    fn saved_key_does_not_select_ready_api_by_itself() {
+        assert!(config_selects_zenith_provider(
+            "model_provider = \"codex_local_access\""
+        ));
+        assert!(config_selects_zenith_provider(
+            "model_provider = \"zenith\""
+        ));
+        assert!(!config_selects_zenith_provider(
+            "model_provider = \"openai\"\n\n[model_providers.codex_local_access]"
+        ));
+    }
+
+    #[test]
     fn ready_api_guard_rejects_active_local_pool_profile() {
         let error = ensure_ready_api_profile_is_inactive(
             "model_provider = \"zenith_relay_local\"\n\n[model_providers.zenith_relay_local]",
@@ -1011,7 +1017,7 @@ name = "OpenAI"
         .expect("new backup");
 
         assert_eq!(
-            latest_backup_model_provider(&codex_home, &backups).as_deref(),
+            latest_backup_model_provider(&backups).as_deref(),
             Some("openai")
         );
 
@@ -1027,7 +1033,7 @@ name = "OpenAI"
 
         backup_config(&backup_dir, r#"model_provider = "openai""#).expect("backup");
 
-        let backups = backup_paths_newest_first(&codex_home, &backup_dir);
+        let backups = backup_paths_newest_first(&backup_dir);
         assert_eq!(backups.len(), 1);
         assert_eq!(backups[0].parent(), Some(backup_dir.as_path()));
         assert!(
@@ -1047,62 +1053,34 @@ name = "OpenAI"
     }
 
     #[test]
-    fn migrate_legacy_backups_moves_root_backups_into_dedicated_directory() {
-        let codex_home = temp_codex_home("migrate-backups");
+    fn config_backups_deduplicate_and_keep_last_three() {
+        let codex_home = temp_codex_home("backup-retention");
         let backup_dir = managed_backup_dir(&codex_home);
-        fs::create_dir_all(&codex_home).expect("codex home");
-        fs::create_dir_all(legacy_backup_dir(&codex_home)).expect("legacy backup dir");
-        let root_name = format!("{CONFIG_FILE}.123{BACKUP_SUFFIX}");
-        let directory_name = format!("{CONFIG_FILE}.124{BACKUP_SUFFIX}");
-        fs::write(codex_home.join(&root_name), r#"model_provider = "openai""#)
-            .expect("root backup");
-        fs::write(
-            legacy_backup_dir(&codex_home).join(&directory_name),
-            r#"model_provider = "custom""#,
-        )
-        .expect("directory backup");
-
-        migrate_legacy_backups(&codex_home, &backup_dir).expect("migrate");
-
-        assert!(!codex_home.join(&root_name).exists());
-        assert!(!legacy_backup_dir(&codex_home)
-            .join(&directory_name)
-            .exists());
-        assert!(backup_dir.join(&root_name).exists());
-        assert!(backup_dir.join(&directory_name).exists());
-
-        let _ = fs::remove_dir_all(codex_home);
-        let _ = fs::remove_dir_all(backup_dir);
-    }
-
-    #[test]
-    fn migrate_legacy_backups_preserves_collisions_and_unrelated_files() {
-        let codex_home = temp_codex_home("migrate-backup-collision");
-        let backup_dir = managed_backup_dir(&codex_home);
-        let legacy_dir = legacy_backup_dir(&codex_home);
-        fs::create_dir_all(&legacy_dir).expect("legacy backup dir");
         fs::create_dir_all(&backup_dir).expect("managed backup dir");
-        let name = format!("{CONFIG_FILE}.123{BACKUP_SUFFIX}");
-        fs::write(legacy_dir.join(&name), "legacy").expect("legacy backup");
-        fs::write(legacy_dir.join("notes.txt"), "keep").expect("unrelated file");
-        fs::write(backup_dir.join(&name), "current").expect("current backup");
+        for timestamp in 100..112 {
+            fs::write(
+                backup_dir.join(format!("{CONFIG_FILE}.{timestamp}{BACKUP_SUFFIX}")),
+                format!("model_provider = \"provider-{timestamp}\""),
+            )
+            .expect("backup");
+        }
 
-        migrate_legacy_backups(&codex_home, &backup_dir).expect("migrate");
+        prune_config_backups(&backup_dir).expect("prune");
+        let backups = backup_paths_from_directories([backup_dir.clone()]);
+        assert_eq!(backups.len(), MAX_CONFIG_BACKUPS);
+        assert!(backup_dir
+            .join(format!("{CONFIG_FILE}.111{BACKUP_SUFFIX}"))
+            .exists());
+        assert!(!backup_dir
+            .join(format!("{CONFIG_FILE}.101{BACKUP_SUFFIX}"))
+            .exists());
 
+        backup_config(&backup_dir, r#"model_provider = "provider-111""#)
+            .expect("deduplicated backup");
         assert_eq!(
-            fs::read_to_string(backup_dir.join(&name)).unwrap(),
-            "current"
+            backup_paths_from_directories([backup_dir.clone()]).len(),
+            MAX_CONFIG_BACKUPS
         );
-        assert_eq!(
-            fs::read_to_string(backup_dir.join(format!("{CONFIG_FILE}.123-1{BACKUP_SUFFIX}")))
-                .unwrap(),
-            "legacy"
-        );
-        assert_eq!(
-            fs::read_to_string(legacy_dir.join("notes.txt")).unwrap(),
-            "keep"
-        );
-        assert!(!legacy_dir.join(name).exists());
 
         let _ = fs::remove_dir_all(codex_home);
         let _ = fs::remove_dir_all(backup_dir);

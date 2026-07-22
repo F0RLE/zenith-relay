@@ -34,9 +34,8 @@ use zenith_relay_core::{
     RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
 };
 
-pub(super) const CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
-
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
+    pool::ensure_system_gateway_key(state)?;
     let codex_home = crate::platform::default_codex_home();
     let protected_account_id = if codex::credential_kind(&codex_home, &state.profile_backup_root())?
         == Some(codex::ProfileCredentialKind::LocalGateway)
@@ -127,10 +126,12 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             health,
             quota,
             quota_updated_at_ms: account.account.quota.updated_at_ms,
-            created_at_ms: account.account.created_at_ms,
+            quota_snapshot: account.account.quota.clone(),
+            subscription_plan_type: account.account.subscription.plan_type.clone(),
+            subscription_expires_at_ms: account.account.subscription.active_until_ms,
             last_used_at_ms: account.account.last_used_at_ms,
-            cooldowns: account.cooldowns,
-            consecutive_failures: account.consecutive_failures,
+            cooldowns: Default::default(),
+            consecutive_failures: 0,
             proxy: proxy.clone(),
         });
         refresh_proxies.push((account_id, proxy));
@@ -181,18 +182,20 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         GatewayRuntimeOptions {
             max_retry_candidates: usize::from(settings.max_retry_candidates),
             routing_strategy: settings.routing_strategy,
+            subscription_plan_order: settings.subscription_plan_order,
             hidden_models: settings.hidden_models,
             default_service_tier: settings.default_service_tier,
             quota_stale_after_ms,
-            image_base_model: settings.image_base_model.clone(),
+            image_base_model: None,
             response_affinity_store: Some(state.response_affinity_store()),
+            provider_storm_breaker: false,
         },
         state.usage_callback(),
     )
     .map_err(core_error)?;
     runtime.set_protected_candidate(
         protected_account_id.as_deref(),
-        CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
+        settings.chatgpt_interface_quota_reserve_basis_points,
     );
     Ok(Arc::new(runtime))
 }
@@ -257,7 +260,7 @@ async fn sync_refreshed_account_or_rollback(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(());
     };
-    let (enabled, health, quota, quota_updated_at_ms, global_cooldown, consecutive_failures) = {
+    let (enabled, health, quota, quota_updated_at_ms) = {
         let store = state.store()?;
         let account = store
             .account(account_id)
@@ -273,8 +276,6 @@ async fn sync_refreshed_account_or_rollback(
                 quota_stale_after_ms_for_interval(store.gateway().quota_refresh_interval_seconds),
             ),
             account.account.quota.updated_at_ms,
-            account.cooldowns.get("*").copied(),
-            account.consecutive_failures,
         )
     };
     if runtime.update_candidate_availability_at(
@@ -284,14 +285,6 @@ async fn sync_refreshed_account_or_rollback(
         quota,
         quota_updated_at_ms,
     ) {
-        if let Some(retry_at_ms) = global_cooldown {
-            runtime.set_candidate_cooldown(account_id, "*", retry_at_ms);
-        } else {
-            runtime.clear_candidate_cooldown(account_id, "*");
-        }
-        if consecutive_failures == 0 {
-            runtime.reset_candidate_failures(account_id);
-        }
         return Ok(());
     }
     sync_accounts_or_rollback(state, old_accounts, old_keys).await
@@ -390,7 +383,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
-    fn persisted_lru_timestamp_maps_to_epoch_milliseconds() {
+    fn persisted_last_used_timestamp_maps_to_epoch_milliseconds() {
         assert_eq!(timestamp_ms("1970-01-01T00:00:00.001Z"), Some(1));
         assert_eq!(timestamp_ms("not-a-date"), None);
     }
@@ -405,6 +398,68 @@ mod tests {
         assert!(!account_routing_allowed(&settings, &subscription));
         settings.use_free_accounts = true;
         assert!(account_routing_allowed(&settings, &subscription));
+    }
+
+    #[tokio::test]
+    async fn runtime_creates_and_reuses_the_system_gateway_key() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-system-key-{id}"));
+        let source_secret_ref = format!("source:system-key-{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        state
+            .store()
+            .unwrap()
+            .upsert_source(ProviderSourceRecord {
+                id: "source_1".into(),
+                name: "Synthetic".into(),
+                enabled: true,
+                in_pool: true,
+                draining: false,
+                base_url: "http://127.0.0.1:9/v1".into(),
+                secret_ref: source_secret_ref.clone(),
+                wire_api: zenith_relay_core::WireApi::Responses,
+                models: vec!["gpt-test".into()],
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                priority: 0,
+                weight: 1,
+                last_used_at: None,
+                last_test_at: None,
+                last_test_status: None,
+                last_error: None,
+            })
+            .unwrap();
+
+        let runtime = runtime_from_store(&state).await.unwrap();
+        let key = state.store().unwrap().keys()[0].clone();
+        let secret = secret_store::load(&key.secret_ref).unwrap().unwrap();
+        assert!(key.system);
+        assert!(key.enabled);
+        assert!(secret.starts_with("zlr_"));
+
+        runtime_from_store(&state).await.unwrap();
+        let reused = state.store().unwrap().keys()[0].clone();
+        assert_eq!(reused.id, key.id);
+        assert_eq!(
+            secret_store::load(&reused.secret_ref).unwrap().as_deref(),
+            Some(secret.as_str())
+        );
+
+        let address = state.gateway.start(runtime, 0).await.unwrap();
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth(&secret)
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+
+        state.gateway.stop().await;
+        secret_store::delete(&source_secret_ref).unwrap();
+        secret_store::delete(&key.secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

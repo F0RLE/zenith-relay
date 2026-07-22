@@ -7,13 +7,16 @@ use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
-use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::{accounts::CodexIdentityEnvelope, ProxyConfig};
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
+#[cfg(test)]
 const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
+#[cfg(test)]
 const ORIGINATOR_HEADER: &str = "originator";
-const ORIGINATOR: &str = "codex_cli_rs";
+#[cfg(test)]
+const ORIGINATOR: &str = zenith_relay_core::accounts::CODEX_ORIGINATOR;
 const FIXED_WAKE_INPUT: &str = "Reply briefly.";
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
@@ -30,7 +33,7 @@ pub struct CodexWakeClient {
     http: reqwest::Client,
     responses_endpoint: Url,
     authorization: HeaderValue,
-    chatgpt_account_id: HeaderValue,
+    identity: CodexIdentityEnvelope,
 }
 
 impl CodexWakeClient {
@@ -76,10 +79,9 @@ impl CodexWakeClient {
                 WakeExecutionFailure::invalid(WakeExecutionErrorCode::InvalidAccessToken)
             })?;
         authorization.set_sensitive(true);
-        let mut account_id = HeaderValue::from_str(chatgpt_account_id).map_err(|_| {
+        let identity = CodexIdentityEnvelope::standard(chatgpt_account_id).map_err(|_| {
             WakeExecutionFailure::invalid(WakeExecutionErrorCode::InvalidProviderAccountId)
         })?;
-        account_id.set_sensitive(true);
         let builder = reqwest::Client::builder()
             .redirect(Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
@@ -95,7 +97,7 @@ impl CodexWakeClient {
             http,
             responses_endpoint,
             authorization,
-            chatgpt_account_id: account_id,
+            identity,
         })
     }
 
@@ -121,13 +123,14 @@ impl CodexWakeClient {
 
         let started = Instant::now();
         let response = self
-            .http
-            .post(self.responses_endpoint.clone())
-            .header(AUTHORIZATION, self.authorization.clone())
-            .header(ACCOUNT_ID_HEADER, self.chatgpt_account_id.clone())
-            .header(ORIGINATOR_HEADER, ORIGINATOR)
-            .header(CONTENT_TYPE, "application/json")
-            .body(body)
+            .identity
+            .apply(
+                self.http
+                    .post(self.responses_endpoint.clone())
+                    .header(AUTHORIZATION, self.authorization.clone())
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body),
+            )
             .send()
             .await
             .map_err(|error| {
@@ -186,7 +189,7 @@ impl fmt::Debug for CodexWakeClient {
             .debug_struct("CodexWakeClient")
             .field("responses_endpoint", &"[configured]")
             .field("authorization", &"[redacted]")
-            .field("chatgpt_account_id", &"[redacted]")
+            .field("identity", &"[redacted]")
             .finish()
     }
 }

@@ -27,6 +27,19 @@ pub struct AssignStoredProxyInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetStoredProxyAccountsInput {
+    proxy_id: String,
+    account_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteStoredProxiesInput {
+    proxy_ids: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssignFreeProxiesInput {
     account_ids: Vec<String>,
 }
@@ -50,7 +63,7 @@ pub struct StoredProxyAssignmentResult {
 
 enum ProxyChoice {
     Inherited,
-    Free,
+    Automatic,
     Stored(String),
     Custom(String),
 }
@@ -95,6 +108,20 @@ pub async fn delete_local_stored_proxy(
 }
 
 #[tauri::command]
+pub async fn delete_local_stored_proxies(
+    input: DeleteStoredProxiesInput,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<ProxyPoolSummary, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let proxy_ids = normalize_ids(input.proxy_ids, false)?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let mut pool = load_reconciled_pool(&state, &credentials)?;
+    pool.delete_many(&proxy_ids)?;
+    pool.save()?;
+    Ok(pool.summary())
+}
+
+#[tauri::command]
 pub async fn assign_local_stored_proxy(
     input: AssignStoredProxyInput,
     state: State<'_, DesktopState>,
@@ -109,17 +136,41 @@ pub async fn assign_local_stored_proxy(
 }
 
 #[tauri::command]
+pub async fn set_local_stored_proxy_accounts(
+    input: SetStoredProxyAccountsInput,
+    state: State<'_, DesktopState>,
+) -> std::result::Result<StoredProxyAssignmentResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let proxy_id = input.proxy_id.trim().to_string();
+    let account_ids = normalize_ids(input.account_ids, true)?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let current = load_reconciled_pool(&state, &credentials)?.assigned_account_ids(&proxy_id)?;
+    let selected = account_ids.iter().cloned().collect::<HashSet<_>>();
+    let mut choices = current
+        .into_iter()
+        .filter(|account_id| !selected.contains(account_id.as_str()))
+        .map(|account_id| (account_id, ProxyChoice::Inherited))
+        .collect::<Vec<_>>();
+    choices.extend(
+        account_ids
+            .into_iter()
+            .map(|account_id| (account_id, ProxyChoice::Stored(proxy_id.clone()))),
+    );
+    apply_choices(&state, choices).await.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn assign_free_local_account_proxies(
     input: AssignFreeProxiesInput,
     state: State<'_, DesktopState>,
 ) -> std::result::Result<StoredProxyAssignmentResult, CommandError> {
     let _mutation = state.setup_guard().await;
-    let account_ids = normalize_account_ids(input.account_ids)?;
+    let account_ids = normalize_ids(input.account_ids, false)?;
     apply_choices(
         &state,
         account_ids
             .into_iter()
-            .map(|account_id| (account_id, ProxyChoice::Free))
+            .map(|account_id| (account_id, ProxyChoice::Automatic))
             .collect(),
     )
     .await
@@ -164,7 +215,7 @@ async fn apply_choices(
                 pool.release(&account_id);
                 None
             }
-            ProxyChoice::Free => match pool.assign_free(&account_id) {
+            ProxyChoice::Automatic => match pool.assign_automatic(&account_id) {
                 Some(url) => Some(url),
                 None => {
                     unavailable += 1;
@@ -194,9 +245,6 @@ async fn apply_choices(
             pool: pool.summary(),
         });
     }
-    for (_, next) in &updates {
-        state.mark_quota_refresh(next.local_account_id(), current_time_ms())?;
-    }
     save_credential_updates(&credentials, &updates)?;
     if let Err(error) = pool.save() {
         restore_credentials(&credentials, &updates)?;
@@ -209,6 +257,10 @@ async fn apply_choices(
         old_pool.save()
     })
     .await?;
+    let now_ms = current_time_ms();
+    for (_, next) in &updates {
+        state.sync_account_quota_refresh(next.local_account_id(), now_ms)?;
+    }
     Ok(StoredProxyAssignmentResult {
         assigned: updates.len(),
         unchanged,
@@ -263,20 +315,21 @@ fn restore_credentials(
     Ok(())
 }
 
-fn normalize_account_ids(account_ids: Vec<String>) -> Result<Vec<String>> {
+fn normalize_ids(values: Vec<String>, allow_empty: bool) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
-    let account_ids = account_ids
+    let values = values
         .into_iter()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .collect::<Vec<_>>();
-    if account_ids.is_empty() || account_ids.iter().any(|value| !seen.insert(value.clone())) {
+    if (!allow_empty && values.is_empty()) || values.iter().any(|value| !seen.insert(value.clone()))
+    {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "account selection is empty or contains duplicates",
+            "selection is empty or contains duplicates",
         ));
     }
-    Ok(account_ids)
+    Ok(values)
 }
 
 fn credential_error(error: CredentialError) -> LocalPoolError {

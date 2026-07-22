@@ -17,6 +17,7 @@ const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_SNAPSHOT_DEPTH: usize = 16;
 const MAX_SNAPSHOT_NODES: usize = 65_536;
 const MAX_SNAPSHOT_STRING_BYTES: usize = 4 * 1024;
+const IMPORT_SESSION_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SecretBackendError;
@@ -305,6 +306,61 @@ impl<B: SecretBackend> ImportSessionStore<B> {
 
     pub fn complete(&self, session_id: &str) -> Result<(), ImportSessionError> {
         self.clear(session_id)
+    }
+
+    pub fn cleanup_expired(&self) -> Result<usize, ImportSessionError> {
+        self.cleanup_expired_at(now_ms())
+    }
+
+    fn cleanup_expired_at(&self, now_ms: u64) -> Result<usize, ImportSessionError> {
+        let directory = self.root.join("imports");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(_) => {
+                return Err(ImportSessionError::new(
+                    ImportSessionErrorCode::SnapshotIo,
+                    "failed to inspect import session directory",
+                ))
+            }
+        };
+        let mut stale = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|_| {
+                ImportSessionError::new(
+                    ImportSessionErrorCode::SnapshotIo,
+                    "failed to inspect import session directory",
+                )
+            })?;
+            let file_type = entry.file_type().map_err(|_| {
+                ImportSessionError::new(
+                    ImportSessionErrorCode::SnapshotIo,
+                    "failed to inspect import session snapshot",
+                )
+            })?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(session_id) = name.strip_suffix(".json") else {
+                continue;
+            };
+            if session_id.ends_with(".prepared") || validate_session_id(session_id).is_err() {
+                continue;
+            }
+            let Ok(snapshot) = read_snapshot(&self.root, session_id, false) else {
+                continue;
+            };
+            if snapshot.created_at_ms.saturating_add(IMPORT_SESSION_TTL_MS) <= now_ms {
+                stale.push(session_id.to_string());
+            }
+        }
+        for session_id in &stale {
+            self.clear(session_id)?;
+        }
+        Ok(stale.len())
     }
 
     fn start_with_id(
@@ -1130,6 +1186,33 @@ mod tests {
         assert!(!snapshot_path(&root, &completed.session_id)
             .unwrap()
             .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn expired_sessions_clear_snapshots_and_secrets() {
+        let root = temp_root("expired");
+        let secrets = MemorySecrets::default();
+        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let first = store.start(&fixture(), None, &[]).unwrap();
+        let second = store.start(&fixture(), None, &[]).unwrap();
+        store
+            .prepare(&first.session_id, None, first.preview.clone(), &[])
+            .unwrap();
+
+        assert_eq!(
+            store
+                .cleanup_expired_at(first.created_at_ms + IMPORT_SESSION_TTL_MS - 1)
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.cleanup_expired_at(u64::MAX).unwrap(), 2);
+        for session_id in [&first.session_id, &second.session_id] {
+            assert!(!snapshot_path(&root, session_id).unwrap().exists());
+            assert!(!prepared_snapshot_path(&root, session_id).unwrap().exists());
+            assert!(!secrets.contains(&secret_ref(session_id)));
+            assert!(!secrets.contains(&prepared_secret_ref(session_id)));
+        }
         fs::remove_dir_all(root).unwrap();
     }
 

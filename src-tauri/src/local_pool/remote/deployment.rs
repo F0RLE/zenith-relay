@@ -1,6 +1,6 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rand::RngCore;
+use rand::Rng;
 use serde::Serialize;
 use std::{fmt, fs, path::Path};
 use url::Url;

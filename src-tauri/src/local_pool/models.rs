@@ -4,33 +4,25 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    DefaultServiceTier, RoutingStrategy, WireApi,
+    normalize_subscription_plan_order,
+    protocol::RemoteAccountLocation,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 13;
+pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
+pub const DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
+pub const MIN_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
+pub const MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 9_900;
 pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
 pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const MAX_LOCAL_ACCOUNTS: usize = 1_024;
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StoreMetadata {
-    pub schema_version: u32,
-}
-
-impl Default for StoreMetadata {
-    fn default() -> Self {
-        Self {
-            schema_version: CURRENT_SCHEMA_VERSION,
-        }
-    }
-}
+pub const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +42,8 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
+    pub subscription_plan_order: Vec<String>,
+    #[serde(default)]
     pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
     pub image_base_model: Option<String>,
@@ -63,8 +57,136 @@ pub struct GatewaySettings {
     pub quota_request_timeout_seconds: u64,
     #[serde(default)]
     pub use_free_accounts: bool,
+    #[serde(default = "default_chatgpt_interface_quota_reserve_basis_points")]
+    pub chatgpt_interface_quota_reserve_basis_points: u64,
     #[serde(default)]
     pub hidden_models: Vec<String>,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTargetRecord {
+    pub origin: String,
+    pub server_id: String,
+    pub identity_fingerprint: String,
+    pub server_version: String,
+    pub protocol_version: u16,
+    pub allow_insecure_http: bool,
+    pub secret_ref: String,
+    pub connected_at_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipOperationKind {
+    MoveToRemote,
+    ReturnToLocal,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipOperationPhase {
+    MovePrepared,
+    MoveRemoteApplying,
+    MoveRemoteCommitted,
+    MoveLocalCommitted,
+    ReturnPrepared,
+    ReturnLocalStaged,
+    ReturnRemoteRemoved,
+    ReturnLocalCommitted,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipOperationRecord {
+    pub id: String,
+    pub kind: OwnershipOperationKind,
+    pub phase: OwnershipOperationPhase,
+    pub server_id: String,
+    pub local_account_ids: Vec<String>,
+    #[serde(default)]
+    pub remote_account_ids: Vec<String>,
+    #[serde(default)]
+    pub created_remote_account_ids: Vec<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+}
+
+impl OwnershipOperationRecord {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        let valid_id = |value: &str, prefix: &str| {
+            value.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        };
+        let valid_object_id = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        };
+        if !valid_id(&self.id, "ownership_")
+            || self.server_id.is_empty()
+            || self.server_id.len() > 128
+            || self.local_account_ids.is_empty()
+            || self.local_account_ids.len() > 256
+            || self.local_account_ids.iter().any(|id| !valid_object_id(id))
+            || self
+                .remote_account_ids
+                .iter()
+                .any(|id| !valid_object_id(id))
+            || self
+                .created_remote_account_ids
+                .iter()
+                .any(|id| !valid_object_id(id))
+            || self.updated_at_ms < self.created_at_ms
+        {
+            return Err("remote ownership operation is invalid");
+        }
+        let mut local_ids = HashSet::new();
+        let mut remote_ids = HashSet::new();
+        let mut created_ids = HashSet::new();
+        if self
+            .local_account_ids
+            .iter()
+            .any(|id| !local_ids.insert(id))
+            || self
+                .remote_account_ids
+                .iter()
+                .any(|id| !remote_ids.insert(id))
+            || self
+                .created_remote_account_ids
+                .iter()
+                .any(|id| !created_ids.insert(id))
+            || self.remote_account_ids.len() > self.local_account_ids.len()
+            || self.created_remote_account_ids.len() > self.local_account_ids.len()
+        {
+            return Err("remote ownership operation contains inconsistent account ids");
+        }
+        let valid_phase = matches!(
+            (self.kind, self.phase),
+            (
+                OwnershipOperationKind::MoveToRemote,
+                OwnershipOperationPhase::MovePrepared
+                    | OwnershipOperationPhase::MoveRemoteApplying
+                    | OwnershipOperationPhase::MoveRemoteCommitted
+                    | OwnershipOperationPhase::MoveLocalCommitted
+            ) | (
+                OwnershipOperationKind::ReturnToLocal,
+                OwnershipOperationPhase::ReturnPrepared
+                    | OwnershipOperationPhase::ReturnLocalStaged
+                    | OwnershipOperationPhase::ReturnRemoteRemoved
+                    | OwnershipOperationPhase::ReturnLocalCommitted
+            )
+        );
+        if !valid_phase {
+            return Err("remote ownership operation phase is invalid");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -123,6 +245,8 @@ pub struct LocalGatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_location: Option<RemoteAccountLocation>,
     pub wire_api: WireApi,
     pub models: Vec<String>,
     #[serde(default)]
@@ -142,6 +266,10 @@ pub struct LocalAccountRecord {
 impl LocalAccountRecord {
     pub fn normalize(&mut self) {
         self.account.label = self.account.label.trim().to_string();
+        if let Some(location) = &mut self.remote_location {
+            location.server_id = location.server_id.trim().to_string();
+            location.remote_account_id = location.remote_account_id.trim().to_string();
+        }
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
@@ -175,6 +303,7 @@ impl Default for GatewaySettings {
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
             routing_strategy: RoutingStrategy::Adaptive,
+            subscription_plan_order: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             image_base_model: None,
             common_proxy_configured: false,
@@ -182,7 +311,10 @@ impl Default for GatewaySettings {
             quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
             quota_request_timeout_seconds: DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS,
             use_free_accounts: false,
+            chatgpt_interface_quota_reserve_basis_points:
+                DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             hidden_models: Vec::new(),
+            model_price_overrides: BTreeMap::new(),
         }
     }
 }
@@ -198,6 +330,7 @@ impl GatewaySettings {
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
         }
+        normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
         if self
             .image_base_model
             .as_deref()
@@ -215,6 +348,25 @@ impl GatewaySettings {
         {
             return Err("quota request timeout must be between 10 and 20 seconds");
         }
+        if self.chatgpt_interface_quota_reserve_basis_points != 0
+            && !(MIN_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS
+                ..=MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS)
+                .contains(&self.chatgpt_interface_quota_reserve_basis_points)
+        {
+            return Err("ChatGPT account quota reserve must be disabled or between 1% and 99%");
+        }
+        if self.model_price_overrides.iter().any(|(model, price)| {
+            model.trim().is_empty()
+                || model.len() > 256
+                || model.chars().any(char::is_control)
+                || price.input_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+                || price
+                    .cached_input_micro_usd_per_million
+                    .is_some_and(|value| value > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+                || price.output_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+        }) {
+            return Err("model price override is invalid");
+        }
         Ok(())
     }
 }
@@ -225,6 +377,10 @@ fn default_quota_refresh_interval_seconds() -> u64 {
 
 fn default_quota_request_timeout_seconds() -> u64 {
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
+}
+
+fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {
+    DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS
 }
 
 impl ProviderSourceRecord {
@@ -325,6 +481,16 @@ mod tests {
         settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS - 1;
         assert!(settings.validate().is_err());
         settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;
+        assert!(settings.validate().is_ok());
+
+        settings.chatgpt_interface_quota_reserve_basis_points = 0;
+        assert!(settings.validate().is_ok());
+        settings.chatgpt_interface_quota_reserve_basis_points = 99;
+        assert!(settings.validate().is_err());
+        settings.chatgpt_interface_quota_reserve_basis_points = 100;
+        assert!(settings.validate().is_ok());
+        settings.chatgpt_interface_quota_reserve_basis_points =
+            MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS;
         assert!(settings.validate().is_ok());
     }
 

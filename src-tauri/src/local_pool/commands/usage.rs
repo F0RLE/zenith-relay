@@ -24,9 +24,13 @@ pub fn get_local_usage_page(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
+    let price_overrides = state.store()?.gateway().model_price_overrides.clone();
     state
         .telemetry
-        .usage_page(&normalize_usage_query(input.unwrap_or_default()))
+        .usage_page_with_price_overrides(
+            &normalize_usage_query(input.unwrap_or_default()),
+            &price_overrides,
+        )
         .map_err(Into::into)
 }
 
