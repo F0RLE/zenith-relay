@@ -2,7 +2,7 @@ use axum::{
     body::{to_bytes, Body},
     extract::{Request, State},
     http::{
-        header::{AUTHORIZATION, CONTENT_TYPE},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
         StatusCode,
     },
     response::{IntoResponse, Response},
@@ -60,8 +60,9 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .send()
         .await
         .unwrap();
-    assert_eq!(source_response.status(), StatusCode::CREATED);
+    let source_status = source_response.status();
     let source_text = source_response.text().await.unwrap();
+    assert_eq!(source_status, StatusCode::CREATED, "{source_text}");
     assert!(!source_text.contains("synthetic-upstream-api-key"));
     let source: Value = serde_json::from_str(&source_text).unwrap();
     let source_id = source["id"].as_str().unwrap();
@@ -86,6 +87,82 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap();
     assert_eq!(membership.status(), StatusCode::OK);
+
+    let started: Value = client
+        .post(format!("{}/gateway/start", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(started["gateway"]["running"], true);
+
+    let capabilities: Value = client
+        .get(format!("{}/capabilities", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(capabilities["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "profile_attach"));
+    let profile_response = client
+        .get(format!("{}/profile/credential", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        profile_response
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    let profile_credential: Value = profile_response.json().await.unwrap();
+    let profile_key = profile_credential["secret"].as_str().unwrap().to_string();
+    assert_eq!(profile_credential["keyId"], "key_system");
+    assert_eq!(
+        profile_credential["baseUrl"],
+        format!("{}/v1", first.origin)
+    );
+    let keys: Value = client
+        .get(format!("{}/keys", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(keys.as_array().unwrap().is_empty());
+    assert_eq!(
+        client
+            .delete(format!("{}/keys/key_system", first.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(&profile_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 
     let generated: Value = client
         .post(format!("{}/keys", first.origin))
@@ -309,6 +386,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     );
 
     for format in [
+        "zenith",
         "cpa",
         "sub2api",
         "cockpit",
@@ -340,6 +418,25 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         assert!(!content.contains("proxy.example"), "{format}");
         serde_json::from_str::<Value>(content).unwrap();
     }
+    let zenith_export: Value = client
+        .post(format!("{}/accounts/export", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "accountIds": [account_id],
+            "format": "zenith",
+            "description": "Seller description"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let zenith_content: Value =
+        serde_json::from_str(zenith_export["content"].as_str().unwrap()).unwrap();
+    assert_eq!(zenith_content["format"], "zenith");
+    assert_eq!(zenith_content["description"], "Seller description");
+    assert_eq!(zenith_content["accounts"][0]["auth"]["type"], "oauth");
     assert_eq!(
         client
             .post(format!("{}/accounts/export", first.origin))
@@ -472,6 +569,50 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(account_event["cachedInputTokens"], 1);
     assert_eq!(account_event["outputTokens"], 1);
     assert_eq!(account_event["totalTokens"], 2);
+    let priced: Value = client
+        .post(format!("{}/models/prices", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "modelId": "gpt-test",
+            "inputMicroUsdPerMillion": 1_000_000,
+            "cachedInputMicroUsdPerMillion": 1_000_000,
+            "outputMicroUsdPerMillion": 2_000_000
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let priced_model = priced["gateway"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-test")
+        .unwrap();
+    assert_eq!(priced_model["customPrice"], true);
+    assert_eq!(priced_model["inputMicroUsdPerMillion"], 1_000_000);
+    assert_eq!(priced_model["cachedInputMicroUsdPerMillion"], 1_000_000);
+    assert_eq!(priced_model["outputMicroUsdPerMillion"], 2_000_000);
+    let repriced_usage: Value = client
+        .get(format!(
+            "{}/usage?requestIdQuery={}",
+            first.origin,
+            account_event["requestId"].as_str().unwrap()
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["microUsd"], 3);
+    assert_eq!(repriced_usage["totals"]["apiEquivalent"]["pricedTokens"], 2);
+    assert_eq!(
+        repriced_usage["totals"]["apiEquivalent"]["unpricedTokens"],
+        0
+    );
 
     let disabled_response = client
         .post(format!("{}/models/rules", first.origin))
@@ -509,6 +650,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert!(!state_text.contains("synthetic-access-token"));
     assert!(!state_text.contains("synthetic-refresh-token"));
     assert!(!state_text.contains(&pool_key));
+    assert!(!state_text.contains(&profile_key));
 
     let first_server_id: String = serde_json::from_str::<Value>(&state_text).unwrap()
         ["runtimeTarget"]["serverId"]
@@ -533,6 +675,14 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         second_state["runtimeTarget"]["serverId"].as_str(),
         Some(first_server_id.as_str())
     );
+    let persisted_price = second_state["gateway"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-test")
+        .unwrap();
+    assert_eq!(persisted_price["customPrice"], true);
+    assert_eq!(persisted_price["cachedInputMicroUsdPerMillion"], 1_000_000);
     let persisted_models: Value = client
         .get(format!("{}/v1/models", second.origin))
         .bearer_auth(&pool_key)
@@ -555,6 +705,16 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(enabled_status, StatusCode::OK, "{enabled_text}");
     let enabled: Value = serde_json::from_str(&enabled_text).unwrap();
     assert_eq!(enabled["gateway"]["models"][0]["enabled"], true);
+    let reopened_profile_credential: Value = client
+        .get(format!("{}/profile/credential", second.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reopened_profile_credential["secret"], profile_key);
     let restored_models: Value = client
         .get(format!("{}/v1/models", second.origin))
         .bearer_auth(&pool_key)
@@ -565,6 +725,16 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap();
     assert_eq!(restored_models["data"][0]["id"], "gpt-test");
+    let usage_before_stream: Value = client
+        .get(format!("{}/usage?page=1&pageSize=1", second.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let total_before_stream = usage_before_stream["total"].as_u64().unwrap();
     let reopened_stream = client
         .post(format!("{}/v1/responses", second.origin))
         .bearer_auth(&pool_key)
@@ -578,21 +748,29 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap()
         .contains("response.completed"));
-    let reopened_usage: Value = client
-        .get(format!(
-            "{}/usage?page=1&pageSize=50&success=true",
-            second.origin
-        ))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(reopened_usage["total"]
-        .as_u64()
-        .is_some_and(|total| total >= 4));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let reopened_usage: Value = client
+            .get(format!(
+                "{}/usage?page=1&pageSize=50&success=true",
+                second.origin
+            ))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if reopened_usage["total"]
+            .as_u64()
+            .is_some_and(|total| total > total_before_stream)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "stream usage was not persisted");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(
         client
             .delete(format!("{}/usage", second.origin))
@@ -821,7 +999,8 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
             "maxRetryCandidates": 5,
-            "routingStrategy": "oldest_account",
+            "routingStrategy": "subscription_plan",
+            "subscriptionPlanOrder": ["business", "plus"],
             "imageBaseModel": "gpt-5.4-mini"
         }))
         .send()
@@ -835,7 +1014,11 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
     assert!(routing["gateway"]
         .get("sessionAffinityTtlSeconds")
         .is_none());
-    assert_eq!(routing["gateway"]["routingStrategy"], "oldest_account");
+    assert_eq!(routing["gateway"]["routingStrategy"], "subscription_plan");
+    assert_eq!(
+        routing["gateway"]["subscriptionPlanOrder"],
+        json!(["business", "plus"])
+    );
     assert_eq!(routing["gateway"]["imageBaseModel"], "gpt-5.4-mini");
     assert!(routing["capabilities"]["features"]
         .as_array()
@@ -900,6 +1083,47 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
+    let zenith_preview_response = client
+        .post(format!("{}/accounts/import/batch/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "content": json!({
+                "format": "zenith",
+                "version": 1,
+                "description": "Seller description",
+                "accounts": [{
+                    "name": "Zenith account",
+                    "provider": "openai",
+                    "auth": {
+                        "type": "oauth",
+                        "accessToken": "synthetic-zenith-access",
+                        "refreshToken": "synthetic-zenith-refresh",
+                        "expiresAt": "2026-08-19T00:00:00Z"
+                    },
+                    "identity": {
+                        "accountId": "synthetic-zenith-account"
+                    },
+                    "subscription": {
+                        "plan": "business",
+                        "expiresAt": "2026-09-19T00:00:00Z"
+                    }
+                }]
+            }).to_string()
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(zenith_preview_response.status(), StatusCode::CREATED);
+    let zenith_preview_text = zenith_preview_response.text().await.unwrap();
+    assert!(!zenith_preview_text.contains("synthetic-zenith-access"));
+    assert!(!zenith_preview_text.contains("synthetic-zenith-refresh"));
+    let zenith_preview: Value = serde_json::from_str(&zenith_preview_text).unwrap();
+    assert_eq!(zenith_preview["preview"]["format"], "zenith_v1");
+    assert_eq!(
+        zenith_preview["preview"]["description"],
+        "Seller description"
+    );
+    assert_eq!(zenith_preview["preview"]["rows"][0]["plan"], "business");
     let missing_refresh = client
         .post(format!(
             "{}/accounts/account_missing/refresh",
@@ -997,6 +1221,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     assert_eq!(first_confirm["results"][0]["status"], "succeeded");
     assert_eq!(server.state.store.accounts().unwrap().len(), 1);
     let first_account = server.state.store.accounts().unwrap().remove(0);
+    assert_eq!(first_confirm["results"][0]["accountId"], first_account.id);
     assert!(first_account.in_pool);
     assert_eq!(
         first_account.subscription.plan_type.as_deref(),
@@ -1190,6 +1415,17 @@ async fn batch_import_handles_arrays_json_lines_invalid_rows_and_duplicates() {
         .unwrap();
     assert_eq!(confirmed.status(), StatusCode::OK);
 
+    let mut configured = server.state.store.accounts().unwrap().remove(0);
+    configured.label = "Server display name".into();
+    configured.enabled = false;
+    configured.draining = true;
+    configured.models = vec!["gpt-server".into()];
+    configured.allowed_models = vec!["gpt-server".into()];
+    configured.excluded_models = vec!["gpt-blocked".into()];
+    configured.priority = 42;
+    configured.weight = 7;
+    server.state.store.save_account(&configured).unwrap();
+
     let duplicate = batch_preview(
         &client,
         &server.origin,
@@ -1203,6 +1439,29 @@ async fn batch_import_handles_arrays_json_lines_invalid_rows_and_duplicates() {
     .await;
     assert_eq!(duplicate["preview"]["rows"][0]["status"], "existing");
     assert_eq!(duplicate["preview"]["rows"][0]["defaultSelected"], false);
+    let duplicate_confirm: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sessionId": duplicate["sessionId"],
+            "selectedItemIds": [duplicate["preview"]["rows"][0]["itemId"]]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(duplicate_confirm["results"][0]["status"], "succeeded");
+    let preserved = server.state.store.accounts().unwrap().remove(0);
+    assert_eq!(preserved.label, "Server display name");
+    assert!(!preserved.enabled);
+    assert!(preserved.draining);
+    assert_eq!(preserved.models, vec!["gpt-server"]);
+    assert_eq!(preserved.allowed_models, vec!["gpt-server"]);
+    assert_eq!(preserved.excluded_models, vec!["gpt-blocked"]);
+    assert_eq!(preserved.priority, 42);
+    assert_eq!(preserved.weight, 7);
 
     let json_lines = [
         json!({"label":"Line one","accessToken":"synthetic-line-access-one","chatgptAccountId":"synthetic-line-account-one"}).to_string(),

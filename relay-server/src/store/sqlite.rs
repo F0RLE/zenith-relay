@@ -7,7 +7,7 @@ use rusqlite::{
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
@@ -17,10 +17,11 @@ use std::{
 };
 use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
-    estimate_api_equivalent, normalize_image_base_model,
+    estimate_api_equivalent_with_price_override, normalize_image_base_model,
+    normalize_subscription_plan_order,
     protocol::{UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
-    ApiEquivalentSummary, DefaultServiceTier, ResponseAffinityBinding, ResponseAffinityStore,
-    RoutingStrategy, UsageEvent, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ResponseAffinityBinding,
+    ResponseAffinityStore, RoutingStrategy, UsageEvent, WireApi,
 };
 
 pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
@@ -30,6 +31,15 @@ pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
+pub(crate) const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
+
+pub type RoutingPolicy = (
+    u8,
+    RoutingStrategy,
+    DefaultServiceTier,
+    Option<String>,
+    Vec<String>,
+);
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -131,6 +141,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 20,
         name: "020_cache_write_input_tokens",
         sql: include_str!("../../migrations/020_cache_write_input_tokens.sql"),
+    },
+    Migration {
+        version: 21,
+        name: "021_terminal_usage_per_request",
+        sql: include_str!("../../migrations/021_terminal_usage_per_request.sql"),
     },
 ];
 
@@ -306,9 +321,7 @@ impl Store {
         transaction.commit().map_err(db_error)
     }
 
-    pub fn routing_policy(
-        &self,
-    ) -> Result<(u8, RoutingStrategy, DefaultServiceTier, Option<String>), String> {
+    pub fn routing_policy(&self) -> Result<RoutingPolicy, String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
@@ -319,7 +332,9 @@ impl Store {
         )?;
         let routing_strategy = match self.metadata("routing_strategy")?.as_deref() {
             None | Some("adaptive") => RoutingStrategy::Adaptive,
-            Some("oldest_account") => RoutingStrategy::OldestAccount,
+            Some("quota_highest") => RoutingStrategy::QuotaHighest,
+            Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
+            Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
             Some(_) => return Err("routing strategy is invalid".to_string()),
         };
         let default_service_tier = match self.metadata("default_service_tier")?.as_deref() {
@@ -329,12 +344,21 @@ impl Store {
         };
         let image_base_model = normalize_image_base_model(self.metadata("image_base_model")?)
             .map_err(|error| error.to_string())?;
+        let subscription_plan_order =
+            self.metadata("subscription_plan_order")?
+                .map_or(Ok(Vec::new()), |value| {
+                    serde_json::from_str::<Vec<String>>(&value)
+                        .map_err(|_| "subscription plan order is invalid".to_string())
+                })?;
+        let subscription_plan_order =
+            normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
         validate_routing_policy(max_retry_candidates)?;
         Ok((
             max_retry_candidates,
             routing_strategy,
             default_service_tier,
             image_base_model,
+            subscription_plan_order,
         ))
     }
 
@@ -344,11 +368,16 @@ impl Store {
         routing_strategy: RoutingStrategy,
         default_service_tier: DefaultServiceTier,
         image_base_model: Option<String>,
+        subscription_plan_order: Vec<String>,
     ) -> Result<(), String> {
         validate_routing_policy(max_retry_candidates)?;
         let image_base_model = normalize_image_base_model(image_base_model)
             .map_err(|error| error.to_string())?
             .unwrap_or_default();
+        let subscription_plan_order =
+            normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
+        let subscription_plan_order = serde_json::to_string(&subscription_plan_order)
+            .map_err(|_| "subscription plan order is invalid".to_string())?;
         let mut connection = self.lock()?;
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -359,7 +388,9 @@ impl Store {
                 "routing_strategy",
                 match routing_strategy {
                     RoutingStrategy::Adaptive => "adaptive".to_string(),
-                    RoutingStrategy::OldestAccount => "oldest_account".to_string(),
+                    RoutingStrategy::QuotaHighest => "quota_highest".to_string(),
+                    RoutingStrategy::SubscriptionExpiry => "subscription_expiry".to_string(),
+                    RoutingStrategy::SubscriptionPlan => "subscription_plan".to_string(),
                 },
             ),
             (
@@ -370,6 +401,7 @@ impl Store {
                 },
             ),
             ("image_base_model", image_base_model),
+            ("subscription_plan_order", subscription_plan_order),
         ] {
             transaction
                 .execute(
@@ -396,6 +428,28 @@ impl Store {
             "hidden_model_ids",
             &serde_json::to_string(&models)
                 .map_err(|_| "hidden model list serialization failed".to_string())?,
+        )
+    }
+
+    pub fn model_price_overrides(&self) -> Result<BTreeMap<String, ApiModelPriceOverride>, String> {
+        let value = self
+            .metadata("model_price_overrides")?
+            .unwrap_or_else(|| "{}".to_string());
+        normalize_model_price_overrides(
+            serde_json::from_str(&value)
+                .map_err(|_| "model price overrides are invalid".to_string())?,
+        )
+    }
+
+    pub fn set_model_price_overrides(
+        &self,
+        overrides: BTreeMap<String, ApiModelPriceOverride>,
+    ) -> Result<(), String> {
+        let overrides = normalize_model_price_overrides(overrides)?;
+        self.set_metadata(
+            "model_price_overrides",
+            &serde_json::to_string(&overrides)
+                .map_err(|_| "model price overrides could not be serialized".to_string())?,
         )
     }
 
@@ -641,8 +695,39 @@ impl Store {
         {
             let mut statement = transaction
                 .prepare(
-                    "INSERT INTO usage_events(request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json)\
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+                    r#"INSERT INTO usage_events(
+                        request_id, attempt, local_key_id, candidate_kind, candidate_hint,
+                        requested_model, resolved_model, wire_api, success, http_status,
+                        error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
+                        cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
+                        output_tokens, total_tokens, created_at_ms, routing_json
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                        ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    )
+                    ON CONFLICT(request_id) DO UPDATE SET
+                        attempt=excluded.attempt,
+                        local_key_id=excluded.local_key_id,
+                        candidate_kind=excluded.candidate_kind,
+                        candidate_hint=excluded.candidate_hint,
+                        requested_model=excluded.requested_model,
+                        resolved_model=excluded.resolved_model,
+                        wire_api=excluded.wire_api,
+                        success=excluded.success,
+                        http_status=excluded.http_status,
+                        error_category=excluded.error_category,
+                        latency_ms=excluded.latency_ms,
+                        ttft_ms=excluded.ttft_ms,
+                        generation_ms=excluded.generation_ms,
+                        input_tokens=excluded.input_tokens,
+                        cached_input_tokens=excluded.cached_input_tokens,
+                        cache_write_input_tokens=excluded.cache_write_input_tokens,
+                        reasoning_tokens=excluded.reasoning_tokens,
+                        output_tokens=excluded.output_tokens,
+                        total_tokens=excluded.total_tokens,
+                        created_at_ms=excluded.created_at_ms,
+                        routing_json=excluded.routing_json
+                    WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
             for (event, created_at_ms) in events {
@@ -657,11 +742,12 @@ impl Store {
                     "source"
                 };
                 let candidate_hint =
-                    format!("{:x}", Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
+                    hex::encode(Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
                 let routing_json = event.routing.as_ref().map(to_json).transpose()?;
                 statement
                     .execute(params![
                         event.request_id,
+                        event.attempt,
                         event.local_key_id,
                         candidate_kind,
                         candidate_hint,
@@ -690,6 +776,7 @@ impl Store {
     }
 
     pub fn usage_page(&self, query: &UsageQuery) -> Result<UsagePage, String> {
+        let price_overrides = self.model_price_overrides()?;
         let page = query.page.max(1);
         let page_size = if query.page_size == 0 {
             50
@@ -706,7 +793,7 @@ impl Store {
             "COALESCE(resolved_model, requested_model, '')",
         )?;
         for group in &mut models {
-            group.totals.api_equivalent = estimate_api_equivalent(
+            group.totals.api_equivalent = estimate_api_equivalent_with_price_override(
                 (!group.key.is_empty()).then_some(group.key.as_str()),
                 Some(group.totals.input_tokens),
                 (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
@@ -714,6 +801,7 @@ impl Store {
                     .then_some(group.totals.cache_write_input_tokens),
                 Some(group.totals.output_tokens),
                 Some(group.totals.total_tokens),
+                configured_model_price(&price_overrides, Some(group.key.as_str())),
             );
             totals.api_equivalent.merge(group.totals.api_equivalent);
         }
@@ -723,7 +811,7 @@ impl Store {
             &values,
             "COALESCE(candidate_hint, '')",
         )?;
-        let buckets = usage_buckets(&connection, &where_sql, &values, query)?;
+        let buckets = usage_buckets(&connection, &where_sql, &values, query, &price_overrides)?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
@@ -787,6 +875,7 @@ impl Store {
     }
 
     pub fn api_equivalents(&self) -> Result<HashMap<String, ApiEquivalentSummary>, String> {
+        let price_overrides = self.model_price_overrides()?;
         let connection = self.lock()?;
         let mut statement = connection
             .prepare(
@@ -808,10 +897,10 @@ impl Store {
                 let input_samples: i64 = row.get(7)?;
                 let cached_samples: i64 = row.get(8)?;
                 let cache_write_samples: i64 = row.get(9)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    estimate_api_equivalent(
-                        row.get::<_, Option<String>>(1)?.as_deref(),
+                Ok((row.get::<_, String>(0)?, {
+                    let model = row.get::<_, Option<String>>(1)?;
+                    estimate_api_equivalent_with_price_override(
+                        model.as_deref(),
                         optional_u64(input_tokens),
                         (input_samples > 0 && cached_samples == input_samples)
                             .then(|| optional_u64(cached_input_tokens))
@@ -821,8 +910,9 @@ impl Store {
                             .flatten(),
                         optional_u64(output_tokens),
                         optional_u64(total_tokens),
-                    ),
-                ))
+                        configured_model_price(&price_overrides, model.as_deref()),
+                    )
+                }))
             })
             .map_err(db_error)?;
         let mut equivalents = HashMap::<String, ApiEquivalentSummary>::new();
@@ -1109,6 +1199,7 @@ fn usage_buckets(
     where_sql: &str,
     values: &[SqlValue],
     query: &UsageQuery,
+    price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<Vec<UsageBucket>, String> {
     let Some(bucket_ms) = query.bucket_ms else {
         return Ok(Vec::new());
@@ -1152,10 +1243,10 @@ fn usage_buckets(
             let total_tokens: Option<i64> = row.get(6)?;
             let cached_samples: i64 = row.get(7)?;
             let cache_write_samples: i64 = row.get(8)?;
-            Ok((
-                nonnegative_u64(row.get(0)?),
-                estimate_api_equivalent(
-                    row.get::<_, Option<String>>(1)?.as_deref(),
+            Ok((nonnegative_u64(row.get(0)?), {
+                let model = row.get::<_, Option<String>>(1)?;
+                estimate_api_equivalent_with_price_override(
+                    model.as_deref(),
                     optional_u64(input_tokens),
                     (cached_samples > 0)
                         .then(|| optional_u64(cached_input_tokens))
@@ -1165,8 +1256,9 @@ fn usage_buckets(
                         .flatten(),
                     optional_u64(output_tokens),
                     optional_u64(total_tokens),
-                ),
-            ))
+                    configured_model_price(price_overrides, model.as_deref()),
+                )
+            }))
         })
         .map_err(db_error)?;
     let mut equivalents = HashMap::<u64, ApiEquivalentSummary>::new();
@@ -1518,6 +1610,35 @@ fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
     Ok(normalized)
 }
 
+fn normalize_model_price_overrides(
+    overrides: BTreeMap<String, ApiModelPriceOverride>,
+) -> Result<BTreeMap<String, ApiModelPriceOverride>, String> {
+    let mut normalized = BTreeMap::new();
+    for (model, price) in overrides {
+        let model = model.trim();
+        if model.is_empty()
+            || model.len() > 256
+            || model.chars().any(char::is_control)
+            || price.input_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+            || price
+                .cached_input_micro_usd_per_million
+                .is_some_and(|value| value > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
+            || price.output_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+        {
+            return Err("model price override is invalid".to_string());
+        }
+        normalized.insert(model.to_ascii_lowercase(), price);
+    }
+    Ok(normalized)
+}
+
+fn configured_model_price(
+    overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    model: Option<&str>,
+) -> Option<ApiModelPriceOverride> {
+    model.and_then(|model| overrides.get(&model.to_ascii_lowercase()).copied())
+}
+
 fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
@@ -1653,7 +1774,8 @@ mod tests {
                 3,
                 RoutingStrategy::Adaptive,
                 DefaultServiceTier::Standard,
-                None
+                None,
+                Vec::new()
             )
         );
         assert!(store
@@ -1662,14 +1784,16 @@ mod tests {
                 RoutingStrategy::Adaptive,
                 DefaultServiceTier::Standard,
                 None,
+                Vec::new(),
             )
             .is_err());
         store
             .set_routing_policy(
                 5,
-                RoutingStrategy::OldestAccount,
+                RoutingStrategy::SubscriptionPlan,
                 DefaultServiceTier::Fast,
                 Some("gpt-5.4-mini".into()),
+                vec!["business".into(), "plus".into()],
             )
             .unwrap();
         drop(store);
@@ -1679,9 +1803,10 @@ mod tests {
             reopened.routing_policy().unwrap(),
             (
                 5,
-                RoutingStrategy::OldestAccount,
+                RoutingStrategy::SubscriptionPlan,
                 DefaultServiceTier::Fast,
-                Some("gpt-5.4-mini".into())
+                Some("gpt-5.4-mini".into()),
+                vec!["business".into(), "plus".into()]
             )
         );
         drop(reopened);
@@ -1702,6 +1827,33 @@ mod tests {
 
         let reopened = Store::open(path).unwrap();
         assert_eq!(reopened.hidden_models().unwrap(), ["gpt-5.4"]);
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_price_overrides_are_validated_normalized_and_persisted() {
+        let root = test_root("model-prices");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        let price = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            cached_input_micro_usd_per_million: Some(100_000),
+            output_micro_usd_per_million: 2_000_000,
+        };
+        store
+            .set_model_price_overrides(BTreeMap::from([(" GPT-Test ".into(), price)]))
+            .unwrap();
+        assert!(store
+            .set_model_price_overrides(BTreeMap::from([("unsafe\nmodel".into(), price)]))
+            .is_err());
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(
+            reopened.model_price_overrides().unwrap().get("gpt-test"),
+            Some(&price)
+        );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1778,7 +1930,8 @@ mod tests {
                 (17, "017_generation_ms".to_string()),
                 (18, "018_image_base_model".to_string()),
                 (19, "019_remove_cache_write_input_tokens".to_string()),
-                (20, "020_cache_write_input_tokens".to_string())
+                (20, "020_cache_write_input_tokens".to_string()),
+                (21, "021_terminal_usage_per_request".to_string())
             ]
         );
         drop(store);
@@ -1864,6 +2017,83 @@ mod tests {
     }
 
     #[test]
+    fn usage_keeps_one_terminal_row_per_request() {
+        let root = test_root("usage-terminal-row");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        let mut event = UsageEvent {
+            request_id: "req_fallback".into(),
+            attempt: 1,
+            local_key_id: "key".into(),
+            source_id: "source_1".into(),
+            candidate_id: Some("source_1".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            wire_api: WireApi::Responses,
+            success: false,
+            http_status: 503,
+            error_category: Some("upstream_unavailable".into()),
+            cooldown_scope: Some("*".into()),
+            retry_at_ms: Some(60_000),
+            consecutive_failures: Some(1),
+            latency_ms: 1,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            quota_snapshot: None,
+        };
+        store.record_usage(&event, 1_000).unwrap();
+        event.attempt = 2;
+        event.source_id = "source_2".into();
+        event.candidate_id = Some("source_2".into());
+        event.success = true;
+        event.http_status = 200;
+        event.error_category = None;
+        event.cooldown_scope = None;
+        event.retry_at_ms = None;
+        event.consecutive_failures = Some(0);
+        event.total_tokens = Some(10);
+        store.record_usage(&event, 2_000).unwrap();
+
+        event.request_id = "req_failed".into();
+        event.attempt = 1;
+        event.success = false;
+        event.http_status = 503;
+        event.error_category = Some("upstream_unavailable".into());
+        event.total_tokens = None;
+        store.record_usage(&event, 3_000).unwrap();
+        event.attempt = 2;
+        event.http_status = 429;
+        event.error_category = Some("upstream_rate_limited".into());
+        store.record_usage(&event, 4_000).unwrap();
+
+        let page = store.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(page.total, 2);
+        let fallback = page
+            .events
+            .iter()
+            .find(|event| event.request_id == "req_fallback")
+            .unwrap();
+        assert!(fallback.success);
+        assert_eq!(fallback.http_status, 200);
+        let failed = page
+            .events
+            .iter()
+            .find(|event| event.request_id == "req_failed")
+            .unwrap();
+        assert!(!failed.success);
+        assert_eq!(failed.http_status, 429);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn usage_filters_paginate_escape_wildcards_and_clear() {
         use zenith_relay_core::protocol::UsageRange;
 
@@ -1908,6 +2138,7 @@ mod tests {
                         reasoning_tokens: Some(1),
                         output_tokens: Some(1),
                         total_tokens: Some(2),
+                        quota_snapshot: None,
                     },
                     2_000 + index,
                 )
@@ -1955,7 +2186,7 @@ mod tests {
                 .map(|routing| routing.reason),
             Some(SelectionReason::QuotaHeadroom)
         );
-        let hint = format!("{:x}", Sha256::digest(b"source_alpha"))[..12].to_string();
+        let hint = hex::encode(Sha256::digest(b"source_alpha"))[..12].to_string();
         assert_eq!(
             store.api_equivalents().unwrap().get(&hint),
             Some(&ApiEquivalentSummary {

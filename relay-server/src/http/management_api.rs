@@ -1,10 +1,10 @@
 use crate::{
     jobs,
     state::{
-        identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
-        SourceRecord, COMMON_PROXY_SECRET_REF, MAX_SERVER_ACCOUNTS,
+        generate_pool_key, identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord,
+        ServerAccountRecord, SourceRecord, COMMON_PROXY_SECRET_REF, MAX_SERVER_ACCOUNTS,
     },
-    store::PendingImport,
+    store::{PendingImport, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -14,7 +14,6 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -26,8 +25,8 @@ use tower::ServiceExt;
 use url::{Host, Url};
 use zenith_relay_core::{
     accounts::{
-        build_account_export, AccountAuthState, AccountExportCredential, AccountExportDocument,
-        AccountExportRequest, AccountHealthState,
+        build_account_export, normalize_account_export_description, AccountAuthState,
+        AccountExportCredential, AccountExportDocument, AccountExportRequest, AccountHealthState,
     },
     automations::{AccountSelector, WakeHistory, WakeModelPolicy, WakeTask},
     discover_source_models, normalize_proxy_url,
@@ -37,8 +36,8 @@ use zenith_relay_core::{
         UsageRange,
     },
     quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
-    source_points_to_gateway, CandidateRuntimeSnapshot, DefaultServiceTier, ProviderSource,
-    RoutingStrategy, WireApi,
+    source_points_to_gateway, ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier,
+    ProviderSource, RoutingStrategy, WireApi,
 };
 
 const MAX_SECRET_BYTES: usize = 64 * 1024;
@@ -49,6 +48,7 @@ const MAX_JWT_BYTES: usize = 64 * 1024;
 const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 const MAX_SYNCHRONOUS_IMPORT_PROBES: usize = 5;
 const DEFAULT_CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
+const IMPORT_ERROR_MARKER: &str = "__zenith_import_error";
 
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -361,8 +361,13 @@ pub async fn export_accounts(
             enabled: record.enabled,
         });
     }
-    let document: AccountExportDocument = build_account_export(input.format, &accounts, now_ms())
-        .map_err(|_| {
+    let document: AccountExportDocument = build_account_export(
+        input.format,
+        &accounts,
+        now_ms(),
+        input.description.as_deref(),
+    )
+    .map_err(|_| {
         ManagementError::internal(
             "account_export_failed",
             "account export could not be created",
@@ -715,25 +720,27 @@ fn prepare_account_import(
         .unwrap_or_else(|| format!("account_{}", uuid::Uuid::new_v4().simple()));
     let session_id = format!("import_{}", uuid::Uuid::new_v4().simple());
     let secret_ref = format!("account:{account_id}:{}", uuid::Uuid::new_v4().simple());
-    let proxy_url = match duplicate_account.as_ref() {
+    let existing_credential = match duplicate_account.as_ref() {
         Some(record) => match state.vault.load(&record.secret_ref).map_err(vault_error)? {
-            Some(value) => {
-                serde_json::from_str::<AccountCredential>(&value)
-                    .map_err(|_| {
-                        ManagementError::internal(
-                            "account_secret_invalid",
-                            "account secret is invalid",
-                        )
-                    })?
-                    .proxy_url
-            }
+            Some(value) => Some(serde_json::from_str::<AccountCredential>(&value).map_err(
+                |_| {
+                    ManagementError::internal("account_secret_invalid", "account secret is invalid")
+                },
+            )?),
             None => None,
         },
         None => None,
     };
+    let proxy_url = existing_credential
+        .as_ref()
+        .and_then(|credential| credential.proxy_url.clone());
     let credential = AccountCredential {
         access_token: input.access_token,
-        refresh_token: nonempty(input.refresh_token),
+        refresh_token: nonempty(input.refresh_token).or_else(|| {
+            existing_credential
+                .as_ref()
+                .and_then(|credential| credential.refresh_token.clone())
+        }),
         id_token: nonempty(input.id_token),
         expires_at_ms: input.expires_at_ms,
         issued_at_ms: now_ms(),
@@ -810,6 +817,8 @@ pub struct BatchImportSession {
 #[serde(rename_all = "camelCase")]
 struct BatchImportPreview {
     format: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     rows: Vec<BatchImportRow>,
     warnings: Vec<BatchImportWarning>,
 }
@@ -840,6 +849,8 @@ struct BatchImportWarning {
     count: Option<usize>,
 }
 
+type ParsedBatchImport = (String, Vec<Value>, Vec<BatchImportWarning>, Option<String>);
+
 #[derive(Serialize)]
 struct BatchImportIssue {
     code: String,
@@ -851,7 +862,7 @@ pub async fn preview_account_batch_import(
     Json(input): Json<BatchImportPreviewInput>,
 ) -> Result<(StatusCode, Json<BatchImportSession>), ManagementError> {
     cleanup_expired_imports(&state)?;
-    let (format, values, warnings) = parse_batch_import_input(input)?;
+    let (format, values, warnings, description) = parse_batch_import_input(input)?;
     let session_id = format!("batch_{}", uuid::Uuid::new_v4().simple());
     let mut rows = Vec::with_capacity(values.len());
     for (ordinal, value) in values.into_iter().enumerate() {
@@ -889,6 +900,7 @@ pub async fn preview_account_batch_import(
             prepared: true,
             preview: BatchImportPreview {
                 format,
+                description,
                 rows,
                 warnings,
             },
@@ -898,7 +910,7 @@ pub async fn preview_account_batch_import(
 
 fn parse_batch_import_input(
     input: BatchImportPreviewInput,
-) -> Result<(String, Vec<Value>, Vec<BatchImportWarning>), ManagementError> {
+) -> Result<ParsedBatchImport, ManagementError> {
     let content = input.content.filter(|value| !value.trim().is_empty());
     if input.documents.is_empty() {
         return parse_batch_import(content.as_deref().unwrap_or_default());
@@ -915,6 +927,9 @@ fn parse_batch_import_input(
             format!("import must contain between 1 and {MAX_IMPORT_ITEMS} items"),
         ));
     }
+    if input.documents.len() == 1 {
+        return parse_batch_import(&input.documents[0]);
+    }
 
     let mut total_bytes = 0usize;
     let mut values = Vec::new();
@@ -929,7 +944,21 @@ fn parse_batch_import_input(
                 "import input exceeds the size limit",
             ));
         }
-        let (_, mut document_values, mut document_warnings) = parse_batch_import(&document)?;
+        let (_, mut document_values, mut document_warnings, _) = match parse_batch_import(&document)
+        {
+            Ok(parsed) => parsed,
+            Err(error) if matches!(error.code.as_str(), "import_empty" | "import_malformed") => {
+                values.push(malformed_import_value());
+                if values.len() > MAX_IMPORT_ITEMS {
+                    return Err(ManagementError::validation(
+                        "import_item_count",
+                        format!("import must contain between 1 and {MAX_IMPORT_ITEMS} items"),
+                    ));
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         values.append(&mut document_values);
         warnings.append(&mut document_warnings);
         if values.len() > MAX_IMPORT_ITEMS {
@@ -939,7 +968,7 @@ fn parse_batch_import_input(
             ));
         }
     }
-    Ok(("json_documents".to_string(), values, warnings))
+    Ok(("json_documents".to_string(), values, warnings, None))
 }
 
 #[derive(Deserialize)]
@@ -965,6 +994,8 @@ pub struct BatchImportConfirmResponse {
 struct BatchImportResult {
     item_id: String,
     status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<BatchImportIssue>,
 }
@@ -1002,14 +1033,16 @@ pub async fn confirm_account_batch_import(
         )
         .await
         {
-            Ok(_) => BatchImportResult {
+            Ok(account) => BatchImportResult {
                 item_id,
                 status: "succeeded".to_string(),
+                account_id: Some(account.id),
                 error: None,
             },
             Err(error) => BatchImportResult {
                 item_id,
                 status: "failed".to_string(),
+                account_id: None,
                 error: Some(BatchImportIssue {
                     code: error.code,
                     message: error.message,
@@ -1024,9 +1057,7 @@ pub async fn confirm_account_batch_import(
     }))
 }
 
-fn parse_batch_import(
-    content: &str,
-) -> Result<(String, Vec<Value>, Vec<BatchImportWarning>), ManagementError> {
+fn parse_batch_import(content: &str) -> Result<ParsedBatchImport, ManagementError> {
     if content.trim().is_empty() {
         return Err(ManagementError::validation(
             "import_empty",
@@ -1040,67 +1071,156 @@ fn parse_batch_import(
         ));
     }
     let parsed = serde_json::from_str::<Value>(content);
-    let (format, values, mut warnings) = match parsed {
+    let (format, values, mut warnings, description) = match parsed {
         Ok(value) => {
             ensure_import_depth(&value, 0)?;
             match value {
-                Value::Array(values) => ("json_array".to_string(), values, Vec::new()),
+                Value::Array(values) => ("json_array".to_string(), values, Vec::new(), None),
                 Value::Object(mut object) => {
+                    let is_zenith = object
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .is_some_and(|format| format.eq_ignore_ascii_case("zenith"));
+                    if is_zenith && !object.get("accounts").is_some_and(Value::is_array) {
+                        return Err(ManagementError::validation(
+                            "import_malformed",
+                            "Zenith account bundle has no account list",
+                        ));
+                    }
                     if let Some(Value::Array(accounts)) = object.remove("accounts") {
                         let version = object
                             .get("version")
                             .and_then(|value| {
                                 value.as_u64().or_else(|| value.as_str()?.parse().ok())
                             })
-                            .unwrap_or(1);
+                            .or((!is_zenith).then_some(1))
+                            .ok_or_else(|| {
+                                ManagementError::validation(
+                                    "import_malformed",
+                                    "Zenith account bundle version is missing",
+                                )
+                            })?;
                         if version != 1 {
                             return Err(ManagementError::validation(
                                 "unsupported_bundle_version",
-                                "portable account bundle version is unsupported",
+                                if is_zenith {
+                                    "Zenith account bundle version is unsupported"
+                                } else {
+                                    "portable account bundle version is unsupported"
+                                },
                             ));
                         }
-                        let mut warnings = Vec::new();
-                        for (key, code) in [
-                            ("proxies", "proxies_ignored"),
-                            ("sources", "sources_ignored"),
-                        ] {
-                            let count = object.get(key).map(container_count).unwrap_or(0);
-                            if count > 0 {
-                                warnings.push(BatchImportWarning {
-                                    code: code.to_string(),
-                                    count: Some(count),
-                                });
+                        if is_zenith {
+                            if accounts.is_empty() {
+                                return Err(ManagementError::validation(
+                                    "import_item_count",
+                                    "Zenith account bundle has no accounts",
+                                ));
                             }
+                            let description = match object.get("description") {
+                                None | Some(Value::Null) => None,
+                                Some(Value::String(description)) => {
+                                    normalize_account_export_description(Some(description))
+                                        .map_err(|_| {
+                                            ManagementError::validation(
+                                                "import_description_invalid",
+                                                "Zenith account bundle description is invalid",
+                                            )
+                                        })?
+                                        .map(str::to_string)
+                                }
+                                Some(_) => {
+                                    return Err(ManagementError::validation(
+                                        "import_description_invalid",
+                                        "Zenith account bundle description is invalid",
+                                    ));
+                                }
+                            };
+                            ("zenith_v1".to_string(), accounts, Vec::new(), description)
+                        } else {
+                            let mut warnings = Vec::new();
+                            for (key, code) in [
+                                ("proxies", "proxies_ignored"),
+                                ("sources", "sources_ignored"),
+                            ] {
+                                let count = object.get(key).map(container_count).unwrap_or(0);
+                                if count > 0 {
+                                    warnings.push(BatchImportWarning {
+                                        code: code.to_string(),
+                                        count: Some(count),
+                                    });
+                                }
+                            }
+                            (
+                                "portable_account_bundle".to_string(),
+                                accounts,
+                                warnings,
+                                None,
+                            )
                         }
-                        ("portable_account_bundle".to_string(), accounts, warnings)
                     } else {
                         (
                             "json_object".to_string(),
                             vec![Value::Object(object)],
                             Vec::new(),
+                            None,
                         )
                     }
                 }
+                Value::String(value) => match raw_access_token(&value) {
+                    Some(token) => (
+                        "json_object".to_string(),
+                        vec![access_token_value(token)],
+                        Vec::new(),
+                        None,
+                    ),
+                    None => {
+                        return Err(ManagementError::validation(
+                            "import_unsupported",
+                            "import input must contain JSON objects or access tokens",
+                        ));
+                    }
+                },
                 _ => {
                     return Err(ManagementError::validation(
                         "import_unsupported",
-                        "import input must contain JSON objects",
+                        "import input must contain JSON objects or access tokens",
                     ));
                 }
             }
         }
         Err(_) => {
+            let lines = content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            let multiple = lines.len() > 1;
             let mut values = Vec::new();
-            for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                let value: Value = serde_json::from_str(line).map_err(|_| {
-                    ManagementError::validation("import_malformed", "import JSON is malformed")
-                })?;
-                ensure_import_depth(&value, 0)?;
-                values.push(value);
+            for line in lines {
+                match serde_json::from_str::<Value>(line) {
+                    Ok(value) => {
+                        ensure_import_depth(&value, 0)?;
+                        values.push(value);
+                    }
+                    Err(_) => match raw_access_token(line) {
+                        Some(token) => values.push(access_token_value(token)),
+                        None if multiple => values.push(malformed_import_value()),
+                        None => {
+                            return Err(ManagementError::validation(
+                                "import_malformed",
+                                "import input is not valid JSON or an access token",
+                            ));
+                        }
+                    },
+                }
             }
-            ("json_lines".to_string(), values, Vec::new())
+            ("json_lines".to_string(), values, Vec::new(), None)
         }
     };
+    let values = values
+        .into_iter()
+        .map(normalize_token_value)
+        .collect::<Vec<_>>();
     if values.is_empty() || values.len() > MAX_IMPORT_ITEMS {
         return Err(ManagementError::validation(
             "import_item_count",
@@ -1108,10 +1228,66 @@ fn parse_batch_import(
         ));
     }
     warnings.shrink_to_fit();
-    Ok((format, values, warnings))
+    Ok((format, values, warnings, description))
+}
+
+fn normalize_token_value(value: Value) -> Value {
+    match value {
+        Value::String(value) => raw_access_token(&value)
+            .map(access_token_value)
+            .unwrap_or(Value::String(value)),
+        value => value,
+    }
+}
+
+fn raw_access_token(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let token = value
+        .get(..7)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+        .and_then(|_| value.get(7..))
+        .map(str::trim)
+        .unwrap_or(value);
+    if token.is_empty()
+        || token.len() > MAX_SECRET_BYTES
+        || !token.is_ascii()
+        || token
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+    {
+        return None;
+    }
+    let mut parts = token.split('.');
+    let jwt = matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(header), Some(payload), Some(signature), None)
+            if !header.is_empty() && !payload.is_empty() && !signature.is_empty()
+    );
+    (jwt || token
+        .strip_prefix("at-")
+        .is_some_and(|value| !value.is_empty()))
+    .then_some(token)
+}
+
+fn access_token_value(token: &str) -> Value {
+    serde_json::json!({ "access_token": token })
+}
+
+fn malformed_import_value() -> Value {
+    serde_json::json!({ IMPORT_ERROR_MARKER: true })
 }
 
 fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, String)> {
+    if value
+        .as_object()
+        .and_then(|object| object.get(IMPORT_ERROR_MARKER))
+        .is_some_and(Value::is_boolean)
+    {
+        return Err(invalid_import(
+            "malformed_json",
+            "import file or line is malformed",
+        ));
+    }
     if let Ok(mut input) = serde_json::from_value::<AccountImportInput>(value.clone()) {
         let jwt = imported_jwt_metadata(input.id_token.as_deref(), Some(&input.access_token));
         input.expires_at_ms = input.expires_at_ms.or(jwt.expires_at_ms);
@@ -1124,9 +1300,12 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
     let object = value
         .as_object()
         .ok_or_else(|| invalid_import("unsupported_value", "import item must be a JSON object"))?;
+    let identity = object.get("identity").and_then(Value::as_object);
+    let subscription = object.get("subscription").and_then(Value::as_object);
     let credentials = object
         .get("credentials")
         .and_then(Value::as_object)
+        .or_else(|| object.get("auth").and_then(Value::as_object))
         .unwrap_or(object);
     let tokens = credentials
         .get("tokens")
@@ -1173,6 +1352,16 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
             "plan",
         ],
     )
+    .or_else(|| {
+        subscription.and_then(|subscription| {
+            import_string(
+                subscription,
+                subscription,
+                None,
+                &["plan", "planType", "plan_type"],
+            )
+        })
+    })
     .filter(|value| {
         ![
             Some(access_token.as_str()),
@@ -1196,6 +1385,21 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
             "accountId",
         ],
     )
+    .or_else(|| {
+        identity.and_then(|identity| {
+            import_string(
+                identity,
+                identity,
+                None,
+                &[
+                    "accountId",
+                    "account_id",
+                    "chatgptAccountId",
+                    "chatgpt_account_id",
+                ],
+            )
+        })
+    })
     .or(jwt.account_id)
     .ok_or_else(|| {
         invalid_import(
@@ -1223,6 +1427,16 @@ fn normalize_batch_account(value: Value) -> Result<AccountImportInput, (String, 
                 "chatgptSubscriptionActiveUntil",
             ],
         )
+        .or_else(|| {
+            subscription.and_then(|subscription| {
+                import_timestamp_ms(
+                    subscription,
+                    subscription,
+                    None,
+                    &["expiresAt", "expires_at"],
+                )
+            })
+        })
         .or(jwt.subscription_active_until_ms),
         chatgpt_account_id,
         responses_url: import_string(
@@ -1491,7 +1705,7 @@ async fn confirm_one_account_import(
         .map_err(store_error)?
         .into_iter()
         .find(|record| record.id == preview.account_id);
-    let subscription =
+    let mut subscription =
         if preview.plan_type.is_some() || preview.subscription_active_until_ms.is_some() {
             Subscription::normalize(SubscriptionInput {
                 plan_type: preview.plan_type.clone(),
@@ -1505,22 +1719,41 @@ async fn confirm_one_account_import(
                 .map(|value| value.subscription.clone())
                 .unwrap_or_default()
         };
+    if subscription.active_until_ms.is_none() {
+        subscription.updated_at_ms = None;
+    }
     let mut record = ServerAccountRecord {
         id: preview.account_id.clone(),
-        label: preview.label,
+        label: existing
+            .as_ref()
+            .map(|value| value.label.clone())
+            .unwrap_or(preview.label),
         identity_hint: preview.identity_hint,
-        enabled: true,
+        enabled: existing.as_ref().is_none_or(|value| value.enabled),
         in_pool: add_to_pool || existing.as_ref().is_some_and(|value| value.in_pool),
-        draining: false,
+        draining: existing.as_ref().is_some_and(|value| value.draining),
         source_id: "openai_codex".to_string(),
         secret_ref: pending.secret_ref.clone(),
         auth_state: preview.auth_state,
         health: AccountHealthState::Healthy,
-        models: preview.models,
-        allowed_models: preview.allowed_models,
-        excluded_models: preview.excluded_models,
-        priority: preview.priority,
-        weight: preview.weight,
+        models: existing
+            .as_ref()
+            .map(|value| value.models.clone())
+            .unwrap_or(preview.models),
+        allowed_models: existing
+            .as_ref()
+            .map(|value| value.allowed_models.clone())
+            .unwrap_or(preview.allowed_models),
+        excluded_models: existing
+            .as_ref()
+            .map(|value| value.excluded_models.clone())
+            .unwrap_or(preview.excluded_models),
+        priority: existing
+            .as_ref()
+            .map_or(preview.priority, |value| value.priority),
+        weight: existing
+            .as_ref()
+            .map_or(preview.weight, |value| value.weight),
         subscription,
         quota: existing
             .as_ref()
@@ -1758,20 +1991,20 @@ pub async fn refresh_account(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PoolQuotaRefreshResult {
+pub struct AccountQuotaRefreshResult {
     refreshed: usize,
     failed: usize,
     snapshot: RuntimeStateSnapshot,
 }
 
-pub async fn refresh_pool_accounts(
+pub async fn refresh_all_account_quotas(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<PoolQuotaRefreshResult>, ManagementError> {
-    let (refreshed, failed) = jobs::refresh_pool_accounts_now(&state)
+) -> Result<Json<AccountQuotaRefreshResult>, ManagementError> {
+    let (refreshed, failed) = jobs::refresh_all_accounts_now(&state)
         .await
         .map_err(runtime_error)?;
     let snapshot = state.snapshot().map_err(store_error)?;
-    Ok(Json(PoolQuotaRefreshResult {
+    Ok(Json(AccountQuotaRefreshResult {
         refreshed,
         failed,
         snapshot,
@@ -1821,6 +2054,66 @@ pub async fn list_keys(
     Ok(Json(state.snapshot().map_err(store_error)?.keys))
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileCredential {
+    key_id: String,
+    base_url: String,
+    secret: String,
+}
+
+pub async fn profile_credential(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ManagementError> {
+    let snapshot = state.snapshot().map_err(store_error)?;
+    if !state.store.gateway_enabled().map_err(store_error)?
+        || snapshot.gateway.candidate_count == 0
+        || snapshot.gateway.visible_model_ids.is_empty()
+    {
+        return Err(ManagementError::new(
+            StatusCode::CONFLICT,
+            "profile_attach_unavailable",
+            "remote gateway has no usable pool route",
+            "profile_attach",
+            true,
+        ));
+    }
+    let mut key = state
+        .store
+        .keys()
+        .map_err(store_error)?
+        .into_iter()
+        .find(|key| key.system)
+        .ok_or_else(|| {
+            ManagementError::internal("system_key_missing", "system client key is unavailable")
+        })?;
+    let secret = state
+        .vault
+        .load(&key.secret_ref)
+        .map_err(vault_error)?
+        .ok_or_else(|| {
+            ManagementError::internal("system_key_missing", "system client key is unavailable")
+        })?;
+    if !key.enabled {
+        let old = key.clone();
+        key.enabled = true;
+        state.store.save_key(&key).map_err(store_error)?;
+        if let Err(error) = state.rebuild_runtime().await {
+            let _ = state.store.save_key(&old);
+            let _ = state.rebuild_runtime().await;
+            return Err(runtime_error(error));
+        }
+    }
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(ProfileCredential {
+            key_id: key.id,
+            base_url: snapshot.gateway.base_url,
+            secret,
+        }),
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyInput {
@@ -1852,6 +2145,7 @@ pub async fn create_key(
         id,
         label: clean_label(&input.label, "key label")?,
         enabled: true,
+        system: false,
         secret_ref: secret_ref.clone(),
         source_ids: normalize_scope(input.source_ids),
         account_ids: normalize_scope(input.account_ids),
@@ -1901,6 +2195,7 @@ pub async fn update_key(
     Json(input): Json<KeyPatch>,
 ) -> Result<Json<KeySummary>, ManagementError> {
     let mut record = find_key(&state, &id)?;
+    reject_system_key_mutation(&record)?;
     let old = record.clone();
     if let Some(value) = input.label {
         record.label = clean_label(&value, "key label")?;
@@ -1937,6 +2232,7 @@ pub async fn delete_key(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ManagementError> {
     let record = find_key(&state, &id)?;
+    reject_system_key_mutation(&record)?;
     let secret = state
         .vault
         .load(&record.secret_ref)
@@ -1961,6 +2257,7 @@ pub async fn rotate_key(
     Path(id): Path<String>,
 ) -> Result<Json<GeneratedKey>, ManagementError> {
     let record = find_key(&state, &id)?;
+    reject_system_key_mutation(&record)?;
     let old_secret = state
         .vault
         .load(&record.secret_ref)
@@ -2074,6 +2371,7 @@ pub struct RoutingPolicyInput {
     default_service_tier: Option<DefaultServiceTier>,
     #[serde(default)]
     image_base_model: Option<Option<String>>,
+    subscription_plan_order: Option<Vec<String>>,
 }
 
 pub async fn set_routing_policy(
@@ -2089,6 +2387,9 @@ pub async fn set_routing_policy(
     let previous = state.store.routing_policy().map_err(store_error)?;
     let default_service_tier = input.default_service_tier.unwrap_or(previous.2);
     let image_base_model = input.image_base_model.unwrap_or(previous.3.clone());
+    let subscription_plan_order = input
+        .subscription_plan_order
+        .unwrap_or_else(|| previous.4.clone());
     state
         .store
         .set_routing_policy(
@@ -2096,12 +2397,13 @@ pub async fn set_routing_policy(
             input.routing_strategy,
             default_service_tier,
             image_base_model,
+            subscription_plan_order,
         )
         .map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
         state
             .store
-            .set_routing_policy(previous.0, previous.1, previous.2, previous.3)
+            .set_routing_policy(previous.0, previous.1, previous.2, previous.3, previous.4)
             .map_err(store_error)?;
         if let Err(restore) = state.rebuild_runtime().await {
             return Err(store_error(format!(
@@ -2190,6 +2492,71 @@ pub async fn set_model_enabled(
             })?;
         return Err(runtime_error(error));
     }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelPriceInput {
+    model_id: String,
+    input_micro_usd_per_million: Option<u64>,
+    cached_input_micro_usd_per_million: Option<u64>,
+    output_micro_usd_per_million: Option<u64>,
+}
+
+pub async fn set_model_price(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelPriceInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let price = match (
+        input.input_micro_usd_per_million,
+        input.cached_input_micro_usd_per_million,
+        input.output_micro_usd_per_million,
+    ) {
+        (Some(input), cached_input, Some(output))
+            if input <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+                && cached_input.unwrap_or(input) <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
+                && output <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION =>
+        {
+            Some(ApiModelPriceOverride {
+                input_micro_usd_per_million: input,
+                cached_input_micro_usd_per_million: Some(cached_input.unwrap_or(input)),
+                output_micro_usd_per_million: output,
+            })
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(ManagementError::validation(
+                "model_price_invalid",
+                "input, cached input, and output model prices must be valid",
+            ));
+        }
+    };
+    let requested = input.model_id.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(ManagementError::validation(
+            "model_id_invalid",
+            "model id is invalid",
+        ));
+    }
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case(requested))
+        .map(|model| model.id.to_ascii_lowercase())
+        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let mut overrides = state.store.model_price_overrides().map_err(store_error)?;
+    if let Some(price) = price {
+        overrides.insert(canonical, price);
+    } else {
+        overrides.remove(&canonical);
+    }
+    state
+        .store
+        .set_model_price_overrides(overrides)
+        .map_err(store_error)?;
     state.snapshot().map(Json).map_err(store_error)
 }
 
@@ -2435,7 +2802,10 @@ fn utc_calendar_day_bounds(now_ms: u64) -> (u64, u64) {
 
 #[cfg(test)]
 mod usage_range_tests {
-    use super::utc_calendar_day_bounds;
+    use super::{
+        normalize_batch_account, parse_batch_import, parse_batch_import_input,
+        utc_calendar_day_bounds, BatchImportPreviewInput,
+    };
 
     #[test]
     fn daily_usage_uses_utc_calendar_day() {
@@ -2443,6 +2813,35 @@ mod usage_range_tests {
         let now = 20 * DAY_MS + 12_345;
 
         assert_eq!(utc_calendar_day_bounds(now), (20 * DAY_MS, 21 * DAY_MS));
+    }
+
+    #[test]
+    fn batch_import_parses_raw_token_lines() {
+        let (_, values, _, _) =
+            parse_batch_import("Bearer header.payload.signature\nat-opaque-token").unwrap();
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0]["access_token"], "header.payload.signature");
+        assert_eq!(values[1]["access_token"], "at-opaque-token");
+    }
+
+    #[test]
+    fn batch_import_keeps_valid_documents_when_one_is_malformed() {
+        let (_, values, _, _) = parse_batch_import_input(BatchImportPreviewInput {
+            content: None,
+            documents: vec![
+                r#"{"account_id":"account-one","access_token":"access-one"}"#.into(),
+                r#"{"access_token":"truncated""#.into(),
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(values.len(), 2);
+        assert!(normalize_batch_account(values[0].clone()).is_ok());
+        assert_eq!(
+            normalize_batch_account(values[1].clone()).err().unwrap().0,
+            "malformed_json"
+        );
     }
 }
 
@@ -2857,10 +3256,17 @@ fn valid_weight(value: u32) -> Result<u32, ManagementError> {
         .ok_or_else(|| validation_error("weight must be positive"))
 }
 
-fn generate_pool_key() -> String {
-    let mut bytes = [0_u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    format!("zrs_{}", URL_SAFE_NO_PAD.encode(bytes))
+fn reject_system_key_mutation(record: &GatewayKeyRecord) -> Result<(), ManagementError> {
+    if record.system {
+        return Err(ManagementError::new(
+            StatusCode::CONFLICT,
+            "system_key_managed",
+            "system client key is managed automatically",
+            "keys",
+            false,
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_not_server_self_source(

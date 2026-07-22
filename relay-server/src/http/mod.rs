@@ -32,7 +32,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/pool/members", post(management_api::set_pool_membership))
         .route(
             "/pool/quota/refresh",
-            post(management_api::refresh_pool_accounts),
+            post(management_api::refresh_all_account_quotas),
         )
         .route("/accounts/export", post(management_api::export_accounts))
         .route(
@@ -81,6 +81,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             get(management_api::list_keys).post(management_api::create_key),
         )
         .route(
+            "/profile/credential",
+            get(management_api::profile_credential),
+        )
+        .route(
             "/keys/{id}",
             patch(management_api::update_key).delete(management_api::delete_key),
         )
@@ -93,6 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/models", get(management_api::models))
         .route("/models/rules", post(management_api::set_model_enabled))
+        .route("/models/prices", post(management_api::set_model_price))
         .route(
             "/usage",
             get(management_api::usage).delete(management_api::clear_usage),

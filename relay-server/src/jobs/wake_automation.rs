@@ -14,7 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 use zenith_relay_core::{
-    accounts::{AccountAuthMode, AccountIdentity, AccountRecord},
+    accounts::{AccountAuthMode, AccountIdentity, AccountRecord, CodexIdentityEnvelope},
     automations::{
         model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
         WakeCompletionOutcome, WakeCoordinator, WakeModel, WakePermit,
@@ -135,7 +135,7 @@ async fn execute_inner(
     let tokens = state.prepare_account_tokens(&account.id).await?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
         .map_err(|_| "wake_access_token_invalid".to_string())?;
-    let account_id = HeaderValue::from_str(&credential.chatgpt_account_id)
+    let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
     let proxy = account_proxy_config(state, &credential)
         .map_err(|_| "wake_proxy_unavailable".to_string())?;
@@ -150,19 +150,20 @@ async fn execute_inner(
     }
     .build()
     .map_err(|_| "wake_client_init".to_string())?;
-    let response = client
-        .post(&credential.responses_url)
-        .header(AUTHORIZATION, authorization)
-        .header("chatgpt-account-id", account_id)
-        .header("originator", "codex_cli_rs")
-        .json(&serde_json::json!({
-            "model": permit.model_id,
-            "input": WAKE_PROMPT,
-            "stream": false,
-            "max_output_tokens": permit.output_token_cap,
-            "reasoning": { "effort": "minimal" },
-            "tools": []
-        }))
+    let response = identity
+        .apply(
+            client
+                .post(&credential.responses_url)
+                .header(AUTHORIZATION, authorization)
+                .json(&serde_json::json!({
+                    "model": permit.model_id,
+                    "input": WAKE_PROMPT,
+                    "stream": false,
+                    "max_output_tokens": permit.output_token_cap,
+                    "reasoning": { "effort": "minimal" },
+                    "tools": []
+                })),
+        )
         .send()
         .await
         .map_err(|_| "wake_transport".to_string())?;

@@ -10,24 +10,28 @@ use std::{
     sync::{atomic::Ordering, mpsc, Arc},
     time::Duration,
 };
+#[cfg(test)]
+use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
+    account_candidate_health,
     accounts::{
-        AccountAuthState, AccountHealthState, TokenPersistenceAdapter, TokenPersistenceFailure,
-        TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+        reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
+        AccountUsageState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
+        TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
     },
     protocol::{
-        AccountRoutingExclusion, AccountSummary, GatewaySummary, KeySummary, ProxyMode,
-        RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+        operational_status, AccountRoutingExclusion, AccountSummary, GatewaySummary, KeySummary,
+        OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
     },
-    ApiEquivalentSummary, CandidateHealth, CandidateQuota, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeAccount, RuntimeAccountAuth,
-    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent,
+    quota_stale_after_ms_for_interval, ApiEquivalentSummary, CandidateHealth, CandidateKind,
+    CandidateQuota, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+    ProxyConfig, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
+    UsageCallback, UsageEvent,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
-const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
 const USAGE_QUEUE_CAPACITY: usize = 16_384;
 const USAGE_BATCH_SIZE: usize = 256;
 
@@ -63,14 +67,40 @@ impl AppState {
             .map_err(|error| error.to_string())
     }
 
+    pub async fn recover_account_tokens_after_unauthorized(
+        self: &Arc<Self>,
+        account_id: &str,
+    ) -> Result<TokenSet, String> {
+        let persistence = ServerTokenPersistence {
+            state: self.clone(),
+        };
+        self.token_authority
+            .invalidate_access_and_persist(account_id, now_ms(), &persistence)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.prepare_account_tokens(account_id).await
+    }
+
     pub async fn rebuild_runtime(self: &Arc<Self>) -> Result<(), String> {
         let source_records = self.store.sources()?;
         let account_records = self.store.accounts()?;
-        let key_records = self.store.keys()?;
+        let key_records = self
+            .store
+            .keys()?
+            .into_iter()
+            .filter(|key| key.enabled)
+            .collect::<Vec<_>>();
         let hidden_models = self.store.hidden_models()?;
-        let use_free_accounts = self.store.quota_policy()?.2;
-        let (max_retry_candidates, routing_strategy, default_service_tier, image_base_model) =
-            self.store.routing_policy()?;
+        let (quota_refresh_interval_seconds, _, use_free_accounts) = self.store.quota_policy()?;
+        let quota_stale_after_ms =
+            quota_stale_after_ms_for_interval(quota_refresh_interval_seconds);
+        let (
+            max_retry_candidates,
+            routing_strategy,
+            default_service_tier,
+            _,
+            subscription_plan_order,
+        ) = self.store.routing_policy()?;
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -130,7 +160,18 @@ impl AppState {
                 &credential,
                 proxy,
                 use_free_accounts,
+                quota_stale_after_ms,
             ));
+        }
+
+        if !sources
+            .iter()
+            .any(|source| source.enabled && !source.draining)
+            && !accounts
+                .iter()
+                .any(|account| account.enabled && !account.draining)
+        {
+            return self.replace_runtime(None);
         }
 
         let mut keys = Vec::new();
@@ -166,11 +207,13 @@ impl AppState {
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
                 routing_strategy,
+                subscription_plan_order,
                 hidden_models,
                 default_service_tier,
-                quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
-                image_base_model,
+                quota_stale_after_ms,
+                image_base_model: None,
                 response_affinity_store: Some(self.store.clone()),
+                provider_storm_breaker: true,
             },
             usage,
         )
@@ -223,10 +266,27 @@ impl AppState {
         let account_proxy_required = self.store.account_proxy_required()?;
         let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
             self.store.quota_policy()?;
-        let (max_retry_candidates, routing_strategy, default_service_tier, image_base_model) =
-            self.store.routing_policy()?;
+        let (
+            max_retry_candidates,
+            routing_strategy,
+            default_service_tier,
+            image_base_model,
+            subscription_plan_order,
+        ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
+        let model_price_overrides = self.store.model_price_overrides()?;
         let equivalents = self.store.api_equivalents()?;
+        let runtime = self.runtime()?;
+        let running = self.store.gateway_enabled()? && runtime.is_some();
+        let routing_order = runtime
+            .as_ref()
+            .map(|runtime| runtime.candidate_runtime_order())
+            .unwrap_or_default();
+        let source_runtime = routing_order
+            .iter()
+            .filter(|candidate| candidate.kind == CandidateKind::ApiSource)
+            .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
+            .collect::<HashMap<_, _>>();
         let mut warnings = Vec::new();
         if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
             warnings.push("usage_persistence_failed".to_string());
@@ -241,6 +301,12 @@ impl AppState {
                 Ok(source_summary(
                     record,
                     secret_available,
+                    (running && record.in_pool).then(|| {
+                        source_runtime
+                            .get(record.id.as_str())
+                            .copied()
+                            .unwrap_or(false)
+                    }),
                     equivalents
                         .get(&identity_hint(&record.id))
                         .copied()
@@ -281,23 +347,33 @@ impl AppState {
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let key_summaries = keys.iter().map(key_summary).collect::<Vec<_>>();
-        let models = zenith_relay_core::protocol::pool_model_summaries(
+        let key_summaries = keys
+            .iter()
+            .filter(|record| !record.system)
+            .map(key_summary)
+            .collect::<Vec<_>>();
+        let mut models = zenith_relay_core::protocol::pool_model_summaries(
             &source_summaries,
             &account_summaries,
             &hidden_models,
         );
+        for model in &mut models {
+            if let Some(price) = model_price_overrides.get(&model.id.to_ascii_lowercase()) {
+                model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
+                model.cached_input_micro_usd_per_million = Some(
+                    price
+                        .cached_input_micro_usd_per_million
+                        .unwrap_or(price.input_micro_usd_per_million),
+                );
+                model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
+                model.custom_price = true;
+            }
+        }
         let visible_model_ids = models
             .iter()
             .filter(|model| model.enabled)
             .map(|model| model.id.clone())
             .collect::<Vec<_>>();
-        let runtime = self.runtime()?;
-        let running = self.store.gateway_enabled()? && runtime.is_some();
-        let routing_order = runtime
-            .as_ref()
-            .map(|runtime| runtime.candidate_runtime_order())
-            .unwrap_or_default();
         Ok(RuntimeStateSnapshot {
             schema_version: SERVER_SCHEMA_VERSION,
             runtime_target: RuntimeTargetSummary {
@@ -316,27 +392,21 @@ impl AppState {
                 candidate_count: source_summaries
                     .iter()
                     .filter(|record| {
-                        record.enabled
-                            && record.in_pool
-                            && !record.draining
-                            && record.secret_available
+                        record.in_pool && record.operational_status == OperationalStatus::Rotation
                     })
                     .count()
                     + account_summaries
                         .iter()
                         .filter(|record| {
-                            record.enabled
-                                && record.in_pool
-                                && !record.draining
-                                && record.secret_available
-                                && record.proxy_available
-                                && record.routing_exclusion.is_none()
+                            record.in_pool
+                                && record.operational_status == OperationalStatus::Rotation
                         })
                         .count(),
                 visible_model_ids,
-                max_retry_candidates: Some(max_retry_candidates),
-                routing_strategy: Some(routing_strategy),
-                default_service_tier: Some(default_service_tier),
+                max_retry_candidates,
+                routing_strategy,
+                subscription_plan_order,
+                default_service_tier,
                 image_base_model,
                 models,
                 common_proxy_configured,
@@ -345,6 +415,7 @@ impl AppState {
                 quota_refresh_interval_seconds,
                 quota_request_timeout_seconds,
                 use_free_accounts,
+                chatgpt_interface_quota_reserve_basis_points: None,
                 routing_order,
             },
             platform: std::env::consts::OS.to_string(),
@@ -390,24 +461,68 @@ fn persist_usage_batch(
             state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
             continue;
         };
+        let credential = state
+            .vault
+            .load(&account.secret_ref)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+        let access_state = credential
+            .as_ref()
+            .map_or(AccountAccessState::Failed, |value| {
+                if value.refresh_token.is_some() {
+                    AccountAccessState::Refreshable
+                } else {
+                    AccountAccessState::AccessOnly
+                }
+            });
+        let successful_auth_state = credential.as_ref().map(|value| {
+            if value.refresh_token.is_some() {
+                AccountAuthState::Active
+            } else {
+                AccountAuthState::DegradedAccessOnly
+            }
+        });
         let mut natural_use_at_ms = None;
         for queued in events {
             let event = &queued.event;
-            if event.success {
-                account.last_used_at_ms = Some(queued.observed_at_ms);
-                account.health = AccountHealthState::Healthy;
+            if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
+                snapshot.updated_at_ms.unwrap_or_default()
+                    >= account.quota.updated_at_ms.unwrap_or_default()
+            }) {
+                account.quota = snapshot.clone();
+            }
+            let update = reduce_account_usage(
+                AccountUsageState {
+                    auth_state: account.auth_state,
+                    health: account.health,
+                    last_error_code: account.last_error_code.clone(),
+                    last_used_at_ms: account.last_used_at_ms,
+                },
+                AccountUsageObservation {
+                    success: event.success,
+                    http_status: event.http_status,
+                    error_category: event.error_category.as_deref(),
+                    affects_account: event.affects_account_state(),
+                },
+                queued.observed_at_ms,
+                (event.http_status == 401).then_some(access_state),
+                if event.success {
+                    successful_auth_state
+                } else {
+                    None
+                },
+            );
+            account.auth_state = update.state.auth_state;
+            account.health = update.state.health;
+            account.last_error_code = update.state.last_error_code;
+            account.last_used_at_ms = update.state.last_used_at_ms;
+            if update.reset_runtime_failures {
+                account.cooldowns.clear();
                 account.consecutive_failures = 0;
-                account.last_error_code = None;
+            }
+            if event.success {
                 natural_use_at_ms = Some(queued.observed_at_ms);
-            } else if event.cooldown_scope.is_some()
-                || event.retry_at_ms.is_some()
-                || event.consecutive_failures.is_some()
-            {
-                account.consecutive_failures = event
-                    .consecutive_failures
-                    .unwrap_or_else(|| account.consecutive_failures.saturating_add(1));
-                account.health = AccountHealthState::Degraded;
-                account.last_error_code = event.error_category.clone();
             }
         }
         updated_accounts.push(account);
@@ -527,15 +642,10 @@ fn runtime_account(
     credential: &AccountCredential,
     proxy: Option<ProxyConfig>,
     use_free_accounts: bool,
+    quota_stale_after_ms: u64,
 ) -> RuntimeAccount {
-    let quota = candidate_quota(&record.quota, now_ms());
-    // Older server records predate the persisted creation timestamp; token issue time is the
-    // only stable ordering signal available for those records.
-    let created_at_ms = if record.created_at_ms > 0 {
-        record.created_at_ms
-    } else {
-        credential.issued_at_ms
-    };
+    let health = candidate_health(&record);
+    let quota = candidate_quota(&record.quota, now_ms(), quota_stale_after_ms);
     let enabled = record.enabled
         && record.in_pool
         && (use_free_accounts || !record.subscription.is_free_plan());
@@ -551,10 +661,12 @@ fn runtime_account(
         weight: record.weight,
         allowed_models: record.allowed_models,
         excluded_models: record.excluded_models,
-        health: candidate_health(record.auth_state, record.health),
+        health,
         quota,
         quota_updated_at_ms: record.quota.updated_at_ms,
-        created_at_ms,
+        quota_snapshot: record.quota.clone(),
+        subscription_plan_type: record.subscription.plan_type.clone(),
+        subscription_expires_at_ms: record.subscription.active_until_ms,
         last_used_at_ms: record.last_used_at_ms,
         cooldowns: record.cooldowns,
         consecutive_failures: record.consecutive_failures,
@@ -577,44 +689,27 @@ fn runtime_key(record: GatewayKeyRecord, secret: String) -> RuntimeMixedLocalKey
     }
 }
 
-fn candidate_health(auth: AccountAuthState, health: AccountHealthState) -> CandidateHealth {
-    match auth {
-        AccountAuthState::RequiresReauth(_) => return CandidateHealth::ReauthRequired,
-        AccountAuthState::Error => return CandidateHealth::Unhealthy,
-        _ => {}
-    }
-    match health {
-        AccountHealthState::Unknown => CandidateHealth::Unknown,
-        AccountHealthState::Healthy => CandidateHealth::Healthy,
-        AccountHealthState::Degraded => CandidateHealth::Degraded,
-        AccountHealthState::Unhealthy => CandidateHealth::Unhealthy,
-        AccountHealthState::Blocked => CandidateHealth::Blocked,
-    }
+fn candidate_health(record: &ServerAccountRecord) -> CandidateHealth {
+    account_candidate_health(
+        record.auth_state,
+        record.health,
+        record.subscription.status,
+        record.last_error_code.as_deref(),
+    )
 }
 
-fn candidate_quota(quota: &zenith_relay_core::quota::QuotaSnapshot, now_ms: u64) -> CandidateQuota {
-    if quota
-        .updated_at_ms
-        .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > QUOTA_STALE_AFTER_MS)
-    {
-        return CandidateQuota::Stale;
-    }
-    let available = quota
-        .primary
-        .iter()
-        .chain(quota.secondary.iter())
-        .filter_map(|window| window.available_basis_points)
-        .min();
-    match available {
-        Some(0) => CandidateQuota::Exhausted,
-        Some(value) => CandidateQuota::Available(u64::from(value)),
-        None => CandidateQuota::Unknown,
-    }
+fn candidate_quota(
+    quota: &zenith_relay_core::quota::QuotaSnapshot,
+    now_ms: u64,
+    stale_after_ms: u64,
+) -> CandidateQuota {
+    CandidateQuota::from_snapshot(quota, now_ms, stale_after_ms)
 }
 
 fn source_summary(
     record: &SourceRecord,
     secret_available: bool,
+    runtime_available: Option<bool>,
     api_equivalent: ApiEquivalentSummary,
 ) -> SourceSummary {
     SourceSummary {
@@ -623,6 +718,12 @@ fn source_summary(
         enabled: record.enabled,
         in_pool: record.in_pool,
         draining: record.draining,
+        operational_status: operational_status(
+            record.enabled,
+            false,
+            !record.draining && secret_available,
+            runtime_available,
+        ),
         base_url: record.base_url.clone(),
         wire_api: record.wire_api,
         models: record.models.clone(),
@@ -646,6 +747,19 @@ fn account_summary(
 ) -> AccountSummary {
     let routing_exclusion = (!use_free_accounts && record.subscription.is_free_plan())
         .then_some(AccountRoutingExclusion::FreePlanPolicy);
+    let quota_wait = routing_exclusion.is_some()
+        || record.quota.limit_reached
+        || record
+            .quota
+            .primary
+            .iter()
+            .chain(record.quota.secondary.iter())
+            .any(|window| window.available_basis_points == Some(0));
+    let configured_available = !record.draining
+        && secret_available
+        && proxy_available
+        && routing_exclusion.is_none()
+        && candidate_health(record).is_eligible();
     AccountSummary {
         id: record.id.clone(),
         label: record.label.clone(),
@@ -653,6 +767,12 @@ fn account_summary(
         enabled: record.enabled,
         in_pool: record.in_pool,
         draining: record.draining,
+        operational_status: operational_status(
+            record.enabled,
+            quota_wait,
+            configured_available,
+            None,
+        ),
         auth_state: record.auth_state,
         health: format!("{:?}", record.health).to_ascii_lowercase(),
         models: record.models.clone(),
@@ -664,6 +784,7 @@ fn account_summary(
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),
         secret_available,
+        remote_location: None,
         proxy_mode,
         proxy_available,
         routing_exclusion,
@@ -676,7 +797,7 @@ fn key_summary(record: &GatewayKeyRecord) -> KeySummary {
         id: record.id.clone(),
         label: record.label.clone(),
         enabled: record.enabled,
-        system: false,
+        system: record.system,
         source_ids: record.source_ids.clone(),
         account_ids: record.account_ids.clone(),
         allowed_models: record.allowed_models.clone(),
@@ -979,11 +1100,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            candidate_quota(&quota, 2_000),
+            candidate_quota(&quota, 2_000, zenith_relay_core::QUOTA_STALE_AFTER_MS),
             CandidateQuota::Available(2_500)
         );
         assert_eq!(
-            candidate_quota(&quota, QUOTA_STALE_AFTER_MS + 1_001),
+            candidate_quota(
+                &quota,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS + 1_001,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            ),
             CandidateQuota::Stale
         );
     }
@@ -1029,8 +1154,26 @@ mod tests {
             proxy_url: None,
         };
 
-        assert!(!runtime_account(record.clone(), &credential, None, false).enabled);
-        assert!(runtime_account(record.clone(), &credential, None, true).enabled);
+        assert!(
+            !runtime_account(
+                record.clone(),
+                &credential,
+                None,
+                false,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            )
+            .enabled
+        );
+        assert!(
+            runtime_account(
+                record.clone(),
+                &credential,
+                None,
+                true,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            )
+            .enabled
+        );
         let summary = account_summary(
             &record,
             true,
@@ -1043,6 +1186,7 @@ mod tests {
             summary.routing_exclusion,
             Some(AccountRoutingExclusion::FreePlanPolicy)
         );
+        assert_eq!(summary.operational_status, OperationalStatus::Unavailable);
         assert!(summary.enabled);
         assert!(summary.in_pool);
     }

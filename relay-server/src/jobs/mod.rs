@@ -5,6 +5,7 @@ mod wake_automation;
 use crate::state::{AppState, ServerAccountRecord};
 use futures_util::{stream, StreamExt};
 use std::sync::Arc;
+use zenith_relay_core::accounts::automatic_quota_refresh_eligible;
 
 const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
 
@@ -19,7 +20,7 @@ pub(crate) async fn refresh_account_now(
     account: ServerAccountRecord,
 ) -> Result<ServerAccountRecord, String> {
     let (updated, transitions) =
-        quota_refresh::refresh_account_metadata(state, account, false).await?;
+        quota_refresh::refresh_account_metadata(state, account, true, true).await?;
     if !transitions.is_empty() {
         wake_automation::schedule_transitions(state, &updated, &transitions).await?;
     }
@@ -27,18 +28,49 @@ pub(crate) async fn refresh_account_now(
     Ok(updated)
 }
 
-pub(crate) async fn refresh_pool_accounts_now(
+pub(crate) async fn refresh_all_accounts_now(
+    state: &Arc<AppState>,
+) -> Result<(usize, usize), String> {
+    let accounts = state.store.accounts()?;
+    refresh_accounts_now(state, accounts, true).await
+}
+
+pub(crate) async fn refresh_automatic_accounts_now(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), String> {
     let accounts = state
         .store
         .accounts()?
         .into_iter()
-        .filter(|account| account.in_pool && account.enabled && !account.draining)
+        .filter(|account| {
+            automatic_quota_refresh_eligible(
+                account.enabled,
+                account.in_pool,
+                account.draining,
+                account.auth_state,
+                account.health,
+            )
+        })
         .collect::<Vec<_>>();
+    refresh_accounts_now(state, accounts, false).await
+}
+
+async fn refresh_accounts_now(
+    state: &Arc<AppState>,
+    accounts: Vec<ServerAccountRecord>,
+    force_subscription_refresh: bool,
+) -> Result<(usize, usize), String> {
     let results = stream::iter(accounts.into_iter().map(|account| {
         let state = Arc::clone(state);
-        async move { quota_refresh::refresh_account_metadata(&state, account, false).await }
+        async move {
+            quota_refresh::refresh_account_metadata(
+                &state,
+                account,
+                force_subscription_refresh,
+                false,
+            )
+            .await
+        }
     }))
     .buffer_unordered(QUOTA_REFRESH_BATCH_SIZE)
     .collect::<Vec<_>>()

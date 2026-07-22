@@ -2,6 +2,8 @@ use crate::{
     config::Config,
     store::{Store, Vault},
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -15,9 +17,10 @@ use zenith_relay_core::{
     CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 20;
+pub const SERVER_SCHEMA_VERSION: u32 = 21;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
+pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +77,8 @@ pub struct GatewayKeyRecord {
     pub id: String,
     pub label: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub system: bool,
     pub secret_ref: String,
     pub source_ids: Option<Vec<String>>,
     pub account_ids: Option<Vec<String>>,
@@ -127,6 +132,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config, store: Arc<Store>, vault: Arc<Vault>) -> Result<Arc<Self>, String> {
+        ensure_system_gateway_key(&store, &vault)?;
         let server_id = store.server_id()?;
         let fingerprint = identity_fingerprint(&server_id);
         Ok(Arc::new(Self {
@@ -167,15 +173,53 @@ impl AppState {
     }
 }
 
+fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String> {
+    let existing = store.keys()?.into_iter().find(|key| key.system);
+    let changed = existing.as_ref().is_none_or(|key| !key.enabled);
+    let mut record = existing.unwrap_or_else(|| GatewayKeyRecord {
+        id: SYSTEM_GATEWAY_KEY_ID.to_string(),
+        label: "ChatGPT".to_string(),
+        enabled: true,
+        system: true,
+        secret_ref: format!("key:{SYSTEM_GATEWAY_KEY_ID}"),
+        source_ids: None,
+        account_ids: None,
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        model_prefix: None,
+        created_at_ms: now_ms(),
+        last_used_at_ms: None,
+    });
+    record.enabled = true;
+    let created_secret = vault.load(&record.secret_ref)?.is_none();
+    if created_secret {
+        vault.save(&record.secret_ref, &generate_pool_key())?;
+    }
+    if changed {
+        if let Err(error) = store.save_key(&record) {
+            if created_secret {
+                let _ = vault.delete(&record.secret_ref);
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn generate_pool_key() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    format!("zrs_{}", URL_SAFE_NO_PAD.encode(bytes))
+}
+
 pub fn identity_hint(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))[..12].to_string()
+    hex::encode(Sha256::digest(value.as_bytes()))[..12].to_string()
 }
 
 pub fn identity_fingerprint(server_id: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("zenith-relay-server\0{server_id}").as_bytes())
-    )
+    hex::encode(Sha256::digest(
+        format!("zenith-relay-server\0{server_id}").as_bytes(),
+    ))
 }
 
 pub fn now_ms() -> u64 {
