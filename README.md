@@ -143,4 +143,5 @@ Public API documentation: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
 
 ## License
 
-MIT
+Copyright (C) 2026 FORLE. Licensed under
+[GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).

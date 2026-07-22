@@ -1,9 +1,12 @@
 param(
     [string]$Source = (Join-Path $PSScriptRoot "..\..\src-tauri\target\release\zenith-relay.exe"),
-    [string]$Destination = (Join-Path ([Environment]::GetFolderPath("Desktop")) "Zenith Relay.exe")
+    [string]$Destination = (Join-Path ([Environment]::GetFolderPath("Desktop")) "Zenith Relay.exe"),
+    [ValidateRange(0, 60)]
+    [int]$DelaySeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
+if ($DelaySeconds -gt 0) { Start-Sleep -Seconds $DelaySeconds }
 $sourcePath = (Resolve-Path -LiteralPath $Source).Path
 $expectedSource = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\..\src-tauri\target\release\zenith-relay.exe"))
 $destinationPath = [System.IO.Path]::GetFullPath($Destination)

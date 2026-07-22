@@ -250,6 +250,7 @@ POST /sources/{id}/test
 GET  /quota
 POST /quota/settings
 GET  /models
+GET  /profile/credential
 POST /gateway/start
 POST /gateway/stop
 GET  /usage
@@ -260,6 +261,13 @@ DELETE /wake-tasks/{id}
 POST /wake-tasks/{id}/test
 GET  /wake-history
 ```
+
+`profile_attach` exposes `GET /profile/credential` only through management
+authentication. The server creates one encrypted system client key, keeps it
+out of normal user key controls, and returns it only for an explicit profile
+attach. The desktop Rust backend must pin the returned `baseUrl` to the saved
+server origin and must never pass the secret through React state, logs, usage,
+or support bundles.
 
 `account_batch_import` accepts a bounded JSON object, JSON array, JSON Lines,
 or portable version-1 object with an `accounts[]` array. Preview responses are
@@ -288,8 +296,9 @@ IDs in order and reports unused lines.
 
 New connections default to `inPool=false`. `POST /pool/members` changes
 membership atomically without deleting the underlying connection.
-`POST /pool/quota/refresh` refreshes only enabled, non-draining OAuth members
-with bounded concurrency. `POST /quota/settings` accepts a background interval
+`POST /pool/quota/refresh` refreshes every stored OAuth account with bounded
+concurrency, regardless of pool membership or enabled state. Automatic refresh
+only checks viable enabled pool members. `POST /quota/settings` accepts a background interval
 from 120 through 3600 seconds and a network timeout from 10 through 20 seconds;
 both values persist in local/server runtime state and are returned in the
 redacted gateway snapshot.
@@ -659,19 +668,21 @@ Selection:
 3. If `previous_response_id` resolves to a response binding, require the
    creating candidate; never replay that continuation through another account.
 4. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-5. Prefer the lowest active-request count so a parallel request does not wait
-   behind a busy account.
-6. In adaptive mode, choose the greatest known minimum remaining quota across
+5. In automatic mode, choose the greatest known minimum remaining quota across
    the refreshed primary and secondary windows. A protected OAuth account uses
-   only quota above its reserve. Equal-quota accounts rotate by recent use and
-   dispatch count. Subscription, token totals, measured speed, manual priority,
+   only quota above its reserve.
+6. Between equal-quota accounts, prefer the lowest active-request count, then
+   rotate by dispatch count and stable id. Last-used time, subscription, token
+   totals, measured speed, manual priority,
    and manual weight do not affect OAuth selection. API sources retain their
    explicit primary/stabilizer/reserve role and traffic share within one role.
-7. For API sources only, a successful `prompt_cache_key` binding may replace
-   that baseline when its source has the same role and active-request count.
-   OAuth accounts always keep normal quota and load rotation. The binding is
-   keyed by local API key, resolved model, and prompt cache key; it is
-   memory-only, bounded to 4096 entries, and expires after one hour.
+   Highest-quota mode stops after quota and the stable-id tie-break, ignoring
+   active load and dispatch history.
+7. A successful `prompt_cache_key` binding may replace that baseline when its
+   candidate has the same routing role and active-request count and remains
+   within 500 basis points of the baseline quota. The binding is keyed by local
+   API key, resolved model, and prompt cache key; it is memory-only, bounded to
+   4096 entries, expires after one hour, and is created only after success.
 8. Exclude already tried candidates for this request.
 9. If all candidates are cooling down, return cooldown diagnostic.
 
@@ -780,9 +791,12 @@ Record:
 
 ```text
 request_id
+attempt
 local_key_id
 source_id
 account_id
+candidate_kind
+candidate_hint or current safe label
 requested_model
 resolved_model
 wire_api
@@ -791,16 +805,31 @@ http_status
 error_category
 latency_ms
 ttft_ms
+generation_ms
 input_tokens
+cached_input_tokens
+cache_write_input_tokens
+reasoning_tokens
 output_tokens
 total_tokens
+created_at_ms
 ```
 
+Storage contains exactly one row per `request_id`. The runtime may publish an
+event for every internal candidate attempt so account health still observes
+each failure, but the usage sink replaces that row with the greatest observed
+`attempt`. A successful fallback therefore replaces its failed precursor; if
+all candidates fail, only the last failure remains. Request and error totals
+count client requests, not internal attempts.
+
 Usage publishing is async. Sink failure must not fail user request.
-Local UI groups recorded requests by the current account/source label and shows
-request count plus input, output, and total tokens. The remote management API
-keeps the stored candidate id hashed; it may attach the label already exposed
-by the current runtime snapshot, but never a raw provider account id or email.
+Local and remote hosts publish the same `UsageEvent` and return the same
+`UsagePage`, `UsageTotals`, `UsageGroup`, and `UsageBucket` management DTOs.
+The UI groups recorded requests by model and current account/source label and
+shows request/success count, token breakdown, latency, TTFT, generation time,
+visible output speed, and API equivalent. The remote management API keeps the
+stored candidate id hashed; it may attach the label already exposed by the
+current runtime snapshot, but never a raw provider account id or email.
 Relay does not estimate monetary API cost without an authoritative,
 provider-specific pricing contract.
 
@@ -820,6 +849,26 @@ models and totals without a usable input/output split increase
 `unpriced_tokens`; Relay never assigns them an invented price. The catalog
 stores its source URL, verification date, and version so price updates remain
 reviewable and centralized.
+
+Remote price overrides are persisted and applied by the server. The desktop
+may edit them through the management protocol, but reconnecting must not apply
+a stale local copy. Remote queries calculate every row group and time bucket
+from server-stored token fields using the same core estimator as local mode.
+
+Visible generation speed is calculated only when both visible output token
+count and generation duration are known:
+
+```text
+speed_tokens_per_second = speed_output_tokens * 1000 / speed_duration_ms
+```
+
+`speed_output_tokens` excludes reasoning tokens. Aggregate speed is calculated
+from aggregate output/duration counters, not by averaging already-rounded row
+speeds. Missing timing produces unknown, not zero.
+
+Closing the desktop application does not pause remote usage persistence. A
+request completed while the launcher is closed must appear exactly once after
+reconnect, including token, timing, speed, error, and API-equivalent fields.
 
 ## Request Log Query Contract
 

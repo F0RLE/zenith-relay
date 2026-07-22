@@ -63,8 +63,8 @@ P0. Baseline verification, module boundaries, persisted-store versioning,
     migrations, platform adapter, typed state/errors, and test harness.
 P1. One compatible API source through one local `/v1` endpoint, local key auth,
     model discovery, streaming, usage capture, and client attach/restore.
-P2. Unified multi-source scheduler with hard filters, priority, quota checks,
-    cooldown, LRU, weight tie-break, affinity, bounded retry, and model registry.
+P2. Unified multi-source scheduler with hard filters, source roles, quota-first
+    OAuth selection, source cooldowns, affinity, bounded retry, and model registry.
 P3. Codex/OpenAI OAuth login/import, token authority, quota/subscription refresh,
     account executor, account health, and quota wake automation.
 P4. User-managed remote runtime with encrypted storage, management protocol,

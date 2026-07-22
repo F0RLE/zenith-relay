@@ -767,32 +767,41 @@ weight
 allowed/excluded models
 ```
 
-The pool exposes two routing strategies: adaptive capacity and oldest eligible
-account. Adaptive order is:
+The pool exposes automatic, highest-quota, subscription-expiry, and
+subscription-plan strategies. Automatic order is:
 
 ```text
 hard filters
 mandatory previous-response binding
 API source role tier
-active requests normalized by traffic share and available quota after reserve
 OAuth preference inside the stabilizer tier
-committed dispatch balance normalized by the same effective share
-greatest minimum known quota reserve when balances are equal
-least recently used, manual priority, weight, and stable id
+greatest current known quota after the ChatGPT-interface reserve
+fewest active requests when quota is equal
+committed dispatch balance when quota and active load are equal
+stable id
 ```
 
-The oldest-account strategy applies all hard gates and active-load checks first,
-then prefers the earliest account creation time. It never revives an exhausted,
-busy, cooling-down, disabled, or out-of-scope account.
+Highest-quota uses the same hard filters, source roles, OAuth preference, and
+quota comparison, then a stable id. It deliberately ignores active load and
+dispatch history, so the account with the greatest quota stays selected.
+
+Subscription-expiry and subscription-plan strategies apply the same hard gates,
+then follow their configured group order. An active OAuth account remains usable
+by multiple chats; local last-used timestamps and cooldown timers never reorder it.
 
 The scheduler makes this choice for every request. `API first` sources run before
-OAuth accounts, `Stabilizer` sources absorb concurrent load and retryable account
-failures, and `Last resort` sources wait behind other eligible members. Traffic
-share affects concurrent distribution inside the same role tier. Sorting the
+OAuth accounts, `Stabilizer` sources remain in the same tier, and `Last resort`
+sources wait behind other eligible members. Traffic share affects API sources,
+not quota-based OAuth selection. Sorting the
 visible member list never changes runtime order. Rows use `In rotation`,
 `Waiting for quota`, `Unavailable`, and `Disabled`; a manually chosen OAuth
 account is labelled `ChatGPT interface`, keeps a 1% reserve, and is not a pinned
 pool route.
+
+The backend is the sole owner of that four-value operational status. It describes
+connection health independently of pool membership; `inPool` is a separate fact.
+Connections and Pool render `operationalStatus` from the runtime snapshot and
+never derive a second status from quota, health, proxy, or cooldown fields.
 
 Request details show the redacted routing reason and the counters used for that
 decision. This explains quota, parallel-load, response ownership, and tie-break choices
@@ -977,11 +986,23 @@ table state intact after closing.
 
 Rules:
 
+- `This computer` and `My server` render the same Usage components, columns,
+  request details, aggregates, charts, filters, and empty/error states; only
+  the backend command/data source changes;
+- Remote mode reads server-owned rows and aggregates. It never merges local
+  telemetry or displays a cached local zero as the server result;
+- when the server is disconnected, keep the last remote page visibly stale
+  and show reconnect state instead of silently replacing it with local data;
 - no prompt or response body by default;
 - no monetary estimate is shown without authoritative provider/model pricing;
 - an OpenAI `API equivalent` is allowed only from the versioned official price
   catalog and recorded split token counts, with unpriced tokens disclosed; it
   is never labeled as actual cost, subscription spend, or Zenith billing;
+- request rows/details expose latency, TTFT, generation duration, visible
+  output tokens/second, input/cache-read/cache-write/reasoning/output/total
+  tokens, and API equivalent when those values are known;
+- Remote API equivalent uses server-owned price overrides and remains present
+  after the launcher or server restarts;
 - account/source aggregates use the current safe label and keep a stable
   redacted hint when that object no longer exists;
 - raw upstream errors are redacted and collapsed;

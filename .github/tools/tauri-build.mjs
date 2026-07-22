@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { repoRoot, tauriInvocation, withZenithRustEnv } from "./tauri-env.mjs";
 
-const args = ["build", "--config", "src-tauri/tauri.conf.json"];
+const args = ["build", ...process.argv.slice(2), "--config", "src-tauri/tauri.conf.json"];
 
 if (!process.env.TAURI_SIGNING_PRIVATE_KEY) {
   args.push(

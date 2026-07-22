@@ -23,8 +23,9 @@ The local Codex-compatible pool should include:
   reasoning tokens, error categories, and local estimated cost;
 - account health with last success/failure, consecutive failures, cooldowns,
   quota-limited state, and image capability status;
-- automatic routing by API-source role, active load, minimum quota reserve, LRU,
-  and final priority/weight tie-breaks; key scope covers single-account use;
+- automatic routing by API-source role, greatest remaining quota, active load
+  between equal-quota candidates, and stable tie-breaks; key scope covers
+  single-account use;
 - stream-safe retry rule: retry only before response bytes are sent.
 
 ## Implementation Risks To Avoid
@@ -99,12 +100,9 @@ zenith-relay/
           self_host.rs          custom self-host connection commands
         store/
           mod.rs
-          secret_store.rs       OS keychain/encrypted fallback references
-          settings_store.rs     non-secret JSON/TOML settings
-          migrations.rs         versioned local config migrations
-          profile_backups.rs    attach/restore backups
-          telemetry_db.rs       SQLite request logs and rollups
-          quarantine.rs         corrupt-file quarantine helpers
+          secret_store.rs       encrypted vault references and OS-held master key
+          telemetry_db.rs       SQLite state, request logs, affinity, migrations
+          vault.rs              authenticated encrypted secret file
         accounts/
           mod.rs
           account_store.rs      account records, index repair, current state
@@ -230,8 +228,8 @@ Rules:
 4. Cache-scoped locks coordinate token refresh. In-process guards coordinate
    profile writes and gateway lifecycle; stale filesystem locks expire before
    takeover.
-5. `recovery/quarantine/` keeps corrupt or unsafe files with reason metadata
-   instead of silent deletion.
+5. Corrupt durable state is never deleted or replaced automatically; startup
+   fails with a recovery error so the original files remain available.
 6. Private admin code, Zenith server secrets, and backend execution policy do
    not belong in this public repository.
 
@@ -309,20 +307,17 @@ profile_attach_status
 
 ## Storage And Migration
 
-Use separate stores instead of one JSON document:
+Use two stores instead of multiple JSON documents:
 
-- encrypted secret store for tokens and API keys;
-- JSON/TOML settings store for non-secret gateway/source/account records;
-- SQLite telemetry DB for request logs and rollups;
+- encrypted secret store for tokens and API keys, with its master key in the OS store;
+- one SQLite database for non-secret state, request logs, affinity, and rollups;
 - profile backup directory with one folder per attach/restore event.
 
-Config migrations should be versioned and idempotent. Telemetry DB can use
-append-only table migrations with `ALTER TABLE ADD COLUMN`, plus indexes for
-the filters shown in the UI.
+Database migrations are versioned and append-only. Use transactions for state
+changes and indexes for the filters shown in the UI.
 
-If the telemetry DB is corrupt or unreadable, quarantine it with timestamp and
-error metadata, then recreate an empty DB. Never delete the quarantined file
-silently.
+If the database is corrupt or unreadable, keep it in place and fail startup
+with a recovery error. Never silently recreate an empty database.
 
 ### Local File And Secret Safety
 
@@ -333,7 +328,7 @@ File access rules:
 - check symlinks/junctions before writes and after open where the OS allows it;
 - allow writes only under selected profile dirs, app data dir, or explicit user
   export paths;
-- use atomic write to temporary file plus rename for JSON/TOML settings;
+- use SQLite transactions for durable state changes;
 - use SQLite backup API for profile/history DB backups;
 - hold profile/file locks while writing client auth/config;
 - do not follow stale PID or stale lock blindly.
@@ -351,10 +346,11 @@ Secret storage rules:
 Update and rollback rules:
 
 - app updates must come from signed releases;
-- before a store migration, create a local backup and mark migration state;
-- failed migration rolls back to backup or opens recovery UI with quarantined
-  files;
-- new app versions can read at least the previous store schema;
+- run store migrations transactionally and leave source files untouched until
+  the new state is committed;
+- failed migration keeps the original data available for recovery;
+- the current flat JSON schema is imported once; older pre-release layouts are
+  unsupported;
 - old app versions must fail safely on newer unsupported schema instead of
   corrupting it.
 
@@ -528,9 +524,12 @@ Core scheduler state:
 PoolScheduler
   candidates: candidate_id -> RuntimeCandidate
   response_affinity: bounded response id -> creating candidate id (30-day TTL)
-  prompt_affinity: bounded cache key -> successful API source id (1-hour TTL)
+  prompt_affinity: bounded cache key -> successful candidate id (1-hour TTL)
   in_flight: candidate_id -> active request count
   dispatches: candidate_id -> committed request count
+  execution_fences: candidate_id -> active token-recovery count
+  capability_blocks: candidate/model pairs rejected by upstream discovery
+  provider_storm_breakers: server-only provider/model 429 windows
 
 RuntimeCandidate
   kind: OAuth account or API source
@@ -558,18 +557,26 @@ Selection contract:
 4. If a previous-response binding exists, require its creating candidate; a
    cooldown or failed preparation does not authorize cross-account replay.
 5. Apply API-source role tier: primary before OAuth/stabilizer, reserve last.
-6. Prefer the lowest active-request count so parallel work uses another free
-   candidate instead of waiting for a busy one.
-7. In adaptive mode, select the greatest known minimum remaining quota from the
+6. In automatic mode, select the greatest known minimum remaining quota from the
    latest backend refresh. A protected OAuth candidate contributes only quota
-   above its reserve. Equal-quota accounts rotate by recent use and dispatch
-   count. Subscription, token totals, measured speed, manual priority, and
+   above its reserve.
+7. Between equal-quota candidates, prefer the lowest active-request count, then
+   rotate by dispatch count and a stable identifier. Last-used time does not
+   affect routing. Subscription, token totals, measured speed, manual priority, and
    manual weight do not affect OAuth selection. API-source roles remain strict,
    with traffic share used only between API sources in the same role.
-8. For API sources only, prefer a successful `prompt_cache_key` binding when
-   its source has the same role and active-request count as the baseline. OAuth
-   accounts always retain normal quota and load rotation.
+   Highest-quota mode stops after the quota comparison and stable-id tie-break;
+   it does not use active load or dispatch history.
+8. Prefer a successful `prompt_cache_key` binding when its candidate has the
+   same role and active-request count as the baseline and remains within 500
+   basis points of the baseline quota.
 9. Exclude candidates already tried for this request.
+
+The desktop runtime and the current SQLite server runtime are single-instance.
+Prompt affinity therefore remains process-local and leases remain in-process.
+Before enabling multiple server replicas, move both leases and prompt affinity
+to the shared PostgreSQL/Redis control plane with ownership tokens and expiry;
+do not emulate distributed coordination through SQLite files.
 10. If all candidates are cooling down, return a local cooldown diagnostic with
    earliest retry time.
 
@@ -878,8 +885,8 @@ Then it applies:
 1. model, health, cooldown, quota, and Free-policy hard filters;
 2. mandatory previous-response binding;
 3. API-source role tier;
-4. active load normalized by traffic share;
-5. OAuth preference, minimum quota reserve, LRU, and final manual tie-breaks;
+4. OAuth preference and greatest remaining quota;
+5. active load and dispatch balance only between equal-quota candidates;
 6. prepared account/token refresh.
 
 Zenith should use the same logical order, but with source/account terminology:
@@ -976,33 +983,37 @@ Model pool execution:
 
 ### Routing Strategies
 
-The runtime uses one automatic strategy. A local key may narrow its scope to a
-single account/source or a selected set, but visible list sorting never changes
-runtime order:
+The runtime offers automatic and highest-quota strategies, plus explicit
+subscription-expiry and subscription-plan orders. A local key may narrow its
+scope to a single account/source or a selected set, but visible list sorting
+never changes runtime order. Automatic uses:
 
 ```text
 hard filters
 API-source role
-active load normalized by traffic share
 OAuth preference inside the stabilizer tier
-committed dispatch balance normalized by traffic share and quota reserve
-greatest minimum quota reserve when balances are equal
-least recently used
-manual priority/weight tie-breaks
+greatest minimum remaining quota after the protected-account reserve
+active load between equal-quota candidates
+committed dispatch balance
+stable id tie-break
 ```
 
-Subscription plan names and expiry dates do not determine runtime priority.
-Manual priority remains an advanced final tie-breaker rather than a routing
-group that starves otherwise eligible accounts.
+Highest-quota keeps the same hard filters, source role, OAuth preference, quota
+comparison, and stable tie-break, but ignores active load and dispatch balance.
+
+In automatic and highest-quota modes, subscription plan names and expiry dates
+do not determine runtime priority. Manual priority remains an advanced final
+tie-breaker rather than a routing group that starves otherwise eligible
+accounts.
 
 ### Response Continuity And Transport Ownership
 
 Zenith does not infer or persist hard chat-to-account bindings from headers,
-metadata, `conversation_id`, or client thread identifiers. A client-supplied
-`prompt_cache_key` is a best-effort hint for API sources only: hash local key
-identity, resolved model, and cache key; bind only after success; keep at most
-4096 entries in memory for one hour; and ignore it when the source is busy.
-OAuth accounts always follow normal quota and load rotation.
+metadata, `conversation_id`, or request content. A client-supplied
+`prompt_cache_key` is a best-effort hint: hash local key identity, resolved
+model, and cache key; bind only after success; keep at most 4096 entries in
+memory for one hour; and ignore it when the candidate is busier than the
+baseline or trails its quota by more than 500 basis points.
 
 Two protocol constraints remain mandatory:
 
@@ -1192,12 +1203,15 @@ job_queue
 
 Rules:
 
+- only enabled accounts that participate in the pool are scheduled
+  automatically; other accounts refresh on explicit request or when added;
 - UI edits and request results enqueue dirty credentials;
 - due credentials are popped from heap and sent to workers;
 - if credential no longer exists or no longer needs refresh, remove it from
   heap;
 - pending refresh state prevents duplicate worker jobs;
 - refresh failure uses backoff;
+- routine quota refresh does not rediscover an already-known model catalog;
 - success that still leaves credential immediately due uses short ineffective
   backoff;
 - unauthorized/revoked refresh marks reauth and stops auto-refresh until user

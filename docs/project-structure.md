@@ -98,9 +98,17 @@ zenith-relay/
     local-gateway-architecture.md
     app-ux-flow-spec.md
     local-pool-ui-notes.md
-    ui-schematic.html
-    full-implementation-agent-prompt.md
-    p0-baseline.md
+    help/
+      en/
+        zenith-api.md
+        this-computer.md
+        my-server.md
+      ru/
+        zenith-api.md
+        this-computer.md
+        my-server.md
+    screenshots/
+      overview.png
 
   src/                              React/Vite desktop frontend package
     package.json
@@ -112,7 +120,19 @@ zenith-relay/
     public/
     src/
       main.tsx
-      styles.css                     global tokens, reset, shell primitives
+      styles.css                     import root only
+      styles/
+        tokens.css
+        base.css
+        shell.css
+        controls.css
+        tables.css
+        dialogs.css
+        pages/
+          connections.css
+          pool.css
+          usage.css
+          settings.css
       vite-env.d.ts
 
       app/
@@ -148,6 +168,9 @@ zenith-relay/
               ClientStep.tsx
               FinishStep.tsx
 
+          help/
+            HelpCenter.tsx           full-page non-sidebar guide for three modes
+
           pages/
             overview/
               OverviewPage.tsx
@@ -156,39 +179,37 @@ zenith-relay/
               ConnectionsPage.tsx
               SourcesView.tsx
               AccountsView.tsx
+              ProxyStorageView.tsx
               AutomationsView.tsx
               RemoteServerView.tsx
+              ImportDialog.tsx
 
             pool/
               PoolPage.tsx
               MembersView.tsx
-              KeysView.tsx
+              MemberEditor.tsx
+              RoutingSettingsDialog.tsx
               ModelRulesView.tsx
 
             gateway/
               GatewayPage.tsx
               EndpointView.tsx
               ClientSetupView.tsx
-              DiagnosticsView.tsx
 
             usage/
               UsagePage.tsx
+              RequestsView.tsx
+              AggregatesView.tsx
+              ErrorsView.tsx
               RequestDetails.tsx
+              useTableLayout.ts
 
             profiles/
               ProfilesPage.tsx
-              ProfilesView.tsx
-              BackupsView.tsx
-              RepairView.tsx
+              RecoveryView.tsx
 
             settings/
               SettingsPage.tsx
-              GeneralSettings.tsx
-              AppearanceSettings.tsx
-              StorageSettings.tsx
-              UpdateSettings.tsx
-              SecuritySettings.tsx
-              RecoverySettings.tsx
 
           components/
             ConnectionStatus.tsx
@@ -220,6 +241,7 @@ zenith-relay/
         onboarding.spec.ts
         local-endpoint.spec.ts
         remote-server.spec.ts
+        remote-usage.spec.ts
         ready-api.spec.ts
         profiles.spec.ts
         accessibility.spec.ts
@@ -266,12 +288,9 @@ zenith-relay/
 
         store/
           mod.rs
-          settings_store.rs          non-secret JSON records
-          secret_store.rs            OS secret references/encrypted fallback
-          telemetry_db.rs            SQLite usage and request metadata
-          migrations.rs              versioned local-data migrations
-          profile_backups.rs
-          quarantine.rs
+          secret_store.rs            encrypted vault with OS-held master key
+          telemetry_db.rs            SQLite state, usage, affinity, and migrations
+          vault.rs                   authenticated encrypted secret file
 
         host/
           mod.rs
@@ -283,6 +302,8 @@ zenith-relay/
           mod.rs
           oauth_browser.rs           desktop browser/callback integration
           imports.rs                 preview and confirm local imports
+          import_orchestrator.rs      host persistence/rollback around core parse
+          quota_refresh.rs            bounded manual/automatic host refresh
           secret_adapter.rs          core credential interface -> OS store
 
         sources/
@@ -294,7 +315,6 @@ zenith-relay/
           codex.rs
           opencode.rs
           backups.rs
-          repair.rs
           launcher.rs
 
         remote/
@@ -331,6 +351,8 @@ zenith-relay/
         accounts/
           mod.rs
           record.rs
+          import.rs
+          status.rs
           token_authority.rs
           codex_executor.rs
 
@@ -352,9 +374,11 @@ zenith-relay/
           mod.rs
           auth.rs
           request.rs
+          translation.rs
           response.rs
           streaming.rs
           execution.rs
+          errors.rs
 
         quota/
           mod.rs
@@ -396,19 +420,43 @@ zenith-relay/
       zenith-relay-server.service
     src/
       main.rs
-      app.rs
+      app.rs                          state construction and runtime rebuild
       config.rs
       state.rs
+      runtime_mapping.rs
+      usage_persistence.rs
+
+      accounts/
+        mod.rs
+        token_refresh.rs
 
       http/
         mod.rs
         public_api.rs                /v1 customer-facing local-pool routes
-        management_api.rs            desktop management protocol
         middleware.rs
+        management/                  desktop management protocol resources
+          mod.rs
+          sources.rs
+          accounts.rs
+          imports.rs
+          proxies.rs
+          keys.rs
+          quota.rs
+          routing.rs
+          models.rs
+          usage.rs
+          gateway.rs
+          automations.rs
 
       store/
         mod.rs
-        sqlite.rs
+        sqlite.rs                     Store facade and connection ownership
+        records.rs
+        imports.rs
+        automations.rs
+        usage.rs
+        affinity.rs
+        migrations.rs
         vault.rs
         backups.rs
 
@@ -421,6 +469,7 @@ zenith-relay/
     tests/
       public_api.rs
       management_api.rs
+      usage_parity.rs
       restart_persistence.rs
       backup_restore.rs
 
@@ -464,7 +513,7 @@ It may not:
 - calculate Zenith prices or balances;
 - infer backend state from file paths.
 
-The seven top-level pages are exactly:
+The seven operational sidebar pages are exactly:
 
 ```text
 overview
@@ -476,9 +525,13 @@ profiles
 settings
 ```
 
-Sources, Accounts, Automations, Remote Server, Members, Keys, Model Rules,
-Endpoint, Client Setup, Diagnostics, Backups, and Repair remain nested views.
-They do not become additional sidebar pages.
+Help is a separate full-page non-sidebar view opened from the shell. It does
+not reset onboarding and does not become an eighth operational sidebar item.
+
+Sources, Accounts, Proxy Storage, Automations, Remote Server, Members, Model
+Rules, Endpoint, Client Setup, and Recovery remain nested views. Internal pool
+keys, command-line diagnostics, and removed history-repair UI do not return as
+pages during refactoring. Nested views do not become additional sidebar pages.
 
 ### `src-tauri/src/relay`
 
@@ -502,7 +555,7 @@ stays here and is not copied into personal-pool core logic.
 Owns desktop-only personal-pool adapters:
 
 - Tauri command surface;
-- local JSON/SQLite storage;
+- transactional local SQLite storage;
 - OS keychain integration;
 - desktop OAuth browser callback;
 - local listener lifecycle;
@@ -517,6 +570,7 @@ Owns behavior that must be identical on this computer and on a user-managed
 server:
 
 - normalized sources and accounts;
+- shared account/source import parsing and redacted previews;
 - model discovery and visibility;
 - local-key scopes;
 - candidate eligibility and ordering;
@@ -576,38 +630,24 @@ verified. `src-tauri` and `relay-server` keep their own lockfiles and depend on
 The desktop uses one branded platform-local root. On Windows this is
 `%LOCALAPPDATA%\\Zenith Relay`; macOS uses
 `~/Library/Application Support/Zenith Relay`; Linux uses
-`$XDG_DATA_HOME/Zenith Relay`. Existing `com.zenith.codex/local-pool` data is
-moved into this layout before the WebView or local gateway starts.
+`$XDG_DATA_HOME/Zenith Relay`.
 
 ```text
 Zenith Relay/
   data/                              required to restore Relay state
-    metadata.json                    schema version and migration state
-    settings.json                    non-secret local gateway settings
-    remote-target.json               active user-managed server connection
-    connections.json                 non-secret provider/source records
-    accounts.json                    non-secret account and quota records
-    pool-keys.json                   local key policy and secret references
-    automations.json
-    usage.sqlite                     no prompt or response bodies
+    relay.sqlite                     settings, records, usage, affinity, schema
     secrets.enc                      encrypted values; master key stays in OS storage
-    secrets.enc.bak
+    secrets.enc.bak                  present only during atomic replacement
 
   recovery/                          durable rollback material
-    migrations/
     profiles/                        reversible client profiles and user snapshots
-    history-repair/                  one current automatic ChatGPT history rollback
     client-config/                   redacted Ready API/config rollback files
-    exports/                         exports made by older Relay versions only
-    quarantine/                      invalid store files preserved for recovery
-    legacy/                          unrecognized legacy files preserved during migration
 
   cache/                             safe to clear while Relay is stopped
     com.zenith.codex/
       EBWebView/                     Tauri/WebView compatibility cache
     imports/                         short-lived import sessions
     oauth_pending/                   resumable OAuth flow metadata
-    repair_previews/                 expiring history-repair previews
     locks/                           cross-process token refresh locks
     deployments/                     regenerable self-host deployment files
 
@@ -622,21 +662,22 @@ or account state.
 The ChatGPT client profile remains external at `<user_home>/.codex`. Zenith
 Relay edits `config.toml`, `auth.json`, and compatible desktop state only for
 explicit attach, restore, or service-tier actions. It does not move ChatGPT
-sessions or databases. Legacy Zenith config backups from `.codex` and
-`.codex/zenith-backups` are migrated into `recovery/client-config`.
+sessions or databases. Redacted config backups are written directly into
+`recovery/client-config`.
 
 Storage rules:
 
-1. JSON files store non-secret records and `secretRef` identifiers only.
-2. Native OS secret storage is the default.
-3. The encrypted vault is an explicit fallback, never plaintext fallback.
+1. `relay.sqlite` stores non-secret records, usage metadata, and `secretRef`
+   identifiers in transactions.
+2. The OS secret store contains only the vault master key.
+3. Tokens and API keys stay in the authenticated encrypted vault.
 4. OAuth access tokens, refresh tokens, API keys, local generated key values,
-   and previous auth files never appear in normal JSON or SQLite rows.
+   and previous auth files never appear in SQLite rows.
 5. Prompt bodies and generated responses are not stored in telemetry, wake
    history, support bundles, or logs.
-6. Durable record migrations create a backup first and quarantine corrupt
-   input instead of deleting it. Directory-layout migrations use same-volume
-   renames, are restart-safe, and never overwrite a name that already exists.
+6. The current flat JSON schema `v14` is imported transactionally once and
+   removed only after all SQLite state rows are verified. Older pre-release
+   layouts are unsupported.
 7. Temporary state, generated output, recovery files, and durable records stay
    in separate directories so clearing one category cannot remove another.
 8. Keep `com.zenith.codex` as the bundle identifier for upgrade compatibility,
@@ -698,88 +739,67 @@ test-results/
 
 ## Phase-To-Path Map
 
-### P0: Baseline And Store
+The active phase definitions come from
+[local-pool-final-planning.md](local-pool-final-planning.md). This map only
+states which paths those phases are allowed to introduce or reorganize.
 
-Use:
+### P0: Complete Remote Pool
 
-```text
-docs/p0-baseline.md
-src-tauri/src/local_pool/error.rs
-src-tauri/src/local_pool/models.rs
-src-tauri/src/local_pool/store/
-src-tauri/src/platform.rs or the later platform/ split
-```
+Finish working behavior in the existing `relay-core`, `relay-server`, desktop
+`local_pool/remote`, Connections Remote Server view, Help center, server
+workflow, and synthetic fixtures. P0 may add only paths required for account
+transfer, autonomous server runtime, management protocol, backup/restore, and
+monitoring. It does not perform cosmetic source moves.
 
-Do not create the server or full UI during P0.
+### P1: Stabilize Product Logic
 
-### P1: One Source And One Local Endpoint
+Work in the existing account, quota, scheduler, gateway, import, store, and
+snapshot modules. Add focused tests next to the current owner. Do not rename
+paths until local/server parity, transactions, concurrency, streaming, and
+failure classification are accepted.
 
-Create the first used parts of:
+### P2: Source Cleanup
 
-```text
-crates/relay-core/src/sources/
-crates/relay-core/src/catalog/
-crates/relay-core/src/gateway/
-crates/relay-core/src/usage/
-src-tauri/src/local_pool/commands/
-src-tauri/src/local_pool/host/
-src-tauri/src/local_pool/profiles/
-src/src/features/relay/onboarding/
-src/src/features/relay/pages/overview/
-src/src/features/relay/pages/connections/
-src/src/features/relay/pages/gateway/
-```
+Delete generated output, empty directories, superseded planning artifacts,
+dead wrappers, and obsolete Help-to-onboarding behavior. P2 creates no new
+runtime layer.
 
-### P2: Multi-Source Pool
+### P3: Restore Ownership Boundaries
 
-Create:
+Create or finish:
 
 ```text
-crates/relay-core/src/scheduler/
-crates/relay-core/src/catalog/rules.rs
-src/src/features/relay/pages/pool/
-src/src/features/relay/pages/usage/
+src-tauri/src/relay/
+src-tauri/src/ready_api/
+crates/relay-core/src/accounts/import.rs
+crates/relay-core/src/accounts/status.rs
+src-tauri/src/local_pool/accounts/import_orchestrator.rs
+src-tauri/src/local_pool/accounts/quota_refresh.rs
+src-tauri/src/local_pool/host/runtime_sync.rs
 ```
 
-### P3: OAuth Accounts, Quota, And Wake Automation
+P3 moves Ready API behavior out of bootstrap, gives local/server import one
+parser, and gives every screen one Rust runtime projection.
 
-Create:
+### P4: Frontend Structure
 
-```text
-crates/relay-core/src/accounts/
-crates/relay-core/src/quota/
-crates/relay-core/src/automations/
-src-tauri/src/local_pool/accounts/
-src/src/features/relay/pages/connections/AccountsView.tsx
-src/src/features/relay/pages/connections/AutomationsView.tsx
-src/src/features/relay/pages/profiles/
-```
+Split only the current independent workflows under Connections, Pool, Usage,
+Help, and `styles/`. Page entries retain data wiring; React does not gain
+backend policy.
 
-### P4: User-Managed Server
+### P5: Rust Structure
 
-Create:
-
-```text
-crates/relay-core/src/protocol/
-relay-server/
-src-tauri/src/local_pool/remote/
-src/src/features/relay/pages/connections/RemoteServerView.tsx
-.github/workflows/relay-server.yml
-```
-
-The desktop must manage the server through the public management protocol. It
-must not read server files directly.
-
-### P5: Complete UI
-
-Finish the seven page trees under `src/src/features/relay/pages`, replace old
-single-screen components, and keep one command wrapper layer under
-`features/relay/api`.
+Create the accepted gateway submodules, management resource modules, concrete
+server Store aggregate modules, runtime mapping, usage persistence, and token
+refresh paths shown in the target tree. Each path is introduced in the same
+batch that moves its tested owner; no empty scaffolding is allowed.
 
 ### P6: Release Verification
 
-Finish Playwright flows, cross-platform desktop builds, server binaries,
-container smoke, backup/restore tests, documentation links, and artifact names.
+Finish behavior-focused test placement, Playwright flows, six desktop targets,
+server binaries/container smoke, restart and backup/restore, Help/README,
+redaction/confidentiality scans, signing, updater verification, and final tree
+reconciliation.
 
 ## Current-To-Target Migration
 
@@ -796,6 +816,14 @@ Current code is moved only when the owning feature is implemented:
 | `src-tauri/src/launcher.rs` | `local_pool/profiles/launcher.rs` |
 | `src-tauri/src/platform.rs` | keep as one file until multiple platform concerns require `platform/` |
 | existing `src-tauri/src/local_pool/*` | keep; split only when the next phase needs the owner boundary |
+| desktop `local_pool/accounts/imports.rs` plus server import parser | `relay-core/accounts/import.rs`; hosts keep I/O, secrets, and transactions |
+| `local_pool/commands/accounts.rs` business helpers | core record/quota logic plus desktop import/quota orchestration; commands delegate |
+| `relay-core/gateway/mod.rs` | gateway request, translation, execution, errors, streaming, and response modules |
+| `relay-server/http/management_api.rs` | authenticated resource modules under `http/management/` |
+| `relay-server/app.rs` mapping/usage/token adapters | `runtime_mapping.rs`, `usage_persistence.rs`, and `accounts/token_refresh.rs` |
+| `relay-server/store/sqlite.rs` aggregate implementations | concrete `Store` facade plus records/imports/automations/usage/affinity/migrations modules |
+| `ConnectionsPage.tsx`, `PoolPage.tsx`, and `UsagePage.tsx` child workflows | the matching page view files; page entries keep wiring |
+| monolithic `styles.css` | stable import root plus tokens/base/shell/controls/tables/dialogs/page styles |
 
 Do not perform a mass file move before behavior requires it. Git history and a
 small working diff are more valuable than making empty folders match the target
