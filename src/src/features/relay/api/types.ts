@@ -87,6 +87,7 @@ export type AccountSummary = {
   remoteLocation?: { serverId: string; remoteAccountId: string } | null;
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
+  proxyId?: string | null;
   routingExclusion?: "free_plan_policy" | null;
   lastErrorCode: string | null;
 };
@@ -160,6 +161,7 @@ export type WakeHistory = {
 
 export type RuntimeSnapshot = {
   schemaVersion: number;
+  configurationRevision?: string | null;
   runtimeTarget: { kind: "local" | "remote"; connected: boolean; origin: string | null; serverId: string | null; version: string | null };
   gateway: {
     running: boolean;
@@ -173,6 +175,7 @@ export type RuntimeSnapshot = {
     models?: ModelSummary[];
     commonProxyConfigured?: boolean;
     commonProxyAvailable?: boolean;
+    commonProxyId?: string | null;
     accountProxyRequired?: boolean;
     quotaRefreshIntervalSeconds?: number;
     quotaRequestTimeoutSeconds?: number;
@@ -188,6 +191,74 @@ export type RuntimeSnapshot = {
   automations: WakeTask[];
   wakeHistory: WakeHistory[];
   warnings: string[];
+};
+
+type ConfigurationPresetMemberRule = {
+  id: string;
+  enabled: boolean;
+  inPool: boolean;
+  allowedModels: string[];
+  excludedModels: string[];
+  priority: number;
+  weight: number;
+};
+
+export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
+  name: string;
+  baseUrl: string;
+  wireApi: "responses" | "chat_completions" | "messages";
+};
+
+export type ConfigurationPresetAccountRule = ConfigurationPresetMemberRule & {
+  identityHint: string;
+  proxyId: string | null;
+};
+
+export type ConfigurationPreset = {
+  format: "zenith-relay-configuration";
+  schemaVersion: number;
+  settings: {
+    sources: ConfigurationPresetSourceRule[];
+    accounts: ConfigurationPresetAccountRule[];
+    routing: {
+      maxRetryCandidates: number;
+      routingStrategy: RoutingStrategy;
+      subscriptionPlanOrder: string[];
+      defaultServiceTier: DefaultServiceTier;
+      imageBaseModel: string | null;
+    };
+    quota: {
+      refreshIntervalSeconds: number;
+      requestTimeoutSeconds: number;
+      useFreeAccounts: boolean;
+      accountProxyRequired: boolean;
+      commonProxyId: string | null;
+    };
+    hiddenModels: string[];
+    modelPriceOverrides: Record<string, {
+      inputMicroUsdPerMillion: number;
+      cachedInputMicroUsdPerMillion?: number | null;
+      outputMicroUsdPerMillion: number;
+    }>;
+  };
+};
+
+export type ConfigurationPresetChange = {
+  path: string;
+  before: unknown;
+  after: unknown;
+};
+
+export type ConfigurationPresetPreview = {
+  baseRevision: string;
+  preset: ConfigurationPreset;
+  changes: ConfigurationPresetChange[];
+};
+
+export type ConfigurationPresetApplyResult = {
+  previousRevision: string;
+  revision: string;
+  changes: ConfigurationPresetChange[];
 };
 
 export type RoutingStrategy = "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";

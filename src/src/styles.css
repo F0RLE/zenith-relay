@@ -3897,6 +3897,43 @@ textarea {
   gap: 0;
 }
 
+.configuration-preset-preview {
+  display: grid;
+  gap: 14px;
+}
+
+.configuration-preset-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 32px;
+}
+
+.configuration-preset-preview > header code {
+  color: var(--text-muted);
+}
+
+.configuration-preset-preview .table-wrap {
+  max-height: min(52vh, 520px);
+  overflow: auto;
+}
+
+.configuration-preset-preview table {
+  table-layout: fixed;
+  min-width: 680px;
+}
+
+.configuration-preset-preview th:first-child {
+  width: 38%;
+}
+
+.configuration-preset-preview td code,
+.configuration-preset-preview th code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .pool-policy-row {
   min-width: 0;
   display: grid;

@@ -253,18 +253,20 @@ Implementation status (2026-07-21):
   including models absent from the built-in catalog;
 - [x] edit and restore remote prices through the same Pool model table used by
   the local runtime;
-- [ ] preview and atomically apply a versioned server configuration preset for
+- [x] preview and atomically apply a versioned server configuration preset for
   pool order, model rules, existing proxy assignments, routing, and price
   overrides. The preview shows an exact diff against a server configuration
   revision; apply rejects a stale revision and rolls back every field on error;
-- [ ] keep credentials, management/client key secrets, host/TLS/vault settings,
+- [x] keep credentials, management/client key secrets, host/TLS/vault settings,
   usage, desktop paths, profile bindings, and other local-only state outside a
   preset. Unknown schema versions, unsupported fields, and missing referenced
   objects fail in preview rather than being silently ignored;
-- [ ] let the user save a portable preset from visible Local/Remote Pool
+- [x] let the user save a portable preset from visible Local/Remote Pool
   settings and explicitly apply it to the server. This is never background
   synchronization: reconnect reads server state and does not auto-apply the
   last local preset;
+- [x] migrated Relay Server storage to schema 23 so proxy assignments use
+  stable secret-free object references shared by exported presets;
 - [ ] add Remote client access under Gateway/Client Setup, not Pool internals:
   create a named key, reveal its secret once, list it masked, edit account/
   source/model/wire scopes, rotate it, and revoke it. The generated ChatGPT

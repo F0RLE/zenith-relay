@@ -1,8 +1,9 @@
 use crate::{
+    configuration::{self, PresetError},
     jobs,
     state::{
-        generate_pool_key, identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord,
-        ServerAccountRecord, SourceRecord, COMMON_PROXY_SECRET_REF, MAX_SERVER_ACCOUNTS,
+        ensure_proxy_record, generate_pool_key, identity_hint, now_ms, AccountCredential, AppState,
+        GatewayKeyRecord, ServerAccountRecord, SourceRecord, MAX_SERVER_ACCOUNTS,
     },
     store::{PendingImport, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
 };
@@ -31,9 +32,10 @@ use zenith_relay_core::{
     automations::{AccountSelector, WakeHistory, WakeModelPolicy, WakeTask},
     discover_source_models, normalize_proxy_url,
     protocol::{
-        AccountSummary, ApiError, ErrorEnvelope, GatewayDiagnostic, HealthResponse, KeySummary,
-        RevealedAccountIdentity, RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery,
-        UsageRange,
+        AccountSummary, ApiError, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
+        ConfigurationPresetDocument, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
+        ErrorEnvelope, GatewayDiagnostic, HealthResponse, KeySummary, RevealedAccountIdentity,
+        RuntimeStateSnapshot, SourceSummary, UsagePage, UsageQuery, UsageRange,
     },
     quota::{parse_subscription_timestamp_ms, QuotaSnapshot, Subscription, SubscriptionInput},
     source_points_to_gateway, ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier,
@@ -69,6 +71,33 @@ pub async fn state_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     Ok(Json(state.snapshot().map_err(store_error)?))
+}
+
+pub async fn configuration_preset(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ConfigurationPresetDocument>, ManagementError> {
+    configuration::document(&state)
+        .map(Json)
+        .map_err(preset_error)
+}
+
+pub async fn preview_configuration_preset(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<ConfigurationPresetPreviewInput>,
+) -> Result<Json<ConfigurationPresetPreview>, ManagementError> {
+    configuration::preview(&state, input.preset)
+        .map(Json)
+        .map_err(preset_error)
+}
+
+pub async fn apply_configuration_preset(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<ConfigurationPresetApplyInput>,
+) -> Result<Json<ConfigurationPresetApplyResult>, ManagementError> {
+    configuration::apply(&state, input)
+        .await
+        .map(Json)
+        .map_err(preset_error)
 }
 
 pub async fn runtime_order(
@@ -419,21 +448,26 @@ pub async fn set_common_proxy(
     Json(input): Json<SetProxyInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
     let next = normalize_optional_proxy(input.proxy_url)?;
-    let previous_configured = state.store.common_proxy_configured().map_err(store_error)?;
-    let previous = state
-        .vault
-        .load(COMMON_PROXY_SECRET_REF)
-        .map_err(vault_error)?;
-    if previous_configured == next.is_some() && previous.as_deref() == next.as_deref() {
+    let previous = state.store.common_proxy_id().map_err(store_error)?;
+    let next = next
+        .as_deref()
+        .map(|value| ensure_proxy_record(&state.store, &state.vault, value))
+        .transpose()
+        .map_err(store_error)?
+        .map(|record| record.id);
+    if previous == next {
+        state.rebuild_runtime().await.map_err(runtime_error)?;
         return Ok(Json(state.snapshot().map_err(store_error)?));
     }
-    save_optional_proxy(&state, COMMON_PROXY_SECRET_REF, next.as_deref())?;
-    if let Err(error) = state.store.set_common_proxy_configured(next.is_some()) {
-        restore_common_proxy(&state, previous_configured, previous.as_deref())?;
-        return Err(store_error(error));
-    }
+    state
+        .store
+        .set_common_proxy_id(next.as_deref())
+        .map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
-        restore_common_proxy(&state, previous_configured, previous.as_deref())?;
+        state
+            .store
+            .set_common_proxy_id(previous.as_deref())
+            .map_err(store_error)?;
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
@@ -468,37 +502,23 @@ pub async fn set_account_proxy(
     Path(id): Path<String>,
     Json(input): Json<SetProxyInput>,
 ) -> Result<Json<AccountSummary>, ManagementError> {
-    let record = find_account(&state, &id)?;
-    let previous = state
-        .vault
-        .load(&record.secret_ref)
-        .map_err(vault_error)?
-        .ok_or_else(|| {
-            ManagementError::not_found("account_secret_missing", "account secret missing")
-        })?;
-    let mut credential: AccountCredential = serde_json::from_str(&previous).map_err(|_| {
-        ManagementError::internal("account_secret_invalid", "account secret is invalid")
-    })?;
+    let mut record = find_account(&state, &id)?;
+    let previous = record.proxy_id.clone();
     let next = normalize_optional_proxy(input.proxy_url)?;
-    if credential.proxy_url == next {
+    let next = next
+        .as_deref()
+        .map(|value| ensure_proxy_record(&state.store, &state.vault, value))
+        .transpose()
+        .map_err(store_error)?
+        .map(|proxy| proxy.id);
+    if previous == next {
         return Ok(Json(account_summary(&state, &record)?));
     }
-    credential.proxy_url = next;
-    let encoded = serde_json::to_string(&credential).map_err(|_| {
-        ManagementError::internal(
-            "account_secret_serialize",
-            "account secret could not be saved",
-        )
-    })?;
-    state
-        .vault
-        .save(&record.secret_ref, &encoded)
-        .map_err(vault_error)?;
+    record.proxy_id = next;
+    state.store.save_account(&record).map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
-        state
-            .vault
-            .save(&record.secret_ref, &previous)
-            .map_err(vault_error)?;
+        record.proxy_id = previous;
+        state.store.save_account(&record).map_err(store_error)?;
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
@@ -529,36 +549,29 @@ pub async fn assign_account_proxies(
             "proxy assignment contains duplicate account ids",
         ));
     }
+    let old_records = input
+        .account_ids
+        .iter()
+        .map(|account_id| find_account(&state, account_id))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut updates = Vec::with_capacity(input.account_ids.len());
     for (account_id, proxy_url) in input.account_ids.iter().zip(&input.proxy_urls) {
-        let record = find_account(&state, account_id)?;
-        let previous = state
-            .vault
-            .load(&record.secret_ref)
-            .map_err(vault_error)?
-            .ok_or_else(|| {
-                ManagementError::not_found("account_secret_missing", "account secret missing")
-            })?;
-        let mut credential: AccountCredential = serde_json::from_str(&previous).map_err(|_| {
-            ManagementError::internal("account_secret_invalid", "account secret is invalid")
-        })?;
-        credential.proxy_url = Some(normalize_proxy(proxy_url)?);
-        let next = serde_json::to_string(&credential).map_err(|_| {
-            ManagementError::internal(
-                "account_secret_serialize",
-                "account secret could not be saved",
-            )
-        })?;
-        updates.push((record.secret_ref, previous, next));
+        let mut record = old_records
+            .iter()
+            .find(|record| &record.id == account_id)
+            .cloned()
+            .ok_or_else(|| ManagementError::not_found("account_not_found", "account not found"))?;
+        let proxy = ensure_proxy_record(&state.store, &state.vault, &normalize_proxy(proxy_url)?)
+            .map_err(store_error)?;
+        record.proxy_id = Some(proxy.id);
+        updates.push(record);
     }
-    for index in 0..updates.len() {
-        if let Err(error) = state.vault.save(&updates[index].0, &updates[index].2) {
-            restore_account_proxy_secrets(&state, &updates[..index])?;
-            return Err(vault_error(error));
-        }
-    }
+    state.store.save_accounts(&updates).map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
-        restore_account_proxy_secrets(&state, &updates)?;
+        state
+            .store
+            .save_accounts(&old_records)
+            .map_err(store_error)?;
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
@@ -566,43 +579,6 @@ pub async fn assign_account_proxies(
         assigned: updates.len(),
         unused: input.proxy_urls.len().saturating_sub(updates.len()),
     }))
-}
-
-fn restore_account_proxy_secrets(
-    state: &AppState,
-    updates: &[(String, String, String)],
-) -> Result<(), ManagementError> {
-    for (secret_ref, previous, _) in updates {
-        state
-            .vault
-            .save(secret_ref, previous)
-            .map_err(vault_error)?;
-    }
-    Ok(())
-}
-
-fn restore_common_proxy(
-    state: &AppState,
-    configured: bool,
-    value: Option<&str>,
-) -> Result<(), ManagementError> {
-    save_optional_proxy(state, COMMON_PROXY_SECRET_REF, value)?;
-    state
-        .store
-        .set_common_proxy_configured(configured)
-        .map_err(store_error)
-}
-
-fn save_optional_proxy(
-    state: &AppState,
-    secret_ref: &str,
-    value: Option<&str>,
-) -> Result<(), ManagementError> {
-    match value {
-        Some(value) => state.vault.save(secret_ref, value).map(|_| ()),
-        None => state.vault.delete(secret_ref).map(|_| ()),
-    }
-    .map_err(vault_error)
 }
 
 fn normalize_optional_proxy(value: Option<String>) -> Result<Option<String>, ManagementError> {
@@ -1768,6 +1744,7 @@ async fn confirm_one_account_import(
             .unwrap_or(pending.created_at_ms),
         last_used_at_ms: existing.as_ref().and_then(|value| value.last_used_at_ms),
         last_error_code: None,
+        proxy_id: existing.as_ref().and_then(|value| value.proxy_id.clone()),
     };
     state.store.save_account(&record).map_err(store_error)?;
     if probe_metadata {
@@ -3348,6 +3325,36 @@ impl IntoResponse for ManagementError {
 
 fn validation_error(message: impl Into<String>) -> ManagementError {
     ManagementError::validation("invalid_request", message)
+}
+
+fn preset_error(error: PresetError) -> ManagementError {
+    match error {
+        PresetError::Invalid(message) => {
+            ManagementError::validation("configuration_preset_invalid", message)
+        }
+        PresetError::Missing(message) => ManagementError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "configuration_reference_missing",
+            message,
+            "configuration",
+            false,
+        ),
+        PresetError::Stale(current_revision) => ManagementError::new(
+            StatusCode::CONFLICT,
+            "configuration_revision_stale",
+            format!("server configuration changed; current revision is {current_revision}"),
+            "configuration",
+            true,
+        ),
+        PresetError::Store(_) => ManagementError::internal(
+            "configuration_store_failed",
+            "server configuration could not be read or saved",
+        ),
+        PresetError::Runtime(_) => ManagementError::internal(
+            "configuration_runtime_failed",
+            "server configuration could not be activated",
+        ),
+    }
 }
 fn store_error(_error: String) -> ManagementError {
     ManagementError::internal("store_failed", "server storage operation failed")

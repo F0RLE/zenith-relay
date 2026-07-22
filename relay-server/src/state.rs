@@ -18,10 +18,19 @@ use zenith_relay_core::{
     CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 22;
+pub const SERVER_SCHEMA_VERSION: u32 = 23;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerProxyRecord {
+    pub id: String,
+    pub endpoint: String,
+    pub secret_ref: String,
+    pub created_at_ms: u64,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +79,8 @@ pub struct ServerAccountRecord {
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
     pub last_error_code: Option<String>,
+    #[serde(default)]
+    pub proxy_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -127,6 +138,7 @@ pub struct AppState {
     pub capabilities: Capabilities,
     pub started_at_ms: u64,
     pub wake_lock: tokio::sync::Mutex<()>,
+    pub configuration_lock: tokio::sync::Mutex<()>,
     pub(crate) failed_usage_writes: AtomicU64,
     pub(crate) usage_writer: Mutex<Option<UsageWriter>>,
     runtime: RwLock<Option<Arc<GatewayRuntime>>>,
@@ -134,6 +146,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config, store: Arc<Store>, vault: Arc<Vault>) -> Result<Arc<Self>, String> {
+        migrate_legacy_proxies(&store, &vault)?;
         ensure_system_gateway_key(&store, &vault)?;
         let server_id = store.server_id()?;
         let fingerprint = identity_fingerprint(&server_id);
@@ -147,6 +160,7 @@ impl AppState {
             capabilities: Capabilities::personal_server(server_id, fingerprint),
             started_at_ms: now_ms(),
             wake_lock: tokio::sync::Mutex::new(()),
+            configuration_lock: tokio::sync::Mutex::new(()),
             failed_usage_writes: AtomicU64::new(0),
             usage_writer: Mutex::new(None),
             runtime: RwLock::new(None),
@@ -174,6 +188,81 @@ impl AppState {
             .map(|runtime| runtime.candidate_runtime_order())
             .unwrap_or_default())
     }
+}
+
+pub fn ensure_proxy_record(
+    store: &Store,
+    vault: &Vault,
+    value: &str,
+) -> Result<ServerProxyRecord, String> {
+    let value = zenith_relay_core::normalize_proxy_url(value)?;
+    let id = proxy_id(&value);
+    if let Some(record) = store.proxy(&id)? {
+        match vault.load(&record.secret_ref)? {
+            Some(stored) if stored != value => {
+                return Err("stored proxy reference is inconsistent".to_string())
+            }
+            Some(_) => {}
+            None => vault.save(&record.secret_ref, &value)?,
+        }
+        return Ok(record);
+    }
+    let url = url::Url::parse(&value).map_err(|_| "stored proxy URL is invalid".to_string())?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| "stored proxy URL is invalid".to_string())?;
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let record = ServerProxyRecord {
+        id: id.clone(),
+        endpoint: format!(
+            "{}://{}:{}",
+            url.scheme(),
+            host,
+            url.port_or_known_default().unwrap_or_default()
+        ),
+        secret_ref: format!("proxy:{id}"),
+        created_at_ms: now_ms(),
+    };
+    vault.save(&record.secret_ref, &value)?;
+    if let Err(error) = store.save_proxy(&record) {
+        let _ = vault.delete(&record.secret_ref);
+        return Err(error);
+    }
+    Ok(record)
+}
+
+fn migrate_legacy_proxies(store: &Store, vault: &Vault) -> Result<(), String> {
+    if store.common_proxy_id()?.is_none() && store.common_proxy_configured()? {
+        if let Some(value) = vault.load(COMMON_PROXY_SECRET_REF)? {
+            let proxy = ensure_proxy_record(store, vault, &value)?;
+            store.set_common_proxy_id(Some(&proxy.id))?;
+        }
+    }
+    for mut record in store.accounts()? {
+        let Some(secret) = vault.load(&record.secret_ref)? else {
+            continue;
+        };
+        let mut credential: AccountCredential = serde_json::from_str(&secret)
+            .map_err(|_| "stored account credential is invalid".to_string())?;
+        if record.proxy_id.is_none() {
+            if let Some(value) = credential.proxy_url.as_deref() {
+                record.proxy_id = Some(ensure_proxy_record(store, vault, value)?.id);
+                store.save_account(&record)?;
+            }
+        }
+        if record.proxy_id.is_some() && credential.proxy_url.take().is_some() {
+            vault.save(
+                &record.secret_ref,
+                &serde_json::to_string(&credential)
+                    .map_err(|_| "stored account credential is invalid".to_string())?,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String> {
@@ -223,6 +312,10 @@ pub fn identity_fingerprint(server_id: &str) -> String {
     hex::encode(Sha256::digest(
         format!("zenith-relay-server\0{server_id}").as_bytes(),
     ))
+}
+
+pub fn proxy_id(value: &str) -> String {
+    zenith_relay_core::proxy_reference_id(value).expect("stored proxy URL was normalized")
 }
 
 pub fn now_ms() -> u64 {

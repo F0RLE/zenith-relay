@@ -214,23 +214,38 @@ fn validate_backup(root: &Path, vault_key: [u8; 32]) -> Result<(), String> {
 
 fn validate_store_secrets(store: &Store, vault: &Vault) -> Result<(), String> {
     let _ = store.server_id()?;
+    let proxies = store.proxies()?;
+    let proxy_ids = proxies
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let accounts = store.accounts()?;
+    if accounts
+        .iter()
+        .filter_map(|record| record.proxy_id.as_deref())
+        .any(|proxy_id| !proxy_ids.contains(proxy_id))
+        || store
+            .common_proxy_id()?
+            .is_some_and(|proxy_id| !proxy_ids.contains(proxy_id.as_str()))
+    {
+        return Err("backup references a missing proxy object".to_string());
+    }
     let secret_refs = store
         .sources()?
         .into_iter()
         .map(|record| record.secret_ref)
-        .chain(
-            store
-                .accounts()?
-                .into_iter()
-                .map(|record| record.secret_ref),
-        )
-        .chain(store.keys()?.into_iter().map(|record| record.secret_ref));
+        .chain(accounts.into_iter().map(|record| record.secret_ref))
+        .chain(store.keys()?.into_iter().map(|record| record.secret_ref))
+        .chain(proxies.into_iter().map(|record| record.secret_ref));
     for secret_ref in secret_refs {
         if vault.load(&secret_ref)?.is_none() {
             return Err("backup references a missing encrypted secret".to_string());
         }
     }
-    if store.common_proxy_configured()? && vault.load(COMMON_PROXY_SECRET_REF)?.is_none() {
+    if store.common_proxy_configured()?
+        && store.common_proxy_id()?.is_none()
+        && vault.load(COMMON_PROXY_SECRET_REF)?.is_none()
+    {
         return Err("backup references a missing encrypted proxy".to_string());
     }
     Ok(())

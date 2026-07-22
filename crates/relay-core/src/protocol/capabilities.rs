@@ -25,6 +25,7 @@ pub enum Feature {
     AccountProxies,
     FreeAccountPolicy,
     RuntimeRouting,
+    ConfigurationPresets,
     Images,
 }
 
@@ -50,6 +51,7 @@ impl Feature {
             Self::AccountProxies => "account_proxies",
             Self::FreeAccountPolicy => "free_account_policy",
             Self::RuntimeRouting => "runtime_routing",
+            Self::ConfigurationPresets => "configuration_presets",
             Self::Images => "images",
         }
     }
@@ -111,6 +113,7 @@ impl Capabilities {
             Feature::AccountProxies,
             Feature::FreeAccountPolicy,
             Feature::RuntimeRouting,
+            Feature::ConfigurationPresets,
             Feature::Images,
         ]
         .into_iter()

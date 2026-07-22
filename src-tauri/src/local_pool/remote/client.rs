@@ -4,9 +4,10 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::accounts::{AccountExportDocument, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientProtocolRange, GatewayDiagnostic, HealthResponse,
-    NegotiatedProtocol, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
-    UsageRange,
+    negotiate, Capabilities, ClientProtocolRange, ConfigurationPresetApplyInput,
+    ConfigurationPresetApplyResult, ConfigurationPresetDocument, ConfigurationPresetPreview,
+    ConfigurationPresetPreviewInput, GatewayDiagnostic, HealthResponse, NegotiatedProtocol,
+    RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery, UsageRange,
 };
 use zenith_relay_core::CandidateRuntimeSnapshot;
 use zenith_relay_core::WireApi;
@@ -111,6 +112,44 @@ impl RemoteClient {
     pub async fn state(&self) -> Result<RuntimeStateSnapshot, RemoteClientError> {
         self.request(Method::GET, "/state", Option::<&()>::None, true)
             .await
+    }
+
+    pub async fn configuration_preset(
+        &self,
+    ) -> Result<ConfigurationPresetDocument, RemoteClientError> {
+        self.request(
+            Method::GET,
+            "/configuration/preset",
+            Option::<&()>::None,
+            true,
+        )
+        .await
+    }
+
+    pub async fn preview_configuration_preset(
+        &self,
+        input: &ConfigurationPresetPreviewInput,
+    ) -> Result<ConfigurationPresetPreview, RemoteClientError> {
+        self.request(
+            Method::POST,
+            "/configuration/preset/preview",
+            Some(input),
+            true,
+        )
+        .await
+    }
+
+    pub async fn apply_configuration_preset(
+        &self,
+        input: &ConfigurationPresetApplyInput,
+    ) -> Result<ConfigurationPresetApplyResult, RemoteClientError> {
+        self.request(
+            Method::POST,
+            "/configuration/preset/apply",
+            Some(input),
+            true,
+        )
+        .await
     }
 
     pub(crate) async fn profile_credential(

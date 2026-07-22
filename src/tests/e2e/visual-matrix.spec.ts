@@ -398,7 +398,8 @@ for (const viewport of viewports) {
       return priority.getBoundingClientRect().top - tabs.getBoundingClientRect().bottom >= 9;
     })).toBe(true);
     const headerActions = page.locator(".pool-header-actions");
-    await expect(headerActions.locator(":scope > *")).toHaveCount(3);
+    await expect(headerActions.locator(":scope > *")).toHaveCount(4);
+    await expect(headerActions.locator('summary[aria-label="Пресет конфигурации"]')).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Добавить участника", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Запустить пул", exact: true })).toBeVisible();
     await expect(headerActions.getByRole("button", { name: "Переключить ChatGPT на пул", exact: true })).toBeVisible();

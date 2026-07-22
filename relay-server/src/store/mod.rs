@@ -1,7 +1,10 @@
 mod sqlite;
 pub mod vault;
 
-pub use sqlite::{PendingImport, Store};
+pub use sqlite::{
+    configuration_revision, ConfigurationReplaceError, ConfigurationReplacement, PendingImport,
+    Store,
+};
 pub(crate) use sqlite::{
     DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
     MAX_QUOTA_REFRESH_INTERVAL_SECONDS, MAX_QUOTA_REQUEST_TIMEOUT_SECONDS,

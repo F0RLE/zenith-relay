@@ -18,6 +18,18 @@ pub fn router(state: Arc<AppState>) -> Router {
     let management = Router::new()
         .route("/capabilities", get(management_api::capabilities))
         .route("/state", get(management_api::state_snapshot))
+        .route(
+            "/configuration/preset",
+            get(management_api::configuration_preset),
+        )
+        .route(
+            "/configuration/preset/preview",
+            post(management_api::preview_configuration_preset),
+        )
+        .route(
+            "/configuration/preset/apply",
+            post(management_api::apply_configuration_preset),
+        )
         .route("/routing/runtime", get(management_api::runtime_order))
         .route(
             "/sources",

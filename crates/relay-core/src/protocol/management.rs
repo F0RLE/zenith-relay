@@ -4,10 +4,11 @@ use crate::{
     api_model_price,
     automations::{WakeHistory, WakeTask},
     quota::{QuotaSnapshot, Subscription},
-    ApiEquivalentSummary, CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules,
-    RoutingDiagnostics, RoutingStrategy, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier,
+    ModelRules, RoutingDiagnostics, RoutingStrategy, WireApi,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -52,6 +53,8 @@ pub struct GatewaySummary {
     pub common_proxy_configured: bool,
     #[serde(default)]
     pub common_proxy_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub common_proxy_id: Option<String>,
     #[serde(default)]
     pub account_proxy_required: bool,
     #[serde(default)]
@@ -184,6 +187,8 @@ pub struct AccountSummary {
     pub proxy_mode: ProxyMode,
     #[serde(default)]
     pub proxy_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_id: Option<String>,
     #[serde(default)]
     pub routing_exclusion: Option<AccountRoutingExclusion>,
     pub last_error_code: Option<String>,
@@ -223,10 +228,127 @@ pub struct KeySummary {
     pub last_used_at_ms: Option<u64>,
 }
 
+pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPreset {
+    pub format: String,
+    pub schema_version: u16,
+    pub settings: ConfigurationPresetSettings,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetSettings {
+    pub sources: Vec<SourcePresetRule>,
+    pub accounts: Vec<AccountPresetRule>,
+    pub routing: PresetRoutingPolicy,
+    pub quota: PresetQuotaPolicy,
+    pub hidden_models: Vec<String>,
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourcePresetRule {
+    pub id: String,
+    pub name: String,
+    pub base_url: String,
+    pub wire_api: WireApi,
+    pub enabled: bool,
+    pub in_pool: bool,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub priority: i32,
+    pub weight: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountPresetRule {
+    pub id: String,
+    pub identity_hint: String,
+    pub enabled: bool,
+    pub in_pool: bool,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub priority: i32,
+    pub weight: u32,
+    pub proxy_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresetRoutingPolicy {
+    pub max_retry_candidates: u8,
+    pub routing_strategy: RoutingStrategy,
+    pub subscription_plan_order: Vec<String>,
+    pub default_service_tier: DefaultServiceTier,
+    pub image_base_model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PresetQuotaPolicy {
+    pub refresh_interval_seconds: u64,
+    pub request_timeout_seconds: u64,
+    pub use_free_accounts: bool,
+    pub account_proxy_required: bool,
+    pub common_proxy_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetDocument {
+    pub revision: String,
+    pub preset: ConfigurationPreset,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetPreviewInput {
+    pub preset: ConfigurationPreset,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetApplyInput {
+    pub base_revision: String,
+    pub preset: ConfigurationPreset,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetChange {
+    pub path: String,
+    pub before: Value,
+    pub after: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetPreview {
+    pub base_revision: String,
+    pub preset: ConfigurationPreset,
+    pub changes: Vec<ConfigurationPresetChange>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigurationPresetApplyResult {
+    pub previous_revision: String,
+    pub revision: String,
+    pub changes: Vec<ConfigurationPresetChange>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStateSnapshot {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_revision: Option<String>,
     pub runtime_target: RuntimeTargetSummary,
     pub gateway: GatewaySummary,
     pub platform: String,

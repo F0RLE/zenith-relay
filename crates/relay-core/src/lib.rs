@@ -13,7 +13,7 @@ pub mod usage;
 
 pub use catalog::{ModelRegistry, ModelRules};
 pub use error::{Error, Result};
-pub use proxy::{normalize_proxy_url, ProxyConfig};
+pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
     discover_source_models, normalize_image_base_model, DefaultServiceTier, GatewayRuntime,
     GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore, RuntimeAccount,

@@ -1,4 +1,5 @@
 use reqwest::ClientBuilder;
+use sha2::{Digest, Sha256};
 use std::fmt;
 use url::Url;
 
@@ -47,6 +48,14 @@ pub fn normalize_proxy_url(value: &str) -> Result<String, &'static str> {
     }
     reqwest::Proxy::all(url.as_str()).map_err(|_| "proxy URL is invalid")?;
     Ok(url.to_string())
+}
+
+pub fn proxy_reference_id(value: &str) -> Result<String, &'static str> {
+    let value = normalize_proxy_url(value)?;
+    Ok(format!(
+        "proxy_{}",
+        hex::encode(Sha256::digest(value.as_bytes()))
+    ))
 }
 
 fn normalize_proxy_authority(value: &str) -> String {
@@ -141,6 +150,15 @@ mod tests {
         assert!(!rendered.contains("pass"));
         assert!(normalize_proxy_url("socks5://proxy.example:1080").is_err());
         assert!(normalize_proxy_url("http://proxy.example/path").is_err());
+    }
+
+    #[test]
+    fn proxy_reference_is_stable_across_supported_input_shapes() {
+        let expected = proxy_reference_id("http://user:pass@proxy.example:8080").unwrap();
+        assert_eq!(
+            proxy_reference_id("proxy.example:8080:user:pass").unwrap(),
+            expected
+        );
     }
 
     #[tokio::test]

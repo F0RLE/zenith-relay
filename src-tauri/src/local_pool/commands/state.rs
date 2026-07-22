@@ -136,6 +136,7 @@ pub async fn get_local_runtime_state(
     );
     Ok(RuntimeStateSnapshot {
         schema_version: snapshot.schema_version,
+        configuration_revision: None,
         runtime_target: RuntimeTargetSummary {
             kind: "local".to_string(),
             connected: running,
@@ -159,6 +160,7 @@ pub async fn get_local_runtime_state(
             models,
             common_proxy_configured: snapshot.gateway.common_proxy_configured,
             common_proxy_available,
+            common_proxy_id: None,
             account_proxy_required: snapshot.gateway.account_proxy_required,
             quota_refresh_interval_seconds: snapshot.gateway.quota_refresh_interval_seconds,
             quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
@@ -303,6 +305,7 @@ fn local_account_summary(
         remote_location: record.remote_location.clone(),
         proxy_mode,
         proxy_available,
+        proxy_id: None,
         routing_exclusion,
         last_error_code: record.account.last_error_code.clone(),
     })
@@ -338,6 +341,7 @@ mod parity_tests {
     fn local_and_remote_snapshots_share_the_same_top_level_contract() {
         let local = serde_json::to_value(RuntimeStateSnapshot {
             schema_version: 1,
+            configuration_revision: None,
             runtime_target: RuntimeTargetSummary {
                 kind: "local".into(),
                 connected: false,
@@ -358,6 +362,7 @@ mod parity_tests {
                 models: Vec::new(),
                 common_proxy_configured: false,
                 common_proxy_available: false,
+                common_proxy_id: None,
                 account_proxy_required: false,
                 quota_refresh_interval_seconds: 300,
                 quota_request_timeout_seconds: 20,

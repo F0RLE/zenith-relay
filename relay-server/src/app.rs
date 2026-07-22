@@ -2,6 +2,7 @@ use crate::state::{
     identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
     SourceRecord, COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
 };
+use crate::store::configuration_revision;
 use futures_util::future::BoxFuture;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
@@ -146,7 +147,7 @@ impl AppState {
         self.token_authority
             .register_if_absent(account_id, credential.tokens()?, record.auth_state)
             .map_err(|error| error.to_string())?;
-        let proxy = account_proxy_config(self, &credential)?;
+        let proxy = account_proxy_config(self, &record, &credential)?;
         let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
         let persistence = ServerTokenPersistence {
             state: self.clone(),
@@ -207,32 +208,15 @@ impl AppState {
         let mut accounts = Vec::new();
         let mut direct_refresh_accounts = HashSet::new();
         let mut refresh_clients = HashMap::new();
-        let common_proxy_configured = self.store.common_proxy_configured()?;
-        let account_proxy_required = self.store.account_proxy_required()?;
-        let common_proxy = if common_proxy_configured {
-            self.vault
-                .load(COMMON_PROXY_SECRET_REF)?
-                .and_then(|value| ProxyConfig::parse(&value).ok())
-        } else {
-            None
-        };
         for record in account_records {
             let Some(secret) = self.vault.load(&record.secret_ref)? else {
                 continue;
             };
             let credential: AccountCredential = serde_json::from_str(&secret)
                 .map_err(|_| "stored account credential is invalid".to_string())?;
-            let proxy = match credential.proxy_url.as_deref() {
-                Some(value) => match ProxyConfig::parse(value) {
-                    Ok(proxy) => Some(proxy),
-                    Err(_) => continue,
-                },
-                None if common_proxy_configured => match common_proxy.clone() {
-                    Some(proxy) => Some(proxy),
-                    None => continue,
-                },
-                None if account_proxy_required => continue,
-                None => None,
+            let proxy = match account_proxy_config(self, &record, &credential) {
+                Ok(proxy) => proxy,
+                Err(_) => continue,
             };
             self.token_authority
                 .register(&record.id, credential.tokens()?, record.auth_state)
@@ -345,6 +329,7 @@ impl AppState {
         let accounts = self.store.accounts()?;
         let keys = self.store.keys()?;
         let common_proxy_configured = self.store.common_proxy_configured()?;
+        let common_proxy_id = self.store.common_proxy_id()?;
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
         let account_proxy_required = self.store.account_proxy_required()?;
         let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
@@ -358,6 +343,7 @@ impl AppState {
         ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let model_price_overrides = self.store.model_price_overrides()?;
+        let configuration_revision = configuration_revision(&self.store.configuration_settings()?)?;
         let equivalents = self.store.api_equivalents()?;
         let runtime = self.runtime()?;
         let running = self.store.gateway_enabled()? && runtime.is_some();
@@ -410,6 +396,8 @@ impl AppState {
                     .and_then(|value| serde_json::from_str::<AccountCredential>(value).ok())
                     .map(|credential| {
                         account_proxy_status(
+                            self,
+                            record,
                             &credential,
                             common_proxy_configured,
                             common_proxy_available,
@@ -459,6 +447,7 @@ impl AppState {
             .collect::<Vec<_>>();
         Ok(RuntimeStateSnapshot {
             schema_version: SERVER_SCHEMA_VERSION,
+            configuration_revision: Some(configuration_revision),
             runtime_target: RuntimeTargetSummary {
                 kind: "remote".to_string(),
                 connected: true,
@@ -494,6 +483,7 @@ impl AppState {
                 models,
                 common_proxy_configured,
                 common_proxy_available,
+                common_proxy_id,
                 account_proxy_required,
                 quota_refresh_interval_seconds,
                 quota_request_timeout_seconds,
@@ -653,8 +643,12 @@ fn mark_natural_use(
 
 pub(crate) fn account_proxy_config(
     state: &AppState,
+    record: &ServerAccountRecord,
     credential: &AccountCredential,
 ) -> Result<Option<ProxyConfig>, String> {
+    if let Some(proxy_id) = record.proxy_id.as_deref() {
+        return proxy_config_by_id(state, proxy_id).map(Some);
+    }
     if let Some(value) = credential.proxy_url.as_deref() {
         return ProxyConfig::parse(value)
             .map(Some)
@@ -666,6 +660,9 @@ pub(crate) fn account_proxy_config(
         }
         return Ok(None);
     }
+    if let Some(proxy_id) = state.store.common_proxy_id()? {
+        return proxy_config_by_id(state, &proxy_id).map(Some);
+    }
     let value = state
         .vault
         .load(COMMON_PROXY_SECRET_REF)?
@@ -675,22 +672,47 @@ pub(crate) fn account_proxy_config(
         .map_err(|_| "stored common proxy URL is invalid".to_string())
 }
 
+fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
+    let record = state
+        .store
+        .proxy(proxy_id)?
+        .ok_or_else(|| "stored proxy reference is missing".to_string())?;
+    let value = state
+        .vault
+        .load(&record.secret_ref)?
+        .ok_or_else(|| "stored proxy secret is missing".to_string())?;
+    ProxyConfig::parse(&value).map_err(|_| "stored proxy URL is invalid".to_string())
+}
+
 fn common_proxy_available(state: &AppState, configured: bool) -> bool {
     configured
-        && state
-            .vault
-            .load(COMMON_PROXY_SECRET_REF)
-            .ok()
-            .flatten()
-            .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+        && state.store.common_proxy_id().ok().flatten().map_or_else(
+            || {
+                state
+                    .vault
+                    .load(COMMON_PROXY_SECRET_REF)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+            },
+            |proxy_id| proxy_config_by_id(state, &proxy_id).is_ok(),
+        )
 }
 
 fn account_proxy_status(
+    state: &AppState,
+    record: &ServerAccountRecord,
     credential: &AccountCredential,
     common_configured: bool,
     common_available: bool,
     account_proxy_required: bool,
 ) -> (ProxyMode, bool) {
+    if let Some(proxy_id) = record.proxy_id.as_deref() {
+        return (
+            ProxyMode::Account,
+            proxy_config_by_id(state, proxy_id).is_ok(),
+        );
+    }
     if let Some(value) = credential.proxy_url.as_deref() {
         return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
     }
@@ -870,6 +892,7 @@ fn account_summary(
         remote_location: None,
         proxy_mode,
         proxy_available,
+        proxy_id: record.proxy_id.clone(),
         routing_exclusion,
         last_error_code: record.last_error_code.clone(),
     }
@@ -1276,6 +1299,7 @@ mod tests {
             created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
+            proxy_id: None,
         };
         let credential = AccountCredential {
             access_token: "access".into(),

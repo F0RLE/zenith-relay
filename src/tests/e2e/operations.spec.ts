@@ -1345,6 +1345,43 @@ test("remote pool saves distribution settings on the connected runtime", async (
   expect(calls.some((call) => call.command === "sync_codex_default_service_tier")).toBe(false);
 });
 
+test("remote configuration presets require preview before an explicit apply", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const menu = page.locator('details.relay-action-menu summary[aria-label="Configuration preset"]');
+  await menu.click();
+  await page.getByRole("menuitem", { name: "Save preset" }).click();
+  await menu.click();
+  await page.getByRole("menuitem", { name: "Apply preset" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Configuration preset" });
+  await expect(dialog.getByText("Changes: 1", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("routing / maxRetryCandidates", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("cell", { name: "3", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("cell", { name: "4", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "Apply changes" }).click();
+  await expect(dialog).toBeHidden();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.some((call) => call.command === "export_remote_configuration_preset")).toBe(true);
+  expect(calls.some((call) => call.command === "preview_remote_configuration_preset")).toBe(true);
+  expect(calls.findLast((call) => call.command === "apply_remote_configuration_preset")?.args).toMatchObject({ input: { baseRevision: "cfg_synthetic_current" } });
+});
+
+test("local pool can save a portable configuration without exposing server apply", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  await page.locator('details.relay-action-menu summary[aria-label="Configuration preset"]').click();
+  await expect(page.getByRole("menuitem", { name: "Apply preset" })).toHaveCount(0);
+  await page.getByRole("menuitem", { name: "Save preset" }).click();
+
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "export_local_configuration_preset"))).toBe(true);
+});
+
 test("remote pool uses the same quota refresh controls", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true, accountCount: 3, freeAccountHealthy: true });
   await page.goto("/");
@@ -1990,7 +2027,8 @@ test("pool toggle changes state without switching ChatGPT", async ({ page }) => 
   await expect(page.getByText("Endpoint started.")).toBeVisible();
   const header = page.locator(".relay-page-header");
   await expect(header.getByRole("button", { name: "Switch ChatGPT to pool", exact: true })).toBeVisible();
-  await expect(header.locator(".pool-header-actions > *")).toHaveCount(3);
+  await expect(header.locator(".pool-header-actions > *")).toHaveCount(4);
+  await expect(header.locator('summary[aria-label="Configuration preset"]')).toBeVisible();
   await header.getByRole("button", { name: "Stop pool", exact: true }).click();
   await expect(page.getByText("Endpoint stopped.")).toBeVisible();
 

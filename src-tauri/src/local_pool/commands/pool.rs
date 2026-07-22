@@ -2,21 +2,160 @@ use super::{
     restart_after_secret_change, restart_or_rollback, sync_gateway_or_rollback,
     sync_records_or_rollback,
 };
-use crate::local_pool::{
-    error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-    models::{LocalGatewayKeyRecord, LocalPoolSnapshot, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
-    state::DesktopState,
-    store::secret_store,
+use crate::{
+    files::atomic_write,
+    local_pool::{
+        accounts::{
+            credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
+        },
+        error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
+        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
+        state::DesktopState,
+        store::secret_store,
+    },
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
-use zenith_relay_core::{ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy};
+use zenith_relay_core::{
+    protocol::{
+        AccountPresetRule, ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy,
+        PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
+        CONFIGURATION_PRESET_SCHEMA_VERSION,
+    },
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 const SYSTEM_GATEWAY_KEY_LABEL: &str = "ChatGPT pool";
+
+#[tauri::command]
+pub fn export_local_configuration_preset(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<Option<String>> {
+    let (gateway, sources, accounts) = {
+        let store = state.store()?;
+        (
+            store.gateway().clone(),
+            store.sources().to_vec(),
+            store.accounts().to_vec(),
+        )
+    };
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
+    let sources = sources
+        .into_iter()
+        .map(|record| SourcePresetRule {
+            id: record.id,
+            name: record.name,
+            base_url: record.base_url.trim_end_matches('/').to_string(),
+            wire_api: record.wire_api,
+            enabled: record.enabled,
+            in_pool: record.in_pool,
+            allowed_models: record.allowed_models,
+            excluded_models: record.excluded_models,
+            priority: record.priority,
+            weight: record.weight,
+        })
+        .collect();
+    let accounts = accounts
+        .into_iter()
+        .map(|record| {
+            let proxy_id = credentials
+                .load(&record.account.id)
+                .map_err(|error| {
+                    LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+                })?
+                .and_then(|credential| {
+                    credential
+                        .proxy_url()
+                        .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+                });
+            Ok(AccountPresetRule {
+                id: record.account.id,
+                identity_hint: record
+                    .account
+                    .identity
+                    .identity_hash
+                    .chars()
+                    .take(12)
+                    .collect(),
+                enabled: record.account.enabled,
+                in_pool: record.account.in_pool,
+                allowed_models: record.allowed_models,
+                excluded_models: record.excluded_models,
+                priority: record.priority,
+                weight: record.weight,
+                proxy_id,
+            })
+        })
+        .collect::<LocalResult<Vec<_>>>()?;
+    let common_proxy_id = if gateway.common_proxy_configured {
+        secret_store::load(COMMON_PROXY_SECRET_REF)?
+            .as_deref()
+            .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+    } else {
+        None
+    };
+    let preset = ConfigurationPreset {
+        format: CONFIGURATION_PRESET_FORMAT.to_string(),
+        schema_version: CONFIGURATION_PRESET_SCHEMA_VERSION,
+        settings: ConfigurationPresetSettings {
+            sources,
+            accounts,
+            routing: PresetRoutingPolicy {
+                max_retry_candidates: gateway.max_retry_candidates,
+                routing_strategy: gateway.routing_strategy,
+                subscription_plan_order: gateway.subscription_plan_order,
+                default_service_tier: gateway.default_service_tier,
+                image_base_model: gateway.image_base_model,
+            },
+            quota: PresetQuotaPolicy {
+                refresh_interval_seconds: gateway.quota_refresh_interval_seconds,
+                request_timeout_seconds: gateway.quota_request_timeout_seconds,
+                use_free_accounts: gateway.use_free_accounts,
+                account_proxy_required: gateway.account_proxy_required,
+                common_proxy_id,
+            },
+            hidden_models: gateway.hidden_models,
+            model_price_overrides: gateway.model_price_overrides,
+        },
+    };
+    write_configuration_preset(&preset, &app)
+}
+
+pub(super) fn write_configuration_preset(
+    preset: &ConfigurationPreset,
+    app: &AppHandle,
+) -> CommandResult<Option<String>> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Zenith Relay configuration", &["json"])
+        .set_file_name(format!(
+            "zenith-relay-configuration-{}.json",
+            chrono::Utc::now().format("%Y%m%d-%H%M%S")
+        ))
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "selected preset path is invalid")
+    })?;
+    let content = serde_json::to_string_pretty(preset).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset could not be serialized",
+        )
+    })?;
+    atomic_write(&path, &format!("{content}\n"))
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zenith_relay_server::{
     config::Config,
     http,
-    state::{AppState, COMMON_PROXY_SECRET_REF},
+    state::AppState,
     store::{Store, Vault},
 };
 
@@ -1771,7 +1771,13 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
         assert!(!vault.contains(secret));
     }
 
-    server.state.vault.delete(COMMON_PROXY_SECRET_REF).unwrap();
+    let common_proxy = server
+        .state
+        .store
+        .proxy(&server.state.store.common_proxy_id().unwrap().unwrap())
+        .unwrap()
+        .unwrap();
+    server.state.vault.delete(&common_proxy.secret_ref).unwrap();
     server.task.abort();
     let _ = server.task.await;
     drop(server.state);
@@ -1842,6 +1848,314 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
     recovered.task.abort();
     common_task.abort();
     account_task.abort();
+}
+
+#[tokio::test]
+async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Preset source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "models": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let source_id = source["id"].as_str().unwrap();
+    let proxy_secret = "http://preset-user:preset-pass@127.0.0.1:9";
+    let proxy_state = client
+        .post(format!("{}/proxies/common", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": proxy_secret}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proxy_state.status(), StatusCode::OK);
+
+    let account_preview: Value = client
+        .post(format!("{}/accounts/import/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "label": "Preset account",
+            "accessToken": "synthetic-preset-access-token",
+            "expiresAtMs": 4_000_000_000_000_u64,
+            "chatgptAccountId": "synthetic-preset-account-id",
+            "responsesUrl": format!("{upstream}/v1/responses"),
+            "models": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_id = account_preview["accountId"].as_str().unwrap();
+    let account_confirm = client
+        .post(format!("{}/accounts/import/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sessionId": account_preview["sessionId"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(account_confirm.status(), StatusCode::OK);
+    let account_proxy = client
+        .post(format!("{}/accounts/{account_id}/proxy", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"proxyUrl": proxy_secret}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(account_proxy.status(), StatusCode::OK);
+
+    let document_response = client
+        .get(format!("{}/configuration/preset", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(document_response.status(), StatusCode::OK);
+    let document_text = document_response.text().await.unwrap();
+    for excluded in [
+        "synthetic-upstream-api-key",
+        "synthetic-preset-access-token",
+        "preset-pass",
+        "managementToken",
+        "clientKey",
+        "vault",
+        "usage",
+        "publicBaseUrl",
+    ] {
+        assert!(!document_text.contains(excluded), "{excluded}");
+    }
+    let document: Value = serde_json::from_str(&document_text).unwrap();
+    assert_eq!(document["preset"]["format"], "zenith-relay-configuration");
+    assert_eq!(document["preset"]["schemaVersion"], 1);
+    assert!(document["revision"]
+        .as_str()
+        .is_some_and(|revision| revision.starts_with("cfg_")));
+    assert!(document["preset"]["settings"]["quota"]["commonProxyId"]
+        .as_str()
+        .is_some_and(|proxy_id| proxy_id.starts_with("proxy_")));
+
+    let mut preset = document["preset"].clone();
+    let source_rule = preset["settings"]["sources"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|rule| rule["id"] == source_id)
+        .unwrap();
+    source_rule["inPool"] = json!(true);
+    source_rule["priority"] = json!(7);
+    source_rule["id"] = json!("source_local_record");
+    let account_rule = preset["settings"]["accounts"]
+        .as_array_mut()
+        .unwrap()
+        .first_mut()
+        .unwrap();
+    account_rule["id"] = json!("account_local_record");
+    account_rule["inPool"] = json!(true);
+    account_rule["priority"] = json!(9);
+    preset["settings"]["routing"]["maxRetryCandidates"] = json!(4);
+    preset["settings"]["hiddenModels"] = json!(["gpt-test"]);
+
+    let preview: Value = client
+        .post(format!("{}/configuration/preset/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"preset": preset}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths = preview["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["path"].as_str().unwrap())
+        .collect::<HashSet<_>>();
+    assert_eq!(preview["preset"]["settings"]["sources"][0]["id"], source_id);
+    assert_eq!(
+        preview["preset"]["settings"]["accounts"][0]["id"],
+        account_id
+    );
+    assert!(paths.contains("/sources/0/inPool"));
+    assert!(paths.contains("/sources/0/priority"));
+    assert!(paths.contains("/accounts/0/inPool"));
+    assert!(paths.contains("/accounts/0/priority"));
+    assert!(paths.contains("/routing/maxRetryCandidates"));
+    assert!(paths.contains("/hiddenModels"));
+    let priority_change = preview["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["path"] == "/sources/0/priority")
+        .unwrap();
+    assert_eq!(priority_change["before"], 0);
+    assert_eq!(priority_change["after"], 7);
+
+    let routing_change = client
+        .post(format!("{}/routing/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"maxRetryCandidates": 5, "routingStrategy": "adaptive"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(routing_change.status(), StatusCode::OK);
+    let stale = client
+        .post(format!("{}/configuration/preset/apply", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "baseRevision": preview["baseRevision"],
+            "preset": preview["preset"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let stale_body: Value = stale.json().await.unwrap();
+    assert_eq!(stale_body["error"]["code"], "configuration_revision_stale");
+    let unchanged: Value = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unchanged["gateway"]["maxRetryCandidates"], 5);
+    assert_eq!(unchanged["sources"][0]["priority"], 0);
+    assert_eq!(unchanged["sources"][0]["inPool"], false);
+
+    let fresh_preview: Value = client
+        .post(format!("{}/configuration/preset/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"preset": preview["preset"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let applied: Value = client
+        .post(format!("{}/configuration/preset/apply", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "baseRevision": fresh_preview["baseRevision"],
+            "preset": fresh_preview["preset"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(applied["previousRevision"], applied["revision"]);
+    let applied_state: Value = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(applied_state["configurationRevision"], applied["revision"]);
+    assert_eq!(applied_state["gateway"]["maxRetryCandidates"], 4);
+    assert_eq!(applied_state["sources"][0]["priority"], 7);
+    assert_eq!(applied_state["sources"][0]["inPool"], true);
+    assert_eq!(applied_state["accounts"][0]["priority"], 9);
+    assert_eq!(applied_state["accounts"][0]["inPool"], true);
+    assert_eq!(
+        applied_state["accounts"][0]["proxyId"],
+        document["preset"]["settings"]["quota"]["commonProxyId"]
+    );
+    assert_eq!(applied_state["gateway"]["visibleModelIds"], json!([]));
+
+    let mut unsupported_schema = fresh_preview["preset"].clone();
+    unsupported_schema["schemaVersion"] = json!(2);
+    let unsupported = client
+        .post(format!("{}/configuration/preset/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"preset": unsupported_schema}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+
+    let mut unknown_field = fresh_preview["preset"].clone();
+    unknown_field["settings"]["unexpected"] = json!(true);
+    let unknown = client
+        .post(format!("{}/configuration/preset/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"preset": unknown_field}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let mut missing = fresh_preview["preset"].clone();
+    missing["settings"]["sources"][0]["id"] = json!("source_missing");
+    missing["settings"]["sources"][0]["baseUrl"] = json!("https://missing.invalid/v1");
+    let missing_response = client
+        .post(format!("{}/configuration/preset/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"preset": missing}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let missing_body: Value = missing_response.json().await.unwrap();
+    assert_eq!(
+        missing_body["error"]["code"],
+        "configuration_reference_missing"
+    );
+    let after_failures: Value = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(after_failures["configurationRevision"], applied["revision"]);
+
+    server.task.abort();
+    let _ = server.task.await;
+    drop(server.state);
+    let restarted = spawn_server(root.path()).await;
+    let restarted_state: Value = client
+        .get(format!("{}/state", restarted.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        restarted_state["configurationRevision"],
+        applied["revision"]
+    );
+    assert_eq!(restarted_state["gateway"]["maxRetryCandidates"], 4);
+    assert_eq!(restarted_state["sources"][0]["priority"], 7);
+    assert_eq!(restarted_state["accounts"][0]["priority"], 9);
+    assert_eq!(restarted_state["accounts"][0]["inPool"], true);
+    restarted.task.abort();
+    upstream_task.abort();
 }
 
 async fn batch_preview(client: &reqwest::Client, origin: &str, content: String) -> Value {

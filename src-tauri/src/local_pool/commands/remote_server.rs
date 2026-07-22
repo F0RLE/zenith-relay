@@ -16,12 +16,18 @@ use crate::local_pool::{
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+};
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    AccountSummary, Capabilities, Feature, GatewayDiagnostic, HealthResponse, OperationalStatus,
-    RemoteAccountLocation, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
+    AccountSummary, Capabilities, ConfigurationPreset, ConfigurationPresetApplyInput,
+    ConfigurationPresetApplyResult, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
+    Feature, GatewayDiagnostic, HealthResponse, OperationalStatus, RemoteAccountLocation,
+    RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
 };
 use zenith_relay_core::CandidateRuntimeSnapshot;
 
@@ -31,12 +37,14 @@ use super::{
         pick_account_import_documents, prepare_preserved_remote_account_credentials,
         read_import_documents, stage_returned_remote_account,
     },
+    pool::write_configuration_preset,
     restart_or_rollback,
 };
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
 const ACCOUNT_TRANSFER_PROGRESS_EVENT: &str = "relay-account-transfer-progress";
 const REMOTE_MISSING_ERROR: &str = "remote_missing";
+const MAX_CONFIGURATION_PRESET_BYTES: usize = 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -346,6 +354,84 @@ pub async fn get_remote_server_usage(
         .usage(&input.unwrap_or_default())
         .await
         .map(Some)
+        .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn export_remote_configuration_preset(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<String>, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    let document = client.configuration_preset().await.map_err(remote_error)?;
+    write_configuration_preset(&document.preset, &app)
+}
+
+#[tauri::command]
+pub async fn preview_remote_configuration_preset(
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> Result<Option<ConfigurationPresetPreview>, CommandError> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .add_filter("Zenith Relay configuration", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "selected preset path is invalid")
+    })?;
+    let content = fs::read(&path).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset could not be read",
+        )
+    })?;
+    if content.len() > MAX_CONFIGURATION_PRESET_BYTES {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset exceeds 1 MiB",
+        )
+        .into());
+    }
+    let preset: ConfigurationPreset = serde_json::from_slice(&content).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "configuration preset is invalid or contains unsupported fields",
+        )
+    })?;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    client
+        .preview_configuration_preset(&ConfigurationPresetPreviewInput { preset })
+        .await
+        .map(Some)
+        .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn apply_remote_configuration_preset(
+    input: ConfigurationPresetApplyInput,
+    state: State<'_, DesktopState>,
+) -> Result<ConfigurationPresetApplyResult, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    client
+        .apply_configuration_preset(&input)
+        .await
         .map_err(remote_error)
 }
 

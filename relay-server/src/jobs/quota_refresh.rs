@@ -139,7 +139,7 @@ async fn refresh_data(
         .ok_or_else(|| QuotaRefreshFailure::new("quota_secret_missing", false))?;
     let credential: AccountCredential = serde_json::from_str(&secret)
         .map_err(|_| QuotaRefreshFailure::new("quota_secret_invalid", false))?;
-    let proxy = account_proxy_config(state, &credential)
+    let proxy = account_proxy_config(state, account, &credential)
         .map_err(|_| QuotaRefreshFailure::new("quota_proxy_unavailable", false))?;
     let request_timeout_seconds = state
         .store
@@ -244,7 +244,7 @@ async fn discover_account_models(
             .map_err(|_| ("models_account_id_invalid".to_string(), false))?;
     let authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
         .map_err(|_| ("models_access_token_invalid".to_string(), false))?;
-    let proxy = account_proxy_config(state, &credential)
+    let proxy = account_proxy_config(state, account, &credential)
         .map_err(|_| ("models_proxy_unavailable".to_string(), false))?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
@@ -384,6 +384,7 @@ mod tests {
             created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
+            proxy_id: None,
         }
     }
 

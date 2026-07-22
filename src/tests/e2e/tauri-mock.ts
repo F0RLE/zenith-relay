@@ -205,6 +205,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     };
     const localRuntime = {
       schemaVersion: 14,
+      configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
       gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false, chatgptInterfaceQuotaReserveBasisPoints: 100, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
@@ -250,7 +251,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.1.0" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "keys", "profile_attach", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy", "runtime_routing"] };
+    remoteRuntime.configurationRevision = "cfg_synthetic_current";
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "keys", "profile_attach", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy", "runtime_routing", "configuration_presets"] };
+    const configurationPreset = {
+      format: "zenith-relay-configuration",
+      schemaVersion: 1,
+      settings: {
+        sources: remoteRuntime.sources.map((item) => ({ id: item.id, name: item.name, baseUrl: item.baseUrl, wireApi: item.wireApi, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight })),
+        accounts: remoteRuntime.accounts.map((item) => ({ id: item.id, identityHint: item.identityHint, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight, proxyId: null })),
+        routing: { maxRetryCandidates: 4, routingStrategy: remoteRuntime.gateway.routingStrategy, subscriptionPlanOrder: remoteRuntime.gateway.subscriptionPlanOrder, defaultServiceTier: remoteRuntime.gateway.defaultServiceTier, imageBaseModel: null },
+        quota: { refreshIntervalSeconds: remoteRuntime.gateway.quotaRefreshIntervalSeconds, requestTimeoutSeconds: remoteRuntime.gateway.quotaRequestTimeoutSeconds, useFreeAccounts: remoteRuntime.gateway.useFreeAccounts, accountProxyRequired: remoteRuntime.gateway.accountProxyRequired, commonProxyId: null },
+        hiddenModels: [],
+        modelPriceOverrides: {},
+      },
+    };
     const assignedProxyAccount = localRuntime.accounts.find((item) => item.proxyMode === "account");
     let proxyEntries = Array.from({ length: input.proxyCount ?? (populated ? 3 : 0) }, (_, index) => ({
       id: `proxy_synthetic_${index + 1}`,
@@ -350,8 +364,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "prepare_top_up_amount": return { amountCents: 1000, amountUsd: 10, valid: true };
           case "get_local_runtime_state": return structuredClone(localRuntime);
           case "get_local_runtime_order": return structuredClone(localRuntime.gateway.routingOrder);
+          case "export_local_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
           case "get_remote_server_state": return input.remoteConnected === false ? null : structuredClone(remoteRuntime);
           case "get_remote_runtime_order": return input.remoteConnected === false ? null : structuredClone(remoteRuntime.gateway.routingOrder);
+          case "export_remote_configuration_preset": return "C:\\Temp\\zenith-relay-configuration.json";
+          case "preview_remote_configuration_preset": return { baseRevision: "cfg_synthetic_current", preset: structuredClone(configurationPreset), changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
+          case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };

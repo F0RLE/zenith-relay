@@ -1,8 +1,10 @@
-use crate::state::{GatewayKeyRecord, ServerAccountRecord, SourceRecord, SERVER_SCHEMA_VERSION};
+use crate::state::{
+    GatewayKeyRecord, ServerAccountRecord, ServerProxyRecord, SourceRecord, SERVER_SCHEMA_VERSION,
+};
 use fs2::FileExt;
 use rusqlite::{
     params, params_from_iter, types::Value as SqlValue, Connection, OpenFlags, OptionalExtension,
-    TransactionBehavior,
+    Transaction, TransactionBehavior,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,7 +21,11 @@ use zenith_relay_core::{
     automations::{WakeAutomationState, WakeTask},
     estimate_api_equivalent_with_price_override, normalize_image_base_model,
     normalize_subscription_plan_order,
-    protocol::{UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageSummary, UsageTotals},
+    protocol::{
+        AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
+        SourcePresetRule, UsageBucket, UsageGroup, UsagePage, UsageQuery, UsageSummary,
+        UsageTotals,
+    },
     ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ResponseAffinityBinding,
     ResponseAffinityStore, RoutingStrategy, UsageEvent, WireApi,
 };
@@ -44,6 +50,19 @@ pub type RoutingPolicy = (
     Option<String>,
     Vec<String>,
 );
+
+#[derive(Debug)]
+pub enum ConfigurationReplaceError {
+    Stale { current_revision: String },
+    Invalid(String),
+    Store(String),
+}
+
+pub struct ConfigurationReplacement {
+    pub previous: ConfigurationPresetSettings,
+    pub previous_revision: String,
+    pub revision: String,
+}
 
 const MIGRATIONS: &[Migration] = &[
     Migration {
@@ -156,6 +175,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "022_usage_retention_rollups",
         sql: include_str!("../../migrations/022_usage_retention_rollups.sql"),
     },
+    Migration {
+        version: 23,
+        name: "023_server_proxy_objects",
+        sql: include_str!("../../migrations/023_server_proxy_objects.sql"),
+    },
 ];
 
 struct Migration {
@@ -259,6 +283,34 @@ impl Store {
             "common_proxy_configured",
             if configured { "true" } else { "false" },
         )
+    }
+
+    pub fn common_proxy_id(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .metadata("common_proxy_id")?
+            .filter(|value| !value.is_empty()))
+    }
+
+    pub fn set_common_proxy_id(&self, proxy_id: Option<&str>) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for (key, value) in [
+            ("common_proxy_id", proxy_id.unwrap_or_default()),
+            (
+                "common_proxy_configured",
+                if proxy_id.is_some() { "true" } else { "false" },
+            ),
+        ] {
+            transaction
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    params![key, value],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
     }
 
     pub fn account_proxy_required(&self) -> Result<bool, String> {
@@ -521,6 +573,73 @@ impl Store {
 
     pub fn delete_account(&self, id: &str) -> Result<Option<ServerAccountRecord>, String> {
         self.delete_record("accounts", id)
+    }
+
+    pub fn proxies(&self) -> Result<Vec<ServerProxyRecord>, String> {
+        self.list_records("proxies")
+    }
+
+    pub fn proxy(&self, id: &str) -> Result<Option<ServerProxyRecord>, String> {
+        self.lock()?
+            .query_row("SELECT data_json FROM proxies WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(db_error)?
+            .map(|value| parse_json(&value))
+            .transpose()
+    }
+
+    pub fn save_proxy(&self, record: &ServerProxyRecord) -> Result<(), String> {
+        self.save_record("proxies", &record.id, &record.secret_ref, record)
+    }
+
+    pub fn configuration_settings(&self) -> Result<ConfigurationPresetSettings, String> {
+        let connection = self.lock()?;
+        configuration_settings_from_connection(&connection)
+    }
+
+    pub fn replace_configuration_if_revision(
+        &self,
+        expected_revision: &str,
+        settings: &ConfigurationPresetSettings,
+    ) -> Result<ConfigurationReplacement, ConfigurationReplaceError> {
+        let mut connection = self.lock().map_err(ConfigurationReplaceError::Store)?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)
+            .map_err(ConfigurationReplaceError::Store)?;
+        let previous = configuration_settings_from_connection(&transaction)
+            .map_err(ConfigurationReplaceError::Store)?;
+        let previous_revision =
+            configuration_revision(&previous).map_err(ConfigurationReplaceError::Store)?;
+        if previous_revision != expected_revision {
+            return Err(ConfigurationReplaceError::Stale {
+                current_revision: previous_revision,
+            });
+        }
+        write_configuration(&transaction, settings)?;
+        transaction
+            .commit()
+            .map_err(db_error)
+            .map_err(ConfigurationReplaceError::Store)?;
+        Ok(ConfigurationReplacement {
+            previous,
+            previous_revision,
+            revision: configuration_revision(settings).map_err(ConfigurationReplaceError::Store)?,
+        })
+    }
+
+    pub fn restore_configuration(
+        &self,
+        settings: &ConfigurationPresetSettings,
+    ) -> Result<(), String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        write_configuration(&transaction, settings).map_err(configuration_replace_message)?;
+        transaction.commit().map_err(db_error)
     }
 
     pub fn replace_pool_membership(
@@ -1213,6 +1332,381 @@ impl Store {
         self.connection
             .lock()
             .map_err(|_| "SQLite lock poisoned".to_string())
+    }
+}
+
+pub fn configuration_revision(settings: &ConfigurationPresetSettings) -> Result<String, String> {
+    let encoded = serde_json::to_vec(settings)
+        .map_err(|_| "configuration revision could not be calculated".to_string())?;
+    Ok(format!("cfg_{}", hex::encode(Sha256::digest(encoded))))
+}
+
+fn configuration_settings_from_connection(
+    connection: &Connection,
+) -> Result<ConfigurationPresetSettings, String> {
+    let sources = list_records_from::<SourceRecord>(connection, "sources")?
+        .into_iter()
+        .map(|record| SourcePresetRule {
+            id: record.id,
+            name: record.name,
+            base_url: record.base_url,
+            wire_api: record.wire_api,
+            enabled: record.enabled,
+            in_pool: record.in_pool,
+            allowed_models: record.allowed_models,
+            excluded_models: record.excluded_models,
+            priority: record.priority,
+            weight: record.weight,
+        })
+        .collect();
+    let accounts = list_records_from::<ServerAccountRecord>(connection, "accounts")?
+        .into_iter()
+        .map(|record| AccountPresetRule {
+            id: record.id,
+            identity_hint: record.identity_hint,
+            enabled: record.enabled,
+            in_pool: record.in_pool,
+            allowed_models: record.allowed_models,
+            excluded_models: record.excluded_models,
+            priority: record.priority,
+            weight: record.weight,
+            proxy_id: record.proxy_id,
+        })
+        .collect();
+    let refresh_interval_seconds = metadata_from(connection, "quota_refresh_interval_seconds")?
+        .map_or(Ok(DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS), |value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "quota refresh interval is invalid".to_string())
+        })?;
+    let request_timeout_seconds = metadata_from(connection, "quota_request_timeout_seconds")?
+        .map_or(Ok(DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS), |value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| "quota request timeout is invalid".to_string())
+        })?;
+    validate_quota_policy(refresh_interval_seconds, request_timeout_seconds)?;
+    let max_retry_candidates = metadata_from(connection, "max_retry_candidates")?.map_or(
+        Ok(DEFAULT_MAX_RETRY_CANDIDATES),
+        |value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| "max retry candidates is invalid".to_string())
+        },
+    )?;
+    validate_routing_policy(max_retry_candidates)?;
+    let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
+        None | Some("adaptive") => RoutingStrategy::Adaptive,
+        Some("quota_highest") => RoutingStrategy::QuotaHighest,
+        Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
+        Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
+        Some(_) => return Err("routing strategy is invalid".to_string()),
+    };
+    let default_service_tier = match metadata_from(connection, "default_service_tier")?.as_deref() {
+        None | Some("standard") => DefaultServiceTier::Standard,
+        Some("fast") => DefaultServiceTier::Fast,
+        Some(_) => return Err("default service tier is invalid".to_string()),
+    };
+    let image_base_model =
+        normalize_image_base_model(metadata_from(connection, "image_base_model")?)
+            .map_err(|error| error.to_string())?;
+    let subscription_plan_order =
+        metadata_from(connection, "subscription_plan_order")?.map_or(Ok(Vec::new()), |value| {
+            serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|_| "subscription plan order is invalid".to_string())
+        })?;
+    let subscription_plan_order =
+        normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
+    let hidden_models = normalize_model_ids(
+        metadata_from(connection, "hidden_model_ids")?.map_or(Ok(Vec::new()), |value| {
+            serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())
+        })?,
+    )?;
+    let model_price_overrides = normalize_model_price_overrides(
+        metadata_from(connection, "model_price_overrides")?.map_or(
+            Ok(BTreeMap::new()),
+            |value| {
+                serde_json::from_str(&value)
+                    .map_err(|_| "model price overrides are invalid".to_string())
+            },
+        )?,
+    )?;
+    Ok(ConfigurationPresetSettings {
+        sources,
+        accounts,
+        routing: PresetRoutingPolicy {
+            max_retry_candidates,
+            routing_strategy,
+            subscription_plan_order,
+            default_service_tier,
+            image_base_model,
+        },
+        quota: PresetQuotaPolicy {
+            refresh_interval_seconds,
+            request_timeout_seconds,
+            use_free_accounts: metadata_from(connection, "use_free_accounts")?
+                .is_some_and(|value| value == "true"),
+            account_proxy_required: metadata_from(connection, "account_proxy_required")?
+                .is_some_and(|value| value == "true"),
+            common_proxy_id: metadata_from(connection, "common_proxy_id")?
+                .filter(|value| !value.is_empty()),
+        },
+        hidden_models,
+        model_price_overrides,
+    })
+}
+
+fn write_configuration(
+    transaction: &Transaction<'_>,
+    settings: &ConfigurationPresetSettings,
+) -> Result<(), ConfigurationReplaceError> {
+    validate_configuration_settings(settings).map_err(ConfigurationReplaceError::Invalid)?;
+    let mut sources = list_records_from::<SourceRecord>(transaction, "sources")
+        .map_err(ConfigurationReplaceError::Store)?;
+    let mut accounts = list_records_from::<ServerAccountRecord>(transaction, "accounts")
+        .map_err(ConfigurationReplaceError::Store)?;
+    let source_rules = settings
+        .sources
+        .iter()
+        .map(|rule| (rule.id.as_str(), rule))
+        .collect::<HashMap<_, _>>();
+    let account_rules = settings
+        .accounts
+        .iter()
+        .map(|rule| (rule.id.as_str(), rule))
+        .collect::<HashMap<_, _>>();
+    if source_rules.len() != sources.len()
+        || account_rules.len() != accounts.len()
+        || sources
+            .iter()
+            .any(|record| !source_rules.contains_key(record.id.as_str()))
+        || accounts
+            .iter()
+            .any(|record| !account_rules.contains_key(record.id.as_str()))
+    {
+        return Err(ConfigurationReplaceError::Invalid(
+            "configuration preset object set is incomplete".to_string(),
+        ));
+    }
+    for proxy_id in settings
+        .accounts
+        .iter()
+        .filter_map(|rule| rule.proxy_id.as_deref())
+        .chain(settings.quota.common_proxy_id.as_deref())
+    {
+        let exists = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM proxies WHERE id = ?1)",
+                [proxy_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(db_error)
+            .map_err(ConfigurationReplaceError::Store)?;
+        if !exists {
+            return Err(ConfigurationReplaceError::Invalid(format!(
+                "referenced proxy {proxy_id} does not exist"
+            )));
+        }
+    }
+    for record in &mut sources {
+        let rule = source_rules[record.id.as_str()];
+        record.enabled = rule.enabled;
+        record.in_pool = rule.in_pool;
+        record.allowed_models = rule.allowed_models.clone();
+        record.excluded_models = rule.excluded_models.clone();
+        record.priority = rule.priority;
+        record.weight = rule.weight;
+        update_record(transaction, "sources", &record.id, record)?;
+    }
+    for record in &mut accounts {
+        let rule = account_rules[record.id.as_str()];
+        record.enabled = rule.enabled;
+        record.in_pool = rule.in_pool;
+        record.allowed_models = rule.allowed_models.clone();
+        record.excluded_models = rule.excluded_models.clone();
+        record.priority = rule.priority;
+        record.weight = rule.weight;
+        record.proxy_id = rule.proxy_id.clone();
+        update_record(transaction, "accounts", &record.id, record)?;
+    }
+    let routing_strategy = match settings.routing.routing_strategy {
+        RoutingStrategy::Adaptive => "adaptive",
+        RoutingStrategy::QuotaHighest => "quota_highest",
+        RoutingStrategy::SubscriptionExpiry => "subscription_expiry",
+        RoutingStrategy::SubscriptionPlan => "subscription_plan",
+    };
+    let default_service_tier = match settings.routing.default_service_tier {
+        DefaultServiceTier::Standard => "standard",
+        DefaultServiceTier::Fast => "fast",
+    };
+    let metadata = [
+        (
+            "quota_refresh_interval_seconds",
+            settings.quota.refresh_interval_seconds.to_string(),
+        ),
+        (
+            "quota_request_timeout_seconds",
+            settings.quota.request_timeout_seconds.to_string(),
+        ),
+        (
+            "use_free_accounts",
+            settings.quota.use_free_accounts.to_string(),
+        ),
+        (
+            "account_proxy_required",
+            settings.quota.account_proxy_required.to_string(),
+        ),
+        (
+            "common_proxy_id",
+            settings.quota.common_proxy_id.clone().unwrap_or_default(),
+        ),
+        (
+            "common_proxy_configured",
+            settings.quota.common_proxy_id.is_some().to_string(),
+        ),
+        (
+            "max_retry_candidates",
+            settings.routing.max_retry_candidates.to_string(),
+        ),
+        ("routing_strategy", routing_strategy.to_string()),
+        ("default_service_tier", default_service_tier.to_string()),
+        (
+            "image_base_model",
+            settings
+                .routing
+                .image_base_model
+                .clone()
+                .unwrap_or_default(),
+        ),
+        (
+            "subscription_plan_order",
+            to_json(&settings.routing.subscription_plan_order)
+                .map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
+            "hidden_model_ids",
+            to_json(&settings.hidden_models).map_err(ConfigurationReplaceError::Store)?,
+        ),
+        (
+            "model_price_overrides",
+            to_json(&settings.model_price_overrides).map_err(ConfigurationReplaceError::Store)?,
+        ),
+    ];
+    for (key, value) in metadata {
+        transaction
+            .execute(
+                "INSERT INTO metadata(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )
+            .map_err(db_error)
+            .map_err(ConfigurationReplaceError::Store)?;
+    }
+    Ok(())
+}
+
+fn validate_configuration_settings(settings: &ConfigurationPresetSettings) -> Result<(), String> {
+    validate_quota_policy(
+        settings.quota.refresh_interval_seconds,
+        settings.quota.request_timeout_seconds,
+    )?;
+    validate_routing_policy(settings.routing.max_retry_candidates)?;
+    if normalize_subscription_plan_order(settings.routing.subscription_plan_order.clone())
+        .map_err(str::to_string)?
+        != settings.routing.subscription_plan_order
+        || normalize_image_base_model(settings.routing.image_base_model.clone())
+            .map_err(|error| error.to_string())?
+            != settings.routing.image_base_model
+        || normalize_model_ids(settings.hidden_models.clone())? != settings.hidden_models
+        || normalize_model_price_overrides(settings.model_price_overrides.clone())?
+            != settings.model_price_overrides
+    {
+        return Err("configuration preset is not normalized".to_string());
+    }
+    let mut ids = HashSet::new();
+    for rule in &settings.sources {
+        if rule.id.is_empty()
+            || !ids.insert(("source", rule.id.as_str()))
+            || rule.weight == 0
+            || rule.name.is_empty()
+            || rule.name.len() > 256
+            || rule.name.chars().any(char::is_control)
+            || url::Url::parse(&rule.base_url).is_err()
+            || normalize_model_ids(rule.allowed_models.clone())? != rule.allowed_models
+            || normalize_model_ids(rule.excluded_models.clone())? != rule.excluded_models
+        {
+            return Err("source preset rule is invalid".to_string());
+        }
+    }
+    for rule in &settings.accounts {
+        if rule.id.is_empty()
+            || !ids.insert(("account", rule.id.as_str()))
+            || rule.weight == 0
+            || rule.identity_hint.is_empty()
+            || rule.identity_hint.len() > 128
+            || rule.identity_hint.chars().any(char::is_control)
+            || normalize_model_ids(rule.allowed_models.clone())? != rule.allowed_models
+            || normalize_model_ids(rule.excluded_models.clone())? != rule.excluded_models
+        {
+            return Err("account preset rule is invalid".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn update_record(
+    transaction: &Transaction<'_>,
+    table: &str,
+    id: &str,
+    record: &impl Serialize,
+) -> Result<(), ConfigurationReplaceError> {
+    let changed = transaction
+        .execute(
+            &format!("UPDATE {table} SET data_json = ?1 WHERE id = ?2"),
+            params![
+                to_json(record).map_err(ConfigurationReplaceError::Store)?,
+                id
+            ],
+        )
+        .map_err(db_error)
+        .map_err(ConfigurationReplaceError::Store)?;
+    if changed != 1 {
+        return Err(ConfigurationReplaceError::Invalid(
+            "referenced configuration object does not exist".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn list_records_from<T: DeserializeOwned>(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<T>, String> {
+    let sql = format!("SELECT data_json FROM {table} ORDER BY id");
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db_error)?;
+    rows.map(|row| parse_json(&row.map_err(db_error)?))
+        .collect()
+}
+
+fn metadata_from(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+    connection
+        .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(db_error)
+}
+
+fn configuration_replace_message(error: ConfigurationReplaceError) -> String {
+    match error {
+        ConfigurationReplaceError::Stale { current_revision } => {
+            format!("configuration revision is stale: {current_revision}")
+        }
+        ConfigurationReplaceError::Invalid(message) | ConfigurationReplaceError::Store(message) => {
+            message
+        }
     }
 }
 
@@ -2217,7 +2711,8 @@ mod tests {
                 (19, "019_remove_cache_write_input_tokens".to_string()),
                 (20, "020_cache_write_input_tokens".to_string()),
                 (21, "021_terminal_usage_per_request".to_string()),
-                (22, "022_usage_retention_rollups".to_string())
+                (22, "022_usage_retention_rollups".to_string()),
+                (23, "023_server_proxy_objects".to_string())
             ]
         );
         drop(store);

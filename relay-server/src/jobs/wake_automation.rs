@@ -147,7 +147,7 @@ async fn execute_inner(
         .map_err(|_| "wake_access_token_invalid".to_string())?;
     let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
-    let proxy = account_proxy_config(state, &credential)
+    let proxy = account_proxy_config(state, &account, &credential)
         .map_err(|_| "wake_proxy_unavailable".to_string())?;
     let builder = reqwest::Client::builder()
         .redirect(Policy::none())
@@ -310,6 +310,7 @@ mod tests {
             created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
+            proxy_id: None,
         };
         let mapped = core_account(&account).unwrap();
         assert_eq!(mapped.id, "account_test");
