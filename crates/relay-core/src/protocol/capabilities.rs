@@ -2,7 +2,7 @@ use crate::WireApi;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Feature {
@@ -14,6 +14,7 @@ pub enum Feature {
     Sources,
     Quota,
     Models,
+    ModelPricing,
     Usage,
     LocalGateway,
     Keys,
@@ -38,6 +39,7 @@ impl Feature {
             Self::Sources => "sources",
             Self::Quota => "quota",
             Self::Models => "models",
+            Self::ModelPricing => "model_pricing",
             Self::Usage => "usage",
             Self::LocalGateway => "local_gateway",
             Self::Keys => "keys",
@@ -98,9 +100,11 @@ impl Capabilities {
             Feature::Sources,
             Feature::Quota,
             Feature::Models,
+            Feature::ModelPricing,
             Feature::Usage,
             Feature::LocalGateway,
             Feature::Keys,
+            Feature::ProfileAttach,
             Feature::Diagnostics,
             Feature::WakeTasks,
             Feature::Backups,
@@ -126,7 +130,7 @@ impl Capabilities {
             supports_quota: true,
             supports_usage: true,
             supports_local_gateway: true,
-            supports_profile_attach: false,
+            supports_profile_attach: true,
             supports_wake_tasks: true,
         }
     }

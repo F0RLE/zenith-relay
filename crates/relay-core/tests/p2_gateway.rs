@@ -999,11 +999,13 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
         GatewayRuntimeOptions {
             max_retry_candidates: 3,
             routing_strategy: Default::default(),
+            subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             response_affinity_store: None,
+            provider_storm_breaker: false,
         },
     )
     .await;
@@ -1079,11 +1081,13 @@ async fn spawn_gateway(
         GatewayRuntimeOptions {
             max_retry_candidates,
             routing_strategy: Default::default(),
+            subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             response_affinity_store: None,
+            provider_storm_breaker: false,
         },
     )
     .await

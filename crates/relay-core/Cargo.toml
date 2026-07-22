@@ -2,22 +2,24 @@
 name = "zenith-relay-core"
 version = "0.1.0"
 edition = "2021"
+license = "AGPL-3.0-only"
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
-base64 = "0.22"
-chrono = { version = "0.4", default-features = false, features = ["std"] }
-futures-util = "0.3"
-httpdate = "1"
-multer = "3"
-reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
-reqwest-websocket = "0.5.1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-subtle = "2"
-tokio = { version = "1", features = ["macros", "time"] }
-url = "2"
+base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+futures-util = "0.3.33"
+httpdate = "1.0.3"
+hex = "0.4.3"
+multer = "3.1.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["http2", "json", "query", "rustls", "stream"] }
+reqwest-websocket = "0.6.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+tokio = { version = "1.53.0", features = ["macros", "time"] }
+url = "2.5.8"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

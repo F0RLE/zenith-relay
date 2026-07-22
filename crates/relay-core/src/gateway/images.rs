@@ -463,41 +463,9 @@ async fn execute_prepared(
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
-        let authorization = match runtime
-            .prepare_authorization(&route.candidate_id, now_ms())
-            .await
-        {
-            Ok(authorization) => authorization,
-            Err(error) => {
-                let failure = AttemptFailure::prepare(error);
-                let state = apply_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
-                    route.half_open_probe,
-                );
-                let mut event = image_usage_event(
-                    &request_id,
-                    attempt,
-                    &key,
-                    &route,
-                    &prepared,
-                    false,
-                    failure.status,
-                    Some(failure.category.to_string()),
-                    started,
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                continue;
-            }
-        };
-        let mut upstream = runtime
+        let upstream = runtime
             .request_client(&route.candidate_id, account_route || prepared.stream)
             .post(upstream_url)
-            .header(AUTHORIZATION, authorization.authorization)
             .header(
                 CONTENT_TYPE,
                 if account_route {
@@ -515,16 +483,13 @@ async fn execute_prepared(
                 },
             )
             .body(request_body);
-        if let Some(account_id) = authorization.chatgpt_account_id {
-            upstream = upstream.header("ChatGPT-Account-Id", account_id);
-        }
-        if let Some(originator) = authorization.originator {
-            upstream = upstream.header("originator", originator);
-        }
-        let upstream = match upstream.send().await {
+        let upstream = match runtime
+            .send_authorized_request(&route.candidate_id, upstream, None)
+            .await
+        {
             Ok(upstream) => upstream,
             Err(error) => {
-                let failure = AttemptFailure::transport(&error);
+                let failure = AttemptFailure::authorized_request(error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
@@ -775,7 +740,7 @@ async fn execute_prepared(
             None,
             now_ms(),
         ) {
-            return cooldown_error(retry_at);
+            return cooldown_error(retry_at, Some(&failure));
         }
     }
     api_error(failure.status, failure.message, failure.category)
@@ -1236,8 +1201,9 @@ fn image_error_response(failure: ImageFailure) -> Response<Body> {
         Json(json!({
             "error": {
                 "message": failure.message,
-                "type": api_error_type(failure.status),
+                "type": api_error_type(failure.status, &failure.code),
                 "code": failure.code,
+                "param": null,
             }
         })),
     )

@@ -40,6 +40,8 @@ pub struct QuotaRefreshData {
     pub secondary: Option<QuotaWindowInput>,
     #[serde(default)]
     pub supplemental: Vec<SupplementalQuotaWindowInput>,
+    #[serde(default)]
+    pub limit_reached: bool,
     pub subscription: Option<SubscriptionInput>,
     pub reset_credits_available: Option<u32>,
     pub observed_at_ms: u64,
@@ -78,6 +80,7 @@ impl QuotaRefreshData {
                 primary,
                 secondary,
                 supplemental,
+                limit_reached: self.limit_reached,
                 reset_credits_available: self.reset_credits_available,
                 updated_at_ms: Some(self.observed_at_ms),
                 error: None,
@@ -140,6 +143,7 @@ pub trait QuotaAdapter: Send + Sync {
 pub struct QuotaRefreshFailure {
     pub code: String,
     pub retryable: bool,
+    http_status: Option<u16>,
 }
 
 impl QuotaRefreshFailure {
@@ -147,8 +151,53 @@ impl QuotaRefreshFailure {
         Self {
             code: safe_code(code),
             retryable,
+            http_status: None,
         }
     }
+
+    pub fn http_status(&self) -> Option<u16> {
+        self.http_status
+    }
+}
+
+pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
+    let retryable = status == 429 || status >= 500;
+    let code = provider_error_code(body).unwrap_or_else(|| {
+        match status {
+            401 => "quota_unauthorized",
+            403 => "quota_forbidden",
+            429 => "quota_rate_limited",
+            500..=599 => "quota_upstream",
+            _ => "quota_http_status",
+        }
+        .to_string()
+    });
+    let mut failure = QuotaRefreshFailure::new(&code, retryable);
+    failure.http_status = Some(status);
+    failure
+}
+
+fn provider_error_code(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    [
+        "/detail/code",
+        "/detail/error/code",
+        "/error/code",
+        "/code",
+        "/error/type",
+        "/type",
+    ]
+    .into_iter()
+    .filter_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
+    .find_map(|code| {
+        let code = code.trim();
+        (!code.is_empty()
+            && code.len() <= 64
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+        .then(|| code.to_ascii_lowercase())
+    })
 }
 
 fn normalize_window(
@@ -275,5 +324,26 @@ mod tests {
         data.preserve_subscription_metadata(&previous);
 
         assert_eq!(data.subscription.unwrap().active_until_ms, Some(2_000));
+    }
+
+    #[test]
+    fn quota_http_failure_keeps_safe_provider_codes() {
+        let invalidated =
+            classify_quota_http_failure(401, br#"{"detail":{"code":"token_invalidated"}}"#);
+        assert_eq!(invalidated.code, "token_invalidated");
+        assert_eq!(invalidated.http_status(), Some(401));
+        assert!(!invalidated.retryable);
+
+        let workspace =
+            classify_quota_http_failure(402, br#"{"error":{"code":"deactivated_workspace"}}"#);
+        assert_eq!(workspace.code, "deactivated_workspace");
+        assert_eq!(workspace.http_status(), Some(402));
+        assert!(!workspace.retryable);
+
+        assert_eq!(
+            classify_quota_http_failure(401, b"").code,
+            "quota_unauthorized"
+        );
+        assert!(classify_quota_http_failure(503, b"").retryable);
     }
 }

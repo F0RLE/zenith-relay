@@ -1,5 +1,17 @@
+use crate::quota::QuotaSnapshot;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
+
+pub const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
+const QUOTA_STALE_GRACE_MS: u64 = 5 * 60 * 1_000;
+
+pub fn quota_stale_after_ms_for_interval(refresh_interval_seconds: u64) -> u64 {
+    QUOTA_STALE_AFTER_MS.max(
+        refresh_interval_seconds
+            .saturating_mul(1_000)
+            .saturating_add(QUOTA_STALE_GRACE_MS),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "remaining")]
@@ -12,6 +24,30 @@ pub enum CandidateQuota {
 }
 
 impl CandidateQuota {
+    pub fn from_snapshot(quota: &QuotaSnapshot, now_ms: u64, stale_after_ms: u64) -> Self {
+        if quota.limit_reached {
+            return Self::Exhausted;
+        }
+        if quota
+            .updated_at_ms
+            .is_some_and(|updated_at| now_ms.saturating_sub(updated_at) > stale_after_ms)
+        {
+            return Self::Stale;
+        }
+        match quota
+            .primary
+            .iter()
+            .chain(quota.secondary.iter())
+            .filter_map(|window| window.available_basis_points)
+            .map(u64::from)
+            .min()
+        {
+            Some(0) => Self::Exhausted,
+            Some(remaining) => Self::Available(remaining),
+            None => Self::Unknown,
+        }
+    }
+
     pub(crate) fn is_eligible(self) -> bool {
         matches!(self, Self::Unknown | Self::Available(1..))
     }
@@ -23,5 +59,30 @@ impl CandidateQuota {
             (_, Self::Available(_)) => Ordering::Less,
             _ => Ordering::Equal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_provider_limit_stays_exhausted_even_when_the_snapshot_is_stale() {
+        let quota = QuotaSnapshot {
+            limit_reached: true,
+            updated_at_ms: Some(1),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            CandidateQuota::from_snapshot(&quota, 10_000, 1),
+            CandidateQuota::Exhausted
+        );
+    }
+
+    #[test]
+    fn stale_window_tracks_long_refresh_intervals() {
+        assert_eq!(quota_stale_after_ms_for_interval(300), QUOTA_STALE_AFTER_MS);
+        assert_eq!(quota_stale_after_ms_for_interval(3_600), 3_900_000);
     }
 }

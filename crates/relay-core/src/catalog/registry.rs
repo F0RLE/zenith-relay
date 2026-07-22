@@ -89,6 +89,7 @@ mod tests {
             health: CandidateHealth::Healthy,
             quota: CandidateQuota::Unknown,
             quota_updated_at_ms: None,
+            quota_reset_at_ms: None,
             cooldowns: BTreeMap::new(),
             last_used_at: None,
             consecutive_failures: 0,

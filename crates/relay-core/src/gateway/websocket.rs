@@ -13,7 +13,7 @@ use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{
-    CloseCode as UpstreamCloseCode, Message as UpstreamMessage, RequestBuilderExt,
+    CloseCode as UpstreamCloseCode, Message as UpstreamMessage, Upgrade,
     WebSocket as UpstreamWebSocket,
 };
 use serde_json::{json, Value};
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};
 
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::MAX_CLIENT_REQUEST_BODY_BYTES;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
 const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -258,6 +258,11 @@ impl ClientRequest {
             false
         }
     }
+
+    fn recover_invalid_encrypted_content(&mut self) -> bool {
+        let mut attempted = false;
+        super::try_recover_encrypted_content(&mut self.value, &mut attempted)
+    }
 }
 
 struct Connected {
@@ -274,7 +279,7 @@ async fn connect_upstream(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     client_headers: &HeaderMap,
-    request: ClientRequest,
+    mut request: ClientRequest,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
 ) -> Result<Connected, GatewayFailure> {
@@ -283,10 +288,12 @@ async fn connect_upstream(
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
+    let mut encrypted_content_recovered = false;
     let mut last_failure = None;
 
-    while attempts_this_run
+    'candidates: while attempts_this_run
         < super::retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
         let selected = runtime.select_and_reserve(
             key,
@@ -332,25 +339,62 @@ async fn connect_upstream(
             }
         };
         let payload = request.payload_for(&route)?;
-        let headers = upstream_headers(client_headers, prepared, request.responses_lite);
-        let upgrade = runtime
-            .websocket_client(&route.candidate_id)
-            .get(route.upstream_url.clone())
-            .headers(headers)
-            .upgrade();
-        let upgrade = match timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await {
-            Ok(Ok(upgrade)) => upgrade,
-            _ => {
-                let failure = GatewayFailure::transport();
-                record_connect_failure(
-                    runtime, key, &route, &request, attempt, started, &failure, None,
-                );
-                last_failure = Some(failure);
-                continue;
+        let mut prepared = prepared;
+        let mut refresh_fence = None;
+        let upgrade = loop {
+            let headers = upstream_headers(client_headers, &prepared, request.responses_lite);
+            let upgrade = runtime
+                .websocket_client(&route.candidate_id)
+                .get(route.upstream_url.clone())
+                .headers(headers)
+                .upgrade();
+            let upgrade = match timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await {
+                Ok(Ok(upgrade)) => upgrade,
+                _ => {
+                    let failure = GatewayFailure::transport();
+                    record_connect_failure(
+                        runtime, key, &route, &request, attempt, started, &failure, None,
+                    );
+                    last_failure = Some(failure);
+                    continue 'candidates;
+                }
+            };
+            if upgrade.status() != StatusCode::UNAUTHORIZED
+                || prepared.token_generation.is_none()
+                || refresh_fence.is_some()
+            {
+                break upgrade;
             }
+            drop(upgrade);
+            refresh_fence = runtime.fence_execution(&route.candidate_id);
+            prepared = match runtime
+                .refresh_authorization_after_unauthorized(
+                    &route.candidate_id,
+                    prepared.token_generation,
+                    now_ms(),
+                )
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let failure = GatewayFailure::prepare(error);
+                    record_connect_failure(
+                        runtime, key, &route, &request, attempt, started, &failure, None,
+                    );
+                    last_failure = Some(failure);
+                    continue 'candidates;
+                }
+            };
         };
+        drop(refresh_fence);
         let status = upgrade.status();
         let response_headers = upgrade.headers().clone();
+        runtime.observe_codex_quota_headers(
+            &route.candidate_id,
+            status,
+            &response_headers,
+            now_ms(),
+        );
         if status != StatusCode::SWITCHING_PROTOCOLS {
             let response = upgrade.into_inner();
             let body = timeout(
@@ -361,6 +405,18 @@ async fn connect_upstream(
             .ok()
             .and_then(Result::ok);
             let failure = GatewayFailure::upstream_status(status, body.as_deref());
+            if failure.category == "upstream_encrypted_content_invalid"
+                && !encrypted_content_recovered
+                && request.recover_invalid_encrypted_content()
+            {
+                encrypted_content_recovered = true;
+                tried.remove(&route.candidate_id);
+                record_connect_rejection(
+                    runtime, key, &route, &request, attempt, started, &failure,
+                );
+                last_failure = Some(failure);
+                continue;
+            }
             let response_missing = body
                 .as_deref()
                 .is_some_and(super::previous_response_not_found);
@@ -454,6 +510,19 @@ async fn connect_upstream(
                     .status
                     .filter(|status| !status.is_success())
                     .unwrap_or_else(|| super::upstream_failure_status(category));
+                if category == "upstream_encrypted_content_invalid"
+                    && !encrypted_content_recovered
+                    && request.recover_invalid_encrypted_content()
+                {
+                    encrypted_content_recovered = true;
+                    tried.remove(&route.candidate_id);
+                    let failure = GatewayFailure::classified(status, category);
+                    record_connect_rejection(
+                        runtime, key, &route, &request, attempt, started, &failure,
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
                 let affinity_miss = super::recoverable_response_affinity_miss(
                     status,
                     request.has_previous_response_id(),
@@ -572,7 +641,7 @@ async fn initial_application_messages(
 async fn first_application_message(
     upstream: &mut UpstreamWebSocket,
 ) -> Result<UpstreamMessage, GatewayFailure> {
-    let deadline = TokioInstant::now() + WEBSOCKET_IDLE_TIMEOUT;
+    let deadline = TokioInstant::now() + INITIAL_MESSAGE_TIMEOUT;
     let mut heartbeat = interval_at(
         TokioInstant::now() + WEBSOCKET_HEARTBEAT_INTERVAL,
         WEBSOCKET_HEARTBEAT_INTERVAL,
@@ -746,7 +815,7 @@ fn record_connect_rejection(
 
 fn upstream_headers(
     client_headers: &HeaderMap,
-    prepared: crate::runtime::PreparedAuthorization,
+    prepared: &crate::runtime::PreparedAuthorization,
     responses_lite: bool,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -755,14 +824,9 @@ fn upstream_headers(
             headers.insert(HeaderName::from_static(name), value.clone());
         }
     }
-    headers.insert(AUTHORIZATION, prepared.authorization);
-    if let Some(account_id) = prepared.chatgpt_account_id {
-        headers.insert(HeaderName::from_static("chatgpt-account-id"), account_id);
-    }
-    if !headers.contains_key("originator") {
-        if let Some(originator) = prepared.originator {
-            headers.insert(HeaderName::from_static("originator"), originator);
-        }
+    headers.insert(AUTHORIZATION, prepared.authorization.clone());
+    if let Some(identity) = prepared.identity.as_ref() {
+        identity.insert(&mut headers);
     }
     if responses_lite {
         headers.insert(
@@ -862,7 +926,23 @@ async fn bridge(
 
     loop {
         let idle_deadline = last_activity + WEBSOCKET_IDLE_TIMEOUT;
+        let semantic_waiting = state
+            .in_flight
+            .as_ref()
+            .is_some_and(|in_flight| in_flight.event.ttft_ms.is_none());
+        let semantic_deadline = TokioInstant::now()
+            + state
+                .in_flight
+                .as_ref()
+                .map_or(super::SSE_SEMANTIC_TIMEOUT, |in_flight| {
+                    super::SSE_SEMANTIC_TIMEOUT.saturating_sub(in_flight.started.elapsed())
+                });
         tokio::select! {
+            _ = sleep_until(semantic_deadline), if semantic_waiting => {
+                finish_incomplete(&runtime, &mut state, "stream_semantic_timeout");
+                send_gateway_error(&mut downstream, &GatewayFailure::semantic_timeout()).await;
+                break;
+            }
             _ = sleep_until(idle_deadline) => {
                 finish_incomplete(&runtime, &mut state, "websocket_idle_timeout");
                 let _ = downstream.send(Message::Close(Some(CloseFrame {
@@ -1240,6 +1320,16 @@ fn finish_terminal(
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     in_flight.event.success = success;
+    runtime.observe_codex_quota_headers(
+        &in_flight.route.candidate_id,
+        terminal.status.unwrap_or(if success {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_GATEWAY
+        }),
+        &terminal.headers,
+        now_ms(),
+    );
     if success {
         state.last_response_id = in_flight.response_id.clone();
         let recovered = runtime.record_success_with_metrics(
@@ -1326,6 +1416,7 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
 fn incomplete_status(category: &str) -> Option<StatusCode> {
     match category {
         "websocket_idle_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
+        "stream_semantic_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
         "stream_event_too_large"
         | "upstream_transport"
         | "upstream_websocket"
@@ -1342,6 +1433,7 @@ fn incomplete_requires_cooldown(category: &str) -> bool {
             | "upstream_websocket"
             | "upstream_websocket_closed"
             | "websocket_idle_timeout"
+            | "stream_semantic_timeout"
     )
 }
 
@@ -1374,7 +1466,39 @@ fn websocket_retry_headers(value: &Value) -> HeaderMap {
     {
         headers.insert(RETRY_AFTER, value);
     }
+    for name in [
+        "x-codex-primary-used-percent",
+        "x-codex-primary-reset-after-seconds",
+        "x-codex-primary-window-minutes",
+        "x-codex-secondary-used-percent",
+        "x-codex-secondary-reset-after-seconds",
+        "x-codex-secondary-window-minutes",
+    ] {
+        if let Some(value) = websocket_header_value(value, name)
+            .filter(|value| value.len() <= 128)
+            .and_then(|value| HeaderValue::from_str(&value).ok())
+        {
+            headers.insert(HeaderName::from_static(name), value);
+        }
+    }
     headers
+}
+
+fn websocket_header_value(value: &Value, name: &str) -> Option<String> {
+    let alternate = name.replace('-', "_");
+    [
+        value.get("headers"),
+        value.pointer("/body/headers"),
+        value.pointer("/response/headers"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|headers| headers.get(name).or_else(|| headers.get(&alternate)))
+    .and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
 }
 
 fn websocket_reset_delay_seconds(value: &Value, now_seconds: u64) -> Option<u64> {
@@ -1409,9 +1533,13 @@ async fn send_gateway_error(downstream: &mut WebSocket, failure: &GatewayFailure
         "type": "error",
         "status": failure.status.as_u16(),
         "error": {
-            "type": super::api_error_type(failure.status),
+            "type": super::api_error_type(
+                failure.status,
+                super::api_error_code(failure.category),
+            ),
             "code": super::api_error_code(failure.category),
             "message": failure.message,
+            "param": null,
         },
         "retry_at_ms": failure.retry_at_ms,
     });
@@ -1515,6 +1643,16 @@ impl GatewayFailure {
             status: StatusCode::GATEWAY_TIMEOUT,
             category: "websocket_idle_timeout",
             message: "upstream WebSocket produced no event before the idle timeout",
+            cooldown_ms: TRANSIENT_COOLDOWN_MS,
+            retry_at_ms: None,
+        }
+    }
+
+    fn semantic_timeout() -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            category: "stream_semantic_timeout",
+            message: "upstream produced no semantic output before the watchdog timeout",
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }

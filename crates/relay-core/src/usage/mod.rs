@@ -1,4 +1,4 @@
-use crate::{RoutingDiagnostics, WireApi};
+use crate::{quota::QuotaSnapshot, RoutingDiagnostics, WireApi};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
@@ -38,6 +38,39 @@ pub struct UsageEvent {
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_snapshot: Option<QuotaSnapshot>,
+}
+
+impl UsageEvent {
+    pub fn affects_account_state(&self) -> bool {
+        if self.account_id.is_none() || self.success {
+            return false;
+        }
+        !matches!(
+            self.error_category.as_deref(),
+            Some(
+                "client_cancelled"
+                    | "response_affinity_miss"
+                    | "response_incomplete"
+                    | "upstream_cancelled"
+                    | "upstream_previous_response_not_found"
+                    | "upstream_tool_call_mismatch"
+                    | "upstream_context_too_large"
+                    | "upstream_encrypted_content_invalid"
+                    | "upstream_instructions_required"
+                    | "upstream_content_policy"
+                    | "upstream_payload_too_large"
+                    | "upstream_unsupported_request"
+                    | "upstream_websocket_unsupported"
+                    | "upstream_invalid_request"
+                    | "upstream_model_not_found"
+                    | "upstream_model_unsupported"
+                    | "upstream_usage_not_included"
+                    | "image_generation_not_enabled"
+            )
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -53,6 +86,16 @@ pub struct ApiEquivalentSummary {
 pub struct ApiModelPrice {
     pub catalog_rank: u32,
     pub input_micro_usd_per_million: u64,
+    pub cached_input_micro_usd_per_million: u64,
+    pub output_micro_usd_per_million: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiModelPriceOverride {
+    pub input_micro_usd_per_million: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: u64,
 }
 
@@ -92,16 +135,45 @@ pub fn estimate_api_equivalent(
     output_tokens: Option<u64>,
     total_tokens: Option<u64>,
 ) -> ApiEquivalentSummary {
+    estimate_api_equivalent_with_price_override(
+        model,
+        input_tokens,
+        cached_input_tokens,
+        cache_write_input_tokens,
+        output_tokens,
+        total_tokens,
+        None,
+    )
+}
+
+pub fn estimate_api_equivalent_with_price_override(
+    model: Option<&str>,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_write_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    price_override: Option<ApiModelPriceOverride>,
+) -> ApiEquivalentSummary {
     let measured_tokens = input_tokens
         .unwrap_or_default()
         .saturating_add(output_tokens.unwrap_or_default());
     let total_tokens = total_tokens.unwrap_or(measured_tokens).max(measured_tokens);
-    let Some(price) = model.and_then(model_price) else {
+    let catalog_price = model.and_then(model_price);
+    if price_override.is_none() && catalog_price.is_none() {
         return ApiEquivalentSummary {
             unpriced_tokens: total_tokens,
             ..Default::default()
         };
-    };
+    }
+    let input_price = price_override
+        .map(|price| price.input_micro_usd_per_million)
+        .or_else(|| catalog_price.map(|price| price.input_micro_usd_per_million))
+        .unwrap_or_default();
+    let output_price = price_override
+        .map(|price| price.output_micro_usd_per_million)
+        .or_else(|| catalog_price.map(|price| price.output_micro_usd_per_million))
+        .unwrap_or_default();
     let input_tokens = input_tokens.unwrap_or_default();
     let cached_input_tokens = cached_input_tokens.map(|tokens| tokens.min(input_tokens));
     let cache_write_input_tokens = cache_write_input_tokens.map(|tokens| {
@@ -118,26 +190,34 @@ pub fn estimate_api_equivalent(
         .saturating_add(cache_write_input_tokens.unwrap_or_default())
         .saturating_add(uncached_input_tokens.unwrap_or_default());
     ApiEquivalentSummary {
-        micro_usd: token_cost(
-            uncached_input_tokens.unwrap_or_default(),
-            price.input_micro_usd_per_million,
-        )
-        .saturating_add(token_cost(
-            cached_input_tokens.unwrap_or_default(),
-            price
-                .cached_input_micro_usd_per_million
-                .unwrap_or(price.input_micro_usd_per_million),
-        ))
-        .saturating_add(token_cost(
-            cache_write_input_tokens.unwrap_or_default(),
-            price
-                .cache_write_input_micro_usd_per_million
-                .unwrap_or(price.input_micro_usd_per_million),
-        ))
-        .saturating_add(token_cost(
-            output_tokens,
-            price.output_micro_usd_per_million,
-        )),
+        micro_usd: token_cost(uncached_input_tokens.unwrap_or_default(), input_price)
+            .saturating_add(token_cost(
+                cached_input_tokens.unwrap_or_default(),
+                price_override.map_or_else(
+                    || {
+                        catalog_price
+                            .and_then(|price| price.cached_input_micro_usd_per_million)
+                            .unwrap_or(input_price)
+                    },
+                    |price| {
+                        price
+                            .cached_input_micro_usd_per_million
+                            .unwrap_or(input_price)
+                    },
+                ),
+            ))
+            .saturating_add(token_cost(
+                cache_write_input_tokens.unwrap_or_default(),
+                price_override.map_or_else(
+                    || {
+                        catalog_price
+                            .and_then(|price| price.cache_write_input_micro_usd_per_million)
+                            .unwrap_or(input_price)
+                    },
+                    |_| input_price,
+                ),
+            ))
+            .saturating_add(token_cost(output_tokens, output_price)),
         priced_tokens: priced_input_tokens.saturating_add(output_tokens),
         unpriced_tokens: total_tokens
             .saturating_sub(priced_input_tokens.saturating_add(output_tokens)),
@@ -154,6 +234,9 @@ pub fn api_model_price(model: &str) -> Option<ApiModelPrice> {
             Some(ApiModelPrice {
                 catalog_rank: u32::try_from(rank).ok()?,
                 input_micro_usd_per_million: price.input_micro_usd_per_million,
+                cached_input_micro_usd_per_million: price
+                    .cached_input_micro_usd_per_million
+                    .unwrap_or(price.input_micro_usd_per_million),
                 output_micro_usd_per_million: price.output_micro_usd_per_million,
             })
         })
@@ -216,6 +299,12 @@ mod pricing_tests {
         assert_eq!(estimate.priced_tokens, 1_100_000);
         assert_eq!(estimate.unpriced_tokens, 0);
         assert_eq!(api_model_price("GPT-5.4").unwrap().catalog_rank, 5);
+        assert_eq!(
+            api_model_price("GPT-5.4")
+                .unwrap()
+                .cached_input_micro_usd_per_million,
+            250_000
+        );
         let catalog = price_catalog().unwrap();
         assert_eq!(catalog.catalog_version, "openai-standard-2026-07-17");
         assert_eq!(
@@ -298,5 +387,32 @@ mod pricing_tests {
             }
         );
         assert!(api_model_price("gpt-future-codex").is_none());
+    }
+
+    #[test]
+    fn custom_price_overrides_catalog_and_prices_unknown_models() {
+        let custom = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_500_000,
+            cached_input_micro_usd_per_million: Some(150_000),
+            output_micro_usd_per_million: 2_500_000,
+        };
+        for model in ["gpt-5.4", "private-model"] {
+            assert_eq!(
+                estimate_api_equivalent_with_price_override(
+                    Some(model),
+                    Some(1_000_000),
+                    Some(400_000),
+                    Some(100_000),
+                    Some(100_000),
+                    Some(1_100_000),
+                    Some(custom),
+                ),
+                ApiEquivalentSummary {
+                    micro_usd: 1_210_000,
+                    priced_tokens: 1_100_000,
+                    unpriced_tokens: 0,
+                }
+            );
+        }
     }
 }

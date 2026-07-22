@@ -223,6 +223,8 @@ pub struct QuotaSnapshot {
     pub secondary: Option<QuotaWindow>,
     #[serde(default)]
     pub supplemental: Vec<SupplementalQuotaWindow>,
+    #[serde(default)]
+    pub limit_reached: bool,
     pub reset_credits_available: Option<u32>,
     pub updated_at_ms: Option<u64>,
     pub error: Option<QuotaErrorState>,
@@ -234,6 +236,15 @@ impl QuotaSnapshot {
             QuotaWindowKind::Primary => self.primary.as_ref(),
             QuotaWindowKind::Secondary => self.secondary.as_ref(),
         }
+    }
+
+    pub fn limiting_reset_at_ms(&self) -> Option<u64> {
+        self.primary
+            .iter()
+            .chain(self.secondary.iter())
+            .filter_map(|window| Some((window.available_basis_points?, window.reset_at_ms?)))
+            .min_by_key(|(available, reset_at_ms)| (*available, *reset_at_ms))
+            .map(|(_, reset_at_ms)| reset_at_ms)
     }
 }
 
@@ -276,18 +287,15 @@ fn transition_fingerprint(
     provider_cycle_id: Option<&str>,
     observed_at_ms: u64,
 ) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(
-            format!(
-                "{kind:?}\0{}\0{}\0{}\0{observed_at_ms}",
-                reset_at_ms.unwrap_or_default(),
-                window_minutes.unwrap_or_default(),
-                provider_cycle_id.unwrap_or_default().trim(),
-            )
-            .as_bytes(),
+    hex::encode(Sha256::digest(
+        format!(
+            "{kind:?}\0{}\0{}\0{}\0{observed_at_ms}",
+            reset_at_ms.unwrap_or_default(),
+            window_minutes.unwrap_or_default(),
+            provider_cycle_id.unwrap_or_default().trim(),
         )
-    )
+        .as_bytes(),
+    ))
 }
 
 fn safe_code(value: &str) -> String {

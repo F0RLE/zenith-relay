@@ -879,16 +879,13 @@ fn select_model(policy: &WakeModelPolicy, models: &[WakeModel]) -> Option<String
 }
 
 fn cycle_key(account: &AccountRecord, transition: &QuotaTransition) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(
-            format!(
-                "{}\0{:?}\0{}",
-                account.id, transition.window_kind, transition.fingerprint,
-            )
-            .as_bytes(),
+    hex::encode(Sha256::digest(
+        format!(
+            "{}\0{:?}\0{}",
+            account.id, transition.window_kind, transition.fingerprint,
         )
-    )
+        .as_bytes(),
+    ))
 }
 
 fn same_cycle(

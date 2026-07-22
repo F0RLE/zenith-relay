@@ -1,17 +1,19 @@
 use crate::accounts::{
-    AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
-    TokenRefreshAdapter,
+    AccountAuthState, CodexIdentityEnvelope, TokenAuthority, TokenAuthorityError,
+    TokenPersistenceAdapter, TokenRefreshAdapter,
 };
+use crate::quota::QuotaSnapshot;
 use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
-    api_model_price, CandidateHealth, CandidateKind, CandidateQuota, CandidateScope, Error,
-    LocalGatewayKey, ModelRegistry, ModelRules, PoolScheduler, ProviderSource, Result,
-    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest,
-    UsageCallback, WireApi, RESPONSE_AFFINITY_TTL_MS,
+    api_model_price, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
+    CandidateQuota, CandidateScope, Error, LocalGatewayKey, ModelRegistry, ModelRules,
+    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
+    Selection, SelectionRequest, UsageCallback, UsageEvent, WireApi, RESPONSE_AFFINITY_TTL_MS,
 };
 use futures_util::StreamExt;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -28,6 +30,7 @@ pub(crate) const MAX_MODELS_BODY_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
+const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
@@ -72,7 +75,9 @@ pub struct RuntimeAccount {
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
     pub quota_updated_at_ms: Option<u64>,
-    pub created_at_ms: u64,
+    pub quota_snapshot: QuotaSnapshot,
+    pub subscription_plan_type: Option<String>,
+    pub subscription_expires_at_ms: Option<u64>,
     pub last_used_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
@@ -97,7 +102,15 @@ impl fmt::Debug for RuntimeAccount {
             .field("health", &self.health)
             .field("quota", &self.quota)
             .field("quota_updated_at_ms", &self.quota_updated_at_ms)
-            .field("created_at_ms", &self.created_at_ms)
+            .field(
+                "quota_reset_at_ms",
+                &self.quota_snapshot.limiting_reset_at_ms(),
+            )
+            .field("subscription_plan_type", &self.subscription_plan_type)
+            .field(
+                "subscription_expires_at_ms",
+                &self.subscription_expires_at_ms,
+            )
             .field("last_used_at_ms", &self.last_used_at_ms)
             .field("cooldowns", &self.cooldowns)
             .field("consecutive_failures", &self.consecutive_failures)
@@ -191,6 +204,7 @@ pub trait ResponseAffinityStore: Send + Sync {
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
     pub routing_strategy: RoutingStrategy,
+    pub subscription_plan_order: Vec<String>,
     pub hidden_models: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub quota_stale_after_ms: u64,
@@ -198,6 +212,7 @@ pub struct GatewayRuntimeOptions {
     /// `None` selects the cheapest known compatible model per account.
     pub image_base_model: Option<String>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
+    pub provider_storm_breaker: bool,
 }
 
 impl fmt::Debug for GatewayRuntimeOptions {
@@ -206,6 +221,7 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .debug_struct("GatewayRuntimeOptions")
             .field("max_retry_candidates", &self.max_retry_candidates)
             .field("routing_strategy", &self.routing_strategy)
+            .field("subscription_plan_order", &self.subscription_plan_order)
             .field("hidden_models", &self.hidden_models)
             .field("default_service_tier", &self.default_service_tier)
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
@@ -214,6 +230,7 @@ impl fmt::Debug for GatewayRuntimeOptions {
                 "response_affinity_store",
                 &self.response_affinity_store.as_ref().map(|_| "configured"),
             )
+            .field("provider_storm_breaker", &self.provider_storm_breaker)
             .finish()
     }
 }
@@ -223,11 +240,13 @@ impl Default for GatewayRuntimeOptions {
         Self {
             max_retry_candidates: 3,
             routing_strategy: RoutingStrategy::Adaptive,
+            subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
             response_affinity_store: None,
+            provider_storm_breaker: false,
         }
     }
 }
@@ -243,10 +262,27 @@ pub struct GatewayRuntime {
     scheduler: Arc<Mutex<PoolScheduler>>,
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
+    codex_model_manifests: Mutex<BTreeMap<String, CachedCodexManifest>>,
+    passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     max_retry_candidates: usize,
-    default_service_tier: DefaultServiceTier,
+    quota_stale_after_ms: u64,
+    default_service_tier_fast: AtomicBool,
     response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     pub(crate) usage: UsageCallback,
+}
+
+#[derive(Clone, Debug)]
+struct PassiveQuotaState {
+    snapshot: QuotaSnapshot,
+    dirty: bool,
+    force_persist: bool,
+    last_persist_hint_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CachedCodexManifest {
+    value: Value,
+    observed_at_ms: u64,
 }
 
 pub(crate) struct CandidateLease {
@@ -254,6 +290,12 @@ pub(crate) struct CandidateLease {
     candidate_id: String,
     model: String,
     lane: CandidateLeaseLane,
+    released: AtomicBool,
+}
+
+pub(crate) struct ExecutionFence {
+    scheduler: Arc<Mutex<PoolScheduler>>,
+    candidate_id: String,
     released: AtomicBool,
 }
 
@@ -289,6 +331,18 @@ impl Drop for CandidateLease {
     }
 }
 
+impl Drop for ExecutionFence {
+    fn drop(&mut self) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_execution_fence(&self.candidate_id, false);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AuthenticatedKey {
     pub(crate) id: String,
@@ -310,7 +364,7 @@ pub(crate) struct SourceExecutor {
 struct AccountExecutor {
     id: String,
     source_id: String,
-    chatgpt_account_id: HeaderValue,
+    identity: CodexIdentityEnvelope,
     responses_url: Url,
     configured_models: BTreeSet<String>,
     image_main_model: Option<String>,
@@ -337,8 +391,15 @@ pub(crate) struct ExecutorRoute {
 
 pub(crate) struct PreparedAuthorization {
     pub(crate) authorization: HeaderValue,
-    pub(crate) chatgpt_account_id: Option<HeaderValue>,
-    pub(crate) originator: Option<HeaderValue>,
+    pub(crate) identity: Option<CodexIdentityEnvelope>,
+    pub(crate) token_generation: Option<u64>,
+}
+
+#[derive(Debug)]
+pub(crate) enum AuthorizedRequestError {
+    Prepare(ExecutorPrepareError),
+    Transport(reqwest::Error),
+    NotReplayable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -424,7 +485,12 @@ impl GatewayRuntime {
 
         let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(options.routing_strategy);
+        let subscription_plan_order =
+            normalize_subscription_plan_order(options.subscription_plan_order.clone())
+                .map_err(|message| Error::Validation(message.to_string()))?;
+        scheduler.set_subscription_plan_order(&subscription_plan_order);
         scheduler.set_quota_stale_after_ms(options.quota_stale_after_ms);
+        scheduler.set_provider_storm_breaker_enabled(options.provider_storm_breaker);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
         for source in sources {
@@ -454,6 +520,7 @@ impl GatewayRuntime {
                 health: CandidateHealth::Healthy,
                 quota: CandidateQuota::Unknown,
                 quota_updated_at_ms: None,
+                quota_reset_at_ms: None,
                 cooldowns: BTreeMap::new(),
                 last_used_at: source.last_used_at_ms,
                 consecutive_failures: 0,
@@ -465,6 +532,7 @@ impl GatewayRuntime {
         }
 
         let mut account_executors = BTreeMap::new();
+        let mut passive_quotas = BTreeMap::new();
         let image_base_model = normalize_image_base_model(options.image_base_model.clone())?;
         if !accounts.is_empty() && account_auth.is_none() {
             return Err(Error::Validation(
@@ -488,18 +556,22 @@ impl GatewayRuntime {
                 ));
             }
             let responses_url = normalized_responses_url(&account.responses_url)?;
+            passive_quotas.insert(
+                account.id.clone(),
+                PassiveQuotaState {
+                    last_persist_hint_ms: account.quota_snapshot.updated_at_ms.unwrap_or_default(),
+                    snapshot: account.quota_snapshot.clone(),
+                    dirty: false,
+                    force_persist: false,
+                },
+            );
             // OAuth identities must not share an HTTP/2 connection pool. A connection-level
             // failure for one account would otherwise abort concurrent streams on other accounts.
             let client = runtime_client(account.proxy.as_ref(), false)?;
             let bounded_client = runtime_client(account.proxy.as_ref(), true)?;
             let websocket_client = runtime_websocket_client(account.proxy.as_ref())?;
-            let mut chatgpt_account_id = HeaderValue::from_str(&account.chatgpt_account_id)
-                .map_err(|_| {
-                    Error::Validation(
-                        "ChatGPT account id contains invalid header characters".to_string(),
-                    )
-                })?;
-            chatgpt_account_id.set_sensitive(true);
+            let identity = CodexIdentityEnvelope::standard(&account.chatgpt_account_id)
+                .map_err(|message| Error::Validation(message.to_string()))?;
             let models = normalized_set(account.models.iter());
             let image_main_model = select_image_main_model(&models, image_base_model.as_deref());
             let mut candidate_models = models.clone();
@@ -521,9 +593,10 @@ impl GatewayRuntime {
                 health: account.health,
                 quota: account.quota,
                 quota_updated_at_ms: account.quota_updated_at_ms,
-                cooldowns: account.cooldowns,
+                quota_reset_at_ms: account.quota_snapshot.limiting_reset_at_ms(),
+                cooldowns: BTreeMap::new(),
                 last_used_at: account.last_used_at_ms,
-                consecutive_failures: account.consecutive_failures,
+                consecutive_failures: 0,
                 secret_available: true,
             };
             let auth = account_auth
@@ -532,13 +605,20 @@ impl GatewayRuntime {
             registry.replace(candidate.id.clone(), candidate_models.iter());
             let candidate_id = candidate.id.clone();
             scheduler.upsert(candidate);
-            scheduler.set_candidate_created_at(&candidate_id, account.created_at_ms);
+            scheduler.set_candidate_subscription_expiry(
+                &candidate_id,
+                account.subscription_expires_at_ms,
+            );
+            scheduler.set_candidate_subscription_plan(
+                &candidate_id,
+                account.subscription_plan_type.as_deref(),
+            );
             account_executors.insert(
                 account.id.clone(),
                 AccountExecutor {
                     id: account.id,
                     source_id: account.source_id,
-                    chatgpt_account_id,
+                    identity,
                     responses_url,
                     configured_models: models,
                     image_main_model,
@@ -642,8 +722,13 @@ impl GatewayRuntime {
             scheduler: Arc::new(Mutex::new(scheduler)),
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
+            codex_model_manifests: Mutex::new(BTreeMap::new()),
+            passive_quotas: Mutex::new(passive_quotas),
             max_retry_candidates: options.max_retry_candidates,
-            default_service_tier: options.default_service_tier,
+            quota_stale_after_ms: options.quota_stale_after_ms,
+            default_service_tier_fast: AtomicBool::new(
+                options.default_service_tier == DefaultServiceTier::Fast,
+            ),
             response_affinity_store: affinity_store,
             usage,
         })
@@ -785,6 +870,41 @@ impl GatewayRuntime {
             .contains(&model.to_ascii_lowercase())
     }
 
+    pub(crate) fn remember_codex_model_manifest(
+        &self,
+        candidate_id: &str,
+        value: Value,
+        observed_at_ms: u64,
+    ) {
+        if self.accounts.contains_key(candidate_id) {
+            self.codex_model_manifests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(
+                    candidate_id.to_string(),
+                    CachedCodexManifest {
+                        value,
+                        observed_at_ms,
+                    },
+                );
+        }
+    }
+
+    pub(crate) fn stale_codex_model_manifest<'a>(
+        &self,
+        candidate_ids: impl IntoIterator<Item = &'a str>,
+    ) -> Option<Value> {
+        let manifests = self
+            .codex_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        candidate_ids
+            .into_iter()
+            .filter_map(|candidate_id| manifests.get(candidate_id))
+            .max_by_key(|manifest| manifest.observed_at_ms)
+            .map(|manifest| manifest.value.clone())
+    }
+
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
         let scheduler = self.lock_scheduler();
         let mut models = BTreeSet::new();
@@ -862,6 +982,15 @@ impl GatewayRuntime {
             quota,
             quota_updated_at_ms,
         )
+    }
+
+    pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
+        self.lock_scheduler()
+            .set_candidate_health(candidate_id, health)
+    }
+
+    pub fn remove_candidate(&self, candidate_id: &str) -> bool {
+        self.lock_scheduler().remove(candidate_id).is_some()
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
@@ -1088,15 +1217,15 @@ impl GatewayRuntime {
         if let Some(source) = self.sources.get(candidate_id) {
             return Ok(PreparedAuthorization {
                 authorization: source.source_authorization(),
-                chatgpt_account_id: None,
-                originator: None,
+                identity: None,
+                token_generation: None,
             });
         }
         let account = self
             .accounts
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
-        let prepared = account
+        let prepared = match account
             .token_authority
             .prepare_and_persist(
                 &account.id,
@@ -1106,16 +1235,285 @@ impl GatewayRuntime {
                 account.persistence_adapter.as_ref(),
             )
             .await
-            .map_err(classify_token_authority_error)?;
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let health = match &error {
+                    TokenAuthorityError::RequiresReauth(_) => Some(CandidateHealth::ReauthRequired),
+                    TokenAuthorityError::AccessTokenExpired
+                    | TokenAuthorityError::AccountNotFound
+                    | TokenAuthorityError::InvalidAccountId => Some(CandidateHealth::Unhealthy),
+                    _ => None,
+                };
+                if let Some(health) = health {
+                    self.set_candidate_health(candidate_id, health);
+                }
+                return Err(classify_token_authority_error(error));
+            }
+        };
         let mut authorization =
-            HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token()))
-                .map_err(|_| ExecutorPrepareError::InvalidCredential)?;
+            match HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token())) {
+                Ok(authorization) => authorization,
+                Err(_) => {
+                    self.set_candidate_health(candidate_id, CandidateHealth::Unhealthy);
+                    return Err(ExecutorPrepareError::InvalidCredential);
+                }
+            };
         authorization.set_sensitive(true);
         Ok(PreparedAuthorization {
             authorization,
-            chatgpt_account_id: Some(account.chatgpt_account_id.clone()),
-            originator: Some(HeaderValue::from_static("codex_cli_rs")),
+            identity: Some(account.identity.clone()),
+            token_generation: Some(prepared.tokens.generation()),
         })
+    }
+
+    pub(crate) async fn refresh_authorization_after_unauthorized(
+        &self,
+        candidate_id: &str,
+        failed_generation: Option<u64>,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        let account = self
+            .accounts
+            .get(candidate_id)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        account
+            .token_authority
+            .invalidate_access_generation_and_persist(
+                &account.id,
+                failed_generation,
+                now_ms,
+                account.persistence_adapter.as_ref(),
+            )
+            .await
+            .map_err(classify_token_authority_error)?;
+        self.prepare_authorization(candidate_id, now_ms).await
+    }
+
+    pub(crate) async fn send_authorized_request(
+        &self,
+        candidate_id: &str,
+        request: reqwest::RequestBuilder,
+        client_version: Option<&str>,
+    ) -> std::result::Result<reqwest::Response, AuthorizedRequestError> {
+        let first_request = request
+            .try_clone()
+            .ok_or(AuthorizedRequestError::NotReplayable)?;
+        let prepared = self
+            .prepare_authorization(candidate_id, runtime_now_ms())
+            .await
+            .map_err(AuthorizedRequestError::Prepare)?;
+        let response = apply_prepared_authorization(first_request, &prepared, client_version)?
+            .send()
+            .await
+            .map_err(AuthorizedRequestError::Transport)?;
+        if response.status() != StatusCode::UNAUTHORIZED || prepared.token_generation.is_none() {
+            self.observe_codex_quota_headers(
+                candidate_id,
+                response.status(),
+                response.headers(),
+                runtime_now_ms(),
+            );
+            return Ok(response);
+        }
+
+        drop(response);
+        let _fence = self.fence_execution(candidate_id);
+        let refreshed = self
+            .refresh_authorization_after_unauthorized(
+                candidate_id,
+                prepared.token_generation,
+                runtime_now_ms(),
+            )
+            .await
+            .map_err(AuthorizedRequestError::Prepare)?;
+        let response = apply_prepared_authorization(request, &refreshed, client_version)?
+            .send()
+            .await
+            .map_err(AuthorizedRequestError::Transport)?;
+        self.observe_codex_quota_headers(
+            candidate_id,
+            response.status(),
+            response.headers(),
+            runtime_now_ms(),
+        );
+        Ok(response)
+    }
+
+    pub(crate) fn fence_execution(&self, candidate_id: &str) -> Option<ExecutionFence> {
+        self.lock_scheduler()
+            .set_execution_fence(candidate_id, true)
+            .then(|| ExecutionFence {
+                scheduler: self.scheduler.clone(),
+                candidate_id: candidate_id.to_string(),
+                released: AtomicBool::new(false),
+            })
+    }
+
+    pub(crate) fn block_candidate_capability(&self, candidate_id: &str, model: &str) -> bool {
+        self.lock_scheduler().block_capability(candidate_id, model)
+    }
+
+    pub(crate) fn clear_candidate_capability_blocks(&self, candidate_id: &str) -> bool {
+        self.lock_scheduler().clear_capability_blocks(candidate_id)
+    }
+
+    pub(crate) fn record_provider_rate_limit(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        now_ms: u64,
+    ) -> bool {
+        self.lock_scheduler()
+            .record_provider_rate_limit(candidate_id, model, now_ms)
+    }
+
+    pub(crate) fn observe_codex_quota_headers(
+        &self,
+        candidate_id: &str,
+        status: StatusCode,
+        headers: &HeaderMap,
+        observed_at_ms: u64,
+    ) -> bool {
+        if !(status.is_success()
+            || status == StatusCode::SWITCHING_PROTOCOLS
+            || status == StatusCode::TOO_MANY_REQUESTS)
+            || !self.accounts.contains_key(candidate_id)
+        {
+            return false;
+        }
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = quotas.get_mut(candidate_id) else {
+            return false;
+        };
+        let Some(merged) =
+            crate::quota::merge_codex_quota_headers(&state.snapshot, headers, observed_at_ms)
+        else {
+            return false;
+        };
+        if merged == state.snapshot {
+            return false;
+        }
+        let previous_quota = CandidateQuota::from_snapshot(
+            &state.snapshot,
+            observed_at_ms,
+            self.quota_stale_after_ms,
+        );
+        let quota =
+            CandidateQuota::from_snapshot(&merged, observed_at_ms, self.quota_stale_after_ms);
+        state.force_persist |= previous_quota != quota
+            && matches!(
+                (previous_quota, quota),
+                (CandidateQuota::Exhausted, _) | (_, CandidateQuota::Exhausted)
+            );
+        state.snapshot = merged;
+        state.dirty = true;
+        self.lock_scheduler().update_candidate_quota_at(
+            candidate_id,
+            quota,
+            state.snapshot.updated_at_ms,
+            state.snapshot.limiting_reset_at_ms(),
+        )
+    }
+
+    pub(crate) fn take_passive_quota_snapshot(
+        &self,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> Option<QuotaSnapshot> {
+        let mut quotas = self
+            .passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = quotas.get_mut(candidate_id)?;
+        if !state.dirty
+            || (!state.force_persist
+                && now_ms.saturating_sub(state.last_persist_hint_ms)
+                    < PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS)
+        {
+            return None;
+        }
+        state.dirty = false;
+        state.force_persist = false;
+        state.last_persist_hint_ms = now_ms;
+        Some(state.snapshot.clone())
+    }
+
+    pub(crate) fn apply_usage_event(&self, event: &UsageEvent, observed_at_ms: u64) {
+        let Some(candidate_id) = event.candidate_id.as_deref() else {
+            return;
+        };
+        if let Some(snapshot) = event.quota_snapshot.as_ref() {
+            self.lock_scheduler().update_candidate_quota_at(
+                candidate_id,
+                CandidateQuota::from_snapshot(snapshot, observed_at_ms, self.quota_stale_after_ms),
+                snapshot.updated_at_ms,
+                snapshot.limiting_reset_at_ms(),
+            );
+        }
+        if event.success {
+            self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
+            return;
+        }
+
+        let category = event.error_category.as_deref().unwrap_or_default();
+        let model = if category == "image_generation_not_enabled" {
+            event.requested_model.as_deref()
+        } else {
+            event
+                .resolved_model
+                .as_deref()
+                .or(event.requested_model.as_deref())
+        }
+        .unwrap_or("*");
+        if is_model_capability_failure(category) {
+            self.block_candidate_capability(candidate_id, model);
+            return;
+        }
+        if event.account_id.is_none() {
+            if event.http_status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
+                self.record_provider_rate_limit(candidate_id, model, observed_at_ms);
+            }
+            return;
+        }
+
+        match category {
+            "upstream_quota_exhausted" => {
+                let reset_at_ms = {
+                    let mut quotas = self
+                        .passive_quotas
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    quotas.get_mut(candidate_id).and_then(|state| {
+                        state.snapshot.limit_reached = true;
+                        state.snapshot.updated_at_ms = Some(observed_at_ms);
+                        state.snapshot.error = None;
+                        state.dirty = true;
+                        state.force_persist = true;
+                        state.snapshot.limiting_reset_at_ms()
+                    })
+                };
+                self.lock_scheduler().update_candidate_quota_at(
+                    candidate_id,
+                    CandidateQuota::Exhausted,
+                    Some(observed_at_ms),
+                    reset_at_ms,
+                );
+            }
+            "upstream_unauthorized" | "account_auth" => {
+                self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
+            }
+            "upstream_account_disabled" => {
+                self.set_candidate_health(candidate_id, CandidateHealth::Blocked);
+            }
+            "upstream_account_verification_required" => {
+                self.set_candidate_health(candidate_id, CandidateHealth::Checkpoint);
+            }
+            _ => {}
+        }
     }
 
     pub(crate) fn request_client(
@@ -1148,8 +1546,17 @@ impl GatewayRuntime {
         self.max_retry_candidates
     }
 
+    pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
+        self.default_service_tier_fast
+            .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
+    }
+
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
-        self.default_service_tier
+        if self.default_service_tier_fast.load(Ordering::Relaxed) {
+            DefaultServiceTier::Fast
+        } else {
+            DefaultServiceTier::Standard
+        }
     }
 
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
@@ -1157,10 +1564,9 @@ impl GatewayRuntime {
         if response_id.is_empty() {
             return None;
         }
-        Some(format!(
-            "{:x}",
-            Sha256::digest(format!("response\0{response_id}").as_bytes())
-        ))
+        Some(hex::encode(Sha256::digest(
+            format!("response\0{response_id}").as_bytes(),
+        )))
     }
 
     pub(crate) fn prompt_affinity_key(
@@ -1173,18 +1579,15 @@ impl GatewayRuntime {
         if prompt_cache_key.is_empty() {
             return None;
         }
-        Some(format!(
-            "{:x}",
-            Sha256::digest(
-                format!(
-                    "prompt\0{}\0{}\0{}",
-                    local_key_id,
-                    model.to_ascii_lowercase(),
-                    prompt_cache_key
-                )
-                .as_bytes()
+        Some(hex::encode(Sha256::digest(
+            format!(
+                "prompt\0{}\0{}\0{}",
+                local_key_id,
+                model.to_ascii_lowercase(),
+                prompt_cache_key
             )
-        ))
+            .as_bytes(),
+        )))
     }
 
     pub(crate) fn bind_prompt_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
@@ -1255,9 +1658,9 @@ impl GatewayRuntime {
             .unwrap_or(1)
     }
 
-    pub(crate) fn set_cooldown(&self, candidate_id: &str, model: &str, retry_at_ms: u64) {
+    pub(crate) fn set_cooldown(&self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
         self.lock_scheduler()
-            .set_cooldown(candidate_id, model, retry_at_ms);
+            .set_cooldown(candidate_id, model, retry_at_ms)
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
@@ -1265,6 +1668,34 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+fn apply_prepared_authorization(
+    request: reqwest::RequestBuilder,
+    prepared: &PreparedAuthorization,
+    client_version: Option<&str>,
+) -> std::result::Result<reqwest::RequestBuilder, AuthorizedRequestError> {
+    let request = request.header(AUTHORIZATION, prepared.authorization.clone());
+    let Some(identity) = prepared.identity.as_ref() else {
+        return Ok(request);
+    };
+    let identity = match client_version {
+        Some(version) => identity
+            .with_client_version(version)
+            .map_err(|_| AuthorizedRequestError::NotReplayable)?,
+        None => identity.clone(),
+    };
+    Ok(identity.apply(request))
+}
+
+fn is_model_capability_failure(category: &str) -> bool {
+    matches!(
+        category,
+        "upstream_model_not_found"
+            | "upstream_model_unsupported"
+            | "upstream_usage_not_included"
+            | "image_generation_not_enabled"
+    )
 }
 
 fn runtime_now_ms() -> u64 {
@@ -1686,6 +2117,27 @@ mod tests {
             id: id.to_string(),
             secret: secret.to_string(),
         }
+    }
+
+    #[test]
+    fn runtime_updates_service_tier_and_removes_candidates_in_place() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Standard);
+        runtime.set_default_service_tier(DefaultServiceTier::Fast);
+        assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
+        assert!(runtime.remove_candidate("source-1"));
+        assert!(runtime.candidate_runtime_order().is_empty());
     }
 
     #[test]

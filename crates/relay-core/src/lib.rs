@@ -20,12 +20,13 @@ pub use runtime::{
     RuntimeAccountAuth, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
 };
 pub use scheduler::{
+    account_candidate_health, normalize_subscription_plan_order, quota_stale_after_ms_for_interval,
     CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
     PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
     SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{source_points_to_gateway, LocalGatewayKey, ProviderSource, WireApi};
 pub use usage::{
-    api_model_price, estimate_api_equivalent, ApiEquivalentSummary, ApiModelPrice, UsageCallback,
-    UsageEvent,
+    api_model_price, estimate_api_equivalent, estimate_api_equivalent_with_price_override,
+    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, UsageCallback, UsageEvent,
 };

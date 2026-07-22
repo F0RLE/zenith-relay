@@ -1,6 +1,7 @@
 use crate::accounts::CODEX_MODELS_CLIENT_VERSION;
 use crate::runtime::{
-    AuthenticatedKey, DefaultServiceTier, ExecutorPrepareError, ExecutorRoute, IMAGE_API_MODEL,
+    AuthenticatedKey, AuthorizedRequestError, DefaultServiceTier, ExecutorPrepareError,
+    ExecutorRoute, IMAGE_API_MODEL,
 };
 use crate::{Error, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::{Body, Bytes};
@@ -16,19 +17,22 @@ use axum::{Json, Router};
 use futures_util::{stream, Stream, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
 mod images;
 mod websocket;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 MiB";
 const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
@@ -38,6 +42,11 @@ const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 const SSE_PRE_OUTPUT_RETRY_GRACE: Duration = Duration::from_secs(30);
+const SSE_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
+const SSE_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(180);
+const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 type CompletionCallback =
     Arc<dyn Fn(&mut UsageEvent, Option<&str>, RateLimitBodyHint) + Send + Sync>;
@@ -114,6 +123,10 @@ async fn codex_models_response(
 ) -> Option<Value> {
     let now_ms = now_ms();
     let routes = runtime.codex_models_routes(key, now_ms).await;
+    let candidate_ids = routes
+        .iter()
+        .map(|(candidate_id, _)| candidate_id.clone())
+        .collect::<Vec<_>>();
     let client_versions = if client_version == CODEX_MODELS_CLIENT_VERSION {
         vec![client_version]
     } else {
@@ -123,25 +136,18 @@ async fn codex_models_response(
         .into_iter()
         .take(runtime.max_retry_candidates().max(1))
     {
-        let Ok(prepared) = runtime.prepare_authorization(&candidate_id, now_ms).await else {
-            continue;
-        };
         for client_version in &client_versions {
             url.query_pairs_mut()
                 .clear()
                 .append_pair("client_version", client_version);
-            let mut request = runtime
+            let request = runtime
                 .request_client(&candidate_id, false)
                 .get(url.clone())
-                .header(AUTHORIZATION, prepared.authorization.clone())
                 .timeout(Duration::from_secs(10));
-            if let Some(account_id) = prepared.chatgpt_account_id.as_ref() {
-                request = request.header("ChatGPT-Account-Id", account_id.clone());
-            }
-            if let Some(originator) = prepared.originator.as_ref() {
-                request = request.header("originator", originator.clone());
-            }
-            let Ok(response) = request.send().await else {
+            let Ok(response) = runtime
+                .send_authorized_request(&candidate_id, request, Some(client_version))
+                .await
+            else {
                 continue;
             };
             if !response.status().is_success() {
@@ -154,11 +160,13 @@ async fn codex_models_response(
             };
             if let Some(catalog) = filter_codex_models_response(runtime, key, visible_models, &body)
             {
+                runtime.clear_candidate_capability_blocks(&candidate_id);
+                runtime.remember_codex_model_manifest(&candidate_id, catalog.clone(), now_ms);
                 return Some(catalog);
             }
         }
     }
-    None
+    runtime.stale_codex_model_manifest(candidate_ids.iter().map(String::as_str))
 }
 
 fn filter_codex_models_response(
@@ -438,7 +446,7 @@ async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Bod
         .map_err(|_| {
             api_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request body exceeds 16 MiB",
+                MAX_CLIENT_REQUEST_BODY_ERROR,
                 "request_too_large",
             )
         })?;
@@ -469,7 +477,7 @@ fn resolve_visible_account_model(
 async fn execute_account_endpoint(
     runtime: Arc<GatewayRuntime>,
     key: AuthenticatedKey,
-    request: Value,
+    mut request: Value,
     requested_model: String,
     resolved_model: String,
     client_headers: HeaderMap,
@@ -492,10 +500,12 @@ async fn execute_account_endpoint(
     let mut tried = account_only_exclusions.clone();
     let mut attempt = 0_u16;
     let mut owner_recovery_confirmed = false;
+    let mut encrypted_content_recovered = false;
     let mut last_failure = None;
 
     while usize::from(attempt)
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
         let Some((selected, lease)) = runtime.select_and_reserve(
             &key,
@@ -545,49 +555,11 @@ async fn execute_account_endpoint(
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
-        let prepared = match runtime
-            .prepare_authorization(&route.candidate_id, now_ms())
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let failure = AttemptFailure::prepare(error);
-                let state = apply_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
-                    route.half_open_probe,
-                );
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    failure.status.as_u16(),
-                    Some(failure.category.to_string()),
-                    started.elapsed().as_millis() as u64,
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                continue;
-            }
-        };
         let mut upstream_request = runtime
             .request_client(&route.candidate_id, false)
             .post(upstream_url)
-            .header(AUTHORIZATION, prepared.authorization)
             .header(CONTENT_TYPE, "application/json")
             .header(ACCEPT, "application/json");
-        if let Some(account_id) = prepared.chatgpt_account_id {
-            upstream_request = upstream_request.header("ChatGPT-Account-Id", account_id);
-        }
-        if let Some(originator) = prepared.originator {
-            upstream_request = upstream_request.header("originator", originator);
-        }
         if endpoint == AccountEndpoint::Compact {
             if let Some(value) = responses_lite.as_ref() {
                 upstream_request =
@@ -607,11 +579,17 @@ async fn execute_account_endpoint(
                 }
             }
         }
-        let upstream = upstream_request.body(request_body).send().await;
+        let upstream = runtime
+            .send_authorized_request(
+                &route.candidate_id,
+                upstream_request.body(request_body),
+                None,
+            )
+            .await;
         let upstream = match upstream {
             Ok(upstream) => upstream,
             Err(error) => {
-                let failure = AttemptFailure::transport(&error);
+                let failure = AttemptFailure::authorized_request(error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
@@ -680,6 +658,14 @@ async fn execute_account_endpoint(
                 Some(failure.category.to_string()),
                 started.elapsed().as_millis() as u64,
             );
+            if failure.category == "upstream_encrypted_content_invalid"
+                && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
+            {
+                tried.remove(&route.candidate_id);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
             let affinity_miss = recoverable_response_affinity_miss(
                 status,
                 has_previous_response_id,
@@ -754,7 +740,7 @@ async fn execute_account_endpoint(
             response_affinity_key.as_deref(),
             now_ms(),
         ) {
-            return cooldown_error(retry_at);
+            return cooldown_error(retry_at, Some(&failure));
         }
     }
     api_error(failure.status, failure.message, failure.category)
@@ -796,7 +782,7 @@ async fn execute_client_request(
         Err(_) => {
             return api_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
-                "request body exceeds 16 MiB",
+                MAX_CLIENT_REQUEST_BODY_ERROR,
                 "request_too_large",
             )
         }
@@ -887,7 +873,7 @@ async fn execute_client_request(
 async fn execute_request(
     runtime: Arc<GatewayRuntime>,
     key: AuthenticatedKey,
-    request: Value,
+    mut request: Value,
     requested_model: String,
     resolved_model: String,
     stream: bool,
@@ -903,6 +889,7 @@ async fn execute_request(
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
     let mut confirmed_response_missing = false;
+    let mut encrypted_content_recovered = false;
     let mut last_failure = None;
     let has_previous_response_id = request
         .get("previous_response_id")
@@ -916,6 +903,7 @@ async fn execute_request(
 
     while attempts_this_run
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
         let selected = runtime.select_and_reserve(
             &key,
@@ -938,7 +926,7 @@ async fn execute_request(
                     response_affinity_key.as_deref(),
                     now_ms(),
                 ) {
-                    return cooldown_error(retry_at);
+                    return cooldown_error(retry_at, None);
                 }
             }
             break;
@@ -1008,61 +996,29 @@ async fn execute_request(
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
-        let prepared = match runtime
-            .prepare_authorization(&route.candidate_id, now_ms())
-            .await
-        {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                let failure = AttemptFailure::prepare(error);
-                let state = apply_cooldown(
-                    &runtime,
-                    &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
-                    route.half_open_probe,
-                );
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    failure.status.as_u16(),
-                    Some(failure.category.to_string()),
-                    started.elapsed().as_millis() as u64,
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                continue;
-            }
-        };
         let client = runtime.request_client(&route.candidate_id, upstream_stream);
         let mut upstream_request = client
             .post(route.upstream_url.clone())
-            .header(AUTHORIZATION, prepared.authorization)
             .header(CONTENT_TYPE, "application/json");
         if upstream_stream {
             upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
-        }
-        if let Some(account_id) = prepared.chatgpt_account_id {
-            upstream_request = upstream_request.header("ChatGPT-Account-Id", account_id);
-        }
-        if let Some(originator) = prepared.originator {
-            upstream_request = upstream_request.header("originator", originator);
         }
         if account_route {
             if let Some(value) = responses_lite.as_ref() {
                 upstream_request = upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value);
             }
         }
-        let upstream = upstream_request.body(request_body).send().await;
+        let upstream = runtime
+            .send_authorized_request(
+                &route.candidate_id,
+                upstream_request.body(request_body),
+                None,
+            )
+            .await;
         let upstream = match upstream {
             Ok(upstream) => upstream,
             Err(error) => {
-                let failure = AttemptFailure::transport(&error);
+                let failure = AttemptFailure::authorized_request(error);
                 let state = apply_cooldown(
                     &runtime,
                     &route.candidate_id,
@@ -1131,6 +1087,14 @@ async fn execute_request(
             };
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             event.error_category = Some(failure.category.to_string());
+            if failure.category == "upstream_encrypted_content_invalid"
+                && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
+            {
+                tried.remove(&route.candidate_id);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
             let response_missing = previous_response_not_found(&bytes);
             let affinity_miss = recoverable_response_affinity_miss(
                 status,
@@ -1235,6 +1199,17 @@ async fn execute_request(
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
                         );
+                        if failure.category == "upstream_encrypted_content_invalid"
+                            && try_recover_encrypted_content(
+                                &mut request,
+                                &mut encrypted_content_recovered,
+                            )
+                        {
+                            tried.remove(&route.candidate_id);
+                            emit_usage(&runtime, event);
+                            last_failure = Some(failure);
+                            continue;
+                        }
                         if let Some(state) = state {
                             apply_failure_state(&mut event, state);
                         }
@@ -1423,9 +1398,9 @@ async fn execute_request(
                 });
                 let combined =
                     stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining);
-                let usage_stream = UsageStream::new(
+                let usage_stream = UsageStream::with_runtime(
                     combined,
-                    runtime.usage.clone(),
+                    runtime.clone(),
                     usage_event(
                         &request_id,
                         attempt,
@@ -1464,6 +1439,14 @@ async fn execute_request(
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
                 );
+                if failure.category == "upstream_encrypted_content_invalid"
+                    && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
+                {
+                    tried.remove(&route.candidate_id);
+                    emit_usage(&runtime, event);
+                    last_failure = Some(failure);
+                    continue;
+                }
                 if let Some(state) = state {
                     apply_failure_state(&mut event, state);
                 }
@@ -1512,7 +1495,7 @@ async fn execute_request(
             response_affinity_key.as_deref(),
             now_ms(),
         ) {
-            return cooldown_error(retry_at);
+            return cooldown_error(retry_at, Some(&failure));
         }
     }
     api_error(failure.status, failure.message, failure.category)
@@ -1554,7 +1537,10 @@ async fn bootstrap_stream(
     let deadline = Instant::now() + SSE_PRE_OUTPUT_RETRY_GRACE;
     loop {
         let next = if buffer.is_empty() {
-            stream.next().await
+            match tokio::time::timeout(SSE_FIRST_BYTE_TIMEOUT, stream.next()).await {
+                Ok(next) => next,
+                Err(_) => return Err(AttemptFailure::stream("stream_first_byte_timeout")),
+            }
         } else {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1841,6 +1827,47 @@ fn sanitize_unstored_reasoning_items(object: &mut Map<String, Value>) {
     }
 }
 
+fn try_recover_encrypted_content(request: &mut Value, attempted: &mut bool) -> bool {
+    if *attempted {
+        return false;
+    }
+    let mut recovered = request.clone();
+    let mut changed = false;
+    strip_encrypted_reasoning(&mut recovered, &mut changed);
+    if !changed {
+        return false;
+    }
+    *request = recovered;
+    *attempted = true;
+    true
+}
+
+fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                strip_encrypted_reasoning(value, changed);
+            }
+        }
+        Value::Object(object) => {
+            if object.get("type").and_then(Value::as_str) == Some("reasoning")
+                && object
+                    .get("encrypted_content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.trim().is_empty())
+            {
+                object.remove("encrypted_content");
+                object.remove("id");
+                *changed = true;
+            }
+            for value in object.values_mut() {
+                strip_encrypted_reasoning(value, changed);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn filter_responses_lite_tools(object: &mut Map<String, Value>) {
     if let Some(Value::Array(tools)) = object.get_mut("tools") {
         tools.retain(responses_lite_tool_allowed);
@@ -1874,7 +1901,10 @@ fn responses_lite_tool_allowed(tool: &Value) -> bool {
     let Some(tool_type) = tool.get("type").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
-    if tool_type.eq_ignore_ascii_case("function") || tool_type.eq_ignore_ascii_case("custom") {
+    if ["function", "custom", "namespace"]
+        .iter()
+        .any(|allowed| tool_type.eq_ignore_ascii_case(allowed))
+    {
         return true;
     }
     tool_type.eq_ignore_ascii_case("tool_search")
@@ -1896,7 +1926,10 @@ fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
     let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
-    if choice_type.eq_ignore_ascii_case("function") || choice_type.eq_ignore_ascii_case("custom") {
+    if ["function", "custom", "namespace"]
+        .iter()
+        .any(|allowed| choice_type.eq_ignore_ascii_case(allowed))
+    {
         return true;
     }
     if choice_type.eq_ignore_ascii_case("tool_search") {
@@ -2279,8 +2312,8 @@ struct AttemptFailure {
 }
 
 struct FailureState {
-    cooldown_scope: String,
-    retry_at_ms: u64,
+    cooldown_scope: Option<String>,
+    retry_at_ms: Option<u64>,
     consecutive_failures: u32,
 }
 
@@ -2316,6 +2349,19 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         ],
     ) {
         "upstream_previous_response_not_found"
+    } else if text_has_any(
+        text,
+        &[
+            "phone_verification_required",
+            "phone number verification required",
+            "verify your phone number",
+            "account_verification_required",
+            "account verification required",
+            "verify your account",
+            "account must be verified",
+        ],
+    ) {
+        "upstream_account_verification_required"
     } else if text_has_any(
         text,
         &[
@@ -2601,6 +2647,7 @@ fn upstream_failure_message(category: &str) -> &'static str {
         "upstream_instructions_required" => "upstream requires request instructions",
         "upstream_usage_not_included" => "upstream account plan does not include this capability",
         "upstream_quota_exhausted" => "upstream usage quota is exhausted",
+        "upstream_account_verification_required" => "upstream account verification is required",
         "upstream_account_disabled" => "upstream account is disabled",
         "upstream_unauthorized" => "upstream authentication failed",
         "upstream_region_unsupported" => "upstream rejected the request region",
@@ -2631,9 +2678,10 @@ fn upstream_failure_message(category: &str) -> &'static str {
 fn upstream_failure_status(category: &str) -> StatusCode {
     match category {
         "upstream_unauthorized" => StatusCode::UNAUTHORIZED,
-        "upstream_account_disabled" | "upstream_forbidden" | "upstream_region_unsupported" => {
-            StatusCode::FORBIDDEN
-        }
+        "upstream_account_disabled"
+        | "upstream_account_verification_required"
+        | "upstream_forbidden"
+        | "upstream_region_unsupported" => StatusCode::FORBIDDEN,
         "upstream_usage_not_included" => StatusCode::FORBIDDEN,
         "upstream_quota_exhausted"
         | "upstream_rate_limited"
@@ -2786,6 +2834,14 @@ fn upstream_event_failure_category(
 }
 
 impl AttemptFailure {
+    fn authorized_request(error: AuthorizedRequestError) -> Self {
+        match error {
+            AuthorizedRequestError::Prepare(error) => Self::prepare(error),
+            AuthorizedRequestError::Transport(error) => Self::transport(&error),
+            AuthorizedRequestError::NotReplayable => Self::body(),
+        }
+    }
+
     fn transport(error: &reqwest::Error) -> Self {
         let (category, message) = if error.is_timeout() {
             ("upstream_transport_timeout", "upstream request timed out")
@@ -3138,10 +3194,10 @@ fn apply_status_cooldown_with_hint(
     };
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now.saturating_add(duration_ms);
-    runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    let applied = runtime.set_cooldown(candidate_id, scope, retry_at_ms);
     FailureState {
-        cooldown_scope: scope.to_string(),
-        retry_at_ms,
+        cooldown_scope: applied.then(|| scope.to_string()),
+        retry_at_ms: applied.then_some(retry_at_ms),
         consecutive_failures,
     }
 }
@@ -3336,17 +3392,17 @@ fn apply_cooldown(
     let consecutive_failures = runtime.record_failure(candidate_id);
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now_ms().saturating_add(duration_ms);
-    runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    let applied = runtime.set_cooldown(candidate_id, scope, retry_at_ms);
     FailureState {
-        cooldown_scope: scope.to_string(),
-        retry_at_ms,
+        cooldown_scope: applied.then(|| scope.to_string()),
+        retry_at_ms: applied.then_some(retry_at_ms),
         consecutive_failures,
     }
 }
 
 fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {
-    event.cooldown_scope = Some(state.cooldown_scope);
-    event.retry_at_ms = Some(state.retry_at_ms);
+    event.cooldown_scope = state.cooldown_scope;
+    event.retry_at_ms = state.retry_at_ms;
     event.consecutive_failures = Some(state.consecutive_failures);
 }
 
@@ -3426,18 +3482,25 @@ fn unauthorized() -> Response<Body> {
     response
 }
 
-fn cooldown_error(retry_at_ms: u64) -> Response<Body> {
+fn cooldown_error(retry_at_ms: u64, failure: Option<&AttemptFailure>) -> Response<Body> {
     let seconds = retry_at_ms
         .saturating_sub(now_ms())
         .saturating_add(999)
         .checked_div(1_000)
         .unwrap_or_default()
         .max(1);
-    let mut response = api_error(
-        StatusCode::TOO_MANY_REQUESTS,
-        "all eligible sources are cooling down",
-        "all_sources_cooling_down",
-    );
+    let mut response = failure
+        .filter(|failure| failure.category == "upstream_quota_exhausted")
+        .map_or_else(
+            || {
+                api_error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "all eligible sources are cooling down",
+                    "all_sources_cooling_down",
+                )
+            },
+            |failure| api_error(failure.status, failure.message, failure.category),
+        );
     if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
         response.headers_mut().insert(RETRY_AFTER, value);
     }
@@ -3445,8 +3508,8 @@ fn cooldown_error(retry_at_ms: u64) -> Response<Body> {
 }
 
 fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
-    let error_type = api_error_type(status);
     let code = api_error_code(code);
+    let error_type = api_error_type(status, code);
     (
         status,
         Json(json!({
@@ -3454,13 +3517,17 @@ fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
                 "message": message,
                 "type": error_type,
                 "code": code,
+                "param": null,
             }
         })),
     )
         .into_response()
 }
 
-fn api_error_type(status: StatusCode) -> &'static str {
+fn api_error_type(status: StatusCode, code: &str) -> &'static str {
+    if code == "insufficient_quota" {
+        return "insufficient_quota";
+    }
     match status {
         StatusCode::UNAUTHORIZED => "authentication_error",
         StatusCode::FORBIDDEN => "permission_error",
@@ -3474,6 +3541,7 @@ fn api_error_code(code: &str) -> &str {
     match code {
         "upstream_unauthorized" => "invalid_api_key",
         "upstream_account_disabled" => "account_deactivated",
+        "upstream_account_verification_required" => "account_verification_required",
         "upstream_usage_not_included" => "usage_not_included",
         "upstream_quota_exhausted" => "insufficient_quota",
         "upstream_rate_limited" => "rate_limit_exceeded",
@@ -3588,6 +3656,7 @@ fn usage_event(
         reasoning_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        quota_snapshot: None,
     }
 }
 
@@ -3601,7 +3670,14 @@ fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {
     apply_usage(event, usage);
 }
 
-fn emit_usage(runtime: &GatewayRuntime, event: UsageEvent) {
+fn emit_usage(runtime: &GatewayRuntime, mut event: UsageEvent) {
+    let observed_at_ms = now_ms();
+    runtime.apply_usage_event(&event, observed_at_ms);
+    if event.quota_snapshot.is_none() {
+        event.quota_snapshot = event.candidate_id.as_deref().and_then(|candidate_id| {
+            runtime.take_passive_quota_snapshot(candidate_id, observed_at_ms)
+        });
+    }
     emit_callback(&runtime.usage, event);
 }
 
@@ -3620,6 +3696,7 @@ fn request_id() -> String {
 
 struct UsageStream<S> {
     inner: Pin<Box<S>>,
+    runtime: Option<Arc<GatewayRuntime>>,
     callback: crate::UsageCallback,
     completion: CompletionCallback,
     event: Option<UsageEvent>,
@@ -3628,10 +3705,15 @@ struct UsageStream<S> {
     started: Instant,
     sse_pending: Vec<u8>,
     output_pending: VecDeque<Bytes>,
+    heartbeat: Pin<Box<Sleep>>,
+    idle_watchdog: Pin<Box<Sleep>>,
+    semantic_watchdog: Pin<Box<Sleep>>,
+    semantic_output_seen: bool,
     terminated: bool,
 }
 
 impl<S> UsageStream<S> {
+    #[cfg(test)]
     fn new(
         stream: S,
         callback: crate::UsageCallback,
@@ -3639,8 +3721,10 @@ impl<S> UsageStream<S> {
         started: Instant,
         completion: CompletionCallback,
     ) -> Self {
+        let semantic_remaining = SSE_SEMANTIC_TIMEOUT.saturating_sub(started.elapsed());
         Self {
             inner: Box::pin(stream),
+            runtime: None,
             callback,
             completion,
             event: Some(event),
@@ -3649,6 +3733,38 @@ impl<S> UsageStream<S> {
             started,
             sse_pending: Vec::new(),
             output_pending: VecDeque::new(),
+            heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
+            idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
+            semantic_watchdog: Box::pin(sleep(semantic_remaining)),
+            semantic_output_seen: false,
+            terminated: false,
+        }
+    }
+
+    fn with_runtime(
+        stream: S,
+        runtime: Arc<GatewayRuntime>,
+        event: UsageEvent,
+        started: Instant,
+        completion: CompletionCallback,
+    ) -> Self {
+        let callback = runtime.usage.clone();
+        let semantic_remaining = SSE_SEMANTIC_TIMEOUT.saturating_sub(started.elapsed());
+        Self {
+            inner: Box::pin(stream),
+            runtime: Some(runtime),
+            callback,
+            completion,
+            event: Some(event),
+            response_id: None,
+            cooldown_hint: RateLimitBodyHint::default(),
+            started,
+            sse_pending: Vec::new(),
+            output_pending: VecDeque::new(),
+            heartbeat: Box::pin(sleep(SSE_HEARTBEAT_INTERVAL)),
+            idle_watchdog: Box::pin(sleep(SSE_IDLE_TIMEOUT)),
+            semantic_watchdog: Box::pin(sleep(semantic_remaining)),
+            semantic_output_seen: false,
             terminated: false,
         }
     }
@@ -3678,7 +3794,11 @@ impl<S> UsageStream<S> {
             .map(|ttft_ms| event.latency_ms.saturating_sub(ttft_ms))
             .filter(|duration| *duration > 0);
         (self.completion)(&mut event, self.response_id.as_deref(), self.cooldown_hint);
-        emit_callback(&self.callback, event);
+        if let Some(runtime) = self.runtime.as_deref() {
+            emit_usage(runtime, event);
+        } else {
+            emit_callback(&self.callback, event);
+        }
     }
 
     fn queue_responses_failure(&mut self, category: &str) -> bool {
@@ -3767,6 +3887,7 @@ impl<S> UsageStream<S> {
                 if let Some(current) = self.event.as_mut() {
                     current.ttft_ms = Some(self.started.elapsed().as_millis() as u64);
                 }
+                self.semantic_output_seen = true;
             }
             if let Some(usage) = terminal.usage {
                 if let Some(current) = self.event.as_mut() {
@@ -3818,6 +3939,9 @@ where
             }
             match this.inner.as_mut().poll_next(context) {
                 Poll::Ready(Some(Ok(bytes))) => {
+                    let now = TokioInstant::now();
+                    this.heartbeat.as_mut().reset(now + SSE_HEARTBEAT_INTERVAL);
+                    this.idle_watchdog.as_mut().reset(now + SSE_IDLE_TIMEOUT);
                     this.ingest_sse(&bytes);
                     if let Some(failure) = this.output_pending.pop_front() {
                         return Poll::Ready(Some(Ok(failure)));
@@ -3842,7 +3966,29 @@ where
                     this.terminated = true;
                     return Poll::Ready(None);
                 }
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if !this.semantic_output_seen
+                        && this.semantic_watchdog.as_mut().poll(context).is_ready()
+                    {
+                        if this.fail_stream("stream_semantic_timeout") {
+                            continue;
+                        }
+                        return Poll::Ready(None);
+                    }
+                    if this.idle_watchdog.as_mut().poll(context).is_ready() {
+                        if this.fail_stream("stream_idle_timeout") {
+                            continue;
+                        }
+                        return Poll::Ready(None);
+                    }
+                    if this.heartbeat.as_mut().poll(context).is_ready() {
+                        this.heartbeat
+                            .as_mut()
+                            .reset(TokioInstant::now() + SSE_HEARTBEAT_INTERVAL);
+                        return Poll::Ready(Some(Ok(Bytes::from_static(SSE_HEARTBEAT))));
+                    }
+                    return Poll::Pending;
+                }
             }
         }
     }
@@ -4260,6 +4406,11 @@ mod tests {
                 "upstream_account_disabled",
             ),
             (
+                StatusCode::FORBIDDEN,
+                br#"{"error":{"code":"phone_verification_required"}}"#.as_slice(),
+                "upstream_account_verification_required",
+            ),
+            (
                 StatusCode::PAYMENT_REQUIRED,
                 br#"{"error":{"code":"deactivated_workspace"}}"#.as_slice(),
                 "upstream_account_disabled",
@@ -4444,19 +4595,29 @@ mod tests {
     #[test]
     fn local_errors_use_openai_compatible_error_types() {
         assert_eq!(
-            api_error_type(StatusCode::UNAUTHORIZED),
+            api_error_type(StatusCode::UNAUTHORIZED, "invalid_api_key"),
             "authentication_error"
         );
-        assert_eq!(api_error_type(StatusCode::FORBIDDEN), "permission_error");
         assert_eq!(
-            api_error_type(StatusCode::TOO_MANY_REQUESTS),
+            api_error_type(StatusCode::FORBIDDEN, "permission_denied"),
+            "permission_error"
+        );
+        assert_eq!(
+            api_error_type(StatusCode::TOO_MANY_REQUESTS, "rate_limit_exceeded"),
             "rate_limit_error"
         );
         assert_eq!(
-            api_error_type(StatusCode::BAD_REQUEST),
+            api_error_type(StatusCode::BAD_REQUEST, "invalid_request"),
             "invalid_request_error"
         );
-        assert_eq!(api_error_type(StatusCode::BAD_GATEWAY), "server_error");
+        assert_eq!(
+            api_error_type(StatusCode::BAD_GATEWAY, "bad_gateway"),
+            "server_error"
+        );
+        assert_eq!(
+            api_error_type(StatusCode::TOO_MANY_REQUESTS, "insufficient_quota"),
+            "insufficient_quota"
+        );
         assert_eq!(
             api_error_code("upstream_quota_exhausted"),
             "insufficient_quota"
@@ -4470,6 +4631,25 @@ mod tests {
             "model_at_capacity"
         );
         assert_eq!(api_error_code("local_internal_code"), "local_internal_code");
+    }
+
+    #[tokio::test]
+    async fn exhausted_quota_survives_the_cooldown_response_shape() {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(br#"{"error":{"type":"insufficient_quota"}}"#),
+        );
+        let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().contains_key(RETRY_AFTER));
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value.pointer("/error/type").unwrap(), "insufficient_quota");
+        assert_eq!(value.pointer("/error/code").unwrap(), "insufficient_quota");
+        assert!(value.pointer("/error/param").unwrap().is_null());
     }
 
     #[test]
@@ -4492,6 +4672,10 @@ mod tests {
             "tools": [
                 {"type": "function", "name": "lookup"},
                 {"type": "custom", "name": "patch"},
+                {"type": "namespace", "name": "collaboration", "tools": [
+                    {"type": "function", "name": "spawn_agent"},
+                    {"type": "function", "name": "wait_agent"}
+                ]},
                 {"type": "tool_search", "execution": "client"},
                 {"type": "tool_search", "execution": "server"},
                 {"type": "web_search"},
@@ -4501,6 +4685,7 @@ mod tests {
                 "type": "allowed_tools",
                 "tools": [
                     {"type": "function", "name": "lookup"},
+                    {"type": "namespace", "name": "collaboration"},
                     {"type": "web_search"}
                 ]
             },
@@ -4528,13 +4713,29 @@ mod tests {
                 .filter_map(|tool| tool.get("type").and_then(Value::as_str))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(types("/tools"), ["function", "custom", "tool_search"]);
-        assert_eq!(types("/tool_choice/tools"), ["function"]);
+        assert_eq!(
+            types("/tools"),
+            ["function", "custom", "namespace", "tool_search"]
+        );
+        assert_eq!(types("/tool_choice/tools"), ["function", "namespace"]);
         assert_eq!(types("/input/0/tools"), ["custom"]);
         assert_eq!(types("/response/tools"), ["function"]);
         assert_eq!(request["input"].as_array().unwrap().len(), 2);
         assert!(request.pointer("/response/tool_choice").is_none());
         assert_eq!(request["parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn responses_lite_preserves_namespace_tool_choice() {
+        let mut request = json!({
+            "tools": [{"type": "namespace", "name": "collaboration"}],
+            "tool_choice": {"type": "namespace", "name": "collaboration"}
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+
+        assert_eq!(request["tools"][0]["type"], "namespace");
+        assert_eq!(request["tool_choice"]["type"], "namespace");
     }
 
     #[test]
@@ -4577,8 +4778,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn oversized_sse_event_is_recorded_as_failure() {
+    #[tokio::test]
+    async fn oversized_sse_event_is_recorded_as_failure() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
         let mut stream = UsageStream::new(
@@ -4610,6 +4811,7 @@ mod tests {
                 reasoning_tokens: None,
                 output_tokens: None,
                 total_tokens: None,
+                quota_snapshot: None,
             },
             Instant::now(),
             Arc::new(|_, _, _| {}),
@@ -4675,8 +4877,8 @@ mod tests {
         assert_eq!(event.total_tokens, Some(21));
     }
 
-    #[test]
-    fn streaming_chat_usage_captures_cached_prompt_tokens() {
+    #[tokio::test]
+    async fn streaming_chat_usage_captures_cached_prompt_tokens() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
         let mut stream = UsageStream::new(
@@ -4875,6 +5077,7 @@ mod tests {
             reasoning_tokens: None,
             output_tokens: None,
             total_tokens: None,
+            quota_snapshot: None,
         }
     }
 }

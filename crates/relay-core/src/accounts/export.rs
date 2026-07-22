@@ -6,12 +6,14 @@ use std::{collections::HashSet, fmt};
 
 pub const MAX_ACCOUNT_EXPORT_ITEMS: usize = 256;
 pub const MAX_ACCOUNT_EXPORT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_ACCOUNT_EXPORT_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 const MAX_METADATA_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountExportFormat {
+    Zenith,
     Cpa,
     Sub2api,
     Cockpit,
@@ -25,6 +27,7 @@ pub enum AccountExportFormat {
 impl AccountExportFormat {
     pub const fn slug(self) -> &'static str {
         match self {
+            Self::Zenith => "zenith",
             Self::Cpa => "cpa",
             Self::Sub2api => "sub2api",
             Self::Cockpit => "cockpit",
@@ -41,6 +44,8 @@ impl AccountExportFormat {
 pub struct AccountExportRequest {
     pub account_ids: Vec<String>,
     pub format: AccountExportFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl AccountExportRequest {
@@ -58,6 +63,12 @@ impl AccountExportRequest {
                 || !seen.insert(account_id)
         }) {
             return Err(validation("account export selection is invalid"));
+        }
+        let description = normalize_account_export_description(self.description.as_deref())?;
+        if description.is_some() && self.format != AccountExportFormat::Zenith {
+            return Err(validation(
+                "account export description is only supported by Zenith",
+            ));
         }
         Ok(())
     }
@@ -166,6 +177,7 @@ pub fn build_account_export(
     format: AccountExportFormat,
     accounts: &[AccountExportCredential],
     exported_at_ms: u64,
+    description: Option<&str>,
 ) -> Result<AccountExportDocument> {
     if accounts.is_empty() || accounts.len() > MAX_ACCOUNT_EXPORT_ITEMS {
         return Err(validation("account export count is invalid"));
@@ -173,12 +185,27 @@ pub fn build_account_export(
     for account in accounts {
         validate_account(account)?;
     }
-    let exported_at = timestamp(exported_at_ms)?;
+    let description = normalize_account_export_description(description)?;
+    if description.is_some() && format != AccountExportFormat::Zenith {
+        return Err(validation(
+            "account export description is only supported by Zenith",
+        ));
+    }
+    let exported_at_value = timestamp_value(exported_at_ms)?;
+    let exported_at = exported_at_value.to_rfc3339_opts(SecondsFormat::Millis, true);
     let values = accounts
         .iter()
         .map(|account| account_value(format, account, exported_at_ms, &exported_at))
         .collect::<Result<Vec<_>>>()?;
-    let value = if format == AccountExportFormat::Sub2api {
+    let value = if format == AccountExportFormat::Zenith {
+        strip_nulls(json!({
+            "format": "zenith",
+            "version": 1,
+            "exportedAt": exported_at,
+            "description": description,
+            "accounts": values,
+        }))
+    } else if format == AccountExportFormat::Sub2api {
         json!({
             "exported_at": exported_at,
             "proxies": [],
@@ -200,15 +227,19 @@ pub fn build_account_export(
     let document = AccountExportDocument {
         format,
         account_count: accounts.len(),
-        file_name: format!(
-            "{}-{}.json",
-            if accounts.len() == 1 {
-                "account"
-            } else {
-                "accounts"
-            },
-            format.slug()
-        ),
+        file_name: if format == AccountExportFormat::Zenith {
+            "zenith.json".into()
+        } else {
+            format!(
+                "{}-{}.json",
+                if accounts.len() == 1 {
+                    "account"
+                } else {
+                    "accounts"
+                },
+                format.slug()
+            )
+        },
         content,
     };
     document.validate()?;
@@ -234,6 +265,28 @@ fn account_value(
         .and_then(|expires_at| expires_at.checked_sub(exported_at_ms))
         .map(|milliseconds| milliseconds / 1_000);
     let value = match format {
+        AccountExportFormat::Zenith => json!({
+            "name": account.label,
+            "provider": "openai",
+            "auth": {
+                "type": "oauth",
+                "accessToken": account.access_token,
+                "refreshToken": account.refresh_token,
+                "idToken": account.id_token,
+                "issuedAt": issued_at,
+                "expiresAt": expires_at,
+            },
+            "identity": {
+                "email": account.email,
+                "accountId": account.account_id,
+                "userId": account.user_id,
+                "organizationId": account.organization_id,
+            },
+            "subscription": {
+                "plan": account.plan_type,
+                "expiresAt": subscription_expires_at,
+            },
+        }),
         AccountExportFormat::Cpa => json!({
             "type": "codex",
             "account_id": account.account_id,
@@ -318,11 +371,9 @@ fn account_value(
             "last_refresh": issued_at,
             "tokens": {
                 "access_token": account.access_token,
-                "refresh_token": account.refresh_token.as_deref().unwrap_or("__missing_refresh_token__"),
+                "refresh_token": account.refresh_token,
                 "id_token": account.id_token.as_deref().unwrap_or(""),
             },
-            "axonhub_refresh_token_placeholder": account.refresh_token.is_none().then_some(true),
-            "axonhub_note": account.refresh_token.is_none().then_some("refresh_token is a placeholder; access_token works only until it expires."),
         }),
         AccountExportFormat::CodexManager => json!({
             "tokens": {
@@ -399,11 +450,27 @@ fn validate_text(value: &str, field: &str, max: usize, allow_empty: bool) -> Res
 }
 
 fn timestamp(milliseconds: u64) -> Result<String> {
+    Ok(timestamp_value(milliseconds)?.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn timestamp_value(milliseconds: u64) -> Result<DateTime<Utc>> {
     let milliseconds = i64::try_from(milliseconds)
         .map_err(|_| validation("account export timestamp is invalid"))?;
     DateTime::<Utc>::from_timestamp_millis(milliseconds)
-        .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, true))
         .ok_or_else(|| validation("account export timestamp is invalid"))
+}
+
+pub fn normalize_account_export_description(value: Option<&str>) -> Result<Option<&str>> {
+    let value = value.filter(|value| !value.trim().is_empty());
+    if value.is_some_and(|value| {
+        value.chars().count() > MAX_ACCOUNT_EXPORT_DESCRIPTION_CHARS
+            || value
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    }) {
+        return Err(validation("account export description is invalid"));
+    }
+    Ok(value)
 }
 
 fn optional_timestamp(milliseconds: Option<u64>) -> Result<Option<String>> {
@@ -445,7 +512,8 @@ mod tests {
     #[test]
     fn all_supported_formats_are_valid_json_and_never_include_proxy_fields() {
         for format in formats() {
-            let document = build_account_export(format, &[fixture()], 1_788_000_000_000).unwrap();
+            let document =
+                build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
             document.validate().unwrap();
             let value: Value = serde_json::from_str(&document.content).unwrap();
             assert!(document.content.contains(ACCESS), "{format:?}");
@@ -465,6 +533,7 @@ mod tests {
             AccountExportFormat::Sub2api,
             &[fixture(), fixture()],
             1_788_000_000_000,
+            None,
         )
         .unwrap();
         let value: Value = serde_json::from_str(&document.content).unwrap();
@@ -478,13 +547,17 @@ mod tests {
 
     #[test]
     fn single_exports_are_objects_and_bulk_exports_are_arrays() {
-        for format in formats()
-            .into_iter()
-            .filter(|format| *format != AccountExportFormat::Sub2api)
-        {
-            let single = build_account_export(format, &[fixture()], 1_788_000_000_000).unwrap();
+        for format in formats().into_iter().filter(|format| {
+            !matches!(
+                format,
+                AccountExportFormat::Zenith | AccountExportFormat::Sub2api
+            )
+        }) {
+            let single =
+                build_account_export(format, &[fixture()], 1_788_000_000_000, None).unwrap();
             let bulk =
-                build_account_export(format, &[fixture(), fixture()], 1_788_000_000_000).unwrap();
+                build_account_export(format, &[fixture(), fixture()], 1_788_000_000_000, None)
+                    .unwrap();
             assert!(serde_json::from_str::<Value>(&single.content)
                 .unwrap()
                 .is_object());
@@ -492,6 +565,34 @@ mod tests {
                 .unwrap()
                 .is_array());
         }
+    }
+
+    #[test]
+    fn zenith_is_a_versioned_described_account_bundle() {
+        let document = build_account_export(
+            AccountExportFormat::Zenith,
+            &[fixture(), fixture()],
+            1_788_000_000_000,
+            Some("  Seller description\nSecond line  "),
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&document.content).unwrap();
+
+        assert_eq!(value["format"], "zenith");
+        assert_eq!(value["version"], 1);
+        assert_eq!(value["description"], "  Seller description\nSecond line  ");
+        assert_eq!(value["accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(value["accounts"][0]["provider"], "openai");
+        assert_eq!(value["accounts"][0]["auth"]["type"], "oauth");
+        assert_eq!(
+            value["accounts"][0]["identity"]["accountId"],
+            "account-secret-id"
+        );
+        assert_eq!(value["accounts"][0]["subscription"]["plan"], "plus");
+        assert!(value.get("proxies").is_none());
+        assert!(value["accounts"][0].get("enabled").is_none());
+        assert!(value["accounts"][0].get("allowedModels").is_none());
+        assert_eq!(document.file_name, "zenith.json");
     }
 
     #[test]
@@ -503,19 +604,45 @@ mod tests {
         account.user_id = None;
         account.organization_id = None;
         for format in formats() {
-            let document =
-                build_account_export(format, std::slice::from_ref(&account), 1_788_000_000_000)
-                    .unwrap();
+            let document = build_account_export(
+                format,
+                std::slice::from_ref(&account),
+                1_788_000_000_000,
+                None,
+            )
+            .unwrap();
             document.validate().unwrap();
             assert!(document.content.contains(ACCESS), "{format:?}");
         }
     }
 
     #[test]
+    fn axon_hub_omits_a_missing_refresh_token() {
+        let mut account = fixture();
+        account.refresh_token = None;
+        let document = build_account_export(
+            AccountExportFormat::AxonHub,
+            &[account],
+            1_788_000_000_000,
+            None,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&document.content).unwrap();
+
+        assert!(value["tokens"].get("refresh_token").is_none());
+        assert!(!document.content.contains("__missing_refresh_token__"));
+        assert!(value.get("axonhub_note").is_none());
+    }
+
+    #[test]
     fn codex_export_preserves_the_required_null_api_key_field() {
-        let document =
-            build_account_export(AccountExportFormat::Codex, &[fixture()], 1_788_000_000_000)
-                .unwrap();
+        let document = build_account_export(
+            AccountExportFormat::Codex,
+            &[fixture()],
+            1_788_000_000_000,
+            None,
+        )
+        .unwrap();
         let value: Value = serde_json::from_str(&document.content).unwrap();
         assert!(value.get("OPENAI_API_KEY").is_some_and(Value::is_null));
     }
@@ -527,6 +654,7 @@ mod tests {
             AccountExportFormat::Codex,
             std::slice::from_ref(&credential),
             1_788_000_000_000,
+            None,
         )
         .unwrap();
         let debug = format!("{credential:?} {document:?}");
@@ -554,8 +682,23 @@ mod tests {
         let valid = AccountExportRequest {
             account_ids: vec!["account_safe".into()],
             format: AccountExportFormat::Sub2api,
+            description: None,
         };
         assert!(valid.validate().is_ok());
+        assert!(AccountExportRequest {
+            account_ids: vec!["account_safe".into()],
+            format: AccountExportFormat::Zenith,
+            description: Some("Seller description".into()),
+        }
+        .validate()
+        .is_ok());
+        assert!(AccountExportRequest {
+            account_ids: vec!["account_safe".into()],
+            format: AccountExportFormat::Sub2api,
+            description: Some("Not supported here".into()),
+        }
+        .validate()
+        .is_err());
         for account_ids in [
             Vec::new(),
             vec!["account_safe".into(), "account_safe".into()],
@@ -564,14 +707,16 @@ mod tests {
             assert!(AccountExportRequest {
                 account_ids,
                 format: AccountExportFormat::Sub2api,
+                description: None,
             }
             .validate()
             .is_err());
         }
     }
 
-    fn formats() -> [AccountExportFormat; 7] {
+    fn formats() -> [AccountExportFormat; 8] {
         [
+            AccountExportFormat::Zenith,
             AccountExportFormat::Cpa,
             AccountExportFormat::Sub2api,
             AccountExportFormat::Cockpit,

@@ -1,6 +1,10 @@
 use super::capacity::CandidateQuota;
 use super::cooldown::active_retry_at;
-use crate::{ModelRules, WireApi};
+use crate::{
+    accounts::{AccountAuthState, AccountHealthState},
+    quota::SubscriptionStatus,
+    ModelRules, WireApi,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -27,8 +31,40 @@ pub enum CandidateHealth {
 }
 
 impl CandidateHealth {
-    fn is_eligible(self) -> bool {
+    pub fn is_eligible(self) -> bool {
         matches!(self, Self::Unknown | Self::Healthy | Self::Degraded)
+    }
+}
+
+pub fn account_candidate_health(
+    auth_state: AccountAuthState,
+    health: AccountHealthState,
+    subscription_status: SubscriptionStatus,
+    last_error_code: Option<&str>,
+) -> CandidateHealth {
+    match auth_state {
+        AccountAuthState::RequiresReauth(_) => return CandidateHealth::ReauthRequired,
+        AccountAuthState::Error => return CandidateHealth::Unhealthy,
+        _ => {}
+    }
+    match last_error_code {
+        Some("checkpoint" | "upstream_account_verification_required") => {
+            return CandidateHealth::Checkpoint
+        }
+        Some("captcha") => return CandidateHealth::Captcha,
+        _ => {}
+    }
+    match subscription_status {
+        SubscriptionStatus::Forbidden => return CandidateHealth::Blocked,
+        SubscriptionStatus::Expired => return CandidateHealth::Expired,
+        _ => {}
+    }
+    match health {
+        AccountHealthState::Unknown => CandidateHealth::Unknown,
+        AccountHealthState::Healthy => CandidateHealth::Healthy,
+        AccountHealthState::Degraded => CandidateHealth::Degraded,
+        AccountHealthState::Unhealthy => CandidateHealth::Unhealthy,
+        AccountHealthState::Blocked => CandidateHealth::Blocked,
     }
 }
 
@@ -73,6 +109,7 @@ pub struct RuntimeCandidate {
     pub health: CandidateHealth,
     pub quota: CandidateQuota,
     pub quota_updated_at_ms: Option<u64>,
+    pub quota_reset_at_ms: Option<u64>,
     pub cooldowns: BTreeMap<String, u64>,
     pub last_used_at: Option<u64>,
     pub consecutive_failures: u32,
@@ -97,7 +134,10 @@ impl RuntimeCandidate {
         allowed_protocols: &[WireApi],
         scope: &CandidateScope,
     ) -> bool {
-        self.is_catalog_visible(model, allowed_protocols, scope) && self.quota.is_eligible()
+        self.is_catalog_visible(model, allowed_protocols, scope)
+            && (self.quota.is_eligible()
+                || (self.kind == CandidateKind::OAuthAccount
+                    && self.quota == CandidateQuota::Stale))
     }
 
     pub(crate) fn is_catalog_visible(
@@ -141,5 +181,42 @@ impl RuntimeCandidate {
         self.models
             .iter()
             .any(|candidate_model| candidate_model.eq_ignore_ascii_case(model))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::accounts::ReauthReason;
+
+    #[test]
+    fn account_health_has_one_precedence_for_all_runtimes() {
+        assert_eq!(
+            account_candidate_health(
+                AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
+                AccountHealthState::Healthy,
+                SubscriptionStatus::Active,
+                None,
+            ),
+            CandidateHealth::ReauthRequired
+        );
+        assert_eq!(
+            account_candidate_health(
+                AccountAuthState::Active,
+                AccountHealthState::Healthy,
+                SubscriptionStatus::Active,
+                Some("checkpoint"),
+            ),
+            CandidateHealth::Checkpoint
+        );
+        assert_eq!(
+            account_candidate_health(
+                AccountAuthState::Active,
+                AccountHealthState::Healthy,
+                SubscriptionStatus::Expired,
+                None,
+            ),
+            CandidateHealth::Expired
+        );
     }
 }

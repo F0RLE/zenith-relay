@@ -378,6 +378,44 @@ impl TokenAuthority {
         Some(tokens)
     }
 
+    pub async fn invalidate_access_and_persist(
+        &self,
+        account_id: &str,
+        now_ms: u64,
+        persistence: &dyn TokenPersistenceAdapter,
+    ) -> Result<(), TokenAuthorityError> {
+        self.invalidate_access_generation_and_persist(account_id, None, now_ms, persistence)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn invalidate_access_generation_and_persist(
+        &self,
+        account_id: &str,
+        failed_generation: Option<u64>,
+        now_ms: u64,
+        persistence: &dyn TokenPersistenceAdapter,
+    ) -> Result<bool, TokenAuthorityError> {
+        let slot = lock(&self.slots)
+            .get(account_id)
+            .cloned()
+            .ok_or(TokenAuthorityError::AccountNotFound)?;
+        let mut slot = slot.lock().await;
+        if failed_generation.is_some_and(|generation| slot.tokens.generation != generation) {
+            return Ok(false);
+        }
+        slot.tokens.expires_at_ms = Some(now_ms);
+        slot.tokens.issued_at_ms = now_ms;
+        slot.tokens.generation = slot.tokens.generation.saturating_add(1);
+        slot.persistence_pending = true;
+        persistence
+            .persist(account_id, &slot.tokens)
+            .await
+            .map_err(|failure| TokenAuthorityError::PersistenceFailed(failure.code))?;
+        slot.persistence_pending = false;
+        Ok(true)
+    }
+
     pub async fn prepare(
         &self,
         account_id: &str,
@@ -739,6 +777,30 @@ mod tests {
                 AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant)
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn invalidated_access_is_expired_and_persisted_once() {
+        let authority = TokenAuthority::new(1).unwrap();
+        authority
+            .register(
+                "local-account",
+                TokenSet::new("access", Some("refresh".into()), None, Some(60_000), 1, 7).unwrap(),
+                AccountAuthState::Active,
+            )
+            .await
+            .unwrap();
+        let persistence = CapturePersistence::default();
+
+        authority
+            .invalidate_access_and_persist("local-account", 10, &persistence)
+            .await
+            .unwrap();
+
+        let tokens = authority.tokens("local-account").await.unwrap();
+        assert_eq!(tokens.expires_at_ms(), Some(10));
+        assert_eq!(tokens.generation(), 8);
+        assert_eq!(persistence.token_calls.load(Ordering::SeqCst), 1);
     }
 
     struct MustNotRefresh;

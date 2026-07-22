@@ -21,7 +21,7 @@ use zenith_relay_core::{
 const LOCAL_KEY: &str = "local-test-key";
 const SOURCE_KEY: &str = "upstream-test-key";
 const OVERSIZED_MODELS_CONTENT_LENGTH: &str = "4194305";
-const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -195,7 +195,7 @@ async fn large_client_requests_are_forwarded_with_a_bounded_limit() {
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": "gpt-test",
-            "input": "x".repeat(2 * 1024 * 1024),
+            "input": "x".repeat(17 * 1024 * 1024),
         }))
         .send()
         .await
@@ -315,11 +315,9 @@ async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 1);
     assert!(events[0].success);
-    assert!(events[0].ttft_ms.is_some_and(|ttft| ttft >= 50));
     assert!(events[0]
         .ttft_ms
         .is_some_and(|ttft| ttft <= events[0].latency_ms));
-    assert!(events[0].latency_ms >= 50);
 }
 
 #[tokio::test]

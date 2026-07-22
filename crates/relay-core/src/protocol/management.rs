@@ -39,12 +39,11 @@ pub struct GatewaySummary {
     pub base_url: String,
     pub candidate_count: usize,
     pub visible_model_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retry_candidates: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routing_strategy: Option<RoutingStrategy>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub default_service_tier: Option<DefaultServiceTier>,
+    pub max_retry_candidates: u8,
+    pub routing_strategy: RoutingStrategy,
+    #[serde(default)]
+    pub subscription_plan_order: Vec<String>,
+    pub default_service_tier: DefaultServiceTier,
     #[serde(default)]
     pub image_base_model: Option<String>,
     #[serde(default)]
@@ -59,14 +58,11 @@ pub struct GatewaySummary {
     pub quota_refresh_interval_seconds: u64,
     #[serde(default)]
     pub quota_request_timeout_seconds: u64,
-    #[serde(default = "legacy_use_free_accounts")]
     pub use_free_accounts: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
     #[serde(default)]
     pub routing_order: Vec<CandidateRuntimeSnapshot>,
-}
-
-fn legacy_use_free_accounts() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -77,7 +73,10 @@ pub struct ModelSummary {
     pub member_count: usize,
     pub catalog_rank: Option<u32>,
     pub input_micro_usd_per_million: Option<u64>,
+    pub cached_input_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: Option<u64>,
+    #[serde(default)]
+    pub custom_price: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -95,6 +94,37 @@ pub enum AccountRoutingExclusion {
     FreePlanPolicy,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OperationalStatus {
+    Rotation,
+    QuotaWait,
+    Unavailable,
+    Disabled,
+}
+
+pub fn operational_status(
+    enabled: bool,
+    quota_wait: bool,
+    configured_available: bool,
+    runtime_available: Option<bool>,
+) -> OperationalStatus {
+    if !enabled {
+        return OperationalStatus::Disabled;
+    }
+    if !configured_available {
+        return OperationalStatus::Unavailable;
+    }
+    if quota_wait {
+        return OperationalStatus::QuotaWait;
+    }
+    if runtime_available.unwrap_or(configured_available) {
+        OperationalStatus::Rotation
+    } else {
+        OperationalStatus::Unavailable
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSummary {
@@ -104,6 +134,7 @@ pub struct SourceSummary {
     #[serde(default)]
     pub in_pool: bool,
     pub draining: bool,
+    pub operational_status: OperationalStatus,
     pub base_url: String,
     pub wire_api: WireApi,
     pub models: Vec<String>,
@@ -119,6 +150,13 @@ pub struct SourceSummary {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RemoteAccountLocation {
+    pub server_id: String,
+    pub remote_account_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountSummary {
     pub id: String,
     pub label: String,
@@ -127,6 +165,7 @@ pub struct AccountSummary {
     #[serde(default)]
     pub in_pool: bool,
     pub draining: bool,
+    pub operational_status: OperationalStatus,
     pub auth_state: AccountAuthState,
     pub health: String,
     pub models: Vec<String>,
@@ -139,6 +178,8 @@ pub struct AccountSummary {
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
     pub secret_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_location: Option<RemoteAccountLocation>,
     #[serde(default)]
     pub proxy_mode: ProxyMode,
     #[serde(default)]
@@ -244,7 +285,10 @@ pub fn pool_model_summaries(
                 member_count: members.len(),
                 catalog_rank: price.map(|price| price.catalog_rank),
                 input_micro_usd_per_million: price.map(|price| price.input_micro_usd_per_million),
+                cached_input_micro_usd_per_million: price
+                    .map(|price| price.cached_input_micro_usd_per_million),
                 output_micro_usd_per_million: price.map(|price| price.output_micro_usd_per_million),
+                custom_price: false,
             }
         })
         .collect::<Vec<_>>();
@@ -442,6 +486,7 @@ mod tests {
             enabled: true,
             in_pool: true,
             draining: false,
+            operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
             wire_api: WireApi::Responses,
             models: vec![
@@ -497,41 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_runtime_fields_keep_remote_servers_compatible() {
-        let gateway: GatewaySummary = serde_json::from_str(
-            r#"{"running":true,"baseUrl":"https://relay.test/v1","candidateCount":1,"visibleModelIds":["gpt-test"]}"#,
-        )
-        .unwrap();
-        assert!(gateway.use_free_accounts);
-        assert_eq!(gateway.max_retry_candidates, None);
-        assert!(gateway.routing_order.is_empty());
-
-        let account = AccountSummary {
-            id: "account_1".into(),
-            label: "Account".into(),
-            identity_hint: "masked".into(),
-            enabled: true,
-            in_pool: true,
-            draining: false,
-            auth_state: AccountAuthState::Active,
-            health: "healthy".into(),
-            models: vec!["gpt-test".into()],
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            priority: 0,
-            weight: 1,
-            api_equivalent: ApiEquivalentSummary::default(),
-            subscription: Subscription::default(),
-            quota: QuotaSnapshot::default(),
-            secret_available: true,
-            proxy_mode: ProxyMode::Direct,
-            proxy_available: true,
-            routing_exclusion: None,
-            last_error_code: None,
-        };
-        let mut value = serde_json::to_value(account).unwrap();
-        value.as_object_mut().unwrap().remove("routingExclusion");
-        let restored: AccountSummary = serde_json::from_value(value).unwrap();
-        assert_eq!(restored.routing_exclusion, None);
+    fn operational_status_has_one_backend_precedence() {
+        assert_eq!(
+            operational_status(false, false, true, Some(true)),
+            OperationalStatus::Disabled
+        );
+        assert_eq!(
+            operational_status(true, true, false, Some(true)),
+            OperationalStatus::Unavailable
+        );
+        assert_eq!(
+            operational_status(true, true, true, Some(false)),
+            OperationalStatus::QuotaWait
+        );
+        assert_eq!(
+            operational_status(true, false, true, Some(false)),
+            OperationalStatus::Unavailable
+        );
+        assert_eq!(
+            operational_status(true, false, true, None),
+            OperationalStatus::Rotation
+        );
     }
 }

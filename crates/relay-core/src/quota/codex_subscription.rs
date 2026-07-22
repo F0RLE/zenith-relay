@@ -1,5 +1,6 @@
 use super::QuotaRefreshFailure;
-use chrono::{DateTime, TimeZone, Utc};
+use crate::accounts::CodexIdentityEnvelope;
+use chrono::{DateTime, Local, TimeZone, Utc};
 use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, REFERER},
@@ -11,12 +12,11 @@ use url::Url;
 pub const CODEX_ACCOUNTS_CHECK_ENDPOINT: &str =
     "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 pub const CODEX_SUBSCRIPTIONS_ENDPOINT: &str = "https://chatgpt.com/backend-api/subscriptions";
-pub const SUBSCRIPTION_REFRESH_INTERVAL_MS: u64 = 12 * 60 * 60 * 1_000;
+pub const SUBSCRIPTION_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1_000;
 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
-
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CodexSubscriptionMetadata {
     pub account_id: Option<String>,
@@ -71,14 +71,19 @@ impl CodexSubscriptionClient {
     ) -> Result<CodexSubscriptionMetadata, QuotaRefreshFailure> {
         let authorization = authorization_header(access_token)?;
         let preferred_account_id = validate_account_id(preferred_account_id)?;
+        let preferred_identity = CodexIdentityEnvelope::standard(preferred_account_id)
+            .map_err(|_| failure("subscription_account_id_invalid", false))?;
         let response = self
             .http
             .get(self.accounts_check_endpoint.clone())
-            .query(&[("timezone_offset_min", "0")])
+            .query(&[(
+                "timezone_offset_min",
+                -(Local::now().offset().local_minus_utc() / 60),
+            )])
             .headers(subscription_headers(
                 authorization.clone(),
                 "/backend-api/accounts/check/v4-2023-04-27",
-                None,
+                &preferred_identity,
             )?)
             .send()
             .await
@@ -96,6 +101,8 @@ impl CodexSubscriptionClient {
             .account_id
             .as_deref()
             .unwrap_or(preferred_account_id);
+        let account_identity = CodexIdentityEnvelope::standard(account_id)
+            .map_err(|_| failure("subscription_account_id_invalid", false))?;
         let response = self
             .http
             .get(self.subscriptions_endpoint.clone())
@@ -103,7 +110,7 @@ impl CodexSubscriptionClient {
             .headers(subscription_headers(
                 authorization,
                 "/backend-api/subscriptions",
-                Some(account_id),
+                &account_identity,
             )?)
             .send()
             .await
@@ -171,7 +178,7 @@ fn validate_account_id(value: &str) -> Result<&str, QuotaRefreshFailure> {
 fn subscription_headers(
     authorization: HeaderValue,
     target_path: &str,
-    account_id: Option<&str>,
+    identity: &CodexIdentityEnvelope,
 ) -> Result<HeaderMap, QuotaRefreshFailure> {
     let mut headers = HeaderMap::new();
     headers.insert(AUTHORIZATION, authorization);
@@ -181,13 +188,7 @@ fn subscription_headers(
         .map_err(|_| failure("subscription_configuration", false))?;
     headers.insert("x-openai-target-path", target.clone());
     headers.insert("x-openai-target-route", target);
-    if let Some(account_id) = account_id {
-        headers.insert(
-            "chatgpt-account-id",
-            HeaderValue::from_str(account_id)
-                .map_err(|_| failure("subscription_account_id_invalid", false))?,
-        );
-    }
+    identity.insert(&mut headers);
     Ok(headers)
 }
 
@@ -439,6 +440,22 @@ mod tests {
         assert_eq!(metadata.active_until_ms, Some(1_788_998_400_000));
     }
 
+    #[test]
+    fn missing_subscription_retries_after_thirty_minutes() {
+        assert_eq!(SUBSCRIPTION_REFRESH_INTERVAL_MS, 30 * 60 * 1_000);
+        assert!(!subscription_refresh_due(
+            None,
+            Some(1_000),
+            1_000 + SUBSCRIPTION_REFRESH_INTERVAL_MS - 1,
+        ));
+        assert!(subscription_refresh_due(
+            None,
+            Some(1_000),
+            1_000 + SUBSCRIPTION_REFRESH_INTERVAL_MS,
+        ));
+        assert!(subscription_refresh_due(None, None, 1_000));
+    }
+
     #[tokio::test]
     async fn subscriptions_fallback_uses_the_canonical_account_and_safe_headers() {
         let router = Router::new()
@@ -470,7 +487,14 @@ mod tests {
         server.abort();
     }
 
-    async fn account_check(headers: HeaderMap) -> impl IntoResponse {
+    async fn account_check(headers: HeaderMap, request: Request) -> impl IntoResponse {
+        let timezone_offset = request
+            .uri()
+            .query()
+            .and_then(|query| query.strip_prefix("timezone_offset_min="))
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap();
+        assert!((-24 * 60..=24 * 60).contains(&timezone_offset));
         assert_eq!(
             headers
                 .get(AUTHORIZATION)
@@ -483,6 +507,15 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("/backend-api/accounts/check/v4-2023-04-27")
         );
+        assert!(headers
+            .get("user-agent")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with(&format!(
+                "codex_cli_rs/{} ",
+                crate::accounts::CODEX_CLIENT_VERSION
+            ))));
+        assert_eq!(headers["chatgpt-account-id"], "account-hint");
+        assert_eq!(headers["originator"], "codex_cli_rs");
         Json(json!({
             "accounts": [{
                 "account": {"id": "account-canonical"},
@@ -493,12 +526,7 @@ mod tests {
 
     async fn subscription(headers: HeaderMap, request: Request) -> impl IntoResponse {
         assert_eq!(request.uri().query(), Some("account_id=account-canonical"));
-        assert_eq!(
-            headers
-                .get("chatgpt-account-id")
-                .and_then(|value| value.to_str().ok()),
-            Some("account-canonical")
-        );
+        assert_eq!(headers["chatgpt-account-id"], "account-canonical");
         Json(json!({
             "subscription_plan": "plus",
             "active_until": "2026-09-10T00:00:00Z"

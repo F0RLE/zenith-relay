@@ -13,7 +13,8 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
     assert!(capabilities.supports(Feature::AccountImportToPool));
     assert!(capabilities.supports(Feature::AccountIdentityReveal));
     assert!(capabilities.supports(Feature::Sources));
-    assert!(!capabilities.supports(Feature::ProfileAttach));
+    assert!(capabilities.supports(Feature::ModelPricing));
+    assert!(capabilities.supports(Feature::ProfileAttach));
 }
 
 #[test]
@@ -31,7 +32,13 @@ fn revealed_account_identity_debug_output_is_redacted() {
 fn protocol_negotiation_rejects_non_overlapping_versions_and_empty_identity() {
     let capabilities = Capabilities::personal_server("server-1", "fingerprint-1");
     assert!(matches!(
-        negotiate(ClientProtocolRange { min: 2, max: 3 }, &capabilities),
+        negotiate(
+            ClientProtocolRange {
+                min: CURRENT_PROTOCOL_VERSION + 1,
+                max: CURRENT_PROTOCOL_VERSION + 2,
+            },
+            &capabilities,
+        ),
         Err(ProtocolError::Incompatible { .. })
     ));
 
