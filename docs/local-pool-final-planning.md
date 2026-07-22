@@ -225,7 +225,7 @@ Implementation status (2026-07-22):
   vault, requires the separately stored original vault key, preserves server
   identity and client access, and restores without replacing a valid live store
   until integrity checks pass;
-- [ ] add bounded retention for raw usage/error/wake/import history so an
+- [x] add bounded retention for raw usage/error/wake/import history so an
   always-on server cannot grow forever. Required per-key totals and active
   spending-window state must survive pruning.
 

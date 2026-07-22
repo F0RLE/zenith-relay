@@ -55,6 +55,16 @@ directory before it becomes visible. Restore validates the manifest, SQLite
 store, encrypted vault, secret references, and original `ZENITH_RELAY_VAULT_KEY`
 before replacing live files. Store the backup and vault key separately.
 
+## Data Retention
+
+Raw request and error rows are retained for 90 days and capped at 100,000
+rows. Before pruning, Relay atomically records lifetime and UTC-day rollups by
+client key and model; request, token, timing, and API-equivalent totals therefore
+survive without retaining request details. Daily rollups and request-id
+deduplication markers use a 400-day window. Wake history is bounded in its state
+machine, and unfinished import payloads expire after 30 minutes. Explicitly
+clearing usage removes both raw rows and their rollups.
+
 ## Database Migrations
 
 Migrations in `migrations/` are append-only and run in numeric order. Schema

@@ -1,5 +1,6 @@
 mod health_probe;
 pub(crate) mod quota_refresh;
+mod retention;
 mod wake_automation;
 
 use crate::state::{AppState, ServerAccountRecord};
@@ -30,6 +31,7 @@ pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> Backgroun
         handles: vec![
             health_probe::start(state.clone(), shutdown.clone()),
             quota_refresh::start(state.clone(), shutdown.clone()),
+            retention::start(state.clone(), shutdown.clone()),
             wake_automation::start(state, shutdown),
         ],
     }

@@ -32,6 +32,10 @@ pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 pub(crate) const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
+const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
+const RAW_USAGE_RETENTION_MS: u64 = 90 * DAY_MS;
+const DAILY_ROLLUP_RETENTION_MS: u64 = 400 * DAY_MS;
+const MAX_RAW_USAGE_EVENTS: u64 = 100_000;
 
 pub type RoutingPolicy = (
     u8,
@@ -146,6 +150,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 21,
         name: "021_terminal_usage_per_request",
         sql: include_str!("../../migrations/021_terminal_usage_per_request.sql"),
+    },
+    Migration {
+        version: 22,
+        name: "022_usage_retention_rollups",
+        sql: include_str!("../../migrations/022_usage_retention_rollups.sql"),
     },
 ];
 
@@ -701,9 +710,11 @@ impl Store {
                         error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json
-                    ) VALUES (
+                    ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -926,10 +937,198 @@ impl Store {
         Ok(equivalents)
     }
 
+    pub fn key_usage_totals(&self, local_key_id: &str) -> Result<UsageTotals, String> {
+        let price_overrides = self.model_price_overrides()?;
+        let connection = self.lock()?;
+        let mut totals = connection
+            .query_row(
+                &format!(
+                    "SELECT {ROLLUP_TOTAL_COLUMNS} FROM usage_key_rollups \
+                     WHERE local_key_id = ?1 AND period_start_ms = -1"
+                ),
+                [local_key_id],
+                |row| usage_totals_from_row(row, 0),
+            )
+            .map_err(db_error)?;
+        merge_usage_totals(
+            &mut totals,
+            usage_totals(
+                &connection,
+                " WHERE local_key_id = ?",
+                &[SqlValue::Text(local_key_id.to_string())],
+            )?,
+        );
+
+        let sql = "SELECT model,
+                SUM(input_tokens), SUM(cached_input_tokens),
+                SUM(cache_write_input_tokens), SUM(output_tokens), SUM(total_tokens),
+                SUM(input_samples), SUM(cached_input_samples),
+                SUM(cache_write_input_samples), SUM(output_samples), SUM(total_samples)
+            FROM (
+                SELECT model, input_tokens, cached_input_tokens,
+                    cache_write_input_tokens, output_tokens, total_tokens,
+                    input_samples, cached_input_samples, cache_write_input_samples,
+                    output_samples, total_samples
+                FROM usage_key_rollups
+                WHERE local_key_id = ?1 AND period_start_ms = -1
+                UNION ALL
+                SELECT COALESCE(resolved_model, requested_model, ''),
+                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
+                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
+                    COUNT(output_tokens), COUNT(total_tokens)
+                FROM usage_events
+                WHERE local_key_id = ?2
+                GROUP BY 1
+            )
+            GROUP BY model";
+        let mut statement = connection.prepare(sql).map_err(db_error)?;
+        let rows = statement
+            .query_map(params![local_key_id, local_key_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    nonnegative_u64(row.get(1)?),
+                    nonnegative_u64(row.get(2)?),
+                    nonnegative_u64(row.get(3)?),
+                    nonnegative_u64(row.get(4)?),
+                    nonnegative_u64(row.get(5)?),
+                    nonnegative_u64(row.get(6)?),
+                    nonnegative_u64(row.get(7)?),
+                    nonnegative_u64(row.get(8)?),
+                    nonnegative_u64(row.get(9)?),
+                    nonnegative_u64(row.get(10)?),
+                ))
+            })
+            .map_err(db_error)?;
+        for row in rows {
+            let (
+                model,
+                input_tokens,
+                cached_input_tokens,
+                cache_write_input_tokens,
+                output_tokens,
+                total_tokens,
+                input_samples,
+                cached_input_samples,
+                cache_write_input_samples,
+                output_samples,
+                total_samples,
+            ) = row.map_err(db_error)?;
+            totals
+                .api_equivalent
+                .merge(estimate_api_equivalent_with_price_override(
+                    (!model.is_empty()).then_some(model.as_str()),
+                    (input_samples > 0).then_some(input_tokens),
+                    (input_samples > 0 && cached_input_samples == input_samples)
+                        .then_some(cached_input_tokens),
+                    (input_samples > 0 && cache_write_input_samples == input_samples)
+                        .then_some(cache_write_input_tokens),
+                    (output_samples > 0).then_some(output_tokens),
+                    (total_samples > 0).then_some(total_tokens),
+                    configured_model_price(&price_overrides, Some(model.as_str())),
+                ));
+        }
+        Ok(totals)
+    }
+
+    pub fn prune_usage_history(&self, now_ms: u64) -> Result<usize, String> {
+        self.prune_usage_history_with_limits(
+            now_ms.saturating_sub(RAW_USAGE_RETENTION_MS),
+            MAX_RAW_USAGE_EVENTS,
+            now_ms.saturating_sub(DAILY_ROLLUP_RETENTION_MS),
+        )
+    }
+
+    fn prune_usage_history_with_limits(
+        &self,
+        raw_cutoff_ms: u64,
+        max_raw_events: u64,
+        daily_rollup_cutoff_ms: u64,
+    ) -> Result<usize, String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for period_sql in ["-1", "(created_at_ms / 86400000) * 86400000"] {
+            let sql = format!(
+                "INSERT INTO usage_key_rollups(
+                    local_key_id, period_start_ms, model, {ROLLUP_USAGE_COLUMNS}
+                 )
+                 SELECT local_key_id, {period_sql},
+                    COALESCE(resolved_model, requested_model, ''),
+                    {USAGE_TOTAL_COLUMNS}, COUNT(input_tokens), COUNT(output_tokens),
+                    COUNT(total_tokens)
+                 FROM usage_events
+                 WHERE {USAGE_PRUNE_PREDICATE}
+                 GROUP BY local_key_id, 2, 3
+                 ON CONFLICT(local_key_id, period_start_ms, model) DO UPDATE SET
+                    {ROLLUP_UPDATE_COLUMNS}"
+            );
+            transaction
+                .execute(
+                    &sql,
+                    params![
+                        raw_cutoff_ms.min(i64::MAX as u64) as i64,
+                        max_raw_events.min(i64::MAX as u64) as i64,
+                    ],
+                )
+                .map_err(db_error)?;
+        }
+        transaction
+            .execute(
+                &format!(
+                    "INSERT INTO usage_request_tombstones(request_id, archived_at_ms)
+                     SELECT request_id, created_at_ms FROM usage_events
+                     WHERE {USAGE_PRUNE_PREDICATE}
+                     ON CONFLICT(request_id) DO UPDATE SET
+                        archived_at_ms = MAX(usage_request_tombstones.archived_at_ms, excluded.archived_at_ms)"
+                ),
+                params![
+                    raw_cutoff_ms.min(i64::MAX as u64) as i64,
+                    max_raw_events.min(i64::MAX as u64) as i64,
+                ],
+            )
+            .map_err(db_error)?;
+        let deleted = transaction
+            .execute(
+                &format!("DELETE FROM usage_events WHERE {USAGE_PRUNE_PREDICATE}"),
+                params![
+                    raw_cutoff_ms.min(i64::MAX as u64) as i64,
+                    max_raw_events.min(i64::MAX as u64) as i64,
+                ],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "DELETE FROM usage_key_rollups WHERE period_start_ms >= 0 AND period_start_ms < ?1",
+                [daily_rollup_cutoff_ms.min(i64::MAX as u64) as i64],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "DELETE FROM usage_request_tombstones WHERE archived_at_ms < ?1",
+                [daily_rollup_cutoff_ms.min(i64::MAX as u64) as i64],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(deleted)
+    }
+
     pub fn clear_usage(&self) -> Result<usize, String> {
-        self.lock()?
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_error)?;
+        let deleted = transaction
             .execute("DELETE FROM usage_events", [])
-            .map_err(db_error)
+            .map_err(db_error)?;
+        transaction
+            .execute("DELETE FROM usage_key_rollups", [])
+            .map_err(db_error)?;
+        transaction
+            .execute("DELETE FROM usage_request_tombstones", [])
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(deleted)
     }
 
     pub fn backup_to(&self, destination: &Path) -> Result<(), String> {
@@ -1141,6 +1340,50 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     (sql, values)
 }
 
+const USAGE_PRUNE_PREDICATE: &str = "created_at_ms < ?1 OR id NOT IN (
+    SELECT id FROM usage_events ORDER BY created_at_ms DESC, id DESC LIMIT ?2
+)";
+
+const ROLLUP_USAGE_COLUMNS: &str = "requests, successful_requests, latency_ms,
+    ttft_ms, ttft_samples, generation_ms, generation_samples,
+    generation_output_tokens, input_tokens, cached_input_tokens,
+    cached_input_samples, cache_write_input_tokens, cache_write_input_samples,
+    reasoning_tokens, output_tokens, total_tokens, speed_output_tokens,
+    speed_duration_ms, input_samples, output_samples, total_samples";
+
+const ROLLUP_TOTAL_COLUMNS: &str = "COALESCE(SUM(requests), 0),
+    COALESCE(SUM(successful_requests), 0), COALESCE(SUM(latency_ms), 0),
+    COALESCE(SUM(ttft_ms), 0), COALESCE(SUM(ttft_samples), 0),
+    COALESCE(SUM(generation_ms), 0), COALESCE(SUM(generation_samples), 0),
+    COALESCE(SUM(generation_output_tokens), 0), COALESCE(SUM(input_tokens), 0),
+    COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(cached_input_samples), 0),
+    COALESCE(SUM(cache_write_input_tokens), 0),
+    COALESCE(SUM(cache_write_input_samples), 0), COALESCE(SUM(reasoning_tokens), 0),
+    COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0),
+    COALESCE(SUM(speed_output_tokens), 0), COALESCE(SUM(speed_duration_ms), 0)";
+
+const ROLLUP_UPDATE_COLUMNS: &str = "requests = usage_key_rollups.requests + excluded.requests,
+    successful_requests = usage_key_rollups.successful_requests + excluded.successful_requests,
+    latency_ms = usage_key_rollups.latency_ms + excluded.latency_ms,
+    ttft_ms = usage_key_rollups.ttft_ms + excluded.ttft_ms,
+    ttft_samples = usage_key_rollups.ttft_samples + excluded.ttft_samples,
+    generation_ms = usage_key_rollups.generation_ms + excluded.generation_ms,
+    generation_samples = usage_key_rollups.generation_samples + excluded.generation_samples,
+    generation_output_tokens = usage_key_rollups.generation_output_tokens + excluded.generation_output_tokens,
+    input_tokens = usage_key_rollups.input_tokens + excluded.input_tokens,
+    cached_input_tokens = usage_key_rollups.cached_input_tokens + excluded.cached_input_tokens,
+    cached_input_samples = usage_key_rollups.cached_input_samples + excluded.cached_input_samples,
+    cache_write_input_tokens = usage_key_rollups.cache_write_input_tokens + excluded.cache_write_input_tokens,
+    cache_write_input_samples = usage_key_rollups.cache_write_input_samples + excluded.cache_write_input_samples,
+    reasoning_tokens = usage_key_rollups.reasoning_tokens + excluded.reasoning_tokens,
+    output_tokens = usage_key_rollups.output_tokens + excluded.output_tokens,
+    total_tokens = usage_key_rollups.total_tokens + excluded.total_tokens,
+    speed_output_tokens = usage_key_rollups.speed_output_tokens + excluded.speed_output_tokens,
+    speed_duration_ms = usage_key_rollups.speed_duration_ms + excluded.speed_duration_ms,
+    input_samples = usage_key_rollups.input_samples + excluded.input_samples,
+    output_samples = usage_key_rollups.output_samples + excluded.output_samples,
+    total_samples = usage_key_rollups.total_samples + excluded.total_samples";
+
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
     COALESCE(SUM(CASE WHEN success != 0 THEN 1 ELSE 0 END), 0), \
     COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttft_ms), 0), COUNT(ttft_ms), \
@@ -1294,6 +1537,48 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         speed_duration_ms: nonnegative_u64(row.get(offset + 17)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
+}
+
+fn merge_usage_totals(target: &mut UsageTotals, value: UsageTotals) {
+    target.requests = target.requests.saturating_add(value.requests);
+    target.successful_requests = target
+        .successful_requests
+        .saturating_add(value.successful_requests);
+    target.latency_ms = target.latency_ms.saturating_add(value.latency_ms);
+    target.ttft_ms = target.ttft_ms.saturating_add(value.ttft_ms);
+    target.ttft_samples = target.ttft_samples.saturating_add(value.ttft_samples);
+    target.generation_ms = target.generation_ms.saturating_add(value.generation_ms);
+    target.generation_samples = target
+        .generation_samples
+        .saturating_add(value.generation_samples);
+    target.generation_output_tokens = target
+        .generation_output_tokens
+        .saturating_add(value.generation_output_tokens);
+    target.input_tokens = target.input_tokens.saturating_add(value.input_tokens);
+    target.cached_input_tokens = target
+        .cached_input_tokens
+        .saturating_add(value.cached_input_tokens);
+    target.cached_input_samples = target
+        .cached_input_samples
+        .saturating_add(value.cached_input_samples);
+    target.cache_write_input_tokens = target
+        .cache_write_input_tokens
+        .saturating_add(value.cache_write_input_tokens);
+    target.cache_write_input_samples = target
+        .cache_write_input_samples
+        .saturating_add(value.cache_write_input_samples);
+    target.reasoning_tokens = target
+        .reasoning_tokens
+        .saturating_add(value.reasoning_tokens);
+    target.output_tokens = target.output_tokens.saturating_add(value.output_tokens);
+    target.total_tokens = target.total_tokens.saturating_add(value.total_tokens);
+    target.speed_output_tokens = target
+        .speed_output_tokens
+        .saturating_add(value.speed_output_tokens);
+    target.speed_duration_ms = target
+        .speed_duration_ms
+        .saturating_add(value.speed_duration_ms);
+    target.api_equivalent.merge(value.api_equivalent);
 }
 
 fn nonnegative_u64(value: i64) -> u64 {
@@ -1931,7 +2216,8 @@ mod tests {
                 (18, "018_image_base_model".to_string()),
                 (19, "019_remove_cache_write_input_tokens".to_string()),
                 (20, "020_cache_write_input_tokens".to_string()),
-                (21, "021_terminal_usage_per_request".to_string())
+                (21, "021_terminal_usage_per_request".to_string()),
+                (22, "022_usage_retention_rollups".to_string())
             ]
         );
         drop(store);
@@ -2090,6 +2376,96 @@ mod tests {
         assert!(!failed.success);
         assert_eq!(failed.http_status, 429);
         drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retention_archives_key_totals_and_rejects_late_duplicate_rows() {
+        let root = test_root("usage-retention");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        let mut event = UsageEvent {
+            request_id: "req_old".into(),
+            attempt: 1,
+            local_key_id: "key_alpha".into(),
+            source_id: "source_alpha".into(),
+            candidate_id: Some("source_alpha".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("gpt-5.4".into()),
+            resolved_model: Some("gpt-5.4".into()),
+            wire_api: WireApi::Responses,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 100,
+            ttft_ms: Some(10),
+            generation_ms: Some(90),
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(400_000),
+            cache_write_input_tokens: None,
+            reasoning_tokens: Some(0),
+            output_tokens: Some(100_000),
+            total_tokens: Some(1_100_000),
+            quota_snapshot: None,
+        };
+        store.record_usage(&event, DAY_MS).unwrap();
+        event.request_id = "req_current".into();
+        event.input_tokens = Some(10);
+        event.cached_input_tokens = Some(0);
+        event.output_tokens = Some(0);
+        event.total_tokens = Some(10);
+        store.record_usage(&event, 100 * DAY_MS).unwrap();
+
+        assert_eq!(
+            store
+                .prune_usage_history_with_limits(50 * DAY_MS, 100, 0)
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
+        let totals = store.key_usage_totals("key_alpha").unwrap();
+        assert_eq!(totals.requests, 2);
+        assert_eq!(totals.input_tokens, 1_000_010);
+        assert_eq!(totals.total_tokens, 1_100_010);
+        assert_eq!(totals.api_equivalent.micro_usd, 3_100_025);
+
+        event.request_id = "req_newest".into();
+        store.record_usage(&event, 102 * DAY_MS).unwrap();
+        assert_eq!(store.prune_usage_history_with_limits(0, 1, 0).unwrap(), 1);
+        let totals = store.key_usage_totals("key_alpha").unwrap();
+        assert_eq!(totals.requests, 3);
+        assert_eq!(totals.api_equivalent.micro_usd, 3_100_050);
+        let archived_daily_requests = store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(requests), 0) FROM usage_key_rollups \
+                 WHERE local_key_id = 'key_alpha' AND period_start_ms >= 0",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(archived_daily_requests, 2);
+
+        event.request_id = "req_old".into();
+        event.input_tokens = Some(9_000_000);
+        store.record_usage(&event, 101 * DAY_MS).unwrap();
+        assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
+        assert_eq!(store.key_usage_totals("key_alpha").unwrap().requests, 3);
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(reopened.key_usage_totals("key_alpha").unwrap(), totals);
+        assert_eq!(reopened.clear_usage().unwrap(), 1);
+        assert_eq!(
+            reopened.key_usage_totals("key_alpha").unwrap(),
+            UsageTotals::default()
+        );
+        drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
 
