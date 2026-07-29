@@ -5,6 +5,7 @@ use crate::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;
+use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -13,12 +14,13 @@ use std::{
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
-    protocol::Capabilities,
-    quota::{QuotaSnapshot, Subscription},
-    CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
+    protocol::{Capabilities, ClientWireApi},
+    providers::chatgpt::AgentIdentityCredential,
+    quota::{QuotaEconomicsState, QuotaSnapshot, Subscription},
+    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 23;
+pub const SERVER_SCHEMA_VERSION: u32 = 30;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -49,6 +51,10 @@ pub struct SourceRecord {
     pub excluded_models: Vec<String>,
     pub priority: i32,
     pub weight: u32,
+    #[serde(default)]
+    pub recovery_delay_seconds: u64,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     pub last_error_code: Option<String>,
 }
 
@@ -73,6 +79,8 @@ pub struct ServerAccountRecord {
     pub weight: u32,
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
+    #[serde(default)]
+    pub economics: QuotaEconomicsState,
     pub cooldowns: BTreeMap<String, u64>,
     pub consecutive_failures: u32,
     #[serde(default)]
@@ -81,6 +89,8 @@ pub struct ServerAccountRecord {
     pub last_error_code: Option<String>,
     #[serde(default)]
     pub proxy_id: Option<String>,
+    #[serde(default)]
+    pub bypass_common_proxy: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -97,6 +107,10 @@ pub struct GatewayKeyRecord {
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub model_prefix: Option<String>,
+    #[serde(default)]
+    pub wire_apis: Option<Vec<ClientWireApi>>,
+    #[serde(default)]
+    pub soft_budget_micro_usd: Option<u64>,
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
 }
@@ -104,6 +118,7 @@ pub struct GatewayKeyRecord {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCredential {
+    #[serde(default)]
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
@@ -114,9 +129,60 @@ pub struct AccountCredential {
     pub responses_url: String,
     #[serde(default)]
     pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub agent_private_key: Option<String>,
+    #[serde(default)]
+    pub agent_runtime_id: Option<String>,
+    #[serde(default)]
+    pub agent_task_id: Option<String>,
 }
 
 impl AccountCredential {
+    pub fn agent_identity(&self) -> Result<Option<AgentIdentityCredential>, String> {
+        match (
+            self.agent_private_key.as_ref(),
+            self.agent_runtime_id.as_ref(),
+            self.agent_task_id.as_ref(),
+        ) {
+            (None, None, None) => Ok(None),
+            (Some(private_key), Some(runtime_id), task_id) => match task_id {
+                Some(task_id) => AgentIdentityCredential::new(
+                    private_key.clone(),
+                    runtime_id.clone(),
+                    task_id.clone(),
+                ),
+                None => {
+                    AgentIdentityCredential::unregistered(private_key.clone(), runtime_id.clone())
+                }
+            }
+            .map(Some)
+            .map_err(|error| error.to_string()),
+            _ => Err("stored Agent Identity credential is incomplete".to_string()),
+        }
+    }
+
+    pub fn is_agent_identity(&self) -> bool {
+        self.agent_private_key.is_some()
+            || self.agent_runtime_id.is_some()
+            || self.agent_task_id.is_some()
+    }
+
+    pub fn has_oauth(&self) -> bool {
+        !self.access_token.trim().is_empty()
+    }
+
+    pub fn authorization(&self, now_ms: u64) -> Result<HeaderValue, String> {
+        if let Some(agent) = self.agent_identity()? {
+            return agent
+                .authorization(now_ms)
+                .map_err(|error| error.to_string());
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.access_token))
+            .map_err(|_| "stored account access token is invalid".to_string())?;
+        authorization.set_sensitive(true);
+        Ok(authorization)
+    }
+
     pub fn tokens(&self) -> Result<TokenSet, String> {
         TokenSet::new(
             self.access_token.clone(),
@@ -266,7 +332,10 @@ fn migrate_legacy_proxies(store: &Store, vault: &Vault) -> Result<(), String> {
 }
 
 fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String> {
-    let existing = store.keys()?.into_iter().find(|key| key.system);
+    let existing = store
+        .keys()?
+        .into_iter()
+        .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID);
     let changed = existing.as_ref().is_none_or(|key| !key.enabled);
     let mut record = existing.unwrap_or_else(|| GatewayKeyRecord {
         id: SYSTEM_GATEWAY_KEY_ID.to_string(),
@@ -279,6 +348,8 @@ fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String>
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
+        wire_apis: None,
+        soft_budget_micro_usd: None,
         created_at_ms: now_ms(),
         last_used_at_ms: None,
     });
@@ -323,4 +394,38 @@ pub fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_credential_keeps_oauth_as_agent_identity_fallback() {
+        let credential = AccountCredential {
+            access_token: "oauth-access".into(),
+            refresh_token: Some("oauth-refresh".into()),
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms: 1,
+            generation: 2,
+            chatgpt_account_id: "provider-account".into(),
+            responses_url: "https://chatgpt.com/backend-api/codex/responses".into(),
+            proxy_url: None,
+            agent_private_key: Some(
+                "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g".into(),
+            ),
+            agent_runtime_id: Some("runtime-test".into()),
+            agent_task_id: Some("task-test".into()),
+        };
+
+        assert!(credential.has_oauth());
+        assert_eq!(credential.tokens().unwrap().access_token(), "oauth-access");
+        assert!(credential
+            .authorization(1_785_000_000_000)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion "));
+    }
 }

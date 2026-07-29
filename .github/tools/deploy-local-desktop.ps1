@@ -18,6 +18,15 @@ if (-not [StringComparer]::OrdinalIgnoreCase.Equals($sourcePath, $expectedSource
 }
 
 $sourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash
+$productionHashPath = "$sourcePath.production.sha256"
+if (-not (Test-Path -LiteralPath $productionHashPath)) {
+    throw "Release build marker is missing: $productionHashPath"
+}
+$productionHash = (Get-Content -Raw -LiteralPath $productionHashPath).Trim()
+if (-not [StringComparer]::OrdinalIgnoreCase.Equals($sourceHash, $productionHash)) {
+    throw "Release executable does not match its production build marker"
+}
+
 Get-Process -Name "Zenith Relay" -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $destinationPath } |
     Stop-Process -Force

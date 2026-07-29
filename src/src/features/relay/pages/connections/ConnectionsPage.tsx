@@ -1,12 +1,13 @@
 import { ChangeEvent, FormEvent, Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { CalendarDays, Check, Clock3, Copy, Download, ExternalLink, Eye, EyeOff, Layers3, LayoutGrid, List, ListMinus, ListPlus, Loader2, LogIn, MapPin, Network, Pencil, Play, Plus, Power, RefreshCw, Server, Trash2, Upload, UserRound, UserRoundX, UsersRound, X } from "lucide-react";
+import { CalendarDays, Check, CircleAlert, Clock3, Copy, Database, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, MapPin, Network, Pencil, Play, Plus, Power, RefreshCw, Server, Shuffle, Square, Trash2, Upload, UserRound, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
 import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
   Button,
+  QuotaEconomicsStrip,
   AccountPlanBadge,
   ActionMenu,
   ActionMenuItem,
@@ -22,20 +23,24 @@ import {
   StatusIcon,
   Tabs,
   copyText,
+  currentAccountErrorCode,
+  accountErrorLabel,
   accountPlanOption,
   compareAccountPlans,
-  formatRemainingTime,
+  formatDetailedRemainingTime,
   operationalStatusTone,
   useConfirm,
 } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
 import { useRelayState } from "../../state/RelayStateProvider";
-import { formatTokenSpeed, latestLocalAccountSpeeds } from "../../usageSpeed";
+import { compareRoutingOrder, routingOrderPositions } from "../../routingOrder";
+import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
 
 type View = "sources" | "accounts" | "proxies" | "automations" | "remote";
 type DialogKind = "source" | "automation" | "remote" | "deploy" | "accountProxy" | "bulkProxies" | "proxyImport" | "oauthSetup" | "accountExport" | null;
 type ParticipationFilter = "all" | "included" | "excluded";
 type ImportFailure = { itemId: string; code: string; label?: string; identity?: string };
+type AccountProxyChoice = "direct" | "automatic" | "stored" | "custom" | "common";
 const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
 const MAX_ZENITH_EXPORT_DESCRIPTION_LENGTH = 2_000;
 const MarkdownDescription = lazy(() => import("../../components/MarkdownDescription"));
@@ -168,7 +173,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
         }
       />
       <Tabs value={view} items={tabs} onChange={(id) => { if (id === "sources") sessionStorage.setItem(CONNECTIONS_VIEW_REQUEST, id); else sessionStorage.removeItem(CONNECTIONS_VIEW_REQUEST); setView(id as View); }} label={t("connections.views")} />
-      {showTableToolbar ? <div className="table-toolbar">
+      {showTableToolbar ? <div className={`table-toolbar${view === "sources" ? " relay-compact-content" : ""}`}>
         <label className="search-field">
           <span className="sr-only">{t("common.search")}</span>
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
@@ -215,8 +220,15 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
       : relayCommands.remoteAction({ type: "set_pool_membership" }, { accountIds: [], sourceIds: [source.id], inPool }),
     "feedback.saved",
   );
+  const refreshModels = (source: SourceSummary) => perform(
+    `source-models-${source.id}`,
+    () => localSource
+      ? relayCommands.testSource(source.id)
+      : relayCommands.remoteAction({ type: "test_source", id: source.id }),
+    "feedback.refreshed",
+  );
   return (
-    <div className="relay-table-wrap">
+    <div className="relay-table-wrap relay-compact-content">
       <table className="relay-table source-table">
         <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.protocol")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
         <tbody>{sources.map((source) => {
@@ -235,18 +247,19 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
             <td><code>{safeHost(source.baseUrl)}</code></td>
             <td>{source.wireApi === "chat_completions" ? "Chat Completions" : "Responses"}</td>
             <td>{source.models.length}</td>
-            <td className="row-actions">
+            <td className="row-actions-cell"><div className="row-actions">
               <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => {
                 void activateCodexProfile(`launch-source-${source.id}`, () => relayCommands.launchCodexSource(source.id), true)
                   .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", source.id); });
               }} />
               <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <ActionMenu>
+                <ActionMenuItem icon={busy === `source-models-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={busy === `source-models-${source.id}`} onClick={() => void refreshModels(source)}>{t("sources.refreshModels")}</ActionMenuItem>
                 {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}`} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
-            </td>
+            </div></td>
           </tr>;
         })}</tbody>
       </table>
@@ -256,17 +269,16 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
 
 function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsage, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible } = useRelayState();
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible } = useRelayState();
   const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
   const [planFilter, setPlanFilter] = useState("all");
   const [participationFilter, setParticipationFilter] = useState<ParticipationFilter>("all");
-  const [layout, setLayout] = useState<"grid" | "list">(() => localStorage.getItem("relay.accountLayout") === "list" ? "list" : "grid");
   const [groupByPlan, setGroupByPlan] = useState(() => localStorage.getItem("relay.accountsGroupByPlan") === "true");
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
+  const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const allAccounts = runtime?.accounts ?? [];
-  const accountSpeeds = useMemo(() => mode === "local" ? latestLocalAccountSpeeds(localUsage) : new Map<string, number>(), [localUsage, mode]);
   const [nowMs, setNowMs] = useState(Date.now());
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   useEffect(() => {
@@ -284,6 +296,10 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   }
   const plans = [...planOptions.values()].sort(compareAccountPlans);
   const errorCount = allAccounts.filter(currentAccountErrorCode).length;
+  const inPoolCount = allAccounts.filter(accountParticipates).length;
+  const disabledCount = allAccounts.filter((account) => !account.enabled).length;
+  const storedPosition = new Map(allAccounts.map((account, index) => [account.id, index]));
+  const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
   const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
@@ -302,13 +318,14 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   if (!runtime?.accounts.length) {
     return <EmptyState title={t("accounts.emptyTitle")} description={t("accounts.emptyDescription")} action={<div className="inline-actions">{mode === "local" ? <Button variant="primary" onClick={onSignIn}>{t("accounts.signIn")}</Button> : null}<Button variant={mode === "local" ? "secondary" : "primary"} disabled={!canImport} title={!canImport ? t("remote.capabilityUnavailable") : undefined} onClick={onImport}>{t("accounts.import")}</Button></div>} />;
   }
+  const canRefreshQuota = mode === "local" || runtime.capabilities.features.includes("quota");
   const accounts = [...runtime.accounts]
     .filter((account) => matchesQuery(query, account.label, account.identityHint, account.subscription.planType, account.models))
     .filter((account) => activePlan === "all" || (activePlan === "errors" ? Boolean(currentAccountErrorCode(account)) : accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan))
     .filter((account) => participationFilter === "all" || (participationFilter === "included") === accountParticipates(account))
     .sort((left, right) => groupByPlan
-      ? compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareAccounts(left, right)
-      : compareAccounts(left, right));
+      ? compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition)
+      : compareRoutingOrder(left.id, right.id, runtimePosition, storedPosition));
   const filtersActive = Boolean(query.trim()) || activePlan !== "all" || participationFilter !== "all";
   const filtersHideAccounts = filtersActive && accounts.length !== allAccounts.length;
   const selectedAccounts = accounts.filter((account) => selected.includes(account.id));
@@ -338,7 +355,6 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   ];
   const toggleSelected = (accountId: string) => setSelected((current) => current.includes(accountId) ? current.filter((id) => id !== accountId) : [...current, accountId]);
   const toggleAllVisible = (checked: boolean) => setSelected(checked ? accounts.map((account) => account.id) : []);
-  const changeLayout = (next: "grid" | "list") => { setLayout(next); localStorage.setItem("relay.accountLayout", next); };
   const togglePlanGrouping = () => setGroupByPlan((current) => {
     localStorage.setItem("relay.accountsGroupByPlan", String(!current));
     return !current;
@@ -402,7 +418,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
         title: t("accounts.moveActiveProfileTitle"),
         confirmLabel: t("accounts.moveActiveProfileAction"),
       })) return;
-      switchedProfile = await activateCodexProfile("move-profile-switch", relayCommands.attachCodexRemoteGateway, true);
+      switchedProfile = await activateCodexProfile("move-profile-switch", relayCommands.attachCodexRemoteGateway);
       if (!switchedProfile) return;
     }
     setTransfer({ accountIds, progress: { completed: 0, total: accountIds.length, phase: "preparing", currentAccountId: accountIds[0] } });
@@ -410,6 +426,9 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     setTransfer(null);
     if (!ok && switchedProfile) {
       await relayCommands.restoreDefaultAccountProfile().then(() => refresh()).catch(() => undefined);
+    }
+    if (ok && switchedProfile) {
+      await perform("move-profile-launch", relayCommands.launchManagedCodex, "feedback.launched");
     }
     if (ok) setSelected([]);
   };
@@ -428,25 +447,38 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
     })) return;
     await perform(`recover-account-${account.id}`, () => relayCommands.forceActivateRemoteAccountLocally(account.id), "feedback.accountRecoveredLocally");
   };
-  const refreshAndDeleteNonWorking = async () => {
-    const refreshedSnapshot: { current: RuntimeSnapshot | null } = { current: null };
-    const refreshed = await perform("refresh-non-working-accounts", async () => {
-      await relayCommands.refreshAllAccountQuotas();
-      refreshedSnapshot.current = await relayCommands.localState();
-    }, "feedback.refreshed");
-    if (!refreshed || !refreshedSnapshot.current) return;
-    const accountIds = refreshedSnapshot.current.accounts.filter(accountIsTerminallyUnusable).map((account) => account.id);
-    if (accountIds.length && await confirm(t("accounts.deleteNonWorkingConfirm", { count: accountIds.length }), { danger: true })) {
-      await deleteAccounts(accountIds, "delete-non-working-accounts");
+  const refreshAllQuotas = async () => {
+    let results: Awaited<ReturnType<typeof relayCommands.refreshAllAccountQuotas>> = [];
+    const ok = await perform("quota-all", async () => {
+      results = await relayCommands.refreshAllAccountQuotas();
+    });
+    if (ok) {
+      setQuotaReport({
+        succeeded: results.filter((result) => result.status === "succeeded").length,
+        failed: results.filter((result) => result.status === "failed").length,
+      });
     }
   };
+  const refreshAccountQuota = (account: AccountSummary) => perform(
+    `connection-account-quota-${account.id}`,
+    () => mode === "local"
+      ? relayCommands.refreshAccountQuota(account.id)
+      : relayCommands.remoteAction({ type: "refresh_account", id: account.id }),
+    "feedback.refreshed",
+  );
   return (
     <>
+    <div className="connections-account-controls">
     <div className="account-command-bar">
       <div className="account-command-context">
         <input type="checkbox" aria-label={t("accounts.selectAll")} title={t("accounts.selectAll")} checked={allSelected} disabled={!accounts.length} onChange={(event) => toggleAllVisible(event.target.checked)} />
         {selectedCount ? <span>{t("accounts.selectedCount", { count: selectedCount })}</span> : <label className="search-field account-search"><span className="sr-only">{t("common.search")}</span><input value={query} onChange={(event) => onQuery(event.target.value)} placeholder={t("common.search")} /></label>}
       </div>
+      {!selectedCount ? <div className="account-filter-stack">
+        <OptionMenu className="account-filter-menu" label={t("accounts.filterByParticipation")} value={participationFilter} options={participationOptions} onChange={(value) => { setSelected([]); setParticipationFilter(value as ParticipationFilter); }} />
+        {plans.length > 1 ? <OptionMenu className="account-filter-menu" label={t("accounts.filterByPlan")} value={activePlan} options={planFilterOptions} onChange={(value) => { setSelected([]); setPlanFilter(value); }} /> : null}
+        {allAccounts.length > 1 ? <Button className="account-group-toggle" variant="secondary" icon={<Layers3 aria-hidden />} title={t("accounts.groupByPlan")} aria-pressed={groupByPlan} onClick={togglePlanGrouping}>{t("accounts.groupByPlan")}</Button> : null}
+      </div> : null}
       <div className="account-command-actions">
         {selectedCount ? <>
           {canIncludeSelected ? <IconButton label={t("accounts.includeSelectedInPool")} icon={busy === "pool-membership-bulk" ? <Loader2 className="spin" aria-hidden /> : <ListPlus aria-hidden />} disabled={Boolean(busy)} onClick={() => void updateSelectedParticipation(true)} /> : null}
@@ -457,15 +489,22 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
           {canRevealAccountIdentities && allAccounts.some((account) => account.secretAvailable) ? <IconButton label={t(accountIdentitiesVisible ? "accounts.hideAllIdentities" : "accounts.revealAllIdentities")} icon={accountIdentitiesBusy ? <Loader2 className="spin" aria-hidden /> : accountIdentitiesVisible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={accountIdentitiesBusy} onClick={() => setAccountIdentitiesVisible(!accountIdentitiesVisible)} /> : null}
-          {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => perform("quota-all", relayCommands.refreshAllAccountQuotas, "feedback.refreshed")} /> : null}
+          {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
             <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport} onClick={() => onExport(exportIds)}>{t("accounts.exportAll")}</ActionMenuItem>
             <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onBulkProxies(accounts.map((account) => account.id))}>{t("proxies.assignBulk")}</ActionMenuItem>
-            {mode === "local" ? <ActionMenuItem danger icon={busy === "refresh-non-working-accounts" || busy === "delete-non-working-accounts" ? <Loader2 className="spin" aria-hidden /> : <UserRoundX aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAndDeleteNonWorking()}>{t("accounts.deleteNonWorking")}</ActionMenuItem> : null}
           </ActionMenu>
         </>}
       </div>
     </div>
+    <div className="connections-account-summary" aria-label={t("accounts.summary.label")}>
+      <div><span>{t("accounts.summary.total")}</span><strong>{allAccounts.length}</strong></div>
+      <div><span>{t("accounts.summary.inPool")}</span><strong>{inPoolCount}</strong></div>
+      <div><span>{t("accounts.summary.errors")}</span><strong>{errorCount}</strong></div>
+      <div><span>{t("accounts.summary.disabled")}</span><strong>{disabledCount}</strong></div>
+    </div>
+    </div>
+    {quotaReport ? <div className={`account-quota-report${quotaReport.failed ? " has-errors" : ""}`} role="status"><Check aria-hidden /><span>{t("accounts.quotaRefreshReport", quotaReport)}</span><button type="button" aria-label={t("common.close")} onClick={() => setQuotaReport(null)}><X aria-hidden /></button></div> : null}
     {transfer ? <div className="account-transfer-progress" role="status" aria-live="polite">
       <header><span><Loader2 className="spin" aria-hidden /></span><div><strong>{t("accounts.moveProgress", { completed: transfer.progress.completed, total: transfer.progress.total })}</strong><small>{t(`accounts.moveProgressPhase.${transfer.progress.phase}`)}</small></div><b>{transfer.progress.completed}/{transfer.progress.total}</b></header>
       <progress max={Math.max(1, transfer.progress.total)} value={transfer.progress.completed} />
@@ -475,59 +514,63 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
         return <li key={accountId} data-transfer-state={status}>{status === "validated" ? <Check aria-hidden /> : status === "current" ? <Loader2 className="spin" aria-hidden /> : <Clock3 aria-hidden />}<span>{account?.label ?? accountId}</span><small>{t(`accounts.moveProgressStatus.${status}`)}</small></li>;
       })}</ul>
     </div> : null}
-    <div className="account-filter-stack">
-      <OptionMenu className="account-filter-menu" label={t("accounts.filterByParticipation")} value={participationFilter} options={participationOptions} onChange={(value) => { setSelected([]); setParticipationFilter(value as ParticipationFilter); }} />
-      {plans.length > 1 ? <OptionMenu className="account-filter-menu" label={t("accounts.filterByPlan")} value={activePlan} options={planFilterOptions} onChange={(value) => { setSelected([]); setPlanFilter(value); }} /> : null}
-      {allAccounts.length > 1 ? <Button className="account-group-toggle" variant="secondary" icon={<Layers3 aria-hidden />} aria-pressed={groupByPlan} onClick={togglePlanGrouping}>{t("accounts.groupByPlan")}</Button> : null}
-      <div className="segmented view-layout-switcher account-layout-switcher" role="group" aria-label={t("accounts.layout")}>
-        <IconButton className={layout === "grid" ? "active" : ""} label={t("accounts.gridView")} icon={<LayoutGrid aria-hidden />} aria-pressed={layout === "grid"} onClick={() => changeLayout("grid")} />
-        <IconButton className={layout === "list" ? "active" : ""} label={t("accounts.listView")} icon={<List aria-hidden />} aria-pressed={layout === "list"} onClick={() => changeLayout("list")} />
-      </div>
-    </div>
     {filtersHideAccounts ? <div className="account-filter-summary" role="status" aria-live="polite"><span>{t("accounts.filterSummary", { visible: accounts.length, total: allAccounts.length })}</span><button type="button" onClick={() => { setSelected([]); onQuery(""); setPlanFilter("all"); setParticipationFilter("all"); }}><X aria-hidden /><span>{t("accounts.clearFilters")}</span></button></div> : null}
-    {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")} data-layout={layout}>
+    {accounts.length ? <div className="account-list" role="list" aria-label={t("connections.accounts")}>
       {accounts.map((account, index) => {
         const plan = accountPlanOption(account.subscription.planType, t("common.unknown"));
         const previousPlan = index ? accountPlanOption(accounts[index - 1].subscription.planType, t("common.unknown")).id : null;
         const participates = accountParticipates(account);
-        const excludedByFreePolicy = account.routingExclusion === "free_plan_policy";
         const subscriptionEnded = account.subscription.activeUntilMs != null && account.subscription.activeUntilMs <= Date.now();
         const subscriptionEnd = account.subscription.activeUntilMs == null
           ? { date: t("accounts.subscriptionEndUnknown"), relative: null }
-          : { date: subscriptionExpiryFormat.format(account.subscription.activeUntilMs), relative: formatRemainingTime(account.subscription.activeUntilMs, nowMs, t) };
-        const latestSpeed = accountSpeeds.get(account.id);
+          : { date: subscriptionExpiryFormat.format(account.subscription.activeUntilMs), relative: formatDetailedRemainingTime(account.subscription.activeUntilMs, nowMs, t) };
         const onServer = mode === "local" && Boolean(account.remoteLocation);
         const errorCode = onServer
           ? account.lastErrorCode === "remote_missing" ? "remote_missing" : null
           : currentAccountErrorCode(account);
         const remoteMissing = onServer && errorCode === "remote_missing";
         const operationalStatus = account.operationalStatus;
-        const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : excludedByFreePolicy ? t("accounts.participation.freePolicy") : t(`connections.status.${operationalStatus}`);
+        const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
-        const poolLabel = excludedByFreePolicy && participates ? t("accounts.participation.freePolicy") : participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
+        const poolLabel = participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
+        const quotaStatus = account.quotaRefreshStatus;
+        const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
+        const indicatorTone = quotaStatus === "refreshing" ? "disabled" : quotaStatus === "failed" || quotaStatus === "requires_reauth" ? "error" : quotaStatus === "pending" ? "disabled" : onServer ? "info" : operationalStatusTone(operationalStatus);
+        const indicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
+        const selectedAccount = selected.includes(account.id);
         return <Fragment key={account.id}>
         {groupByPlan && plan.id !== previousPlan ? <div className="account-plan-group-heading" role="presentation"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /><span>{t("accounts.groupCount", { count: visiblePlanCounts.get(plan.id) ?? 0 })}</span></div> : null}
-        <article className={`account-card${selected.includes(account.id) ? " selected" : ""}`} role="listitem">
+        <article className={`account-card${selectedAccount ? " selected" : ""}`} role="listitem">
           <div className="account-card-main">
-            <div className="account-kind-icon" aria-hidden><UserRound /></div>
+            {displayedErrorCode
+              ? <IconButton className="account-kind-icon account-status-button" data-status="error" label={accountErrorLabel(displayedErrorCode, t)} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(account)} />
+              : <StatusIcon className="account-kind-icon" status={indicatorTone} label={indicatorLabel}><UserRound aria-hidden /></StatusIcon>}
             <div className="account-identity">
               <strong title={account.label}>{account.label}</strong>
-              <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /><span className="account-identity-state">{errorCode ? <IconButton className="account-status-button" label={accountErrorLabel(errorCode, t)} icon={<StatusBadge status="error" label="" />} onClick={() => setErrorDetails(account)} /> : onServer ? <StatusIcon status="info" label={operationalLabel} /> : <StatusIcon status={operationalStatusTone(operationalStatus)} label={operationalLabel} />}</span></div>
+              <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></div>
             </div>
-            <input className="account-select" type="checkbox" aria-label={t("accounts.select", { name: account.label })} checked={selected.includes(account.id)} onChange={() => toggleSelected(account.id)} />
-          </div>
-          <div className="account-card-quota"><QuotaStack snapshot={account.quota} nowMs={nowMs} /></div>
-          <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <span className="account-subscription-countdown">{subscriptionEnd.relative}</span> : null}</div>
-          <footer className="account-card-footer"><div className="account-card-tools">{onServer ? <span className="account-remote-location" title={t("accounts.onServerHint")}><Server aria-hidden />{t("accounts.onServer")}</span> : <label className="account-pool-action" title={excludedByFreePolicy ? t("accounts.participation.freePolicyHint") : poolLabel}><span>{t("accounts.poolParticipation")}</span><input type="checkbox" role="switch" checked={participates} disabled={busy === `pool-${account.id}`} aria-label={t("accounts.poolParticipationFor", { name: account.label })} onChange={(event) => void perform(`pool-${account.id}`, () => updateParticipation(account, event.target.checked), "feedback.saved")} /></label>}{latestSpeed != null && !onServer ? <span className="account-token-speed" title={t("usage.latestSpeed")}>{formatTokenSpeed(latestSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</span> : null}</div><div className="account-row-action-list">
+            <div className="account-card-header-actions">
               <ActionMenu className="account-row-menu">
+                {errorCode ? <ActionMenuItem icon={<CircleAlert aria-hidden />} onClick={() => setErrorDetails(account)}>{t("accounts.errorDetailsTitle")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem icon={<Download aria-hidden />} disabled={Boolean(busy)} onClick={() => void returnToComputer(account)}>{t("accounts.returnToComputer")}</ActionMenuItem> : null}
                 {onServer ? <ActionMenuItem danger icon={<Power aria-hidden />} disabled={Boolean(busy)} onClick={() => void recoverLocally(account)}>{t("accounts.forceActivateLocal")}</ActionMenuItem> : null}
-                {!onServer ? <ActionMenuItem icon={<Network aria-hidden />} disabled={!canManageProxies} onClick={() => onProxy(account)}>{`${t("proxies.proxy")}: ${proxyLabel}`}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Download aria-hidden />} disabled={!canExport || !account.secretAvailable} onClick={() => onExport([account.id])}>{t("accounts.exportOne", { name: account.label })}</ActionMenuItem>
                 {!onServer ? <ActionMenuItem icon={<Power aria-hidden />} onClick={() => { void perform(`enable-${account.id}`, () => mode === "local" ? relayCommands.setAccountEnabled(account.id, !account.enabled) : relayCommands.remoteAction({ type: "update_account", id: account.id }, { enabled: !account.enabled }), "feedback.saved"); }}>{account.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem> : null}
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t(onServer ? "accounts.deleteLocalRecoveryConfirm" : mode === "remote" ? "accounts.deleteRemoteConfirm" : "accounts.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${account.id}`, () => mode === "local" ? relayCommands.deleteAccount(account.id) : relayCommands.remoteAction({ type: "delete_account", id: account.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
-              {mode === "local" ? <IconButton label={t("accounts.launchAccount")} icon={<Play aria-hidden />} disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`} title={onServer ? t("accounts.onServerHint") : !account.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchAccount")} onClick={() => void activateCodexProfile(`launch-account-${account.id}`, () => relayCommands.launchCodexAccount(account.id), true)} /> : null}
+              <IconButton className="account-select-button" label={selectedAccount ? t("accounts.deselect", { name: account.label }) : t("accounts.select", { name: account.label })} icon={selectedAccount ? <Check aria-hidden /> : <Square aria-hidden />} aria-pressed={selectedAccount} onClick={() => toggleSelected(account.id)} />
+            </div>
+          </div>
+          <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
+          <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
+          <QuotaEconomicsStrip account={account} />
+          <footer className="account-card-footer"><div className="account-card-actions">
+            {onServer
+              ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />
+              : <IconButton className={participates ? "danger" : ""} label={poolLabel} icon={participates ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `pool-${account.id}`} onClick={() => void perform(`pool-${account.id}`, () => updateParticipation(account, !participates), "feedback.saved")} />}
+            <IconButton label={t("accounts.refreshQuota")} icon={busy === `connection-account-quota-${account.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !account.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(account)} />
+            <IconButton label={`${t("proxies.proxy")}: ${proxyLabel}`} icon={<Pencil aria-hidden />} disabled={onServer || !canManageProxies} onClick={() => onProxy(account)} />
+            {mode === "local" ? <IconButton label={t("accounts.launchAccount")} icon={<Play aria-hidden />} disabled={onServer || !account.secretAvailable || busy === `launch-account-${account.id}`} title={onServer ? t("accounts.onServerHint") : !account.secretAvailable ? t("accounts.credentialsUnavailable") : t("accounts.launchAccount")} onClick={() => void activateCodexProfile(`launch-account-${account.id}`, () => relayCommands.launchCodexAccount(account.id), true)} /> : null}
           </div></footer>
         </article>
         </Fragment>;
@@ -538,11 +581,36 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   );
 }
 
-function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+function AccountQuotaRefreshState({ account }: { account: AccountSummary }) {
   const { t } = useTranslation();
-  const code = accountErrorCode(account) ?? "unknown";
+  const status = account.quotaRefreshStatus ?? (account.authState.state === "requires_reauth"
+    ? "requires_reauth"
+    : account.quota.error
+      ? "failed"
+      : account.quota.updatedAtMs != null
+        ? "updated"
+        : "pending");
+  const icon = status === "refreshing"
+    ? <Loader2 className="spin" aria-hidden />
+    : status === "updated"
+      ? <Check aria-hidden />
+      : status === "requires_reauth"
+        ? <LogIn aria-hidden />
+        : status === "failed"
+          ? <RefreshCw aria-hidden />
+          : <Clock3 aria-hidden />;
+  return <div className={`account-quota-refresh-state ${status}`} role="status">{icon}<span>{t(`accounts.quotaRefreshStatus.${status}`)}</span></div>;
+}
+
+function accountHasQuotaWindows(account: AccountSummary) {
+  return Boolean(account.quota.primary || account.quota.secondary || account.quota.supplemental?.length);
+}
+
+export function AccountErrorDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const code = currentAccountErrorCode(account) ?? "unknown";
   const authState = account.authState.state;
-  const observedAtMs = account.quota.error?.observedAtMs ?? null;
+  const observedAtMs = account.quota.error?.occurredAtMs ?? null;
   const details = JSON.stringify({
     code,
     message: accountErrorLabel(code, t),
@@ -762,9 +830,9 @@ function AccountProxyDialog({ account, onClose }: { account: AccountSummary; onC
 
 function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
   const { t } = useTranslation();
-  const { busy, perform } = useRelayState();
+  const { busy, perform, runtime } = useRelayState();
   const { pool } = useProxyPool();
-  const [choice, setChoice] = useState<"automatic" | "stored" | "custom" | "inherited">("inherited");
+  const [choice, setChoice] = useState<AccountProxyChoice>(() => account.proxyMode === "common" ? "common" : account.proxyMode === "account" ? "stored" : "direct");
   const [proxyId, setProxyId] = useState("");
   const [proxyUrl, setProxyUrl] = useState("");
   const [unavailable, setUnavailable] = useState(false);
@@ -777,14 +845,15 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
     if (current) {
       setChoice("stored");
       setProxyId(current.id);
-    } else if (pool.total > 0) {
-      setChoice("automatic");
+    } else if (account.proxyMode === "account") {
+      setChoice("custom");
     }
-  }, [current, pool]);
+  }, [account.proxyMode, current, pool]);
   const apply = async () => {
     const result: { current: StoredProxyAssignmentResult | null } = { current: null };
     const ok = await perform(`proxy-${account.id}`, async () => {
-      if (choice === "inherited") await relayCommands.setAccountProxy(account.id, null);
+      if (choice === "direct") await relayCommands.setAccountProxy(account.id, null, true);
+      else if (choice === "common") await relayCommands.setAccountProxy(account.id, null);
       else if (choice === "automatic") result.current = await relayCommands.assignAutomaticProxies([account.id]);
       else if (choice === "stored") result.current = await relayCommands.assignStoredProxy(account.id, proxyId);
       else await relayCommands.setAccountProxy(account.id, proxyUrl.trim());
@@ -796,26 +865,47 @@ function LocalAccountProxyDialog({ account, onClose }: { account: AccountSummary
     }
     onClose();
   };
-  const valid = Boolean(pool) && (choice !== "stored" || proxyId) && (choice !== "custom" || proxyUrl.trim()) && (choice !== "automatic" || pool!.total > 0 || Boolean(current));
-  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div>{!pool ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : <div className="proxy-choice-list" role="radiogroup" aria-label={t("proxies.accountRoute")}>
-    <label className={choice === "automatic" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "automatic"} disabled={pool.total === 0 && !current} onChange={() => { setChoice("automatic"); setUnavailable(false); }} /><span><strong>{t("proxies.assignAutomatically")}</strong><small>{t("proxies.storedAvailable", { count: pool.total })}</small></span></label>
-    <label className={choice === "stored" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "stored"} disabled={!available.length} onChange={() => { setChoice("stored"); setProxyId((value) => value || available[0]?.id || ""); setUnavailable(false); }} /><span><strong>{t("proxies.chooseStored")}</strong><small>{t("proxies.chooseStoredHint")}</small></span></label>
-    {choice === "stored" && available.length ? <OptionMenu className="field-option-menu proxy-choice-control" label={t("proxies.chooseStored")} value={proxyId || available[0].id} onChange={setProxyId} options={available.map((entry) => ({ value: entry.id, label: entry.endpoint }))} /> : null}
-    <label className={choice === "custom" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "custom"} onChange={() => { setChoice("custom"); setUnavailable(false); }} /><span><strong>{t("proxies.addCustom")}</strong><small>{t("proxies.addCustomHint")}</small></span></label>
-    {choice === "custom" ? <SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /> : null}
-    <label className={choice === "inherited" ? "selected" : ""}><input type="radio" name="proxy-choice" checked={choice === "inherited"} onChange={() => { setChoice("inherited"); setUnavailable(false); }} /><span><strong>{t("proxies.useInherited")}</strong><small>{t("proxies.useInheritedHint")}</small></span></label>
-  </div>}{unavailable ? <p role="alert" className="form-note error-text">{t("proxies.noStoredProxy")}</p> : null}</div></Dialog>;
+  const directBlocked = Boolean(runtime?.gateway.accountProxyRequired);
+  const commonConfigured = Boolean(runtime?.gateway.commonProxyConfigured);
+  const valid = Boolean(pool) && (choice !== "direct" || !directBlocked) && (choice !== "common" || commonConfigured) && (choice !== "stored" || proxyId) && (choice !== "custom" || proxyUrl.trim()) && (choice !== "automatic" || pool!.total > 0 || Boolean(current));
+  const choose = (value: AccountProxyChoice) => { setChoice(value); setUnavailable(false); };
+  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form proxy-route-form">{!pool ? <div className="center-loading"><Loader2 className="spin" aria-hidden />{t("common.loading")}</div> : <>
+    <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
+      <ProxyRouteOption value="direct" selected={choice === "direct"} disabled={directBlocked} icon={<WifiOff aria-hidden />} label={t("proxies.direct")} hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")} onSelect={choose} />
+      <ProxyRouteOption value="automatic" selected={choice === "automatic"} disabled={!pool.total && !current} icon={<Shuffle aria-hidden />} label={t("proxies.assignAutomatically")} hint={t("proxies.storedAvailable", { count: pool.total })} onSelect={choose} />
+      <ProxyRouteOption value="stored" selected={choice === "stored"} disabled={!available.length} icon={<Database aria-hidden />} label={t("proxies.chooseStored")} hint={t("proxies.chooseStoredShortHint")} onSelect={(value) => { choose(value); setProxyId((currentId) => currentId || available[0]?.id || ""); }} />
+      <ProxyRouteOption value="custom" selected={choice === "custom"} icon={<Plus aria-hidden />} label={t("proxies.addCustom")} hint={t("proxies.addCustomShortHint")} onSelect={choose} />
+      {commonConfigured ? <ProxyRouteOption value="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} hint={t("proxies.useCommonHint")} onSelect={choose} /> : null}
+    </div>
+    {choice === "stored" && available.length ? <div className="proxy-route-control"><OptionMenu className="field-option-menu" label={t("proxies.chooseStored")} value={proxyId || available[0].id} onChange={setProxyId} options={available.map((entry) => ({ value: entry.id, label: entry.endpoint }))} /></div> : null}
+    {choice === "custom" ? <div className="proxy-route-control"><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /></div> : null}
+  </>}{unavailable ? <p role="alert" className="form-note error-text">{t("proxies.noStoredProxy")}</p> : null}</div></Dialog>;
 }
 
 function RemoteAccountProxyDialog({ account, onClose }: { account: AccountSummary; onClose: () => void }) {
   const { t } = useTranslation();
-  const { busy, perform } = useRelayState();
+  const { busy, perform, runtime } = useRelayState();
+  const [choice, setChoice] = useState<AccountProxyChoice>(() => account.proxyMode === "common" ? "common" : account.proxyMode === "account" ? "custom" : "direct");
   const [proxyUrl, setProxyUrl] = useState("");
-  const apply = async (value: string | null) => {
-    const ok = await perform(`proxy-${account.id}`, () => relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: value }), "feedback.saved");
+  const commonConfigured = Boolean(runtime?.gateway.commonProxyConfigured);
+  const directBlocked = Boolean(runtime?.gateway.accountProxyRequired);
+  const apply = async () => {
+    const ok = await perform(`proxy-${account.id}`, () => relayCommands.remoteAction({ type: "set_account_proxy", id: account.id }, { proxyUrl: choice === "custom" ? proxyUrl.trim() : null, bypassCommonProxy: choice === "direct" }), "feedback.saved");
     if (ok) onClose();
   };
-  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>{account.proxyMode === "account" ? <Button variant="secondary" busy={busy === `proxy-${account.id}`} onClick={() => void apply(null)}>{t("proxies.useInherited")}</Button> : null}<Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!proxyUrl.trim()} onClick={() => void apply(proxyUrl.trim())}>{t("common.save")}</Button></>}><div className="relay-form"><div className="proxy-current"><span>{t("proxies.currentMode")}</span><StatusBadge status={account.proxyAvailable === false ? "error" : "ready"} label={t(`proxies.modes.${account.proxyMode ?? "direct"}`)} /></div><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /><p className="form-note">{t("proxies.savedHidden")}</p></div></Dialog>;
+  const valid = (choice !== "direct" || !directBlocked) && (choice !== "common" || commonConfigured) && (choice !== "custom" || Boolean(proxyUrl.trim()));
+  return <Dialog title={t("proxies.accountTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `proxy-${account.id}`} disabled={!valid} onClick={() => void apply()}>{t("common.save")}</Button></>}><div className="relay-form proxy-route-form">
+    <div className="proxy-route-options" role="radiogroup" aria-label={t("proxies.accountRoute")}>
+      <ProxyRouteOption value="direct" selected={choice === "direct"} disabled={directBlocked} icon={<WifiOff aria-hidden />} label={t("proxies.direct")} hint={t(directBlocked ? "proxies.directBlockedHint" : "proxies.directHint")} onSelect={setChoice} />
+      <ProxyRouteOption value="custom" selected={choice === "custom"} icon={<Plus aria-hidden />} label={t("proxies.addCustom")} hint={t("proxies.addCustomShortHint")} onSelect={setChoice} />
+      {commonConfigured ? <ProxyRouteOption value="common" selected={choice === "common"} icon={<Network aria-hidden />} label={t("proxies.useCommon")} hint={t("proxies.useCommonHint")} onSelect={setChoice} /> : null}
+    </div>
+    {choice === "custom" ? <div className="proxy-route-control"><SecretField label={t("proxies.proxyUrl")} value={proxyUrl} onChange={setProxyUrl} placeholder={t("proxies.proxyPlaceholder")} /><p className="form-note">{t("proxies.savedHidden")}</p></div> : null}
+  </div></Dialog>;
+}
+
+function ProxyRouteOption({ value, selected, disabled = false, icon, label, hint, onSelect }: { value: AccountProxyChoice; selected: boolean; disabled?: boolean; icon: React.ReactNode; label: string; hint: string; onSelect: (value: AccountProxyChoice) => void }) {
+  return <button type="button" role="radio" aria-checked={selected} disabled={disabled} className={selected ? "selected" : ""} onClick={() => onSelect(value)}>{icon}<span><strong>{label}</strong><small>{hint}</small></span></button>;
 }
 
 function BulkProxyDialog({ accountIds, onClose }: { accountIds: string[]; onClose: () => void }) {
@@ -891,7 +981,7 @@ function AutomationsTable({ query, onEdit }: { query: string; onEdit: (task: Wak
                 <td>{task.windowKinds.map((item) => t(`quota.${item}`)).join(", ")}</td>
                 <td>{task.modelPolicy.kind === "explicit" ? task.modelPolicy.value : t("automations.lightest")}</td>
                 <td>{last ? t(`wake.${last.outcome}`, { defaultValue: last.outcome }) : t("common.never")}</td>
-                <td className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")} /><ActionMenu><ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem></ActionMenu></td>
+                <td className="row-actions-cell"><div className="row-actions"><IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(task)} /><IconButton label={t("common.test")} icon={<Play aria-hidden />} disabled={busy === `test-${task.id}`} onClick={() => perform(`test-${task.id}`, () => mode === "local" ? relayCommands.testAutomation(task.id) : relayCommands.remoteAction({ type: "test_wake_task", id: task.id }), "feedback.checked")} /><ActionMenu><ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("automations.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${task.id}`, () => mode === "local" ? relayCommands.deleteAutomation(task.id) : relayCommands.remoteAction({ type: "delete_wake_task", id: task.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem></ActionMenu></div></td>
               </tr>
             );
           })}</tbody>
@@ -927,8 +1017,11 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
   const [wireApi, setWireApi] = useState<SourceSummary["wireApi"]>(source?.wireApi ?? "responses");
+  const [priceDrafts, setPriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(source?.modelPriceOverrides ?? {}));
+  const modelPriceOverrides = useMemo(() => parseSourcePriceDrafts(priceDrafts), [priceDrafts]);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    if (source && !modelPriceOverrides) return;
     const ok = await perform("source-save", async () => {
       if (!source) {
         const payload = apiProviderSourceInput(provider);
@@ -941,7 +1034,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
         }
         return;
       }
-      const update = { name, baseUrl, wireApi, models: source.models, allowedModels: source.allowedModels, excludedModels: source.excludedModels, draining: source.draining, priority: source.priority, weight: source.weight };
+      const update = { name, baseUrl, wireApi, models: source.models, allowedModels: source.allowedModels, excludedModels: source.excludedModels, draining: source.draining, priority: source.priority, weight: source.weight, recoveryDelaySeconds: source.recoveryDelaySeconds, modelPriceOverrides };
       if (mode !== "remote") {
         await relayCommands.updateSource({ sourceId: source.id, ...update });
         if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
@@ -951,7 +1044,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     }, source ? "feedback.saved" : "feedback.sourceAdded");
     if (ok) onClose();
   };
-  return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={!source && !apiProviderReady(provider)} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><div className="source-access-grid"><div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={wireApi} onChange={(value) => setWireApi(value as SourceSummary["wireApi"])} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
+  return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={(!source && !apiProviderReady(provider)) || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><div className="source-access-grid"><div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={wireApi} onChange={(value) => setWireApi(value as SourceSummary["wireApi"])} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} /></> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
 }
 
 function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Promise<void> }) {
@@ -1259,86 +1352,8 @@ function safeHost(value: string) {
   try { return new URL(value).host; } catch { return value; }
 }
 
-function compareAccounts(left: AccountSummary, right: AccountSummary) {
-  return automaticAccountTier(left) - automaticAccountTier(right)
-    || compareQuotaDescending(quotaFloor(left), quotaFloor(right))
-    || left.label.localeCompare(right.label);
-}
-
-function automaticAccountTier(account: AccountSummary) {
-  const status = account.operationalStatus;
-  if (status === "rotation") return quotaFloor(account) == null ? 1 : 0;
-  if (status === "quotaWait" || account.routingExclusion === "free_plan_policy") return 2;
-  if (status === "unavailable") return 3;
-  return 4;
-}
-
 function accountParticipates(account: AccountSummary) {
   return account.inPool;
-}
-
-function quotaFloor(account: AccountSummary) {
-  const values = [account.quota.primary, account.quota.secondary]
-    .map((window) => window?.availableBasisPoints)
-    .filter((value): value is number => value != null);
-  return values.length ? Math.min(...values) : null;
-}
-
-function compareQuotaDescending(left: number | null, right: number | null) {
-  if (left == null && right == null) return 0;
-  if (left == null) return 1;
-  if (right == null) return -1;
-  return right - left;
-}
-
-function accountErrorCode(account: AccountSummary) {
-  const auth = account.authState;
-  if (auth.state === "requires_reauth") return auth.reason ? "auth_" + auth.reason : "auth_requires_reauth";
-  const stored = account.lastErrorCode?.trim() || account.quota.error?.code.trim();
-  if (stored) return stored;
-  if (auth.state === "error") return "auth_error";
-  if (!account.secretAvailable) return "credentials_missing";
-  if (account.health === "blocked" || account.health === "unhealthy") return "health_" + account.health;
-  return null;
-}
-
-function currentAccountErrorCode(account: AccountSummary) {
-  if (account.operationalStatus !== "unavailable") return null;
-  if (account.routingExclusion === "free_plan_policy" && !accountIsTerminallyUnusable(account)) return null;
-  return accountErrorCode(account);
-}
-
-function accountIsTerminallyUnusable(account: AccountSummary) {
-  const auth = account.authState;
-  if (auth.state === "requires_reauth" || !account.secretAvailable) return true;
-  const code = (account.lastErrorCode?.trim() || account.quota.error?.code.trim() || "").toLowerCase();
-  return new Set([
-    "credentials_missing",
-    "deactivated_workspace",
-    "invalid_chatgpt_account_id",
-    "models_invalid_account_id",
-    "token_invalidated",
-  ]).has(code) || code.startsWith("auth_");
-}
-
-function accountErrorLabel(code: string, t: TFunction) {
-  const normalized = code.toLocaleLowerCase();
-  if (normalized === "remote_missing") return t("accounts.errors.remoteMissing");
-  if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return t("accounts.errors.reusedRefreshToken");
-  if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return t("accounts.errors.expiredRefreshToken");
-  if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return t("accounts.errors.invalidatedRefreshToken");
-  if (/invalid_grant/.test(normalized)) return t("accounts.errors.invalidGrant");
-  if (/invalid_grant|requires_reauth|refresh_token/.test(normalized)) return t("accounts.errors.requiresReauth");
-  if (/verification|verify.*account|phone/.test(normalized)) return t("accounts.errors.verificationRequired");
-  if (/credential|secret/.test(normalized)) return t("accounts.errors.credentialsMissing");
-  if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return t("accounts.errors.blocked");
-  if (/forbidden|blocked/.test(normalized)) return t("accounts.errors.blocked");
-  if (/rate.?limit|too_many/.test(normalized)) return t("accounts.errors.rateLimited");
-  if (/transport|timeout|network|connect/.test(normalized)) return t("accounts.errors.connection");
-  if (/quota/.test(normalized)) return t("accounts.errors.quota");
-  if (/auth_error|unauthorized|authentication/.test(normalized)) return t("accounts.errors.authorization");
-  if (/response|parse|decode|malformed/.test(normalized)) return t("accounts.errors.invalidResponse");
-  return t("accounts.errors.unknown");
 }
 
 function collectImportFailures(response: ConfirmAccountImportResponse | null, session: ImportSession): ImportFailure[] {

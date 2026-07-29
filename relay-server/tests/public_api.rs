@@ -17,7 +17,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -29,6 +29,28 @@ use zenith_relay_server::{
     state::AppState,
     store::{Store, Vault},
 };
+
+#[tokio::test]
+async fn profile_can_be_prepared_before_the_first_account_transfer() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let credential = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(credential.status(), StatusCode::OK);
+    let credential: Value = credential.json().await.unwrap();
+    assert_eq!(credential["keyId"], "key_system");
+    assert_eq!(credential["baseUrl"], format!("{}/v1", server.origin));
+    assert!(credential["secret"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+}
 
 #[tokio::test]
 async fn remote_gateway_persists_and_serves_after_management_client_disconnects() {
@@ -113,6 +135,11 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap()
         .iter()
         .any(|feature| feature == "profile_attach"));
+    assert!(capabilities["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "profile_key_rotation"));
     let profile_response = client
         .get(format!("{}/profile/credential", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -127,7 +154,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         Some("no-store")
     );
     let profile_credential: Value = profile_response.json().await.unwrap();
-    let profile_key = profile_credential["secret"].as_str().unwrap().to_string();
+    let mut profile_key = profile_credential["secret"].as_str().unwrap().to_string();
     assert_eq!(profile_credential["keyId"], "key_system");
     assert_eq!(
         profile_credential["baseUrl"],
@@ -142,7 +169,8 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .json()
         .await
         .unwrap();
-    assert!(keys.as_array().unwrap().is_empty());
+    assert_eq!(keys["schemaVersion"], 1);
+    assert!(keys["keys"].as_array().unwrap().is_empty());
     assert_eq!(
         client
             .delete(format!("{}/keys/key_system", first.origin))
@@ -164,16 +192,125 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         StatusCode::OK
     );
 
+    let aborted_rotation: Value = client
+        .post(format!("{}/profile/credential/rotations", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let aborted_rotation_id = aborted_rotation["rotationId"].as_str().unwrap();
+    let aborted_secret = aborted_rotation["secret"].as_str().unwrap();
+    assert_eq!(aborted_rotation["schemaVersion"], 1);
+    assert_eq!(aborted_rotation["keyId"], "key_system");
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(aborted_secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .delete(format!(
+                "{}/profile/credential/rotations/{aborted_rotation_id}",
+                first.origin
+            ))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(aborted_secret)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+
+    let rotation_response = client
+        .post(format!("{}/profile/credential/rotations", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        rotation_response.headers().get(CACHE_CONTROL).unwrap(),
+        "no-store"
+    );
+    let rotation: Value = rotation_response.json().await.unwrap();
+    let rotation_id = rotation["rotationId"].as_str().unwrap();
+    let rotated_profile_key = rotation["secret"].as_str().unwrap().to_string();
+    assert_ne!(rotated_profile_key, profile_key);
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(&rotated_profile_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!(
+                "{}/profile/credential/rotations/{rotation_id}",
+                first.origin
+            ))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(&profile_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    profile_key = rotated_profile_key;
+    let hidden_keys: Value = client
+        .get(format!("{}/keys", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(hidden_keys["keys"].as_array().unwrap().is_empty());
+
     let generated: Value = client
         .post(format!("{}/keys", first.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
+            "schemaVersion": 1,
             "label": "Test client",
             "sourceIds": null,
             "accountIds": null,
             "allowedModels": [],
             "excludedModels": [],
-            "modelPrefix": null
+            "modelPrefix": null,
+            "wireApis": ["responses"],
+            "softBudgetMicroUsd": 2
         }))
         .send()
         .await
@@ -181,7 +318,26 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .json()
         .await
         .unwrap();
-    let pool_key = generated["secret"].as_str().unwrap().to_string();
+    assert_eq!(generated["schemaVersion"], 1);
+    assert_eq!(generated["key"]["wireApis"], json!(["responses"]));
+    assert_eq!(generated["key"]["softBudgetMicroUsd"], 2);
+    let client_key_id = generated["key"]["id"].as_str().unwrap().to_string();
+    let mut pool_key = generated["secret"].as_str().unwrap().to_string();
+
+    for path in ["/v1/chat/completions", "/v1/images/generations"] {
+        let denied = client
+            .post(format!("{}{path}", first.origin))
+            .bearer_auth(&pool_key)
+            .json(&json!({"model":"gpt-test"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            denied.json::<Value>().await.unwrap()["error"]["code"],
+            "client_api_not_allowed"
+        );
+    }
 
     let models = client
         .get(format!("{}/v1/models", first.origin))
@@ -192,6 +348,55 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(models.status(), StatusCode::OK);
     assert!(models.text().await.unwrap().contains("gpt-test"));
     assert_websocket_upgrade(&first.origin, &pool_key).await;
+
+    let chat_only: Value = client
+        .post(format!("{}/keys", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "schemaVersion": 1,
+            "label": "Chat-only client",
+            "sourceIds": null,
+            "accountIds": null,
+            "allowedModels": [],
+            "excludedModels": [],
+            "modelPrefix": null,
+            "wireApis": ["chat_completions"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chat_only_key = chat_only["secret"].as_str().unwrap();
+    for path in ["/v1/responses", "/v1/responses/compact", "/v1/alpha/search"] {
+        assert_eq!(
+            client
+                .post(format!("{}{path}", first.origin))
+                .bearer_auth(chat_only_key)
+                .json(&json!({"model":"gpt-test"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_websocket_status(&first.origin, chat_only_key, "403").await;
+    assert_eq!(
+        client
+            .delete(format!(
+                "{}/keys/{}",
+                first.origin,
+                chat_only["key"]["id"].as_str().unwrap()
+            ))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
 
     let response = client
         .post(format!("{}/v1/responses", first.origin))
@@ -613,6 +818,54 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         repriced_usage["totals"]["apiEquivalent"]["unpricedTokens"],
         0
     );
+    let client_keys: Value = client
+        .get(format!("{}/keys", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let client_key = client_keys["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| key["id"] == client_key_id)
+        .unwrap();
+    assert!(client_key["usageTotals"]["requests"].as_u64().unwrap() > 0);
+    assert!(
+        client_key["usageTotals"]["apiEquivalent"]["microUsd"]
+            .as_u64()
+            .unwrap()
+            >= 3
+    );
+    let rotated_client_key: Value = client
+        .post(format!("{}/keys/{client_key_id}/rotate", first.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let replacement = rotated_client_key["secret"].as_str().unwrap().to_string();
+    assert_ne!(replacement, pool_key);
+    assert_eq!(
+        rotated_client_key["key"]["usageTotals"],
+        client_key["usageTotals"]
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/v1/models", first.origin))
+            .bearer_auth(&pool_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    pool_key = replacement;
 
     let disabled_response = client
         .post(format!("{}/models/rules", first.origin))
@@ -771,6 +1024,45 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         assert!(Instant::now() < deadline, "stream usage was not persisted");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    let usage_before_key_delete: Value = client
+        .get(format!(
+            "{}/usage?localKeyQuery={client_key_id}",
+            second.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(usage_before_key_delete["total"].as_u64().unwrap() > 0);
+    assert_eq!(
+        client
+            .delete(format!("{}/keys/{client_key_id}", second.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    let usage_after_key_delete: Value = client
+        .get(format!(
+            "{}/usage?localKeyQuery={client_key_id}",
+            second.origin
+        ))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        usage_after_key_delete["totals"],
+        usage_before_key_delete["totals"]
+    );
     assert_eq!(
         client
             .delete(format!("{}/usage", second.origin))
@@ -801,6 +1093,353 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert!(!String::from_utf8_lossy(&vault).contains(&pool_key));
 
     second.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn management_token_can_rotate_without_changing_server_identity() {
+    let root = TempDir::new().unwrap();
+    let old_token = "synthetic-management-token-old";
+    let new_token = "synthetic-management-token-new";
+    let client = reqwest::Client::new();
+    let first = spawn_server_with_token(root.path(), old_token).await;
+    let first_health: Value = client
+        .get(format!("{}/health", first.origin))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let server_id = first_health["serverId"].as_str().unwrap().to_string();
+    first.task.abort();
+    let _ = first.task.await;
+    drop(first.state);
+
+    let restarted = spawn_server_with_token(root.path(), new_token).await;
+    let restarted_health: Value = client
+        .get(format!("{}/health", restarted.origin))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restarted_health["serverId"], server_id);
+    assert_eq!(
+        client
+            .get(format!("{}/state", restarted.origin))
+            .bearer_auth(old_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        client
+            .get(format!("{}/state", restarted.origin))
+            .bearer_auth(new_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn client_key_lifecycle_is_versioned_and_secrets_are_one_time() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let input = json!({
+        "schemaVersion": 1,
+        "label": "Phone",
+        "sourceIds": null,
+        "accountIds": null,
+        "allowedModels": [],
+        "excludedModels": [],
+        "modelPrefix": null,
+        "wireApis": ["responses", "images"]
+    });
+
+    let unsupported = client
+        .post(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "schemaVersion": 2,
+            "label": "Phone",
+            "sourceIds": null,
+            "accountIds": null,
+            "allowedModels": [],
+            "excludedModels": [],
+            "modelPrefix": null,
+            "wireApis": ["responses"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        unsupported.json::<Value>().await.unwrap()["error"]["code"],
+        "client_access_schema_unsupported"
+    );
+
+    let created = client
+        .post(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(created.headers().get(CACHE_CONTROL).unwrap(), "no-store");
+    let created: Value = created.json().await.unwrap();
+    let key_id = created["key"]["id"].as_str().unwrap();
+    let first_secret = created["secret"].as_str().unwrap();
+    assert_eq!(created["schemaVersion"], 1);
+
+    let invalid_budget = client
+        .patch(format!("{}/keys/{key_id}", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"schemaVersion":1,"softBudgetMicroUsd":0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_budget.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        invalid_budget.json::<Value>().await.unwrap()["error"]["code"],
+        "client_soft_budget_invalid"
+    );
+
+    let updated: Value = client
+        .patch(format!("{}/keys/{key_id}", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "schemaVersion": 1,
+            "label": "Tablet",
+            "enabled": false,
+            "wireApis": ["images"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["label"], "Tablet");
+    assert_eq!(updated["enabled"], false);
+    assert_eq!(updated["wireApis"], json!(["images"]));
+
+    let rotated = client
+        .post(format!("{}/keys/{key_id}/rotate", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rotated.headers().get(CACHE_CONTROL).unwrap(), "no-store");
+    let rotated: Value = rotated.json().await.unwrap();
+    assert_ne!(rotated["secret"].as_str().unwrap(), first_secret);
+
+    let listed: Value = client
+        .get(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["schemaVersion"], 1);
+    assert_eq!(listed["keys"][0]["id"], key_id);
+    assert!(!listed.to_string().contains(first_secret));
+    assert!(!listed
+        .to_string()
+        .contains(rotated["secret"].as_str().unwrap()));
+
+    assert_eq!(
+        client
+            .delete(format!("{}/keys/{key_id}", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
+    let root = TempDir::new().unwrap();
+    let (upstream, observed, upstream_task) = spawn_source_lifecycle_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let management_key = "synthetic-management-token-value";
+    let first_key = "synthetic-source-key-v1";
+    let second_key = "synthetic-source-key-v2";
+
+    let created_response = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Lifecycle source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": first_key,
+            "wireApi": "responses",
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created_response.status(), StatusCode::CREATED);
+    let created_text = created_response.text().await.unwrap();
+    assert!(!created_text.contains(first_key));
+    let created: Value = serde_json::from_str(&created_text).unwrap();
+    let source_id = created["id"].as_str().unwrap();
+    assert_eq!(created["models"], json!(["gpt-source-lifecycle"]));
+
+    let stats_response = client
+        .get(format!("{}/sources/{source_id}/stats", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats_response.status(), StatusCode::OK);
+    let stats_text = stats_response.text().await.unwrap();
+    assert!(!stats_text.contains(first_key));
+    assert_eq!(
+        serde_json::from_str::<Value>(&stats_text).unwrap(),
+        json!({
+            "provider": "unsupported",
+            "balanceMicroUsd": null,
+            "spentMicroUsd": null,
+            "requests": null,
+            "totalTokens": null
+        })
+    );
+
+    let disabled: Value = client
+        .patch(format!("{}/sources/{source_id}", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"name":"Lifecycle source edited","enabled":false}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(disabled["name"], "Lifecycle source edited");
+    assert_eq!(disabled["enabled"], false);
+
+    let rotated_response = client
+        .patch(format!("{}/sources/{source_id}", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"apiKey":second_key,"enabled":true}))
+        .send()
+        .await
+        .unwrap();
+    let rotated_text = rotated_response.text().await.unwrap();
+    assert!(!rotated_text.contains(first_key));
+    assert!(!rotated_text.contains(second_key));
+    assert_eq!(
+        client
+            .post(format!("{}/sources/{source_id}/test", server.origin))
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        observed.lock().unwrap().last().map(String::as_str),
+        Some("Bearer synthetic-source-key-v2")
+    );
+
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds":[source_id],"inPool":true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/gateway/start", server.origin))
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let routed_before = observed.lock().unwrap().len();
+    assert_eq!(
+        client
+            .post(format!("{}/v1/responses", server.origin))
+            .bearer_auth(profile["secret"].as_str().unwrap())
+            .json(&json!({"model":"gpt-source-lifecycle","input":"route"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    {
+        let observed = observed.lock().unwrap();
+        assert!(observed.len() > routed_before);
+        assert_eq!(
+            observed.last().map(String::as_str),
+            Some("Bearer synthetic-source-key-v2")
+        );
+    }
+
+    let snapshot_text = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!snapshot_text.contains(first_key));
+    assert!(!snapshot_text.contains(second_key));
+    assert_eq!(
+        client
+            .delete(format!("{}/sources/{source_id}", server.origin))
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert!(server
+        .state
+        .vault
+        .load(&format!("source:{source_id}"))
+        .unwrap()
+        .is_none());
+    assert!(server.state.snapshot().unwrap().sources.is_empty());
+
+    server.task.abort();
     upstream_task.abort();
 }
 
@@ -844,12 +1483,14 @@ async fn remote_gateway_serves_two_hundred_concurrent_requests_and_flushes_usage
         .post(format!("{}/keys", server.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
+            "schemaVersion": 1,
             "label": "Concurrent client",
             "sourceIds": null,
             "accountIds": null,
             "allowedModels": [],
             "excludedModels": [],
-            "modelPrefix": null
+            "modelPrefix": null,
+            "wireApis": null
         }))
         .send()
         .await
@@ -955,33 +1596,32 @@ async fn remote_gateway_serves_two_hundred_concurrent_requests_and_flushes_usage
 }
 
 #[tokio::test]
-async fn quota_policy_and_pool_refresh_have_remote_parity() {
+async fn adaptive_quota_refresh_has_no_remote_interval_setting() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
 
-    let invalid = client
-        .post(format!("{}/quota/settings", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({"refreshIntervalSeconds": 119, "requestTimeoutSeconds": 20}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
-
-    let updated: Value = client
+    let removed = client
         .post(format!("{}/quota/settings", server.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({"refreshIntervalSeconds": 120, "requestTimeoutSeconds": 10}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NOT_FOUND);
+    let state: Value = client
+        .get(format!("{}/state", server.origin))
+        .bearer_auth("synthetic-management-token-value")
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(updated["gateway"]["quotaRefreshIntervalSeconds"], 120);
-    assert_eq!(updated["gateway"]["quotaRequestTimeoutSeconds"], 10);
-    assert_eq!(updated["gateway"]["useFreeAccounts"], false);
+    assert!(state["gateway"]
+        .get("quotaRefreshIntervalSeconds")
+        .is_none());
+    assert!(state["gateway"].get("useFreeAccounts").is_none());
 
     let invalid_routing = client
         .post(format!("{}/routing/settings", server.origin))
@@ -1036,27 +1676,6 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .unwrap();
     assert!(runtime_order.is_array());
 
-    let free_enabled: Value = client
-        .post(format!("{}/quota/settings", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "refreshIntervalSeconds": 120,
-            "requestTimeoutSeconds": 10,
-            "useFreeAccounts": true
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(free_enabled["gateway"]["useFreeAccounts"], true);
-    assert!(free_enabled["capabilities"]["features"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|feature| feature == "free_account_policy"));
-
     let refreshed: Value = client
         .post(format!("{}/pool/quota/refresh", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -1068,11 +1687,12 @@ async fn quota_policy_and_pool_refresh_have_remote_parity() {
         .unwrap();
     assert_eq!(refreshed["refreshed"], 0);
     assert_eq!(refreshed["failed"], 0);
-    assert_eq!(
-        refreshed["snapshot"]["gateway"]["quotaRefreshIntervalSeconds"],
-        120
-    );
-    assert_eq!(refreshed["snapshot"]["gateway"]["useFreeAccounts"], true);
+    assert!(refreshed["snapshot"]["gateway"]
+        .get("quotaRefreshIntervalSeconds")
+        .is_none());
+    assert!(refreshed["snapshot"]["gateway"]
+        .get("useFreeAccounts")
+        .is_none());
     assert_eq!(refreshed["snapshot"]["gateway"]["maxRetryCandidates"], 5);
 
     server.task.abort();
@@ -1199,7 +1819,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     assert_eq!(preview["preview"]["rows"].as_array().unwrap().len(), 2);
     assert_eq!(preview["preview"]["rows"][0]["plan"], "plus");
     assert_eq!(preview["preview"]["warnings"][0]["code"], "proxies_ignored");
-    assert_eq!(preview["preview"]["warnings"][1]["code"], "sources_ignored");
+    assert_eq!(preview["preview"]["warnings"].as_array().unwrap().len(), 1);
     let batch_id = preview["sessionId"].as_str().unwrap();
     let rows = preview["preview"]["rows"].as_array().unwrap();
     let first_item_id = rows[0]["itemId"].as_str().unwrap();
@@ -1251,7 +1871,10 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         .json()
         .await
         .unwrap();
-    assert_eq!(second_confirm["results"][0]["status"], "succeeded");
+    assert_eq!(
+        second_confirm["results"][0]["status"], "succeeded",
+        "{second_confirm}"
+    );
     assert_eq!(server.state.store.accounts().unwrap().len(), 2);
     let second_account = server
         .state
@@ -1316,7 +1939,7 @@ async fn batch_import_accepts_multiple_documents_and_confirms_every_selected_acc
     assert!(!preview_text.contains("synthetic-document-access"));
     assert!(!preview_text.contains("synthetic-document-refresh"));
     let preview: Value = serde_json::from_str(&preview_text).unwrap();
-    assert_eq!(preview["preview"]["format"], "json_documents");
+    assert_eq!(preview["preview"]["format"], "json_array");
     let rows = preview["preview"]["rows"].as_array().unwrap();
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|row| row["defaultSelected"] == true));
@@ -1365,6 +1988,70 @@ async fn batch_import_accepts_multiple_documents_and_confirms_every_selected_acc
 }
 
 #[tokio::test]
+async fn batch_import_accepts_agent_identity_and_keeps_it_in_the_vault() {
+    const PRIVATE_KEY: &str = "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let content = json!({
+        "type": "sub2api-data",
+        "version": 1,
+        "accounts": [{
+            "name": "Agent account",
+            "credentials": {
+                "auth_mode": "agentIdentity",
+                "agent_private_key": PRIVATE_KEY,
+                "agent_runtime_id": "runtime-test",
+                "task_id": "task-test",
+                "chatgpt_account_id": "account-test"
+            },
+            "models": ["gpt-test"]
+        }]
+    })
+    .to_string();
+    let response = client
+        .post(format!("{}/accounts/import/batch/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"content": content}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let text = response.text().await.unwrap();
+    assert!(!text.contains(PRIVATE_KEY));
+    let preview: Value = serde_json::from_str(&text).unwrap();
+    let item_id = preview["preview"]["rows"][0]["itemId"].as_str().unwrap();
+    let confirmed: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sessionId": preview["sessionId"],
+            "selectedItemIds": [item_id],
+            "addToPool": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(confirmed["results"][0]["status"], "succeeded");
+    let account = server.state.store.accounts().unwrap().remove(0);
+    let stored = server
+        .state
+        .vault
+        .load(&account.secret_ref)
+        .unwrap()
+        .unwrap();
+    assert!(stored.contains(PRIVATE_KEY));
+    assert!(!std::fs::read(root.path().join("relay.sqlite"))
+        .unwrap()
+        .windows(PRIVATE_KEY.len())
+        .any(|window| window == PRIVATE_KEY.as_bytes()));
+    server.task.abort();
+}
+
+#[tokio::test]
 async fn batch_import_handles_arrays_json_lines_invalid_rows_and_duplicates() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
@@ -1401,7 +2088,7 @@ async fn batch_import_handles_arrays_json_lines_invalid_rows_and_duplicates() {
     );
     assert!(!preview.to_string().contains("invalid-row-marker"));
     assert!(!preview.to_string().contains("synthetic-label-secret"));
-    assert_eq!(preview["preview"]["rows"][2]["label"], "Imported account");
+    assert_eq!(preview["preview"]["rows"][2]["label"], "synt...ount");
     assert!(preview["preview"]["rows"][2]["plan"].is_null());
 
     let batch_id = preview["sessionId"].as_str().unwrap();
@@ -1632,12 +2319,14 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
         .post(format!("{}/keys", server.origin))
         .bearer_auth("synthetic-management-token-value")
         .json(&json!({
+            "schemaVersion": 1,
             "label": "Proxy test client",
             "sourceIds": [],
             "accountIds": [account_id],
             "allowedModels": [],
             "excludedModels": [],
-            "modelPrefix": null
+            "modelPrefix": null,
+            "wireApis": null
         }))
         .send()
         .await
@@ -1940,7 +2629,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     }
     let document: Value = serde_json::from_str(&document_text).unwrap();
     assert_eq!(document["preset"]["format"], "zenith-relay-configuration");
-    assert_eq!(document["preset"]["schemaVersion"], 1);
+    assert_eq!(document["preset"]["schemaVersion"], 2);
     assert!(document["revision"]
         .as_str()
         .is_some_and(|revision| revision.starts_with("cfg_")));
@@ -2085,7 +2774,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["gateway"]["visibleModelIds"], json!([]));
 
     let mut unsupported_schema = fresh_preview["preset"].clone();
-    unsupported_schema["schemaVersion"] = json!(2);
+    unsupported_schema["schemaVersion"] = json!(3);
     let unsupported = client
         .post(format!("{}/configuration/preset/preview", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -2195,13 +2884,17 @@ struct RunningServer {
 }
 
 async fn spawn_server(root: &Path) -> RunningServer {
+    spawn_server_with_token(root, "synthetic-management-token-value").await
+}
+
+async fn spawn_server_with_token(root: &Path, management_token: &str) -> RunningServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let config = Config {
         bind: address,
         data_dir: root.to_path_buf(),
         public_base_url: url::Url::parse(&format!("http://{address}")).unwrap(),
-        management_token: "synthetic-management-token-value".to_string(),
+        management_token: management_token.to_string(),
         vault_key: [9; 32],
     };
     let store = Arc::new(Store::open(root.join("relay.sqlite")).unwrap());
@@ -2237,6 +2930,51 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
         axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{address}"), task)
+}
+
+async fn spawn_source_lifecycle_upstream(
+) -> (String, Arc<Mutex<Vec<String>>>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new()
+        .route("/v1/models", get(source_lifecycle_models))
+        .route("/v1/responses", post(source_lifecycle_response))
+        .with_state(observed.clone());
+    let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (format!("http://{address}"), observed, task)
+}
+
+async fn source_lifecycle_models(
+    State(observed): State<Arc<Mutex<Vec<String>>>>,
+    request: Request,
+) -> impl IntoResponse {
+    observe_source_authorization(&observed, &request);
+    Json(json!({"data":[{"id":"gpt-source-lifecycle"}]}))
+}
+
+async fn source_lifecycle_response(
+    State(observed): State<Arc<Mutex<Vec<String>>>>,
+    request: Request,
+) -> impl IntoResponse {
+    observe_source_authorization(&observed, &request);
+    Json(json!({
+        "id":"response-source-lifecycle",
+        "object":"response",
+        "model":"gpt-source-lifecycle",
+        "output":[],
+        "usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+    }))
+}
+
+fn observe_source_authorization(observed: &Mutex<Vec<String>>, request: &Request) {
+    let authorization = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    observed.lock().unwrap().push(authorization);
 }
 
 #[derive(Clone)]
@@ -2437,6 +3175,10 @@ fn assert_account_authorization(request: &Request) {
 }
 
 async fn assert_websocket_upgrade(origin: &str, key: &str) {
+    assert_websocket_status(origin, key, "101").await;
+}
+
+async fn assert_websocket_status(origin: &str, key: &str, status: &str) {
     let address = origin.strip_prefix("http://").unwrap();
     let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
     let request = format!(
@@ -2449,5 +3191,8 @@ async fn assert_websocket_upgrade(origin: &str, key: &str) {
         .unwrap()
         .unwrap();
     let response = String::from_utf8_lossy(&response[..read]);
-    assert!(response.starts_with("HTTP/1.1 101 "), "{response}");
+    assert!(
+        response.starts_with(&format!("HTTP/1.1 {status} ")),
+        "{response}"
+    );
 }

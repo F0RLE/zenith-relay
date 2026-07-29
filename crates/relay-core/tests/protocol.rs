@@ -18,6 +18,29 @@ fn protocol_negotiation_accepts_current_server_and_features_are_explicit() {
 }
 
 #[test]
+fn protocol_overlap_and_missing_optional_capabilities_remain_compatible() {
+    let mut current = Capabilities::personal_server("server-1", "fingerprint-1");
+    current.compatibility_min_client = CURRENT_PROTOCOL_VERSION - 1;
+    let negotiated = negotiate(
+        ClientProtocolRange {
+            min: CURRENT_PROTOCOL_VERSION - 1,
+            max: CURRENT_PROTOCOL_VERSION,
+        },
+        &current,
+    )
+    .unwrap();
+    assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
+
+    current.features.remove(Feature::ClientKeyBudgets.as_str());
+    current
+        .features
+        .remove(Feature::ProfileKeyRotation.as_str());
+    assert!(negotiate(ClientProtocolRange::default(), &current).is_ok());
+    assert!(!current.supports(Feature::ClientKeyBudgets));
+    assert!(current.supports(Feature::ClientAccess));
+}
+
+#[test]
 fn revealed_account_identity_debug_output_is_redacted() {
     let identity = RevealedAccountIdentity {
         account_id: "account-1".into(),

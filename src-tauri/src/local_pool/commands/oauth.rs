@@ -1,7 +1,4 @@
-use super::{
-    accounts::{next_quota_refresh_at, AccountQuotaOutcome, AccountQuotaRefreshResponse},
-    sync_accounts_or_rollback,
-};
+use super::sync_accounts_or_rollback;
 use crate::local_pool::{
     accounts::{
         credentials::{
@@ -17,7 +14,7 @@ use crate::local_pool::{
             OAuthFlowStart, OAuthFlowStatus,
         },
         proxy::{common_proxy_config, effective_proxy_config, ensure_account_proxy},
-        quota::CodexQuotaClient,
+        quota_refresh::{next_quota_refresh_at, AccountQuotaOutcome, AccountQuotaRefreshResponse},
         quota_service::{apply_quota_failure, apply_quota_success},
         records::{self, new_account_record, CODEX_SOURCE_ID},
         NativeSecretBackend,
@@ -26,6 +23,7 @@ use crate::local_pool::{
     models::{LocalAccountRecord, LocalGatewayKeyRecord},
     state::DesktopState,
 };
+use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, fmt};
 use tauri::{AppHandle, State};
@@ -34,6 +32,8 @@ use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
+    providers::chatgpt::AgentIdentityCredential,
+    providers::chatgpt::CodexQuotaClient,
     quota::QuotaRefreshFailure,
     ProxyConfig,
 };
@@ -183,6 +183,34 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             .map_err(credential_error)?;
     }
     let proxy = effective_proxy_config(&settings, &credentials)?;
+    if let Some(agent_identity) = previous_credentials
+        .as_ref()
+        .and_then(StoredCodexCredentials::agent_identity)
+    {
+        credentials = credentials.with_agent_identity(agent_identity.clone());
+    } else {
+        let builder = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("Zenith Relay");
+        if let Ok(client) = match proxy.as_ref() {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        {
+            if let Ok(agent_identity) = AgentIdentityCredential::register_from_oauth(
+                &client,
+                &checkpoint.access_token,
+                checkpoint.account_is_fedramp,
+                env!("CARGO_PKG_VERSION"),
+            )
+            .await
+            {
+                credentials = credentials.with_agent_identity(agent_identity);
+            }
+        }
+    }
     let previous_models = existing
         .map(|account| account.models.clone())
         .unwrap_or_default();
@@ -191,7 +219,7 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             .discover(
                 &checkpoint.access_token,
                 &checkpoint.provider_account_id,
-                zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
             )
             .await
         {
@@ -278,7 +306,6 @@ async fn complete_oauth(login_id: &str, state: &DesktopState) -> LocalResult<Loc
             quota: quota_outcome,
         },
         now_ms,
-        settings.quota_refresh_interval_seconds,
     );
 
     let runtime_port = state.gateway.address().await.map(|address| address.port());
@@ -893,6 +920,7 @@ fn credential_error(error: CredentialError) -> LocalPoolError {
 
 fn initial_model_issue(error: &ModelDiscoveryFailure) -> InitialModelIssue {
     let (code, auth_error, blocked) = match error.code {
+        ModelDiscoveryFailureCode::AgentTaskInvalid => ("models_agent_task_invalid", false, false),
         ModelDiscoveryFailureCode::Forbidden => ("models_forbidden", false, true),
         ModelDiscoveryFailureCode::HttpStatus => ("models_http_status", false, false),
         ModelDiscoveryFailureCode::InvalidAccessToken => {

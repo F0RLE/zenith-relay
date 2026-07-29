@@ -1,7 +1,3 @@
-use super::imports::{
-    parse_import, ImportError, ImportErrorCode, ImportPreview, ParsedImport, ParsedImportItem,
-    MAX_IMPORT_ITEMS,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -11,6 +7,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+use zenith_relay_core::accounts::{
+    parse_import, ImportError, ImportErrorCode, ImportPreview, ParsedImport, ParsedImportItem,
+    MAX_IMPORT_ITEMS,
+};
 
 const SNAPSHOT_VERSION: u32 = 1;
 const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
@@ -1067,7 +1067,7 @@ mod tests {
         let mut final_preview = started.preview.clone();
         final_preview.rows[0].identity = "Account ••••1234".into();
         final_preview.rows[0].quota_status =
-            crate::local_pool::accounts::imports::ImportQuotaStatus::Success;
+            zenith_relay_core::accounts::ImportQuotaStatus::Success;
         let prepared = store
             .prepare(
                 &started.session_id,
@@ -1125,11 +1125,11 @@ mod tests {
             .unwrap();
         let mut final_preview = started.preview.clone();
         let row = &mut final_preview.rows[0];
-        row.status = crate::local_pool::accounts::imports::ImportPreviewStatus::Invalid;
+        row.status = zenith_relay_core::accounts::ImportPreviewStatus::Invalid;
         row.selectable = false;
         row.default_selected = false;
-        row.error = Some(crate::local_pool::accounts::imports::ImportIssue {
-            code: crate::local_pool::accounts::imports::ImportIssueCode::RefreshExchangeFailed,
+        row.error = Some(zenith_relay_core::accounts::ImportIssue {
+            code: zenith_relay_core::accounts::ImportIssueCode::RefreshExchangeFailed,
             message: "refresh exchange failed".into(),
         });
 

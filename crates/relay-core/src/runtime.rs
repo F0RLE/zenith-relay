@@ -1,6 +1,11 @@
 use crate::accounts::{
-    AccountAuthState, CodexIdentityEnvelope, TokenAuthority, TokenAuthorityError,
-    TokenPersistenceAdapter, TokenRefreshAdapter,
+    AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
+    TokenRefreshAdapter,
+};
+use crate::protocol::ClientWireApi;
+use crate::providers::chatgpt::{
+    is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
+    CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
 use crate::sources::normalized_base_url;
@@ -21,7 +26,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
 use url::Url;
@@ -39,6 +44,7 @@ pub struct RuntimeSource {
     pub draining: bool,
     pub priority: i32,
     pub weight: u32,
+    pub recovery_delay_seconds: u64,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub last_used_at_ms: Option<u64>,
@@ -52,78 +58,12 @@ impl RuntimeSource {
             draining: false,
             priority: 0,
             weight: 1,
+            recovery_delay_seconds: 0,
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             last_used_at_ms: None,
         }
     }
-}
-
-#[derive(Clone)]
-pub struct RuntimeAccount {
-    pub id: String,
-    pub source_id: String,
-    pub chatgpt_account_id: String,
-    pub responses_url: String,
-    pub models: Vec<String>,
-    pub enabled: bool,
-    pub draining: bool,
-    pub priority: i32,
-    pub weight: u32,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub health: CandidateHealth,
-    pub quota: CandidateQuota,
-    pub quota_updated_at_ms: Option<u64>,
-    pub quota_snapshot: QuotaSnapshot,
-    pub subscription_plan_type: Option<String>,
-    pub subscription_expires_at_ms: Option<u64>,
-    pub last_used_at_ms: Option<u64>,
-    pub cooldowns: BTreeMap<String, u64>,
-    pub consecutive_failures: u32,
-    pub proxy: Option<ProxyConfig>,
-}
-
-impl fmt::Debug for RuntimeAccount {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RuntimeAccount")
-            .field("id", &self.id)
-            .field("source_id", &self.source_id)
-            .field("chatgpt_account_id", &"[redacted]")
-            .field("responses_url", &redacted_runtime_url(&self.responses_url))
-            .field("models", &self.models)
-            .field("enabled", &self.enabled)
-            .field("draining", &self.draining)
-            .field("priority", &self.priority)
-            .field("weight", &self.weight)
-            .field("allowed_models", &self.allowed_models)
-            .field("excluded_models", &self.excluded_models)
-            .field("health", &self.health)
-            .field("quota", &self.quota)
-            .field("quota_updated_at_ms", &self.quota_updated_at_ms)
-            .field(
-                "quota_reset_at_ms",
-                &self.quota_snapshot.limiting_reset_at_ms(),
-            )
-            .field("subscription_plan_type", &self.subscription_plan_type)
-            .field(
-                "subscription_expires_at_ms",
-                &self.subscription_expires_at_ms,
-            )
-            .field("last_used_at_ms", &self.last_used_at_ms)
-            .field("cooldowns", &self.cooldowns)
-            .field("consecutive_failures", &self.consecutive_failures)
-            .field("proxy_configured", &self.proxy.is_some())
-            .finish()
-    }
-}
-
-pub struct RuntimeAccountAuth {
-    pub token_authority: Arc<TokenAuthority>,
-    pub refresh_adapter: Arc<dyn TokenRefreshAdapter>,
-    pub persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
-    pub refresh_skew_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -158,6 +98,7 @@ pub struct RuntimeMixedLocalKey {
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub model_prefix: Option<String>,
+    pub wire_apis: Option<Vec<ClientWireApi>>,
 }
 
 impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
@@ -170,6 +111,7 @@ impl From<RuntimeLocalKey> for RuntimeMixedLocalKey {
             allowed_models: key.allowed_models,
             excluded_models: key.excluded_models,
             model_prefix: key.model_prefix,
+            wire_apis: None,
         }
     }
 }
@@ -198,6 +140,7 @@ pub trait ResponseAffinityStore: Send + Sync {
     ) -> std::result::Result<Option<ResponseAffinityBinding>, String>;
     fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String>;
     fn delete(&self, key: &str) -> std::result::Result<(), String>;
+    fn delete_candidate(&self, candidate_id: &str) -> std::result::Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -257,7 +200,8 @@ pub struct GatewayRuntime {
     websocket_client: reqwest::Client,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceExecutor>,
-    accounts: BTreeMap<String, AccountExecutor>,
+    source_recovery_delays_ms: BTreeMap<String, u64>,
+    chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
     registry: ModelRegistry,
@@ -349,6 +293,7 @@ pub(crate) struct AuthenticatedKey {
     pub(crate) scope: CandidateScope,
     pub(crate) model_rules: ModelRules,
     pub(crate) model_prefix: Option<String>,
+    client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
 pub(crate) struct SourceExecutor {
@@ -361,7 +306,7 @@ pub(crate) struct SourceExecutor {
     configured_models: BTreeSet<String>,
 }
 
-struct AccountExecutor {
+struct ChatGptAccountExecutor {
     id: String,
     source_id: String,
     identity: CodexIdentityEnvelope,
@@ -375,6 +320,9 @@ struct AccountExecutor {
     client: reqwest::Client,
     bounded_client: reqwest::Client,
     websocket_client: reqwest::Client,
+    active: AtomicBool,
+    agent_identity: RwLock<Option<AgentIdentityCredential>>,
+    agent_task_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -383,6 +331,7 @@ pub(crate) struct ExecutorRoute {
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
     pub(crate) wire_api: WireApi,
+    pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
     pub(crate) source_model: String,
     pub(crate) half_open_probe: bool,
@@ -393,6 +342,7 @@ pub(crate) struct PreparedAuthorization {
     pub(crate) authorization: HeaderValue,
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
+    pub(crate) agent_task_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -417,6 +367,7 @@ struct RuntimeKey {
     scope: CandidateScope,
     model_rules: ModelRules,
     model_prefix: Option<String>,
+    client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
 impl GatewayRuntime {
@@ -451,9 +402,9 @@ impl GatewayRuntime {
 
     pub fn from_mixed_pool(
         sources: Vec<RuntimeSource>,
-        accounts: Vec<RuntimeAccount>,
+        accounts: Vec<RuntimeChatGptAccount>,
         keys: Vec<RuntimeMixedLocalKey>,
-        account_auth: RuntimeAccountAuth,
+        account_auth: RuntimeChatGptAuth,
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
@@ -462,9 +413,9 @@ impl GatewayRuntime {
 
     fn build(
         sources: Vec<RuntimeSource>,
-        accounts: Vec<RuntimeAccount>,
+        accounts: Vec<RuntimeChatGptAccount>,
         keys: Vec<RuntimeMixedLocalKey>,
-        account_auth: Option<RuntimeAccountAuth>,
+        account_auth: Option<RuntimeChatGptAuth>,
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
@@ -493,11 +444,17 @@ impl GatewayRuntime {
         scheduler.set_provider_storm_breaker_enabled(options.provider_storm_breaker);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
+        let mut source_recovery_delays_ms = BTreeMap::new();
         for source in sources {
             source.source.validate()?;
             if source.weight == 0 {
                 return Err(Error::Validation(
                     "source weight must be at least one".to_string(),
+                ));
+            }
+            if source.recovery_delay_seconds > 24 * 60 * 60 {
+                return Err(Error::Validation(
+                    "source recovery delay must not exceed 24 hours".to_string(),
                 ));
             }
             if source_executors.contains_key(&source.source.id) {
@@ -528,6 +485,12 @@ impl GatewayRuntime {
             };
             registry.replace(candidate.id.clone(), models.iter());
             scheduler.upsert(candidate);
+            if source.recovery_delay_seconds > 0 {
+                source_recovery_delays_ms.insert(
+                    source.source.id.clone(),
+                    source.recovery_delay_seconds.saturating_mul(1_000),
+                );
+            }
             source_executors.insert(source.source.id, executor);
         }
 
@@ -615,7 +578,7 @@ impl GatewayRuntime {
             );
             account_executors.insert(
                 account.id.clone(),
-                AccountExecutor {
+                ChatGptAccountExecutor {
                     id: account.id,
                     source_id: account.source_id,
                     identity,
@@ -629,6 +592,9 @@ impl GatewayRuntime {
                     client,
                     bounded_client,
                     websocket_client,
+                    active: AtomicBool::new(true),
+                    agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
+                    agent_task_lock: tokio::sync::Mutex::new(()),
                 },
             );
         }
@@ -656,6 +622,18 @@ impl GatewayRuntime {
             configured_key_rules.push((key.enabled, scope.clone(), base_model_rules.clone()));
             let mut model_rules = base_model_rules;
             model_rules.excluded.extend(hidden_models.iter().cloned());
+            let client_wire_apis = key.wire_apis.map(|values| {
+                values
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            });
+            if client_wire_apis.as_ref().is_some_and(Vec::is_empty) {
+                return Err(Error::Validation(
+                    "client key wire scope must not be empty".to_string(),
+                ));
+            }
             runtime_keys.push(RuntimeKey {
                 id: key.key.id,
                 enabled: key.enabled,
@@ -663,6 +641,7 @@ impl GatewayRuntime {
                 scope,
                 model_rules,
                 model_prefix: normalize_prefix(key.model_prefix),
+                client_wire_apis,
             });
         }
 
@@ -717,7 +696,8 @@ impl GatewayRuntime {
             websocket_client,
             discovery_client,
             sources: source_executors,
-            accounts: account_executors,
+            source_recovery_delays_ms,
+            chatgpt_accounts: account_executors,
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
             registry,
@@ -757,7 +737,18 @@ impl GatewayRuntime {
                 scope: key.scope.clone(),
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
+                client_wire_apis: key.client_wire_apis.clone(),
             })
+    }
+
+    pub(crate) fn allows_client_wire_api(
+        &self,
+        key: &AuthenticatedKey,
+        wire_api: ClientWireApi,
+    ) -> bool {
+        key.client_wire_apis
+            .as_ref()
+            .is_none_or(|allowed| allowed.contains(&wire_api))
     }
 
     pub(crate) fn resolve_model(&self, key: &AuthenticatedKey, model: &str) -> Option<String> {
@@ -797,7 +788,7 @@ impl GatewayRuntime {
     ) -> Vec<(String, Url)> {
         let routes = {
             let scheduler = self.lock_scheduler();
-            self.accounts
+            self.chatgpt_accounts
                 .values()
                 .filter_map(|account| {
                     let candidate = scheduler.candidate(&account.id)?;
@@ -826,7 +817,7 @@ impl GatewayRuntime {
         };
         let mut ranked = Vec::with_capacity(routes.len());
         for (account_id, url, visible_models) in routes {
-            let Some(account) = self.accounts.get(&account_id) else {
+            let Some(account) = self.chatgpt_accounts.get(&account_id) else {
                 continue;
             };
             let auth_state = account.token_authority.auth_state(&account_id).await;
@@ -876,18 +867,20 @@ impl GatewayRuntime {
         value: Value,
         observed_at_ms: u64,
     ) {
-        if self.accounts.contains_key(candidate_id) {
-            self.codex_model_manifests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(
-                    candidate_id.to_string(),
-                    CachedCodexManifest {
-                        value,
-                        observed_at_ms,
-                    },
-                );
+        let scheduler = self.lock_scheduler();
+        if scheduler.candidate(candidate_id).is_none() {
+            return;
         }
+        self.codex_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                candidate_id.to_string(),
+                CachedCodexManifest {
+                    value,
+                    observed_at_ms,
+                },
+            );
     }
 
     pub(crate) fn stale_codex_model_manifest<'a>(
@@ -908,7 +901,7 @@ impl GatewayRuntime {
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
         let scheduler = self.lock_scheduler();
         let mut models = BTreeSet::new();
-        for account in self.accounts.values() {
+        for account in self.chatgpt_accounts.values() {
             let Some(candidate) = scheduler.candidate(&account.id) else {
                 continue;
             };
@@ -950,6 +943,7 @@ impl GatewayRuntime {
                 scope: key.scope.clone(),
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
+                client_wire_apis: key.client_wire_apis.clone(),
             },
             allowed_protocols,
             now_ms,
@@ -990,11 +984,36 @@ impl GatewayRuntime {
     }
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().remove(candidate_id).is_some()
+        let removed = self.lock_scheduler().remove(candidate_id).is_some();
+        self.codex_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(candidate_id);
+        self.passive_quotas
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(candidate_id);
+        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
+            account.active.store(false, Ordering::Release);
+            *account
+                .agent_identity
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+        if let Some(store) = self.response_affinity_store.as_ref() {
+            let _ = store.delete_candidate(candidate_id);
+        }
+        removed
     }
 
     pub fn candidate_runtime_order(&self) -> Vec<crate::CandidateRuntimeSnapshot> {
         self.lock_scheduler().runtime_order(runtime_now_ms())
+    }
+
+    pub(crate) fn account_candidate_is_active(&self, candidate_id: &str) -> bool {
+        self.chatgpt_accounts
+            .get(candidate_id)
+            .is_some_and(|account| account.active.load(Ordering::Acquire))
     }
 
     pub fn set_protected_candidate(
@@ -1162,19 +1181,21 @@ impl GatewayRuntime {
                 source_id: source.id.clone(),
                 account_id: None,
                 wire_api: source.wire_api,
+                service_tier: DefaultServiceTier::Standard,
                 upstream_url: source.endpoint(source.wire_api)?.clone(),
                 source_model,
                 half_open_probe: false,
                 routing: None,
             });
         }
-        let account = self.accounts.get(candidate_id)?;
+        let account = self.chatgpt_accounts.get(candidate_id)?;
         let source_model = account.canonical_model(model)?;
         Some(ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
             source_model,
             half_open_probe: false,
@@ -1190,18 +1211,20 @@ impl GatewayRuntime {
                 source_id: source.id.clone(),
                 account_id: None,
                 wire_api: source.wire_api,
+                service_tier: DefaultServiceTier::Standard,
                 upstream_url: source.responses_url.clone(),
                 source_model,
                 half_open_probe: false,
                 routing: None,
             });
         }
-        let account = self.accounts.get(candidate_id)?;
+        let account = self.chatgpt_accounts.get(candidate_id)?;
         Some(ExecutorRoute {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
             source_model: account.image_main_model.clone()?,
             half_open_probe: false,
@@ -1219,12 +1242,49 @@ impl GatewayRuntime {
                 authorization: source.source_authorization(),
                 identity: None,
                 token_generation: None,
+                agent_task_id: None,
             });
         }
         let account = self
-            .accounts
+            .chatgpt_accounts
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
+        if !account.active.load(Ordering::Acquire) {
+            return Err(ExecutorPrepareError::Authentication);
+        }
+        if account
+            .agent_identity
+            .read()
+            .map_err(|_| ExecutorPrepareError::Transient)?
+            .is_some()
+        {
+            match account.ensure_agent_identity_task(None).await {
+                Ok(agent) => {
+                    return Ok(PreparedAuthorization {
+                        authorization: agent
+                            .authorization(now_ms)
+                            .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
+                        identity: Some(account.identity.clone()),
+                        token_generation: None,
+                        agent_task_id: agent.task_id().map(str::to_string),
+                    });
+                }
+                Err(error) if account.token_authority.tokens(&account.id).await.is_none() => {
+                    return Err(error);
+                }
+                Err(_) => {}
+            }
+        }
+        self.prepare_oauth_authorization(candidate_id, account, now_ms)
+            .await
+    }
+
+    async fn prepare_oauth_authorization(
+        &self,
+        candidate_id: &str,
+        account: &ChatGptAccountExecutor,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let prepared = match account
             .token_authority
             .prepare_and_persist(
@@ -1264,6 +1324,7 @@ impl GatewayRuntime {
             authorization,
             identity: Some(account.identity.clone()),
             token_generation: Some(prepared.tokens.generation()),
+            agent_task_id: None,
         })
     }
 
@@ -1274,9 +1335,12 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
         let account = self
-            .accounts
+            .chatgpt_accounts
             .get(candidate_id)
             .ok_or(ExecutorPrepareError::Authentication)?;
+        if !account.active.load(Ordering::Acquire) {
+            return Err(ExecutorPrepareError::Authentication);
+        }
         account
             .token_authority
             .invalidate_access_generation_and_persist(
@@ -1288,6 +1352,32 @@ impl GatewayRuntime {
             .await
             .map_err(classify_token_authority_error)?;
         self.prepare_authorization(candidate_id, now_ms).await
+    }
+
+    pub(crate) async fn refresh_agent_identity_task_after_unauthorized(
+        &self,
+        candidate_id: &str,
+        expected_task_id: &str,
+        now_ms: u64,
+    ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
+        let account = self
+            .chatgpt_accounts
+            .get(candidate_id)
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        if !account.active.load(Ordering::Acquire) {
+            return Err(ExecutorPrepareError::Authentication);
+        }
+        match account
+            .ensure_agent_identity_task(Some(expected_task_id))
+            .await
+        {
+            Ok(_) => self.prepare_authorization(candidate_id, now_ms).await,
+            Err(error) if account.token_authority.tokens(&account.id).await.is_none() => Err(error),
+            Err(_) => {
+                self.prepare_oauth_authorization(candidate_id, account, now_ms)
+                    .await
+            }
+        }
     }
 
     pub(crate) async fn send_authorized_request(
@@ -1307,6 +1397,41 @@ impl GatewayRuntime {
             .send()
             .await
             .map_err(AuthorizedRequestError::Transport)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            if let Some(task_id) = prepared.agent_task_id.as_deref() {
+                let (response, invalid_task) =
+                    inspect_agent_identity_unauthorized(response).await?;
+                if !invalid_task {
+                    self.observe_codex_quota_headers(
+                        candidate_id,
+                        response.status(),
+                        response.headers(),
+                        runtime_now_ms(),
+                    );
+                    return Ok(response);
+                }
+                drop(response);
+                let refreshed = self
+                    .refresh_agent_identity_task_after_unauthorized(
+                        candidate_id,
+                        task_id,
+                        runtime_now_ms(),
+                    )
+                    .await
+                    .map_err(AuthorizedRequestError::Prepare)?;
+                let response = apply_prepared_authorization(request, &refreshed, client_version)?
+                    .send()
+                    .await
+                    .map_err(AuthorizedRequestError::Transport)?;
+                self.observe_codex_quota_headers(
+                    candidate_id,
+                    response.status(),
+                    response.headers(),
+                    runtime_now_ms(),
+                );
+                return Ok(response);
+            }
+        }
         if response.status() != StatusCode::UNAUTHORIZED || prepared.token_generation.is_none() {
             self.observe_codex_quota_headers(
                 candidate_id,
@@ -1378,7 +1503,7 @@ impl GatewayRuntime {
         if !(status.is_success()
             || status == StatusCode::SWITCHING_PROTOCOLS
             || status == StatusCode::TOO_MANY_REQUESTS)
-            || !self.accounts.contains_key(candidate_id)
+            || !self.chatgpt_accounts.contains_key(candidate_id)
         {
             return false;
         }
@@ -1389,9 +1514,11 @@ impl GatewayRuntime {
         let Some(state) = quotas.get_mut(candidate_id) else {
             return false;
         };
-        let Some(merged) =
-            crate::quota::merge_codex_quota_headers(&state.snapshot, headers, observed_at_ms)
-        else {
+        let Some(merged) = crate::providers::chatgpt::merge_codex_quota_headers(
+            &state.snapshot,
+            headers,
+            observed_at_ms,
+        ) else {
             return false;
         };
         if merged == state.snapshot {
@@ -1521,7 +1648,7 @@ impl GatewayRuntime {
         candidate_id: &str,
         upstream_stream: bool,
     ) -> &reqwest::Client {
-        if let Some(account) = self.accounts.get(candidate_id) {
+        if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
             return if upstream_stream {
                 &account.client
             } else {
@@ -1536,7 +1663,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
-        self.accounts
+        self.chatgpt_accounts
             .get(candidate_id)
             .map(|account| &account.websocket_client)
             .unwrap_or(&self.websocket_client)
@@ -1544,6 +1671,10 @@ impl GatewayRuntime {
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
         self.max_retry_candidates
+    }
+
+    pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
+        self.source_recovery_delays_ms.get(candidate_id).copied()
     }
 
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
@@ -1670,6 +1801,89 @@ impl GatewayRuntime {
     }
 }
 
+impl ChatGptAccountExecutor {
+    async fn ensure_agent_identity_task(
+        &self,
+        expected_task_id: Option<&str>,
+    ) -> std::result::Result<AgentIdentityCredential, ExecutorPrepareError> {
+        if !self.active.load(Ordering::Acquire) {
+            return Err(ExecutorPrepareError::Authentication);
+        }
+        let current = self
+            .agent_identity
+            .read()
+            .map_err(|_| ExecutorPrepareError::Transient)?
+            .clone()
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        if current.task_id().is_some()
+            && expected_task_id.is_none_or(|expected| current.task_id() != Some(expected))
+        {
+            return Ok(current);
+        }
+
+        let _guard = self.agent_task_lock.lock().await;
+        let current = self
+            .agent_identity
+            .read()
+            .map_err(|_| ExecutorPrepareError::Transient)?
+            .clone()
+            .ok_or(ExecutorPrepareError::Authentication)?;
+        if current.task_id().is_some()
+            && expected_task_id.is_none_or(|expected| current.task_id() != Some(expected))
+        {
+            return Ok(current);
+        }
+        let task_id = current
+            .register_task(&self.bounded_client)
+            .await
+            .map_err(classify_agent_identity_error)?;
+        let task_id = self
+            .persistence_adapter
+            .persist_agent_task_id(&self.id, current.task_id(), &task_id)
+            .await
+            .map_err(|_| ExecutorPrepareError::Persistence)?;
+        let updated = current
+            .with_task_id(task_id)
+            .map_err(|_| ExecutorPrepareError::InvalidCredential)?;
+        if !self.active.load(Ordering::Acquire) {
+            return Err(ExecutorPrepareError::Authentication);
+        }
+        *self
+            .agent_identity
+            .write()
+            .map_err(|_| ExecutorPrepareError::Transient)? = Some(updated.clone());
+        Ok(updated)
+    }
+}
+
+fn classify_agent_identity_error(error: AgentIdentityError) -> ExecutorPrepareError {
+    match error {
+        AgentIdentityError::RegistrationTransport => ExecutorPrepareError::Transient,
+        AgentIdentityError::RegistrationRejected => ExecutorPrepareError::Authentication,
+        _ => ExecutorPrepareError::InvalidCredential,
+    }
+}
+
+async fn inspect_agent_identity_unauthorized(
+    response: reqwest::Response,
+) -> std::result::Result<(reqwest::Response, bool), AuthorizedRequestError> {
+    let status = response.status();
+    let version = response.version();
+    let headers = response.headers().clone();
+    let body = response
+        .bytes()
+        .await
+        .map_err(AuthorizedRequestError::Transport)?;
+    let invalid = is_agent_identity_task_invalid_response(status.as_u16(), &body);
+    let mut restored = axum::http::Response::builder()
+        .status(status)
+        .version(version)
+        .body(reqwest::Body::from(body))
+        .map_err(|_| AuthorizedRequestError::NotReplayable)?;
+    *restored.headers_mut() = headers;
+    Ok((reqwest::Response::from(restored), invalid))
+}
+
 fn apply_prepared_authorization(
     request: reqwest::RequestBuilder,
     prepared: &PreparedAuthorization,
@@ -1751,7 +1965,7 @@ impl SourceExecutor {
     }
 }
 
-impl AccountExecutor {
+impl ChatGptAccountExecutor {
     fn canonical_model(&self, model: &str) -> Option<String> {
         self.configured_models
             .iter()
@@ -1767,7 +1981,7 @@ impl fmt::Debug for GatewayRuntime {
             .field("source_ids", &self.sources.keys().collect::<Vec<_>>())
             .field(
                 "account_candidate_ids",
-                &self.accounts.keys().collect::<Vec<_>>(),
+                &self.chatgpt_accounts.keys().collect::<Vec<_>>(),
             )
             .field("local_key_count", &self.keys.len())
             .field("max_retry_candidates", &self.max_retry_candidates)
@@ -1824,13 +2038,6 @@ async fn discover_with(client: &reqwest::Client, source: &SourceExecutor) -> Res
     Ok(data
         .iter()
         .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .filter(|model| {
-            source.configured_models.is_empty()
-                || source
-                    .configured_models
-                    .iter()
-                    .any(|configured| configured.eq_ignore_ascii_case(model))
-        })
         .filter(|model| seen.insert(model.to_ascii_lowercase()))
         .map(str::to_string)
         .collect())
@@ -2037,17 +2244,6 @@ fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Clie
     }
     .build()
     .map_err(Error::from)
-}
-
-fn redacted_runtime_url(value: &str) -> String {
-    let Ok(mut url) = Url::parse(value) else {
-        return "[invalid]".to_string();
-    };
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    url.to_string()
 }
 
 fn is_loopback_url(url: &Url) -> bool {

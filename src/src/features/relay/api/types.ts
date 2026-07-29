@@ -1,5 +1,5 @@
 export type RelayMode = "local" | "remote" | "zenith";
-export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings";
+export type PageId = "overview" | "connections" | "pool" | "gateway" | "usage" | "profiles" | "settings" | "help";
 export type DefaultServiceTier = "standard" | "fast";
 export type OperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
 
@@ -25,13 +25,81 @@ export type QuotaSnapshot = {
   limitReached: boolean;
   resetCreditsAvailable: number | null;
   updatedAtMs: number | null;
-  error: { code: string; observedAtMs: number } | null;
+  error: { code: string; occurredAtMs: number } | null;
 };
 
 export type ApiEquivalentSummary = {
   microUsd: number;
   pricedTokens: number;
   unpricedTokens: number;
+};
+
+export type QuotaCycleRecord = {
+  status: "complete" | "censored" | "contaminated";
+  provider: string;
+  plan: string | null;
+  windowKind: "primary" | "secondary";
+  windowMinutes: number | null;
+  fingerprint: string;
+  startedAtMs: number;
+  completedAtMs: number;
+  resetAtMs: number | null;
+  pricingRevision: string | null;
+  epoch: number;
+  serviceTier: DefaultServiceTier | null;
+  standardObservations?: number;
+  fastObservations?: number;
+  activeObservations?: number;
+  passiveObservations?: number;
+  consumedBasisPoints: number;
+  unattributedBasisPoints: number;
+  apiEquivalentMicroUsd: number | null;
+  requests: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  reasoningTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+};
+
+export type QuotaObservationRecord = {
+  windowKind: "primary" | "secondary";
+  usedBasisPoints: number | null;
+  availableBasisPoints: number | null;
+  deltaBasisPoints: number;
+  resolutionBasisPoints: number;
+  resetAtMs: number | null;
+  windowMinutes: number | null;
+  observedAtMs: number;
+  source: "active" | "passive";
+};
+
+export type QuotaPlanBenchmark = {
+  provider: string;
+  plan: string;
+  windowKind: "primary" | "secondary";
+  windowMinutes: number;
+  serviceTier: DefaultServiceTier;
+  pricingRevision: string;
+  accountCount: number;
+  cycleCount: number;
+  latestCompletedAtMs: number;
+  stale: boolean;
+  confidence: "low" | "medium" | "high";
+  fullWindowMicroUsd: number;
+  meanFullWindowMicroUsd: number;
+  lowFullWindowMicroUsd: number;
+  highFullWindowMicroUsd: number;
+  potentialMicroUsd: number | null;
+  weeklyEquivalentMicroUsd: number | null;
+};
+
+export type ApiModelPriceOverride = {
+  inputMicroUsdPerMillion: number;
+  cachedInputMicroUsdPerMillion?: number | null;
+  cacheWrite5mMicroUsdPerMillion?: number | null;
+  cacheWrite1hMicroUsdPerMillion?: number | null;
+  outputMicroUsdPerMillion: number;
 };
 
 export type SourceSummary = {
@@ -48,21 +116,19 @@ export type SourceSummary = {
   excludedModels: string[];
   priority: number;
   weight: number;
+  recoveryDelaySeconds: number;
+  modelPriceOverrides?: Record<string, ApiModelPriceOverride>;
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
 };
 
 export type SourceStats = {
-  sourceId: string;
   provider: "zenith" | "openrouter" | "unsupported";
-  supported: boolean;
-  balance: string | null;
-  spent: string | null;
+  balanceMicroUsd: number | null;
+  spentMicroUsd: number | null;
   requests: number | null;
-  requestsDisplay: string | null;
   totalTokens: number | null;
-  totalTokensDisplay: string | null;
 };
 
 export type AccountSummary = {
@@ -81,14 +147,54 @@ export type AccountSummary = {
   priority: number;
   weight: number;
   apiEquivalent: ApiEquivalentSummary;
+  economics?: {
+    purchaseCostMicroUsd: number | null;
+    potentialMicroUsd: number | null;
+    potentialLowMicroUsd: number | null;
+    potentialHighMicroUsd: number | null;
+    potentialRequests: number | null;
+    potentialTotalTokens: number | null;
+    availableNowMicroUsd?: number | null;
+    estimateState: "collecting" | "estimated" | "stale";
+    confidence: "low" | "medium" | "high" | null;
+    observedBasisPoints: number;
+    sampleCount: number;
+    windows?: Array<{
+      kind: "primary" | "secondary";
+      potentialMicroUsd: number | null;
+      potentialLowMicroUsd: number | null;
+      potentialHighMicroUsd: number | null;
+      potentialRequests: number | null;
+      potentialTotalTokens: number | null;
+      fullWindowMicroUsd: number | null;
+      fullWindowLowMicroUsd?: number | null;
+      fullWindowHighMicroUsd?: number | null;
+      estimateState: "collecting" | "estimated" | "stale";
+      confidence: "low" | "medium" | "high" | null;
+      observedBasisPoints: number;
+      sampleCount: number;
+      planBenchmark?: QuotaPlanBenchmark | null;
+      serviceTiers?: Array<{
+        serviceTier: DefaultServiceTier;
+        potentialMicroUsd: number | null;
+        potentialRequests: number | null;
+        potentialTotalTokens: number | null;
+        observedBasisPoints: number;
+        sampleCount: number;
+      }>;
+    }>;
+    cycles?: QuotaCycleRecord[];
+    observations?: QuotaObservationRecord[];
+  };
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
+  quotaRefreshStatus: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   secretAvailable: boolean;
   remoteLocation?: { serverId: string; remoteAccountId: string } | null;
   proxyMode?: "direct" | "common" | "account";
   proxyAvailable?: boolean;
   proxyId?: string | null;
-  routingExclusion?: "free_plan_policy" | null;
+  routingBlockReason?: "disabled" | "not_in_pool" | "draining" | "secret_unavailable" | "proxy_unavailable" | "reauth_required" | "auth_error" | "checkpoint" | "captcha" | "subscription_forbidden" | "subscription_expired" | "account_unhealthy" | "quota_exhausted" | null;
   lastErrorCode: string | null;
 };
 
@@ -107,8 +213,36 @@ export type KeySummary = {
   allowedModels: string[];
   excludedModels: string[];
   modelPrefix: string | null;
+  wireApis: ClientWireApi[] | null;
+  softBudgetMicroUsd?: number | null;
+  usageTotals?: UsageTotals;
   createdAtMs: number;
   lastUsedAtMs: number | null;
+};
+
+export type ClientWireApi = "responses" | "chat_completions" | "images";
+
+export type ClientKeyCreateInput = {
+  schemaVersion: 1;
+  label: string;
+  sourceIds: string[] | null;
+  accountIds: string[] | null;
+  allowedModels: string[];
+  excludedModels: string[];
+  modelPrefix: string | null;
+  wireApis: ClientWireApi[] | null;
+  softBudgetMicroUsd?: number | null;
+};
+
+export type ClientKeyPatch = Partial<Omit<ClientKeyCreateInput, "schemaVersion">> & {
+  schemaVersion: 1;
+  enabled?: boolean;
+};
+
+export type GeneratedClientKey = {
+  schemaVersion: 1;
+  key: KeySummary;
+  secret: string;
 };
 
 export type ModelSummary = {
@@ -118,6 +252,8 @@ export type ModelSummary = {
   catalogRank: number | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;
+  cacheWrite5mMicroUsdPerMillion?: number | null;
+  cacheWrite1hMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
   customPrice: boolean;
 };
@@ -177,14 +313,16 @@ export type RuntimeSnapshot = {
     commonProxyAvailable?: boolean;
     commonProxyId?: string | null;
     accountProxyRequired?: boolean;
-    quotaRefreshIntervalSeconds?: number;
     quotaRequestTimeoutSeconds?: number;
-    useFreeAccounts: boolean;
     chatgptInterfaceQuotaReserveBasisPoints?: number;
     routingOrder?: CandidateRuntimeSnapshot[];
   };
   platform: string;
-  capabilities: { features: string[]; [key: string]: unknown };
+  capabilities: {
+    features: string[];
+    supportedWireApis?: Array<"responses" | "chat_completions" | "messages">;
+    [key: string]: unknown;
+  };
   sources: SourceSummary[];
   accounts: AccountSummary[];
   keys: KeySummary[];
@@ -207,11 +345,15 @@ export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
   name: string;
   baseUrl: string;
   wireApi: "responses" | "chat_completions" | "messages";
+  serviceTier?: DefaultServiceTier;
+  recoveryDelaySeconds: number;
+  modelPriceOverrides: Record<string, ApiModelPriceOverride>;
 };
 
 export type ConfigurationPresetAccountRule = ConfigurationPresetMemberRule & {
   identityHint: string;
   proxyId: string | null;
+  bypassCommonProxy?: boolean;
 };
 
 export type ConfigurationPreset = {
@@ -228,18 +370,12 @@ export type ConfigurationPreset = {
       imageBaseModel: string | null;
     };
     quota: {
-      refreshIntervalSeconds: number;
       requestTimeoutSeconds: number;
-      useFreeAccounts: boolean;
       accountProxyRequired: boolean;
       commonProxyId: string | null;
     };
     hiddenModels: string[];
-    modelPriceOverrides: Record<string, {
-      inputMicroUsdPerMillion: number;
-      cachedInputMicroUsdPerMillion?: number | null;
-      outputMicroUsdPerMillion: number;
-    }>;
+    modelPriceOverrides: Record<string, ApiModelPriceOverride>;
   };
 };
 
@@ -320,7 +456,7 @@ export type MoveAccountsToRemoteResult = {
 };
 
 export type RoutingDiagnostics = {
-  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "parallel_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "fair_rotation" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
+  reason: "response_affinity" | "prompt_cache_affinity" | "session_affinity" | "connection_affinity" | "only_eligible" | "routing_tier" | "source_role" | "parallel_load" | "source_load" | "pool_policy" | "quota_headroom" | "adaptive_balance" | "subscription_expiry" | "subscription_plan" | "weighted_rotation" | "fair_rotation" | "fallback_attempt" | "least_recently_used" | "manual_priority" | "manual_weight" | "stable_tie_break";
   eligibleCandidates: number;
   quotaRemainingBasisPoints: number | null;
   inFlightBefore: number;
@@ -339,6 +475,8 @@ export type LocalUsage = {
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: "responses" | "chat_completions" | "messages";
+  serviceTier?: DefaultServiceTier;
+  appliedServiceTier?: DefaultServiceTier | null;
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
@@ -351,6 +489,7 @@ export type LocalUsage = {
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  apiEquivalent?: ApiEquivalentSummary;
 };
 
 export type UsageTotals = {
@@ -414,6 +553,8 @@ export type UsageExportRow = {
   requestId: string | null;
   httpStatus: number | null;
   errorCategory: string | null;
+  serviceTier?: DefaultServiceTier;
+  appliedServiceTier?: DefaultServiceTier | null;
 };
 
 export type SupportExportContext = {
@@ -428,24 +569,19 @@ export type SupportExportContext = {
   warningCount: number;
 };
 
-export type GatewayDiagnostic = {
-  stream: boolean;
-  model: string;
-  latencyMs: number;
-  bytesReceived: number;
-};
-
 export type RemoteUsage = {
   id: number;
   requestId: string;
   localKeyId: string;
-  candidateKind: string;
+  candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
   wireApi: "responses" | "chat_completions" | "messages";
+  serviceTier?: DefaultServiceTier;
+  appliedServiceTier?: DefaultServiceTier | null;
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
@@ -458,6 +594,7 @@ export type RemoteUsage = {
   reasoningTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  apiEquivalent?: ApiEquivalentSummary;
   createdAtMs: number;
 };
 
@@ -587,6 +724,11 @@ export type ProfileSnapshot = {
   createdAtMs: number;
   configAvailable: boolean;
   authAvailable: boolean;
+};
+
+export type ProfileSnapshotList = {
+  snapshots: ProfileSnapshot[];
+  invalidCount: number;
 };
 
 export type SupportBundlePreview = {

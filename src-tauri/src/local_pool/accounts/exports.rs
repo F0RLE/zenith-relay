@@ -92,7 +92,7 @@ pub fn normalize_account_ids(account_ids: Vec<String>) -> Result<Vec<String>, Co
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_pool::accounts::imports::parse_import;
+    use zenith_relay_core::accounts::parse_import;
     use zenith_relay_core::accounts::{build_account_export, AccountExportCredential};
 
     #[test]

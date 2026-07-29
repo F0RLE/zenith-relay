@@ -7,7 +7,7 @@ use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
-use zenith_relay_core::{accounts::CodexIdentityEnvelope, ProxyConfig};
+use zenith_relay_core::{providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
@@ -16,7 +16,7 @@ const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 #[cfg(test)]
 const ORIGINATOR_HEADER: &str = "originator";
 #[cfg(test)]
-const ORIGINATOR: &str = zenith_relay_core::accounts::CODEX_ORIGINATOR;
+const ORIGINATOR: &str = zenith_relay_core::providers::chatgpt::CODEX_ORIGINATOR;
 const FIXED_WAKE_INPUT: &str = "Reply briefly.";
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;

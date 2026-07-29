@@ -1,20 +1,22 @@
+mod routing_policy;
+
 use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 use super::cooldown::has_expired_cooldown;
 use crate::WireApi;
+pub use routing_policy::RoutingStrategy;
+use routing_policy::{candidate_kind_preference, routing_tier};
+#[cfg(test)]
+use routing_policy::{API_SOURCE_PRIMARY_PRIORITY, API_SOURCE_RESERVE_PRIORITY};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
-const API_SOURCE_PRIMARY_PRIORITY: i32 = 1_000_000;
-const API_SOURCE_RESERVE_PRIORITY: i32 = -1_000_000;
 const RESPONSE_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
 const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;
-const QUOTA_RESET_TIE_BPS: u64 = 100;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 const PROVIDER_STORM_WINDOW_MS: u64 = 10_000;
 const PROVIDER_STORM_OPEN_MS: u64 = 30_000;
@@ -57,35 +59,23 @@ pub struct CandidateRuntimeSnapshot {
     pub dispatches: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingStrategy {
-    #[default]
-    Adaptive,
-    QuotaHighest,
-    SubscriptionExpiry,
-    SubscriptionPlan,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionReason {
     ResponseAffinity,
     PromptCacheAffinity,
-    SessionAffinity,
-    ConnectionAffinity,
     OnlyEligible,
     RoutingTier,
+    SourceRole,
     ParallelLoad,
+    SourceLoad,
     PoolPolicy,
     QuotaHeadroom,
-    AdaptiveBalance,
     SubscriptionExpiry,
     SubscriptionPlan,
+    WeightedRotation,
     FairRotation,
-    LeastRecentlyUsed,
-    ManualPriority,
-    ManualWeight,
+    FallbackAttempt,
     StableTieBreak,
 }
 
@@ -579,6 +569,8 @@ impl PoolScheduler {
             .max_by(|left, right| self.compare_preference(left, right, lane));
         let reason = if prompt_affinity_hit {
             SelectionReason::PromptCacheAffinity
+        } else if !request.tried.is_empty() {
+            SelectionReason::FallbackAttempt
         } else {
             runner_up.map_or(SelectionReason::OnlyEligible, |runner_up| {
                 self.selection_reason(selected, runner_up, lane)
@@ -939,71 +931,6 @@ impl PoolScheduler {
             })
     }
 
-    fn compare_preference(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-        lane: InFlightLane,
-    ) -> Ordering {
-        let left_in_flight = self.in_flight_count(&left.id, lane);
-        let right_in_flight = self.in_flight_count(&right.id, lane);
-        let left_dispatches = self.dispatch_count(&left.id, lane);
-        let right_dispatches = self.dispatch_count(&right.id, lane);
-        let common = routing_tier(left)
-            .cmp(&routing_tier(right))
-            .then_with(|| right_in_flight.cmp(&left_in_flight))
-            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)));
-        match self.routing_strategy {
-            RoutingStrategy::Adaptive => routing_tier(left)
-                .cmp(&routing_tier(right))
-                .then_with(|| {
-                    candidate_kind_preference(left).cmp(&candidate_kind_preference(right))
-                })
-                .then_with(|| self.compare_quota_and_reset(left, right))
-                .then_with(|| right_in_flight.cmp(&left_in_flight))
-                .then_with(|| {
-                    self.compare_equal_quota_rotation(
-                        left,
-                        right,
-                        left_dispatches,
-                        right_dispatches,
-                    )
-                })
-                .then_with(|| right.id.cmp(&left.id)),
-            RoutingStrategy::QuotaHighest => routing_tier(left)
-                .cmp(&routing_tier(right))
-                .then_with(|| {
-                    candidate_kind_preference(left).cmp(&candidate_kind_preference(right))
-                })
-                .then_with(|| self.compare_quota_and_reset(left, right))
-                .then_with(|| right.id.cmp(&left.id)),
-            RoutingStrategy::SubscriptionExpiry => common
-                .then_with(|| self.compare_subscription_expiry(left, right))
-                .then_with(|| self.compare_quota_and_reset(left, right))
-                .then_with(|| {
-                    self.compare_equal_quota_rotation(
-                        left,
-                        right,
-                        left_dispatches,
-                        right_dispatches,
-                    )
-                })
-                .then_with(|| right.id.cmp(&left.id)),
-            RoutingStrategy::SubscriptionPlan => common
-                .then_with(|| self.compare_subscription_plan(left, right))
-                .then_with(|| self.compare_quota_and_reset(left, right))
-                .then_with(|| {
-                    self.compare_equal_quota_rotation(
-                        left,
-                        right,
-                        left_dispatches,
-                        right_dispatches,
-                    )
-                })
-                .then_with(|| right.id.cmp(&left.id)),
-        }
-    }
-
     fn prompt_affinity_allows(
         &self,
         preferred: &RuntimeCandidate,
@@ -1026,84 +953,12 @@ impl PoolScheduler {
         }
     }
 
-    fn compare_quota_and_reset(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-    ) -> Ordering {
-        match (self.routing_quota(left), self.routing_quota(right)) {
-            (CandidateQuota::Available(left_quota), CandidateQuota::Available(right_quota))
-                if left_quota.abs_diff(right_quota) <= QUOTA_RESET_TIE_BPS =>
-            {
-                match (left.quota_reset_at_ms, right.quota_reset_at_ms) {
-                    (Some(left_reset), Some(right_reset)) => right_reset
-                        .cmp(&left_reset)
-                        .then_with(|| left_quota.cmp(&right_quota)),
-                    _ => left_quota.cmp(&right_quota),
-                }
-            }
-            (left_quota, right_quota) => left_quota.compare_preference(right_quota),
-        }
-    }
-
     fn provider_storm_open(&self, candidate: &RuntimeCandidate, model: &str, now_ms: u64) -> bool {
         self.provider_storm_breaker_enabled
             && self
                 .provider_storm_breakers
                 .get(&(candidate.source_id.clone(), model.to_ascii_lowercase()))
                 .is_some_and(|breaker| breaker.open_until_ms > now_ms)
-    }
-
-    fn selection_reason(
-        &self,
-        selected: &RuntimeCandidate,
-        runner_up: &RuntimeCandidate,
-        lane: InFlightLane,
-    ) -> SelectionReason {
-        let selected_in_flight = self.in_flight_count(&selected.id, lane);
-        let runner_up_in_flight = self.in_flight_count(&runner_up.id, lane);
-        let selected_dispatches = self.dispatch_count(&selected.id, lane);
-        let runner_up_dispatches = self.dispatch_count(&runner_up.id, lane);
-        if routing_tier(selected) != routing_tier(runner_up) {
-            SelectionReason::RoutingTier
-        } else if candidate_kind_preference(selected) != candidate_kind_preference(runner_up) {
-            SelectionReason::PoolPolicy
-        } else if matches!(
-            self.routing_strategy,
-            RoutingStrategy::SubscriptionExpiry | RoutingStrategy::SubscriptionPlan
-        ) && selected_in_flight != runner_up_in_flight
-        {
-            SelectionReason::ParallelLoad
-        } else if self.routing_strategy == RoutingStrategy::SubscriptionExpiry
-            && self.compare_subscription_expiry(selected, runner_up) != Ordering::Equal
-        {
-            SelectionReason::SubscriptionExpiry
-        } else if self.routing_strategy == RoutingStrategy::SubscriptionPlan
-            && self.compare_subscription_plan(selected, runner_up) != Ordering::Equal
-        {
-            SelectionReason::SubscriptionPlan
-        } else if self
-            .routing_quota(selected)
-            .compare_preference(self.routing_quota(runner_up))
-            != Ordering::Equal
-        {
-            SelectionReason::QuotaHeadroom
-        } else if self.routing_strategy == RoutingStrategy::Adaptive
-            && selected_in_flight != runner_up_in_flight
-        {
-            SelectionReason::ParallelLoad
-        } else if self.routing_strategy != RoutingStrategy::QuotaHighest
-            && self.compare_equal_quota_rotation(
-                selected,
-                runner_up,
-                selected_dispatches,
-                runner_up_dispatches,
-            ) != Ordering::Equal
-        {
-            SelectionReason::FairRotation
-        } else {
-            SelectionReason::StableTieBreak
-        }
     }
 
     fn in_flight_count(&self, candidate_id: &str, lane: InFlightLane) -> u32 {
@@ -1148,24 +1003,6 @@ impl PoolScheduler {
         }
     }
 
-    fn compare_equal_quota_rotation(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-        left_dispatches: u64,
-        right_dispatches: u64,
-    ) -> Ordering {
-        if left.kind == CandidateKind::ApiSource && right.kind == CandidateKind::ApiSource {
-            return compare_projected_weighted_values(
-                left_dispatches,
-                right_dispatches,
-                u128::from(left.weight.max(1)),
-                u128::from(right.weight.max(1)),
-            );
-        }
-        right_dispatches.cmp(&left_dispatches)
-    }
-
     fn quota_reserve_allows(&self, candidate: &RuntimeCandidate, now_ms: u64) -> bool {
         let Some((_, reserve)) = self
             .protected_candidate
@@ -1182,65 +1019,6 @@ impl PoolScheduler {
             return false;
         }
         matches!(candidate.quota, CandidateQuota::Available(remaining) if remaining > *reserve)
-    }
-
-    fn routing_quota_factor(&self, candidate: &RuntimeCandidate) -> u64 {
-        let reserve = self
-            .protected_candidate
-            .as_ref()
-            .filter(|(candidate_id, _)| candidate_id == &candidate.id)
-            .map_or(0, |(_, reserve)| *reserve);
-        match candidate.quota {
-            CandidateQuota::Available(remaining) => remaining.saturating_sub(reserve),
-            CandidateQuota::Unknown if reserve == 0 => 1,
-            CandidateQuota::Unknown | CandidateQuota::Exhausted | CandidateQuota::Stale => 0,
-        }
-    }
-
-    fn routing_quota(&self, candidate: &RuntimeCandidate) -> CandidateQuota {
-        match candidate.quota {
-            CandidateQuota::Available(_) => {
-                CandidateQuota::Available(self.routing_quota_factor(candidate))
-            }
-            quota => quota,
-        }
-    }
-
-    fn compare_subscription_expiry(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-    ) -> Ordering {
-        if left.kind != CandidateKind::OAuthAccount || right.kind != CandidateKind::OAuthAccount {
-            return Ordering::Equal;
-        }
-        match (
-            self.subscription_expires_at_ms.get(&left.id),
-            self.subscription_expires_at_ms.get(&right.id),
-        ) {
-            (Some(left), Some(right)) => right.cmp(left),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
-        }
-    }
-
-    fn compare_subscription_plan(
-        &self,
-        left: &RuntimeCandidate,
-        right: &RuntimeCandidate,
-    ) -> Ordering {
-        if left.kind != CandidateKind::OAuthAccount || right.kind != CandidateKind::OAuthAccount {
-            return Ordering::Equal;
-        }
-        let rank = |candidate: &RuntimeCandidate| {
-            self.subscription_plans
-                .get(&candidate.id)
-                .and_then(|plan| self.subscription_plan_ranks.get(plan))
-                .copied()
-                .unwrap_or(usize::MAX)
-        };
-        rank(right).cmp(&rank(left))
     }
 }
 
@@ -1282,42 +1060,6 @@ fn half_open_scope(candidate: &RuntimeCandidate, model: &str, now_ms: u64) -> Op
             has_expired_cooldown(&candidate.cooldowns, model, now_ms)
                 .then(|| model.to_ascii_lowercase())
         })
-}
-
-fn routing_tier(candidate: &RuntimeCandidate) -> i8 {
-    match candidate.kind {
-        CandidateKind::OAuthAccount => 0,
-        CandidateKind::ApiSource if candidate.priority >= API_SOURCE_PRIMARY_PRIORITY => 1,
-        CandidateKind::ApiSource if candidate.priority <= API_SOURCE_RESERVE_PRIORITY => -1,
-        CandidateKind::ApiSource => 0,
-    }
-}
-
-fn candidate_kind_preference(candidate: &RuntimeCandidate) -> u8 {
-    u8::from(candidate.kind == CandidateKind::OAuthAccount)
-}
-
-fn compare_weighted_values(
-    left_value: u64,
-    right_value: u64,
-    left_weight: u128,
-    right_weight: u128,
-) -> Ordering {
-    (u128::from(right_value) * left_weight).cmp(&(u128::from(left_value) * right_weight))
-}
-
-fn compare_projected_weighted_values(
-    left_value: u64,
-    right_value: u64,
-    left_weight: u128,
-    right_weight: u128,
-) -> Ordering {
-    compare_weighted_values(
-        left_value.saturating_add(1),
-        right_value.saturating_add(1),
-        left_weight,
-        right_weight,
-    )
 }
 
 #[cfg(test)]
@@ -1635,12 +1377,20 @@ mod tests {
         let mut heavy = candidate("heavy");
         heavy.weight = 2;
         scheduler.upsert(heavy);
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "heavy");
         assert_eq!(
-            select(&mut scheduler, &HashSet::new())
-                .unwrap()
-                .candidate_id,
-            "heavy"
+            selected.diagnostics.reason,
+            SelectionReason::WeightedRotation
         );
+
+        scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("busy-source"));
+        scheduler.upsert(candidate("free-source"));
+        assert!(scheduler.reserve("busy-source"));
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "free-source");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::SourceLoad);
 
         scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("b"));
@@ -1756,43 +1506,43 @@ mod tests {
 
     #[test]
     fn api_source_roles_remain_strict_around_fair_oauth_routing() {
-        let scope = CandidateScope::default();
-        let tried = HashSet::new();
-        let request = |scheduler: &mut PoolScheduler| {
-            scheduler
-                .select(SelectionRequest {
-                    model: "gpt-5",
-                    allowed_protocols: &[WireApi::Responses],
-                    scope: &scope,
-                    tried: &tried,
-                    response_affinity_key: None,
-                    prompt_affinity_key: None,
-                    now_ms: 100,
-                })
-                .unwrap()
-                .candidate_id
-        };
-
         let mut primary = PoolScheduler::new();
         let mut source = candidate("primary-source");
         source.priority = API_SOURCE_PRIMARY_PRIORITY;
         primary.upsert(source);
         primary.upsert(oauth_candidate("account"));
-        assert_eq!(request(&mut primary), "primary-source");
+        let selected = select(&mut primary, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "primary-source");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
 
         let mut reserve = PoolScheduler::new();
         let mut source = candidate("reserve-source");
         source.priority = API_SOURCE_RESERVE_PRIORITY;
         reserve.upsert(source);
         reserve.upsert(oauth_candidate("account"));
-        assert_eq!(request(&mut reserve), "account");
+        let selected = select(&mut reserve, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "account");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
+        let selected = select(&mut reserve, &HashSet::from(["account".to_string()])).unwrap();
+        assert_eq!(selected.candidate_id, "reserve-source");
+        assert_eq!(
+            selected.diagnostics.reason,
+            SelectionReason::FallbackAttempt
+        );
 
         let mut stabilizer = PoolScheduler::new();
         stabilizer.upsert(candidate("stabilizer-source"));
         stabilizer.upsert(oauth_candidate("account"));
-        assert_eq!(request(&mut stabilizer), "account");
+        let selected = select(&mut stabilizer, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "account");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::SourceRole);
         assert!(stabilizer.reserve("account"));
-        assert_eq!(request(&mut stabilizer), "account");
+        assert_eq!(
+            select(&mut stabilizer, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "account"
+        );
     }
 
     #[test]
@@ -1821,6 +1571,23 @@ mod tests {
                 .candidate_id,
             "full"
         );
+    }
+
+    #[test]
+    fn quota_difference_inside_provider_precision_prefers_free_capacity() {
+        let mut scheduler = PoolScheduler::new();
+        let mut busy = oauth_candidate("busy");
+        busy.quota = CandidateQuota::Available(5_000);
+        scheduler.upsert(busy);
+        let mut free = oauth_candidate("free");
+        free.quota = CandidateQuota::Available(4_999);
+        scheduler.upsert(free);
+        assert!(scheduler.reserve("busy"));
+
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+
+        assert_eq!(selected.candidate_id, "free");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
     }
 
     #[test]
@@ -1890,7 +1657,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_highest_keeps_a_stable_equal_quota_account_despite_load_and_dispatches() {
+    fn quota_highest_uses_parallel_load_only_as_an_equal_quota_tie_break() {
         let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(RoutingStrategy::QuotaHighest);
         for id in ["first", "second"] {
@@ -1899,19 +1666,20 @@ mod tests {
             scheduler.upsert(account);
         }
 
-        for _ in 0..3 {
-            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-            assert_eq!(selected.candidate_id, "first");
-            assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
-            assert!(scheduler.reserve("first"));
-            assert_eq!(
-                select(&mut scheduler, &HashSet::new())
-                    .unwrap()
-                    .candidate_id,
-                "first"
-            );
-            assert!(scheduler.release("first"));
-        }
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "first");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
+        assert!(scheduler.reserve("first"));
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "second");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
+        assert!(scheduler.release("first"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "first"
+        );
     }
 
     #[test]
@@ -2026,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_expiry_routing_prefers_unknown_then_nearest_available_expiry() {
+    fn subscription_expiry_routing_is_strict_and_places_unknown_dates_last() {
         let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(RoutingStrategy::SubscriptionExpiry);
         for (id, expires_at_ms, quota) in [
@@ -2050,23 +1818,41 @@ mod tests {
                 .take(3)
                 .map(|candidate| candidate.candidate_id)
                 .collect::<Vec<_>>(),
-            ["unknown", "nearest", "later"]
+            ["nearest", "later", "unknown"]
         );
 
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "unknown");
+        assert_eq!(selected.candidate_id, "nearest");
         assert_eq!(
             selected.diagnostics.reason,
             SelectionReason::SubscriptionExpiry
         );
-        assert!(scheduler.reserve("unknown"));
+        assert!(scheduler.reserve("nearest"));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
             "nearest"
         );
-        assert!(scheduler.release("unknown"));
+        assert!(scheduler.release("nearest"));
+        assert!(scheduler.update_candidate_availability(
+            "nearest",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Exhausted,
+        ));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "later"
+        );
+        assert!(scheduler.update_candidate_availability(
+            "later",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Exhausted,
+        ));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
@@ -2076,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn subscription_plan_routing_follows_group_order_and_skips_busy_accounts() {
+    fn subscription_plan_routing_keeps_group_order_until_the_group_is_unavailable() {
         let mut scheduler = PoolScheduler::new();
         scheduler.set_routing_strategy(RoutingStrategy::SubscriptionPlan);
         scheduler.set_subscription_plan_order(&[
@@ -2102,6 +1888,19 @@ mod tests {
             SelectionReason::SubscriptionPlan
         );
         assert!(scheduler.reserve("business"));
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "business"
+        );
+        assert!(scheduler.release("business"));
+        assert!(scheduler.update_candidate_availability(
+            "business",
+            true,
+            CandidateHealth::Healthy,
+            CandidateQuota::Exhausted,
+        ));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
                 .unwrap()

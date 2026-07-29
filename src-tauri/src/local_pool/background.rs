@@ -1,11 +1,10 @@
 use super::{
     accounts::{
-        quota::CodexQuotaClient,
+        quota_refresh::{
+            next_quota_refresh_at, prepare_account_credentials, record_quota_refresh_error,
+            refresh_account_quota_once, AccountQuotaOutcome, AccountQuotaRefreshResponse,
+        },
         wake::{completion_from_execution, CodexWakeClient},
-    },
-    commands::accounts::{
-        next_quota_refresh_at, prepare_account_credentials, refresh_account_quota_once,
-        AccountQuotaOutcome, AccountQuotaRefreshResponse,
     },
     error::{ErrorCode, LocalPoolError, Result},
     models::LocalAccountRecord,
@@ -20,6 +19,7 @@ use zenith_relay_core::{
         model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
         WakeCompletionOutcome, WakeModel, WakePermit, WakeVerificationOutcome,
     },
+    providers::chatgpt::CodexQuotaClient,
     quota::QuotaAdapterCapabilities,
 };
 
@@ -142,6 +142,9 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
         });
         active_permits.insert(task.id(), permit);
     }
+    if claimed > 0 {
+        let _ = app.emit("zenith-state-changed", ());
+    }
 
     let mut first_error = None;
     while let Some(joined) = workers.join_next_with_id().await {
@@ -177,6 +180,7 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
                 });
             }
         }
+        let _ = app.emit("zenith-state-changed", ());
         let open_slots = QUOTA_BATCH_SIZE.saturating_sub(workers.len());
         if open_slots == 0 {
             continue;
@@ -201,9 +205,6 @@ async fn run_due_quota_refreshes(app: &AppHandle) -> Result<usize> {
                 first_error.get_or_insert(error);
             }
         }
-    }
-    if claimed > 0 {
-        let _ = app.emit("zenith-state-changed", ());
     }
     first_error.map_or(Ok(claimed), Err)
 }
@@ -231,10 +232,7 @@ fn settle_quota_refresh(
 ) -> Result<()> {
     match response {
         Ok(response) => {
-            let refresh_interval_seconds = state.store()?.gateway().quota_refresh_interval_seconds;
-            if let Some(due_at_ms) =
-                next_quota_refresh_at(&response, current_time_ms(), refresh_interval_seconds)
-            {
+            if let Some(due_at_ms) = next_quota_refresh_at(&response, current_time_ms()) {
                 state.reschedule_quota_refresh(permit, due_at_ms)?;
             } else {
                 state.complete_quota_refresh(permit)?;
@@ -243,6 +241,7 @@ fn settle_quota_refresh(
         }
         Err(error) => {
             let account_id = permit.account_id.clone();
+            let _ = record_quota_refresh_error(state, &account_id, &error, current_time_ms());
             if terminal_quota_refresh_error(state, &account_id, &error)? {
                 state.complete_quota_refresh(permit)?;
             } else {
@@ -267,7 +266,7 @@ fn terminal_quota_refresh_error(
     Ok(state.store()?.account(account_id).is_none_or(|account| {
         matches!(
             account.account.auth_state,
-            AccountAuthState::RequiresReauth(_) | AccountAuthState::DegradedAccessOnly
+            AccountAuthState::RequiresReauth(_)
         )
     }))
 }
@@ -381,10 +380,7 @@ fn settle_verification_quota(
     account_id: &str,
     response: &AccountQuotaRefreshResponse,
 ) -> Result<()> {
-    let refresh_interval_seconds = state.store()?.gateway().quota_refresh_interval_seconds;
-    if let Some(due_at_ms) =
-        next_quota_refresh_at(response, current_time_ms(), refresh_interval_seconds)
-    {
+    if let Some(due_at_ms) = next_quota_refresh_at(response, current_time_ms()) {
         state.sync_account_quota_refresh(account_id, due_at_ms)?;
     } else {
         state.remove_quota_refresh(account_id)?;
@@ -507,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_auth_states_stop_automatic_quota_retries() {
+    fn only_reauthentication_stops_automatic_quota_retries() {
         let root = std::env::temp_dir().join(format!(
             "zenith-relay-background-auth-{}",
             uuid::Uuid::new_v4()
@@ -532,7 +528,7 @@ mod tests {
 
         account.account.auth_state = AccountAuthState::DegradedAccessOnly;
         state.store().unwrap().upsert_account(account).unwrap();
-        assert!(terminal_quota_refresh_error(&state, "account-1", &error).unwrap());
+        assert!(!terminal_quota_refresh_error(&state, "account-1", &error).unwrap());
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -680,6 +676,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            economics: Default::default(),
             remote_location: None,
             wire_api: WireApi::Responses,
             models: Vec::new(),

@@ -1,3 +1,4 @@
+use super::windows::normalize_subscription_plan;
 use super::{
     QuotaNormalizationError, QuotaSnapshot, QuotaWindow, QuotaWindowInput, QuotaWindowKind,
     Subscription, SubscriptionInput, SupplementalQuotaWindow,
@@ -30,6 +31,9 @@ pub struct QuotaAdapterCapabilities {
 pub struct QuotaAdapterContext {
     pub account_id: String,
     pub source_id: String,
+    /// Provider-owned account identity used by the adapter. This is never a
+    /// UI label or a scheduler id.
+    pub provider_account_id: String,
     pub stable_identity: String,
 }
 
@@ -41,10 +45,25 @@ pub struct QuotaRefreshData {
     #[serde(default)]
     pub supplemental: Vec<SupplementalQuotaWindowInput>,
     #[serde(default)]
+    /// Normalized value persisted into `QuotaSnapshot`.
     pub limit_reached: bool,
     pub subscription: Option<SubscriptionInput>,
     pub reset_credits_available: Option<u32>,
     pub observed_at_ms: u64,
+}
+
+/// Provider-neutral result of a quota refresh. Provider adapters populate the
+/// normalized window payload and may optionally report whether access is
+/// allowed; account state reduction stays independent of the adapter.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaRefreshResult {
+    pub quota: QuotaRefreshData,
+    pub allowed: Option<bool>,
+    /// Optional raw provider signal used to distinguish a blocked account from
+    /// an ordinary quota exhaustion. It is intentionally not defaulted to
+    /// `false` because providers may omit the signal.
+    pub reported_limit_reached: Option<bool>,
 }
 
 impl QuotaRefreshData {
@@ -55,7 +74,12 @@ impl QuotaRefreshData {
         if subscription.plan_type.is_none() {
             subscription.plan_type = previous.plan_type.clone();
         }
-        if subscription.active_until_ms.is_none() {
+        if subscription.active_until_ms.is_none()
+            && !subscription_plan_changed(
+                previous.plan_type.as_deref(),
+                subscription.plan_type.as_deref(),
+            )
+        {
             subscription.active_until_ms = previous.active_until_ms;
         }
     }
@@ -88,6 +112,18 @@ impl QuotaRefreshData {
             self.subscription.map(Subscription::normalize),
         ))
     }
+}
+
+pub fn subscription_plan_changed(previous: Option<&str>, observed: Option<&str>) -> bool {
+    let Some(observed) = observed.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+    previous
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none_or(|previous| {
+            normalize_subscription_plan(previous) != normalize_subscription_plan(observed)
+        })
 }
 
 fn normalize_supplemental(
@@ -136,7 +172,7 @@ pub trait QuotaAdapter: Send + Sync {
         context: &'a QuotaAdapterContext,
         access_token: &'a str,
         now_ms: u64,
-    ) -> BoxFuture<'a, Result<QuotaRefreshData, QuotaRefreshFailure>>;
+    ) -> BoxFuture<'a, Result<QuotaRefreshResult, QuotaRefreshFailure>>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,6 +194,11 @@ impl QuotaRefreshFailure {
     pub fn http_status(&self) -> Option<u16> {
         self.http_status
     }
+
+    pub(crate) fn with_http_status(mut self, status: u16) -> Self {
+        self.http_status = Some(status);
+        self
+    }
 }
 
 pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
@@ -172,9 +213,7 @@ pub fn classify_quota_http_failure(status: u16, body: &[u8]) -> QuotaRefreshFail
         }
         .to_string()
     });
-    let mut failure = QuotaRefreshFailure::new(&code, retryable);
-    failure.http_status = Some(status);
-    failure
+    QuotaRefreshFailure::new(&code, retryable).with_http_status(status)
 }
 
 fn provider_error_code(body: &[u8]) -> Option<String> {
@@ -328,12 +367,76 @@ mod tests {
     }
 
     #[test]
+    fn quota_refresh_preserves_expiry_across_openai_plan_aliases() {
+        for (previous_plan, observed_plan) in [
+            ("chatgptplusplan", "plus"),
+            ("chatgptbusinessplan", "business"),
+            ("chatgptteamplan", "business"),
+        ] {
+            let previous = Subscription::normalize(SubscriptionInput {
+                plan_type: Some(previous_plan.into()),
+                active_until_ms: Some(2_000),
+                forbidden: false,
+                observed_at_ms: 1,
+            });
+            let mut data = QuotaRefreshData {
+                subscription: Some(SubscriptionInput {
+                    plan_type: Some(observed_plan.into()),
+                    active_until_ms: None,
+                    forbidden: false,
+                    observed_at_ms: 10,
+                }),
+                ..Default::default()
+            };
+
+            data.preserve_subscription_metadata(&previous);
+
+            assert_eq!(data.subscription.unwrap().active_until_ms, Some(2_000));
+        }
+    }
+
+    #[test]
+    fn quota_refresh_does_not_copy_an_expiry_between_different_plans() {
+        for (previous_plan, observed_plan) in [
+            ("free", "plus"),
+            ("plus", "business"),
+            ("business", "pro"),
+            ("team", "free"),
+        ] {
+            let previous = Subscription::normalize(SubscriptionInput {
+                plan_type: Some(previous_plan.into()),
+                active_until_ms: Some(2_000),
+                forbidden: false,
+                observed_at_ms: 1,
+            });
+            let mut data = QuotaRefreshData {
+                subscription: Some(SubscriptionInput {
+                    plan_type: Some(observed_plan.into()),
+                    active_until_ms: None,
+                    forbidden: false,
+                    observed_at_ms: 10,
+                }),
+                ..Default::default()
+            };
+
+            data.preserve_subscription_metadata(&previous);
+
+            assert_eq!(data.subscription.unwrap().active_until_ms, None);
+        }
+    }
+
+    #[test]
     fn quota_http_failure_keeps_safe_provider_codes() {
         let invalidated =
             classify_quota_http_failure(401, br#"{"detail":{"code":"token_invalidated"}}"#);
         assert_eq!(invalidated.code, "token_invalidated");
         assert_eq!(invalidated.http_status(), Some(401));
         assert!(!invalidated.retryable);
+
+        assert_eq!(
+            classify_quota_http_failure(401, b"task expired").code,
+            "quota_unauthorized"
+        );
 
         let workspace =
             classify_quota_http_failure(402, br#"{"error":{"code":"deactivated_workspace"}}"#);

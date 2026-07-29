@@ -16,6 +16,36 @@ export function isCodexOauthAccountEligible(account: AccountSummary) {
   return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
 }
 
+export function currentAccountErrorCode(account: AccountSummary) {
+  const quotaError = account.quota.error?.code.trim();
+  if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
+  if (account.routingBlockReason === "reauth_required" || account.authState.state === "requires_reauth") {
+    return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
+  }
+  if (account.operationalStatus !== "unavailable") return null;
+  return account.lastErrorCode?.trim() || quotaError || account.routingBlockReason || "account_unavailable";
+}
+
+export function accountErrorLabel(code: string, t: TFunction) {
+  const normalized = code.toLocaleLowerCase();
+  if (normalized === "remote_missing") return t("accounts.errors.remoteMissing");
+  if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return t("accounts.errors.reusedRefreshToken");
+  if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return t("accounts.errors.expiredRefreshToken");
+  if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return t("accounts.errors.invalidatedRefreshToken");
+  if (/invalid_grant/.test(normalized)) return t("accounts.errors.invalidGrant");
+  if (/invalid_grant|requires_reauth|refresh_token/.test(normalized)) return t("accounts.errors.requiresReauth");
+  if (/verification|verify.*account|phone/.test(normalized)) return t("accounts.errors.verificationRequired");
+  if (/credential|secret/.test(normalized)) return t("accounts.errors.credentialsMissing");
+  if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return t("accounts.errors.blocked");
+  if (/forbidden|blocked/.test(normalized)) return t("accounts.errors.blocked");
+  if (/rate.?limit|too_many/.test(normalized)) return t("accounts.errors.rateLimited");
+  if (/transport|timeout|network|connect/.test(normalized)) return t("accounts.errors.connection");
+  if (/quota/.test(normalized)) return t("accounts.errors.quota");
+  if (/auth_error|unauthorized|authentication/.test(normalized)) return t("accounts.errors.authorization");
+  if (/response|parse|decode|malformed/.test(normalized)) return t("accounts.errors.invalidResponse");
+  return t("accounts.errors.unknown");
+}
+
 export function formatAccountPlan(planType: string | null, unknown: string) {
   const value = planType?.trim();
   if (!value) return unknown;
@@ -42,6 +72,55 @@ export function accountPlanOption(planType: string | null, unknown: string) {
 export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {
   const plan = accountPlanOption(planType, unknown);
   return <span className="account-plan-badge" data-plan={plan.id}>{plan.label}</span>;
+}
+
+export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const economics = account.economics;
+  const purchaseCost = economics?.purchaseCostMicroUsd ?? null;
+  const incompleteEquivalent = account.apiEquivalent.unpricedTokens > 0;
+  const payback = purchaseCost && purchaseCost > 0 ? account.apiEquivalent.microUsd / purchaseCost : null;
+  const potential = economics?.estimateState === "estimated" && economics.potentialMicroUsd != null
+    ? formatMicroUsd(economics.potentialMicroUsd, locale, true)
+    : economics?.estimateState === "collecting" && economics.observedBasisPoints > 0
+      ? t("accounts.economics.collectingProgress", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100) })
+      : t(`accounts.economics.${economics?.estimateState ?? "collecting"}`);
+  const potentialRange = economics?.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
+    ? `${formatMicroUsd(economics.potentialLowMicroUsd, locale)}–${formatMicroUsd(economics.potentialHighMicroUsd, locale)}`
+    : null;
+  const potentialTitle = economics?.estimateState === "estimated"
+    ? [
+      t("accounts.economics.potentialHint"),
+      potentialRange ? t("accounts.economics.range", { range: potentialRange }) : null,
+      economics.confidence ? t("accounts.economics.confidence", { value: t(`accounts.economics.confidenceLevels.${economics.confidence}`) }) : null,
+      t("accounts.economics.observed", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100) }),
+      t("accounts.economics.samples", { count: economics.sampleCount }),
+    ].filter(Boolean).join(" · ")
+    : t(`accounts.economics.${economics?.estimateState === "stale" ? "staleHint" : "collectingHint"}`);
+  const potentialMeta = economics?.estimateState === "estimated"
+    ? [
+      potentialRange,
+      economics.confidence ? t(`accounts.economics.confidenceLevels.${economics.confidence}`) : null,
+      `${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(economics.observedBasisPoints / 100)}%`,
+    ].filter(Boolean).join(" · ")
+    : null;
+  const paybackTitle = purchaseCost == null
+    ? t("accounts.economics.purchaseMissing")
+    : t("accounts.economics.paybackHint", {
+      used: formatMicroUsd(account.apiEquivalent.microUsd, locale),
+      purchase: formatMicroUsd(purchaseCost, locale),
+    });
+  return <dl className="account-economics-strip">
+    <div title={t("accounts.economics.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.economics.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale)}{incompleteEquivalent ? "*" : ""}</dd></div>
+    <div title={potentialTitle} data-state={economics?.estimateState ?? "collecting"}><dt>{t("accounts.economics.potential")}</dt><dd><span>{potential}</span>{potentialMeta ? <small>{potentialMeta}</small> : null}</dd></div>
+    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.economics.payback")}</dt><dd>{payback == null ? "—" : `${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}${incompleteEquivalent ? "*" : ""}`}</dd></div>
+  </dl>;
+}
+
+function formatMicroUsd(value: number, locale: string, approximate = false) {
+  const formatted = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value / 1_000_000);
+  return `${approximate ? "≈" : ""}${formatted}`;
 }
 
 export function compareAccountPlans(left: { id: string; label: string }, right: { id: string; label: string }) {
@@ -217,10 +296,10 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
   </>;
 }
 
-export function StatusIcon({ status, label }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string }) {
+export function StatusIcon({ status, label, className = "", children }: { status: "ready" | "warning" | "error" | "info" | "disabled"; label: string; className?: string; children?: ReactNode }) {
   const tooltip = useTooltip<HTMLSpanElement>(label);
   return <>
-    <span ref={tooltip.anchorRef} className="relay-status-icon" role="img" tabIndex={0} aria-label={label} aria-describedby={tooltip.describedBy} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}><StatusBadge status={status} label="" /></span>
+    <span ref={tooltip.anchorRef} className={`relay-status-icon ${className}`.trim()} data-status={status} role="img" tabIndex={0} aria-label={label} aria-describedby={tooltip.describedBy} onMouseEnter={tooltip.show} onMouseLeave={tooltip.hideAfterHover} onFocus={tooltip.showAfterFocus} onBlur={tooltip.hide} onPointerDown={tooltip.pointerStart}>{children ?? <StatusBadge status={status} label="" />}</span>
     {tooltip.tooltip}
   </>;
 }
@@ -277,7 +356,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
   useEffect(() => {
     if (!open) return;
     const selectedOption = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-    selectedOption?.focus();
+    selectedOption?.focus({ preventScroll: true });
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();
@@ -288,7 +367,7 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       close(true);
     };
     const dismiss = () => close();
-    const dismissOnScroll = (event: Event) => {
+    const dismissOnWheel = (event: WheelEvent) => {
       const target = event.target;
       if (target instanceof Node && listRef.current?.contains(target)) return;
       close();
@@ -296,12 +375,12 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
     document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismissOnScroll, true);
+    window.addEventListener("wheel", dismissOnWheel, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismissOnScroll, true);
+      window.removeEventListener("wheel", dismissOnWheel, true);
     };
   }, [open]);
 
@@ -437,13 +516,19 @@ export function SettingToggle({ label, description, checked, disabled = false, o
 
 export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
   const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
-  if (totalSeconds >= 86_400) return t("timeShort.days", { count: Math.ceil(totalSeconds / 86_400) });
+  if (totalSeconds >= 86_400) return t("timeShort.days", { count: Math.floor(totalSeconds / 86_400) });
   if (totalSeconds >= 3_600) return `${t("timeShort.hours", { count: Math.floor(totalSeconds / 3_600) })} ${t("timeShort.minutes", { count: Math.floor(totalSeconds % 3_600 / 60) })}`;
   if (totalSeconds >= 60) return `${t("timeShort.minutes", { count: Math.floor(totalSeconds / 60) })} ${t("timeShort.seconds", { count: totalSeconds % 60 })}`;
   return t("timeShort.seconds", { count: totalSeconds });
 }
 
-export function QuotaMeter({ window, kind, label, nowMs }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string; nowMs?: number }) {
+export function formatDetailedRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
+  const totalMinutes = Math.max(0, Math.floor((targetMs - nowMs) / 60_000));
+  if (totalMinutes < 1_440) return formatRemainingTime(targetMs, nowMs, t);
+  return `${t("timeShort.days", { count: Math.floor(totalMinutes / 1_440) })} ${t("timeShort.hours", { count: Math.floor(totalMinutes % 1_440 / 60) })} ${t("timeShort.minutes", { count: totalMinutes % 60 })}`;
+}
+
+export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string; nowMs?: number; concise?: boolean }) {
   const { i18n, t } = useTranslation();
   const windowKind = kind ?? window?.kind ?? "primary";
   const resolvedLabel = label ?? quotaWindowLabel(window, windowKind, t);
@@ -455,14 +540,15 @@ export function QuotaMeter({ window, kind, label, nowMs }: { window: QuotaWindow
   const reset = window.resetAtMs
     ? nowMs == null
       ? new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "short" }).format(new Date(window.resetAtMs))
-      : formatRemainingTime(window.resetAtMs, nowMs, t)
+      : formatDetailedRemainingTime(window.resetAtMs, nowMs, t)
     : t("common.unknown");
-  const resetLabel = t("quota.reset", { value: reset });
-  const remainingLabel = t("quota.remainingPercent", { value: percent });
-  return <div className="quota-meter"><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
+  const resetLabel = concise ? reset : t("quota.reset", { value: reset });
+  const remainingLabel = concise ? `${percent}%` : t("quota.remainingPercent", { value: percent });
+  const level = percent <= 5 ? "critical" : percent <= 20 ? "low" : "normal";
+  return <div className="quota-meter" data-level={level}><div className="quota-meter-heading"><span>{resolvedLabel}</span><small title={resetLabel}>{resetLabel}</small><strong>{remainingLabel}</strong></div><div className="quota-track" aria-label={`${resolvedLabel}: ${remainingLabel}`}><span style={{ width: `${percent}%` }} /></div></div>;
 }
 
-export function QuotaStack({ snapshot, nowMs }: { snapshot: QuotaSnapshot; nowMs?: number }) {
+export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: QuotaSnapshot; nowMs?: number; concise?: boolean }) {
   const { t } = useTranslation();
   const coreBlocked = snapshot.limitReached || [snapshot.primary, snapshot.secondary]
     .some((window) => window?.availableBasisPoints === 0);
@@ -474,8 +560,8 @@ export function QuotaStack({ snapshot, nowMs }: { snapshot: QuotaSnapshot; nowMs
     }),
     ...(snapshot.supplemental ?? []),
   ];
-  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} /></div>;
-  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} />)}</div>;
+  if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} concise={concise} /></div>;
+  return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
 }
 
 export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {

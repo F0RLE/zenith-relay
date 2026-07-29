@@ -15,6 +15,7 @@ use std::{
 const SECRET_PREFIX: &str = "local-pool:";
 const HASHED_SECRET_PREFIX: &str = "lp:";
 const VAULT_KEY_USER: &str = "local-vault-master-key-v1";
+const LEGACY_MIGRATION_MARKER: &str = ".legacy-keyring-migrated-v1";
 
 struct ConfiguredVault {
     root: PathBuf,
@@ -48,6 +49,7 @@ pub fn initialize(root: &Path) -> Result<()> {
             format!("failed to open encrypted secret vault: {message}"),
         )
     })?;
+    migrate_legacy_keyring_once(&root, &vault);
     VAULT
         .set(ConfiguredVault { root, vault })
         .map_err(|_| LocalPoolError::new(ErrorCode::Io, "failed to initialize secret vault"))
@@ -78,7 +80,6 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
         return load_keyring_secret(secret_ref);
     };
     if let Some(value) = configured.vault.load(secret_ref).map_err(vault_error)? {
-        let _ = delete_keyring_secret(secret_ref);
         return Ok(Some(value));
     }
     let Some(value) = load_keyring_secret(secret_ref)? else {
@@ -90,6 +91,27 @@ pub fn load(secret_ref: &str) -> Result<Option<String>> {
         .map_err(vault_error)?;
     let _ = delete_keyring_secret(secret_ref);
     Ok(Some(value))
+}
+
+fn migrate_legacy_keyring_once(root: &Path, vault: &Vault) {
+    let marker = root.join(LEGACY_MIGRATION_MARKER);
+    if marker.exists() {
+        return;
+    }
+    let Ok(secret_refs) = vault.secret_refs() else {
+        return;
+    };
+    let mut complete = true;
+    for secret_ref in secret_refs {
+        complete &= delete_keyring_secret(&secret_ref).is_ok();
+    }
+    if !complete {
+        return;
+    }
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker);
 }
 
 pub fn delete(secret_ref: &str) -> Result<()> {

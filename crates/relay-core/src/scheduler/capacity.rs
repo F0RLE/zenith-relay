@@ -2,16 +2,7 @@ use crate::quota::QuotaSnapshot;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-pub const QUOTA_STALE_AFTER_MS: u64 = 15 * 60 * 1_000;
-const QUOTA_STALE_GRACE_MS: u64 = 5 * 60 * 1_000;
-
-pub fn quota_stale_after_ms_for_interval(refresh_interval_seconds: u64) -> u64 {
-    QUOTA_STALE_AFTER_MS.max(
-        refresh_interval_seconds
-            .saturating_mul(1_000)
-            .saturating_add(QUOTA_STALE_GRACE_MS),
-    )
-}
+pub const QUOTA_STALE_AFTER_MS: u64 = 20 * 60 * 1_000;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "state", content = "remaining")]
@@ -78,11 +69,5 @@ mod tests {
             CandidateQuota::from_snapshot(&quota, 10_000, 1),
             CandidateQuota::Exhausted
         );
-    }
-
-    #[test]
-    fn stale_window_tracks_long_refresh_intervals() {
-        assert_eq!(quota_stale_after_ms_for_interval(300), QUOTA_STALE_AFTER_MS);
-        assert_eq!(quota_stale_after_ms_for_interval(3_600), 3_900_000);
     }
 }

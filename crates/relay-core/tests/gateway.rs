@@ -80,7 +80,7 @@ async fn non_local_host_stops_before_auth_and_upstream_execution() {
 }
 
 #[tokio::test]
-async fn models_are_discovered_and_filtered_with_the_source_credential() {
+async fn models_are_discovered_with_the_source_credential() {
     let (upstream, state) = spawn_upstream().await;
     let models = discover_source_models(&ProviderSource {
         id: "source-1".into(),
@@ -92,7 +92,7 @@ async fn models_are_discovered_and_filtered_with_the_source_credential() {
     })
     .await
     .unwrap();
-    assert_eq!(models, ["gpt-test"]);
+    assert_eq!(models, ["gpt-test", "hidden-model"]);
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);

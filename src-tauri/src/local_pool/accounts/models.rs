@@ -6,7 +6,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::time::Duration;
 use url::Url;
-use zenith_relay_core::{accounts::CodexIdentityEnvelope, ProxyConfig};
+use zenith_relay_core::{
+    providers::chatgpt::{is_agent_identity_task_invalid_response, CodexIdentityEnvelope},
+    ProxyConfig,
+};
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
@@ -15,7 +18,7 @@ const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 #[cfg(test)]
 const ORIGINATOR_HEADER: &str = "originator";
 #[cfg(test)]
-const CODEX_ORIGINATOR: &str = zenith_relay_core::accounts::CODEX_ORIGINATOR;
+const CODEX_ORIGINATOR: &str = zenith_relay_core::providers::chatgpt::CODEX_ORIGINATOR;
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_CLIENT_VERSION_BYTES: usize = 64;
@@ -66,13 +69,23 @@ impl CodexModelsClient {
         client_version: &str,
     ) -> Result<Vec<String>, ModelDiscoveryFailure> {
         validate_access_token(access_token)?;
-        validate_account_id(chatgpt_account_id)?;
-        validate_client_version(client_version)?;
-
-        let authorization =
+        let mut authorization =
             HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| {
                 ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccessToken)
             })?;
+        authorization.set_sensitive(true);
+        self.discover_authorized(authorization, chatgpt_account_id, client_version)
+            .await
+    }
+
+    pub async fn discover_authorized(
+        &self,
+        authorization: HeaderValue,
+        chatgpt_account_id: &str,
+        client_version: &str,
+    ) -> Result<Vec<String>, ModelDiscoveryFailure> {
+        validate_account_id(chatgpt_account_id)?;
+        validate_client_version(client_version)?;
         let identity = CodexIdentityEnvelope::new(chatgpt_account_id, client_version)
             .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidAccountId))?;
         let mut request_url = self.endpoint.clone();
@@ -100,13 +113,20 @@ impl CodexModelsClient {
                 }
             })?;
         if !status.is_success() {
-            let (code, retryable) = match status.as_u16() {
-                401 => (ModelDiscoveryFailureCode::Unauthorized, false),
-                403 => (ModelDiscoveryFailureCode::Forbidden, false),
-                429 => (ModelDiscoveryFailureCode::RateLimited, true),
-                _ if status.is_server_error() => (ModelDiscoveryFailureCode::Upstream, true),
-                _ => (ModelDiscoveryFailureCode::HttpStatus, false),
-            };
+            let (code, retryable) =
+                if is_agent_identity_task_invalid_response(status.as_u16(), &body) {
+                    (ModelDiscoveryFailureCode::AgentTaskInvalid, false)
+                } else {
+                    match status.as_u16() {
+                        401 => (ModelDiscoveryFailureCode::Unauthorized, false),
+                        403 => (ModelDiscoveryFailureCode::Forbidden, false),
+                        429 => (ModelDiscoveryFailureCode::RateLimited, true),
+                        _ if status.is_server_error() => {
+                            (ModelDiscoveryFailureCode::Upstream, true)
+                        }
+                        _ => (ModelDiscoveryFailureCode::HttpStatus, false),
+                    }
+                };
             return Err(ModelDiscoveryFailure {
                 code,
                 retryable,
@@ -120,6 +140,7 @@ impl CodexModelsClient {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModelDiscoveryFailureCode {
+    AgentTaskInvalid,
     Forbidden,
     HttpStatus,
     InvalidAccessToken,
@@ -162,6 +183,9 @@ impl ModelDiscoveryFailure {
 impl fmt::Display for ModelDiscoveryFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self.code {
+            ModelDiscoveryFailureCode::AgentTaskInvalid => {
+                "Agent Identity task must be registered again"
+            }
             ModelDiscoveryFailureCode::Forbidden => "model discovery is forbidden",
             ModelDiscoveryFailureCode::HttpStatus => "model discovery request was rejected",
             ModelDiscoveryFailureCode::InvalidAccessToken => "model access token is invalid",
@@ -305,7 +329,7 @@ mod tests {
             .discover(
                 "access-secret",
                 "account-123",
-                zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
             )
             .await
             .unwrap();
@@ -343,7 +367,7 @@ mod tests {
                 .discover(
                     "access-secret",
                     "account-123",
-                    zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION,
+                    zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
                 )
                 .await
                 .unwrap_err();
@@ -384,12 +408,12 @@ mod tests {
         );
         let expected_query = format!(
             "client_version={}",
-            zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION
+            zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION
         );
         assert_eq!(uri.query(), Some(expected_query.as_str()));
         assert_eq!(
             headers.get("version").and_then(|value| value.to_str().ok()),
-            Some(zenith_relay_core::accounts::CODEX_MODELS_CLIENT_VERSION)
+            Some(zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION)
         );
         Json(json!({
             "models": [

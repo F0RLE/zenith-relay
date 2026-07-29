@@ -34,9 +34,15 @@ use zenith_relay_core::{
         WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
         WakeTask,
     },
-    quota::{QuotaRefreshPermit, QuotaRefreshQueue, QuotaTransition},
+    quota::{
+        quota_reference_value, quota_valuation_revision, QuotaRefreshPermit, QuotaRefreshQueue,
+        QuotaTransition,
+    },
     ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent,
 };
+
+#[cfg(test)]
+use zenith_relay_core::DefaultServiceTier;
 
 const MAX_QUOTA_REFRESH_ENTRIES: usize = crate::local_pool::models::MAX_LOCAL_ACCOUNTS;
 
@@ -67,6 +73,7 @@ pub struct DesktopState {
     failed_usage_writes: Arc<AtomicU64>,
     failed_affinity_writes: Arc<AtomicU64>,
     quota_account_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
+    subscription_refresh_lock: AsyncMutex<()>,
     setup_lock: tokio::sync::Mutex<()>,
 }
 
@@ -87,11 +94,10 @@ impl DesktopState {
         let mut quota_refresh =
             QuotaRefreshQueue::new(MAX_QUOTA_REFRESH_ENTRIES).map_err(invalid_core_state)?;
         let startup_due_at_ms = now_ms();
-        for account in store
-            .accounts()
-            .iter()
-            .filter(|account| account.account.is_automatic_quota_refresh_eligible())
-        {
+        for account in store.accounts().iter().filter(|account| {
+            account.remote_location.is_none()
+                && account.account.is_automatic_quota_monitoring_eligible()
+        }) {
             quota_refresh
                 .upsert(&account.account.id, startup_due_at_ms)
                 .map_err(invalid_core_state)?;
@@ -129,6 +135,7 @@ impl DesktopState {
             failed_usage_writes,
             failed_affinity_writes,
             quota_account_locks: Arc::new(Mutex::new(HashMap::new())),
+            subscription_refresh_lock: AsyncMutex::new(()),
             setup_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -141,6 +148,16 @@ impl DesktopState {
 
     pub(crate) fn token_authority(&self) -> Arc<TokenAuthority> {
         self.token_authority.clone()
+    }
+
+    pub(crate) fn record_performance(
+        &self,
+        name: &str,
+        duration_ms: f64,
+        context: Option<&str>,
+    ) -> Result<()> {
+        self.telemetry
+            .record_performance(name, duration_ms, context)
     }
 
     pub(crate) fn mark_quota_refresh(&self, account_id: &str, due_at_ms: u64) -> Result<bool> {
@@ -177,17 +194,22 @@ impl DesktopState {
         account_id: &str,
         due_at_ms: u64,
     ) -> Result<bool> {
-        let active_pool_account = {
+        let monitored_account = {
             let store = self.store()?;
-            store
-                .account(account_id)
-                .is_some_and(|account| account.account.is_automatic_quota_refresh_eligible())
+            store.account(account_id).is_some_and(|account| {
+                account.remote_location.is_none()
+                    && account.account.is_automatic_quota_monitoring_eligible()
+            })
         };
-        if active_pool_account {
+        if monitored_account {
             self.mark_quota_refresh(account_id, due_at_ms)
         } else {
             self.remove_quota_refresh(account_id)
         }
+    }
+
+    pub(crate) fn quota_refresh_in_flight(&self, account_id: &str) -> Result<bool> {
+        Ok(self.quota_refresh_queue()?.is_in_flight(account_id))
     }
 
     pub(crate) fn claim_due_quota_refreshes(
@@ -384,9 +406,9 @@ impl DesktopState {
         let wake = self.wake.clone();
         let failed = self.failed_usage_writes.clone();
         let wake_notify = self.wake_notify.clone();
+        let state_events = self.oauth_events.clone();
         Arc::new(move |event| {
             // ponytail: synchronous local writes; add a bounded spool only if profiling shows contention.
-            let recorded = telemetry.record(&event).is_ok();
             let observed_at = chrono::Utc::now();
             let observed_at_ms = u64::try_from(observed_at.timestamp_millis()).unwrap_or_default();
             let observed_at = observed_at.to_rfc3339();
@@ -407,10 +429,11 @@ impl DesktopState {
             };
             let update = store.lock().map_err(|_| ()).and_then(|mut store| {
                 let Some(account_id) = account_id.as_deref() else {
+                    let recorded = telemetry.record(&event).is_ok();
                     store
                         .touch_usage(&event.local_key_id, &event.source_id, None, observed_at)
                         .map_err(|_| ())?;
-                    return Ok((0, None));
+                    return Ok((0, None, false, recorded));
                 };
 
                 let mut accounts = store.accounts().to_vec();
@@ -418,14 +441,43 @@ impl DesktopState {
                     .iter_mut()
                     .find(|account| account.account.id == account_id)
                     .ok_or(())?;
+                let recorded = telemetry.record(&event).is_ok();
+
+                let visible_state = (
+                    account.account.quota.clone(),
+                    account.account.auth_state,
+                    account.account.health,
+                    account.account.last_error_code.clone(),
+                    account.economics.clone(),
+                );
+                account.economics.set_account_context(
+                    "chatgpt",
+                    account.account.subscription.plan_type.as_deref(),
+                );
+                account
+                    .economics
+                    .set_value_revision(quota_valuation_revision());
+                account.economics.observe_event_at(
+                    &event,
+                    quota_reference_value(&event),
+                    observed_at_ms,
+                );
                 let refresh_now = apply_account_usage_state(
                     account,
                     &event,
                     observed_at_ms,
                     access_expiry,
                     successful_auth_state,
-                ) && account.account.enabled
-                    && account.account.in_pool;
+                ) && account.account.is_automatic_quota_monitoring_eligible()
+                    && account.remote_location.is_none();
+                let visible_state_changed = visible_state
+                    != (
+                        account.account.quota.clone(),
+                        account.account.auth_state,
+                        account.account.health,
+                        account.account.last_error_code.clone(),
+                        account.economics.clone(),
+                    );
                 let mut keys = store.keys().to_vec();
                 if let Some(key) = keys.iter_mut().find(|key| key.id == event.local_key_id) {
                     key.last_used_at = Some(observed_at);
@@ -443,15 +495,29 @@ impl DesktopState {
                     .replace_account_state(accounts, keys, automations)
                     .map_err(|_| ())?;
                 *coordinator = next;
-                Ok((natural_use, refresh_now.then(|| account_id.to_string())))
+                Ok((
+                    natural_use,
+                    refresh_now.then(|| account_id.to_string()),
+                    visible_state_changed,
+                    recorded,
+                ))
             });
-            if update.as_ref().is_ok_and(|(completed, _)| *completed > 0) {
+            if update
+                .as_ref()
+                .is_ok_and(|(completed, _, _, _)| *completed > 0)
+            {
                 wake_notify.notify_one();
+            }
+            if update
+                .as_ref()
+                .is_ok_and(|(_, _, visible_state_changed, _)| *visible_state_changed)
+            {
+                state_events.emit_state_changed();
             }
             let queued = update
                 .as_ref()
                 .ok()
-                .and_then(|(_, account_id)| account_id.as_deref())
+                .and_then(|(_, account_id, _, _)| account_id.as_deref())
                 .map_or(Ok(false), |account_id| {
                     quota_refresh
                         .lock()
@@ -463,6 +529,7 @@ impl DesktopState {
                 quota_refresh_notify.notify_one();
             }
             let touched = update.is_ok() && queued.is_ok();
+            let recorded = update.as_ref().is_ok_and(|(_, _, _, recorded)| *recorded);
             if !recorded || !touched {
                 failed.fetch_add(1, Ordering::Relaxed);
             }
@@ -489,6 +556,19 @@ impl DesktopState {
             .entry(account_id.to_string())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone())
+    }
+
+    pub(crate) fn remove_quota_account_lock(&self, account_id: &str) -> Result<bool> {
+        Ok(self
+            .quota_account_locks
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota account lock poisoned"))?
+            .remove(account_id)
+            .is_some())
+    }
+
+    pub(crate) async fn subscription_refresh_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.subscription_refresh_lock.lock().await
     }
 
     pub async fn snapshot(&self) -> Result<LocalPoolSnapshot> {
@@ -527,13 +607,7 @@ impl DesktopState {
         }
         let mut accounts_with_secrets = HashSet::new();
         for account in &accounts {
-            let mut available = !account.account.secret_refs.is_empty();
-            for secret_ref in &account.account.secret_refs {
-                if secrets.load(secret_ref)?.is_none() {
-                    available = false;
-                    break;
-                }
-            }
+            let available = account_secret_available(account, secrets)?;
             if available {
                 accounts_with_secrets.insert(account.account.id.as_str());
             } else {
@@ -559,10 +633,6 @@ impl DesktopState {
                 account.account.enabled
                     && account.account.in_pool
                     && !account.account.draining
-                    && crate::local_pool::commands::account_routing_allowed(
-                        &gateway,
-                        &account.account.subscription,
-                    )
                     && accounts_with_secrets.contains(account.account.id.as_str())
                     && key
                         .account_ids
@@ -630,6 +700,15 @@ impl DesktopState {
     }
 }
 
+fn account_secret_available(
+    account: &LocalAccountRecord,
+    secrets: &impl SecretLookup,
+) -> Result<bool> {
+    let secret_ref = super::accounts::credentials::credential_secret_ref(&account.account.id)
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    Ok(secrets.load(&secret_ref)?.is_some())
+}
+
 struct DesktopResponseAffinityStore {
     telemetry: Arc<TelemetryDb>,
     failed_writes: Arc<AtomicU64>,
@@ -663,6 +742,10 @@ impl ResponseAffinityStore for DesktopResponseAffinityStore {
 
     fn delete(&self, key: &str) -> std::result::Result<(), String> {
         self.finish(self.telemetry.delete_affinity(key))
+    }
+
+    fn delete_candidate(&self, candidate_id: &str) -> std::result::Result<(), String> {
+        self.finish(self.telemetry.delete_candidate_affinities(candidate_id))
     }
 }
 
@@ -766,6 +849,12 @@ impl DesktopOAuthEvents {
             *current = Some(app);
         }
     }
+
+    fn emit_state_changed(&self) {
+        if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
+            let _ = app.emit("zenith-state-changed", ());
+        }
+    }
 }
 
 impl OAuthFlowEventSink for DesktopOAuthEvents {
@@ -862,6 +951,30 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn subscription_refreshes_share_one_global_lock() {
+        let root = temp_root("subscription-lock");
+        let state = DesktopState::open(root.clone()).unwrap();
+        let first = state.subscription_refresh_guard().await;
+
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.subscription_refresh_guard(),
+        )
+        .await
+        .is_err());
+        drop(first);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            state.subscription_refresh_guard(),
+        )
+        .await
+        .is_ok());
+
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn usage_callback_persists_before_returning() {
         let root =
@@ -884,6 +997,8 @@ mod tests {
                 excluded_models: Vec::new(),
                 priority: 0,
                 weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: Default::default(),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
@@ -920,6 +1035,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: true,
             http_status: 200,
             error_category: None,
@@ -1212,12 +1329,13 @@ mod tests {
                 .iter()
                 .map(|permit| permit.account_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["account-1", "account-2"]
+            vec!["account-1", "account-2", "account-3"]
         );
         let first = permits.remove(0);
         assert!(state
             .reschedule_quota_refresh(first, next_due + 1_000)
             .unwrap());
+        assert!(state.complete_quota_refresh(permits.remove(0)).unwrap());
         assert!(state.complete_quota_refresh(permits.remove(0)).unwrap());
         assert!(state
             .mark_quota_refresh("account-1", next_due + 10)
@@ -1489,6 +1607,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn canonical_account_credential_controls_availability() {
+        let mut account = account_record("account_credential");
+        account.account.secret_refs.clear();
+
+        assert!(!account_secret_available(&account, &MemorySecrets(HashMap::new())).unwrap());
+        assert!(account_secret_available(
+            &account,
+            &MemorySecrets(HashMap::from([(
+                "account:codex:account_credential".into(),
+                "credential".into(),
+            )]))
+        )
+        .unwrap());
+    }
+
     fn source_record(id: &str) -> ProviderSourceRecord {
         ProviderSourceRecord {
             id: id.into(),
@@ -1504,6 +1638,8 @@ mod tests {
             excluded_models: Vec::new(),
             priority: 0,
             weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
             last_used_at: None,
             last_test_at: None,
             last_test_status: None,
@@ -1574,6 +1710,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            economics: Default::default(),
             remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
@@ -1641,6 +1778,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success,
             http_status: if success { 200 } else { 500 },
             error_category: (!success).then(|| "upstream".into()),
@@ -1678,6 +1817,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: false,
             http_status,
             error_category: Some("upstream_status".into()),

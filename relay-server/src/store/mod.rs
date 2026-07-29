@@ -1,13 +1,26 @@
+mod affinity;
+mod automations;
+mod backups;
+mod imports;
+mod migrations;
+mod records;
 mod sqlite;
+mod usage;
 pub mod vault;
 
-pub use sqlite::{
-    configuration_revision, ConfigurationReplaceError, ConfigurationReplacement, PendingImport,
-    Store,
-};
-pub(crate) use sqlite::{
-    DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
-    MAX_QUOTA_REFRESH_INTERVAL_SECONDS, MAX_QUOTA_REQUEST_TIMEOUT_SECONDS,
-    MIN_QUOTA_REFRESH_INTERVAL_SECONDS, MIN_QUOTA_REQUEST_TIMEOUT_SECONDS,
-};
+pub use imports::PendingImport;
+pub use records::{configuration_revision, ConfigurationReplaceError, ConfigurationReplacement};
+pub use sqlite::Store;
 pub use vault::Vault;
+
+#[cfg(test)]
+mod test_support {
+    use std::path::PathBuf;
+
+    pub(super) fn test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "zenith-relay-store-{name}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+}

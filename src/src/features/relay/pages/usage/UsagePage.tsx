@@ -1,12 +1,30 @@
-import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useMemo, useState } from "react";
+import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, CreditCard, Database, Download, Gauge, RefreshCw, SlidersHorizontal, Trash2, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { RemoteUsageQuery, RoutingDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
+import type { AccountSummary, DefaultServiceTier, RemoteUsageQuery, RoutingDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
+import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
+import {
+  CONNECTION_COLUMN_IDS,
+  ERROR_COLUMN_IDS,
+  loadRequestTableLayout,
+  MODEL_COLUMN_IDS,
+  reorderColumns,
+  REQUEST_COLUMN_IDS,
+  REQUEST_COLUMN_MAX_WIDTH,
+  REQUEST_COLUMN_MIN_WIDTH,
+  REQUEST_TABLE_LAYOUT_KEY,
+  shiftColumn,
+  useColumnDrag,
+  useStoredColumnOrder,
+  type AggregateColumnId,
+  type ErrorColumnId,
+  type RequestColumnId,
+  type RequestTableLayout,
+} from "./useColumnLayout";
 
 type View = "requests" | "models" | "connections" | "errors";
 type Range = "all" | "daily" | "weekly" | "monthly";
@@ -16,8 +34,9 @@ type UsageRow = {
   success: boolean;
   model: string | null;
   connection: string;
-  key: string;
   wireApi: string | null;
+  serviceTier: DefaultServiceTier | null;
+  appliedServiceTier: DefaultServiceTier | null;
   ttft: number | null;
   duration: number;
   inputTokens: number | null;
@@ -31,148 +50,54 @@ type UsageRow = {
   errorCategory: string | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
+  candidateKind: "account" | "source";
   generationDurationMs: number | null;
+  apiEquivalent: UsageTotals["apiEquivalent"] | null;
 };
+type AccountWindowEconomics = NonNullable<NonNullable<AccountSummary["economics"]>["windows"]>[number];
 
-const REQUEST_COLUMN_IDS = ["time", "status", "model", "connection", "timing", "speed", "tokens", "request"] as const;
-type RequestColumnId = typeof REQUEST_COLUMN_IDS[number];
-type RequestTableLayout = { order: RequestColumnId[]; widths: Partial<Record<RequestColumnId, number>> };
-const AGGREGATE_COLUMN_IDS = ["name", "requests", "success", "breakdown", "total", "speed", "timing"] as const;
-type AggregateColumnId = typeof AGGREGATE_COLUMN_IDS[number];
-const ERROR_COLUMN_IDS = ["time", "model", "connection", "error", "request"] as const;
-type ErrorColumnId = typeof ERROR_COLUMN_IDS[number];
-type ColumnDrag<ColumnId extends string> = { column: ColumnId; pointerId: number; target: ColumnId; after: boolean };
-const REQUEST_TABLE_LAYOUT_KEY = "relay.usageRequestTableLayout";
-const REQUEST_COLUMN_MAX_WIDTH = 480;
-const REQUEST_COLUMN_MIN_WIDTH: Record<RequestColumnId, number> = { time: 130, status: 58, model: 82, connection: 100, timing: 96, speed: 82, tokens: 72, request: 120 };
-
-function loadRequestTableLayout(): RequestTableLayout {
-  const fallback = { order: [...REQUEST_COLUMN_IDS], widths: {} } satisfies RequestTableLayout;
-  try {
-    const parsed = JSON.parse(localStorage.getItem(REQUEST_TABLE_LAYOUT_KEY) ?? "null") as { order?: unknown; widths?: Record<string, unknown> } | null;
-    const order = parsed?.order;
-    if (!Array.isArray(order) || order.length !== REQUEST_COLUMN_IDS.length || new Set(order).size !== REQUEST_COLUMN_IDS.length || !order.every((id) => REQUEST_COLUMN_IDS.includes(id as RequestColumnId))) return fallback;
-    const widths: Partial<Record<RequestColumnId, number>> = {};
-    for (const id of REQUEST_COLUMN_IDS) {
-      const width = Number(parsed?.widths?.[id]);
-      if (Number.isFinite(width)) widths[id] = Math.min(REQUEST_COLUMN_MAX_WIDTH, Math.max(REQUEST_COLUMN_MIN_WIDTH[id], Math.round(width)));
-    }
-    return { order: order as RequestColumnId[], widths: Object.keys(widths).length === REQUEST_COLUMN_IDS.length ? widths : {} };
-  } catch {
-    return fallback;
-  }
-}
-
-function reorderColumns<ColumnId extends string>(order: ColumnId[], column: ColumnId, target: ColumnId, after = false) {
-  if (column === target) return order;
-  const next = order.filter((id) => id !== column);
-  next.splice(next.indexOf(target) + Number(after), 0, column);
-  return next;
-}
-
-function shiftColumn<ColumnId extends string>(order: ColumnId[], column: ColumnId, offset: number) {
-  const from = order.indexOf(column);
-  const to = Math.min(order.length - 1, Math.max(0, from + offset));
-  if (from === to) return order;
-  const next = [...order];
-  next.splice(to, 0, next.splice(from, 1)[0]);
-  return next;
-}
-
-function useStoredColumnOrder<ColumnId extends string>(storageKey: string, defaults: readonly ColumnId[]) {
-  const [order, setOrder] = useState<ColumnId[]>(() => {
-    try {
-      const stored = JSON.parse(localStorage.getItem(storageKey) ?? "null") as unknown;
-      if (Array.isArray(stored) && stored.length === defaults.length && new Set(stored).size === defaults.length && stored.every((id) => defaults.includes(id as ColumnId))) return stored as ColumnId[];
-    } catch { }
-    return [...defaults];
-  });
-  useEffect(() => {
-    try { localStorage.setItem(storageKey, JSON.stringify(order)); } catch { }
-  }, [order, storageKey]);
-  return [order, setOrder] as const;
-}
-
-function useColumnDrag<ColumnId extends string>(moveColumn: (column: ColumnId, target: ColumnId, after: boolean) => void, moveColumnBy: (column: ColumnId, offset: number) => void) {
-  const [drag, setDrag] = useState<ColumnDrag<ColumnId> | null>(null);
-  const dragRef = useRef<ColumnDrag<ColumnId> | null>(null);
-  const cancel = () => { dragRef.current = null; setDrag(null); };
-  const bind = (column: ColumnId) => ({
-    onPointerDown: (event: PointerEvent<HTMLButtonElement>) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      event.currentTarget.setPointerCapture(event.pointerId);
-      const next = { column, pointerId: event.pointerId, target: column, after: false };
-      dragRef.current = next;
-      setDrag(next);
-    },
-    onPointerMove: (event: PointerEvent<HTMLButtonElement>) => {
-      const current = dragRef.current;
-      const table = event.currentTarget.closest("table");
-      if (!current || current.pointerId !== event.pointerId || !(table instanceof HTMLTableElement)) return;
-      const headers = Array.from(table.querySelectorAll<HTMLTableCellElement>("thead th[data-column]"));
-      const target = headers.find((header) => event.clientX <= header.getBoundingClientRect().right) ?? headers[headers.length - 1];
-      if (!target) return;
-      const bounds = target.getBoundingClientRect();
-      const targetId = target.dataset.column as ColumnId;
-      const after = event.clientX > bounds.left + bounds.width / 2;
-      if (current.target === targetId && current.after === after) return;
-      const next = { ...current, target: targetId, after };
-      dragRef.current = next;
-      setDrag(next);
-    },
-    onPointerUp: (event: PointerEvent<HTMLButtonElement>) => {
-      const current = dragRef.current;
-      if (!current || current.pointerId !== event.pointerId) return;
-      if (current.column !== current.target) moveColumn(current.column, current.target, current.after);
-      cancel();
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    },
-    onPointerCancel: cancel,
-    onLostPointerCapture: () => { if (dragRef.current?.column === column) cancel(); },
-    onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => {
-      if (!event.altKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-      event.preventDefault();
-      moveColumnBy(column, event.key === "ArrowLeft" ? -1 : 1);
-    },
-  });
-  return { bind, drag };
-}
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
+  const { mode, runtime, runtimeRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
   const [range, setRange] = useState<Range>("weekly");
   const [modelQuery, setModelQuery] = useState("");
   const [connectionQuery, setConnectionQuery] = useState("");
-  const [keyQuery, setKeyQuery] = useState("");
   const [wireApi, setWireApi] = useState("");
   const [errorQuery, setErrorQuery] = useState("");
   const [requestQuery, setRequestQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [selectedAccountId, setSelectedAccountId] = useState("");
   const [usageLoading, setUsageLoading] = useState(false);
   const [usageError, setUsageError] = useState(false);
   const [selected, setSelected] = useState<UsageRow | null>(null);
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const requestFiltersActive = view === "requests";
+  const selectedAccount = runtime?.accounts.find((account) => account.id === selectedAccountId) ?? null;
+  const knownPoolMemberGroups = mode === "local" ? localUsagePage?.poolMembers : mode === "remote" ? remoteUsagePage?.poolMembers : undefined;
+  const selectedAccountGroup = selectedAccount && mode === "remote"
+    ? knownPoolMemberGroups?.find((group) => (accountDisplayName(null, group.label) ?? group.label) === selectedAccount.label)
+    : null;
+  const selectedAccountQuery = selectedAccount
+    ? mode === "remote" ? selectedAccountGroup?.key ?? selectedAccount.id : selectedAccount.id
+    : undefined;
   const usageQuery = useMemo<RemoteUsageQuery>(() => ({
     page,
     pageSize: 50,
     range: range === "all" ? undefined : range,
     modelQuery: requestFiltersActive ? modelQuery.trim() || undefined : undefined,
-    sourceOrAccountQuery: requestFiltersActive ? connectionQuery.trim() || undefined : undefined,
-    localKeyQuery: requestFiltersActive ? keyQuery.trim() || undefined : undefined,
+    sourceOrAccountQuery: selectedAccountQuery ?? (requestFiltersActive ? connectionQuery.trim() || undefined : undefined),
     wireApi: requestFiltersActive && wireApi ? wireApi as RemoteUsageQuery["wireApi"] : undefined,
     success: view === "errors" ? false : requestFiltersActive && status !== "all" ? status === "success" : undefined,
     errorCategory: requestFiltersActive ? errorQuery.trim() || undefined : undefined,
     requestIdQuery: requestFiltersActive ? requestQuery.trim() || undefined : undefined,
-  }), [page, range, modelQuery, connectionQuery, keyQuery, wireApi, status, errorQuery, requestQuery, view]);
+  }), [page, range, modelQuery, connectionQuery, wireApi, status, errorQuery, requestQuery, view, selectedAccountQuery]);
 
   useEffect(() => {
-    if (mode === "zenith" || !remoteUsageSupported) {
+    if (mode === "zenith" || !runtime || !remoteUsageSupported) {
       setUsageLoading(false);
       return;
     }
@@ -186,20 +111,21 @@ export function UsagePage() {
         .finally(() => active && setUsageLoading(false));
     }, 200);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [mode, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
+  }, [mode, runtimeRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
   useEffect(() => {
     setPage(1);
     setSelected(null);
+    setSelectedAccountId("");
   }, [mode]);
 
   const accountLabels = useMemo(() => new Map(runtime?.accounts.map((account) => [account.id, account.label]) ?? []), [runtime?.accounts]);
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
-    if (mode === "zenith") return readyUsage.map((item) => ({ id: item.id, time: item.createdAt, success: item.status === "success", model: item.modelDisplay || item.model, connection: "Zenith API", key: "Zenith API", wireApi: null, ttft: item.timeToFirstByteMs ?? null, duration: item.streamDurationMs ?? item.timeToFirstByteMs ?? 0, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.status === "success" ? 200 : null, errorCategory: item.status === "success" ? null : item.status, routing: null, accountId: null, generationDurationMs: item.streamDurationMs ?? item.timeToFirstByteMs ?? null }));
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, generationDurationMs: item.generationMs ?? null }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), key: item.localKeyId, wireApi: item.wireApi, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, generationDurationMs: item.generationMs }));
-  }, [mode, readyUsage, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
+    if (mode === "zenith") return [];
+    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, generationDurationMs: item.generationMs ?? null, apiEquivalent: item.apiEquivalent ?? null }));
+    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), generationDurationMs: item.generationMs, apiEquivalent: item.apiEquivalent ?? null }));
+  }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   const cutoff = range === "all" ? 0 : Date.now() - (range === "daily" ? 1 : range === "weekly" ? 7 : 30) * 24 * 60 * 60 * 1_000;
   const filtered = mode !== "zenith" ? rows : rows.filter((item) => {
     if (new Date(item.time).getTime() < cutoff) return false;
@@ -209,7 +135,6 @@ export function UsagePage() {
       && (!requestQuery.trim() || item.requestId?.toLocaleLowerCase().includes(requestQuery.trim().toLocaleLowerCase()))
       && (!modelQuery.trim() || item.model?.toLocaleLowerCase().includes(modelQuery.trim().toLocaleLowerCase()))
       && (!connectionQuery.trim() || item.connection.toLocaleLowerCase().includes(connectionQuery.trim().toLocaleLowerCase()))
-      && (!keyQuery.trim() || item.key.toLocaleLowerCase().includes(keyQuery.trim().toLocaleLowerCase()))
       && (!wireApi || item.wireApi === wireApi)
       && (!errorQuery.trim() || item.errorCategory === errorQuery.trim());
   });
@@ -223,20 +148,21 @@ export function UsagePage() {
   const speedUnit = t("usage.tokensPerSecondUnit");
   const formatTime = (value: string) => new Intl.DateTimeFormat(i18n.language, { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
   const resetPage = (work: () => void) => { work(); setPage(1); setSelected(null); };
-  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory }))), "feedback.exported");
-  const reloadUsage = () => mode === "local" ? loadLocalUsage(usageQuery) : mode === "remote" ? loadRemoteUsage(usageQuery) : Promise.resolve();
+  const exportRows = () => perform("usage-export", () => relayCommands.exportUsage(filtered.map((row) => ({ time: row.time, success: row.success, model: row.model, connection: row.connection, latencyMs: row.duration, ttftMs: row.ttft, inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, cacheWriteInputTokens: row.cacheWriteInputTokens, reasoningTokens: row.reasoningTokens, outputTokens: row.outputTokens, tokens: row.tokens, requestId: row.requestId, httpStatus: row.httpStatus, errorCategory: row.errorCategory, serviceTier: row.serviceTier ?? undefined, appliedServiceTier: row.appliedServiceTier }))), "feedback.exported");
   const clearLogs = async () => {
     if (!await confirm(t("usage.clearConfirm"), { danger: true })) return;
     setPage(1);
-    if (await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared")) await reloadUsage();
+    await perform("usage-clear", () => mode === "local" ? relayCommands.clearLocalUsage() : relayCommands.remoteAction({ type: "clear_usage" }), "feedback.cleared");
   };
   const canClear = mode === "local" || (mode === "remote" && remoteUsageSupported);
-  const refreshUsage = async () => { await refresh(); await reloadUsage(); };
+  const refreshUsage = refresh;
   const modelGroups = usagePage?.models;
   const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("common.unknown") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
+  const modelOptions = [{ value: "", label: t("usage.anyModel") }, ...Array.from(new Set([...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])])).filter(Boolean).sort().map((value) => ({ value, label: value }))];
+  const poolMemberOptions = [{ value: "", label: t("usage.anyPoolMember") }, ...(poolMemberGroups ?? []).filter((group) => group.key).map((group) => ({ value: group.key, label: group.label || group.key })).sort((left, right) => left.label.localeCompare(right.label, i18n.language))];
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
-    setKeyQuery(""); setWireApi(""); setErrorQuery(""); setRequestQuery("");
+    setWireApi(""); setErrorQuery(""); setRequestQuery("");
     setPage(1); setSelected(null);
   };
 
@@ -245,11 +171,15 @@ export function UsagePage() {
   }
 
   return <section className="relay-page">
-    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
+    <PageHeader title={t("nav.usage")} subtitle={t("usage.subtitle")} actions={<><ActionMenu className="usage-overflow"><ActionMenuItem icon={<Download aria-hidden />} disabled={usageLoading || busy === "usage-export"} onClick={exportRows}>{t("common.export")}</ActionMenuItem><ActionMenuItem danger icon={<Trash2 aria-hidden />} disabled={!canClear} title={!canClear ? t("usage.clearUnavailable") : undefined} onClick={clearLogs}>{t("usage.clearLogs")}</ActionMenuItem></ActionMenu><Button variant="primary" icon={<RefreshCw aria-hidden />} busy={loading || usageLoading} onClick={() => void refreshUsage()}>{t("common.refresh")}</Button></>} />
     <div className="usage-view-toolbar">
       <Tabs value={view} onChange={(id) => { setView(id as View); setPage(1); setSelected(null); }} label={t("usage.views")} items={[{ id: "requests", label: t("usage.requests") }, { id: "models", label: t("common.models") }, { id: "connections", label: t("usage.poolMembers") }, { id: "errors", label: t("overview.errors") }]} />
-      <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
+      <div className="usage-scope-controls">
+        {mode !== "zenith" && runtime?.accounts.length ? <OptionMenu className="usage-account-menu" label={t("usage.account")} value={selectedAccountId} onChange={(value) => resetPage(() => { setSelectedAccountId(value); setConnectionQuery(""); })} options={[{ value: "", label: t("usage.allAccounts") }, ...runtime.accounts.map((account) => ({ value: account.id, label: account.label }))]} /> : null}
+        <OptionMenu className="usage-range-menu" label={t("usage.range")} value={range} onChange={(value) => resetPage(() => setRange(value as Range))} icon={<CalendarDays aria-hidden />} options={[{ value: "daily", label: t("usage.daily") }, { value: "weekly", label: t("usage.weekly") }, { value: "monthly", label: t("usage.monthly") }, { value: "all", label: t("common.all") }]} />
+      </div>
     </div>
+    {selectedAccount ? <AccountUsageEconomics account={selectedAccount} totals={totals} /> : null}
     <section className="usage-overview" aria-label={t("usage.summary")}>
       <div className="usage-metrics">
         <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} />
@@ -264,8 +194,7 @@ export function UsagePage() {
         <UsageMetric label={t("usage.effectiveSpeed")} value={formatTokenSpeed(averageEffectiveSpeed, i18n.resolvedLanguage ?? i18n.language, speedUnit)} />
       </div>
     </section>
-    <div className="usage-data-toolbar"><Button variant="secondary" icon={<Download aria-hidden />} busy={busy === "usage-export"} disabled={usageLoading} onClick={exportRows}>{t("common.export")}</Button></div>
-    {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} keyQuery={keyQuery} setKeyQuery={(value) => resetPage(() => setKeyQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
+    {view === "requests" ? <RequestsView rows={filtered} status={status} setStatus={(value) => resetPage(() => setStatus(value))} modelQuery={modelQuery} modelOptions={modelOptions} setModelQuery={(value) => resetPage(() => setModelQuery(value))} connectionQuery={connectionQuery} poolMemberOptions={poolMemberOptions} setConnectionQuery={(value) => resetPage(() => setConnectionQuery(value))} wireApi={wireApi} setWireApi={(value) => resetPage(() => setWireApi(value))} errorQuery={errorQuery} setErrorQuery={(value) => resetPage(() => setErrorQuery(value))} requestQuery={requestQuery} setRequestQuery={(value) => resetPage(() => setRequestQuery(value))} clearFilters={clearFilters} formatTime={formatTime} onSelect={setSelected} /> : null}
     {view === "models" ? <AggregateView rows={filtered} groups={modelGroups} field="model" empty={t("usage.empty")} /> : null}
     {view === "connections" ? <AggregateView rows={filtered} groups={poolMemberGroups} field="connection" empty={t("usage.empty")} /> : null}
     {view === "errors" ? <ErrorsView rows={filtered.filter((item) => !item.success)} formatTime={formatTime} onSelect={setSelected} /> : null}
@@ -275,22 +204,22 @@ export function UsagePage() {
   </section>;
 }
 
-function RequestsView({ rows, status, setStatus, modelQuery, setModelQuery, connectionQuery, setConnectionQuery, keyQuery, setKeyQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; setModelQuery: (value: string) => void; connectionQuery: string; setConnectionQuery: (value: string) => void; keyQuery: string; setKeyQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
+function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setModelQuery, connectionQuery, poolMemberOptions, setConnectionQuery, wireApi, setWireApi, errorQuery, setErrorQuery, requestQuery, setRequestQuery, clearFilters, formatTime, onSelect }: { rows: UsageRow[]; status: string; setStatus: (value: string) => void; modelQuery: string; modelOptions: Array<{ value: string; label: string }>; setModelQuery: (value: string) => void; connectionQuery: string; poolMemberOptions: Array<{ value: string; label: string }>; setConnectionQuery: (value: string) => void; wireApi: string; setWireApi: (value: string) => void; errorQuery: string; setErrorQuery: (value: string) => void; requestQuery: string; setRequestQuery: (value: string) => void; clearFilters: () => void; formatTime: (value: string) => string; onSelect: (row: UsageRow) => void }) {
   const { t } = useTranslation();
   const [showMoreFilters, setShowMoreFilters] = useState(false);
-  const secondaryCount = [keyQuery, wireApi, errorQuery, requestQuery].filter(Boolean).length;
+  const secondaryCount = [wireApi, errorQuery, requestQuery].filter(Boolean).length;
   const hasFilters = status !== "all" || Boolean(modelQuery || connectionQuery || secondaryCount);
+  const errorOptions = [{ value: "", label: t("usage.anyErrorCategory") }, ...Array.from(new Set([...rows.flatMap((row) => row.errorCategory ? [row.errorCategory] : []), ...(errorQuery ? [errorQuery] : [])])).sort().map((value) => ({ value, label: formatErrorCategory(value, t) }))];
   return <><div className="usage-filter-panel">
     <div className="usage-filters usage-filter-primary">
       <OptionMenu className="filter-option-menu" label={t("common.status")} value={status} onChange={setStatus} options={[{ value: "all", label: t("usage.anyStatus") }, { value: "success", label: t("common.success") }, { value: "failed", label: t("common.failed") }]} />
-      <input value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} aria-label={t("common.model")} placeholder={t("common.model")} />
-      <input value={connectionQuery} onChange={(event) => setConnectionQuery(event.target.value)} aria-label={t("usage.poolMember")} placeholder={t("usage.poolMember")} />
+      <OptionMenu className="filter-option-menu" label={t("common.model")} value={modelQuery} onChange={setModelQuery} options={modelOptions} />
+      <OptionMenu className="filter-option-menu" label={t("usage.poolMember")} value={connectionQuery} onChange={setConnectionQuery} options={poolMemberOptions} />
     </div>
     <div className="usage-filter-controls">{hasFilters ? <IconButton label={t("usage.clearFilters")} icon={<X aria-hidden />} onClick={clearFilters} /> : null}<span className="usage-filter-toggle-wrap"><IconButton className="usage-filter-toggle" label={t("usage.moreFilters")} icon={<SlidersHorizontal aria-hidden />} aria-expanded={showMoreFilters} onClick={() => setShowMoreFilters((current) => !current)} />{secondaryCount ? <small>{secondaryCount}</small> : null}</span></div>
     {showMoreFilters ? <div className="usage-filters usage-filter-secondary">
-      <input value={keyQuery} onChange={(event) => setKeyQuery(event.target.value)} aria-label={t("usage.localKey")} placeholder={t("usage.localKey")} />
       <OptionMenu className="filter-option-menu" label={t("usage.protocol")} value={wireApi} onChange={setWireApi} options={[{ value: "", label: t("usage.anyProtocol") }, { value: "responses", label: "Responses" }, { value: "chat_completions", label: "Chat Completions" }]} />
-      <input value={errorQuery} onChange={(event) => setErrorQuery(event.target.value)} aria-label={t("usage.errorCategory")} placeholder={t("usage.errorCategory")} />
+      <OptionMenu className="filter-option-menu" label={t("usage.errorCategory")} value={errorQuery} onChange={setErrorQuery} options={errorOptions} />
       <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
     </div> : null}
   </div>{rows.length ? <RequestTable rows={rows} formatTime={formatTime} onSelect={onSelect} /> : <EmptyState title={t("common.noResults")} description={t("common.noResultsHint")} />}</>;
@@ -308,10 +237,12 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
     status: { label: t("common.status"), cell: (row) => <StatusIcon status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} /> },
     model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
+    tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
     timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration) },
     speed: { label: t("usage.speed"), cell: (row) => formatTokenSpeed(tokenSpeed(rowSpeedSample(row)), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
+    equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
   };
   const resized = REQUEST_COLUMN_IDS.every((id) => layout.widths[id] != null);
@@ -383,12 +314,14 @@ type AggregateRow = {
   duration: number;
   speed: number | null;
   generationSpeed: number | null;
+  apiEquivalent: UsageTotals["apiEquivalent"];
 };
 
 function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]; groups?: UsageGroup[]; field: "model" | "connection"; empty: string }) {
   const { t, i18n } = useTranslation();
   const aggregateRows = groups?.map(({ key, label, totals }) => aggregateRowFromTotals(label || key || t("common.unknown"), totals)) ?? aggregateRowsFromUsage(rows, field, t("common.unknown"));
-  const [order, setOrder] = useStoredColumnOrder(`relay.usage.${field}ColumnOrder`, AGGREGATE_COLUMN_IDS);
+  const defaults: readonly AggregateColumnId[] = field === "model" ? MODEL_COLUMN_IDS : CONNECTION_COLUMN_IDS;
+  const [order, setOrder] = useStoredColumnOrder(`relay.usage.${field}ColumnOrder.v2`, defaults);
   const moveColumn = (column: AggregateColumnId, target: AggregateColumnId, after: boolean) => setOrder((current) => reorderColumns(current, column, target, after));
   const moveColumnBy = (column: AggregateColumnId, offset: number) => setOrder((current) => shiftColumn(current, column, offset));
   const { bind, drag } = useColumnDrag(moveColumn, moveColumnBy);
@@ -400,6 +333,10 @@ function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]; group
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
     speed: { label: t("usage.generationSpeed"), cell: (group) => formatTokenSpeed(group.generationSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
     timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests)) },
+    input: { label: t("usage.inputTokens"), cell: (group) => <CompactNumber value={group.inputTokens} locale={i18n.language} /> },
+    output: { label: t("usage.outputTokens"), cell: (group) => <CompactNumber value={group.outputTokens} locale={i18n.language} /> },
+    cache: { label: t("usage.cachedInputTokens"), cell: (group) => group.cachedInputSamples ? <CompactNumber value={group.cachedInputTokens} locale={i18n.language} /> : "—" },
+    equivalent: { label: t("usage.value"), cell: (group) => formatApiEquivalent(group.apiEquivalent, i18n.language) },
   };
   if (!aggregateRows.length) return <EmptyState title={t("usage.emptyTitle")} description={empty} />;
   return <div className="relay-table-wrap"><table className="relay-table usage-aggregate-table usage-sortable-table">
@@ -434,7 +371,14 @@ function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () => void }
   const { t, i18n } = useTranslation();
   const routing = row.routing;
   const speed = rowSpeedSample(row);
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}><dl className="detail-list"><div><dt>{t("usage.requestId")}</dt><dd><code>{row.requestId ?? "-"}</code></dd></div><div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div><div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div><div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div><div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div><div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div><div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div><div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div><div><dt>{t("usage.totalTime")}</dt><dd>{row.duration} ms</dd></div><div><dt>{t("usage.generationSpeed")}</dt><dd>{formatTokenSpeed(generationTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.effectiveSpeed")}</dt><dd>{formatTokenSpeed(effectiveTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div><div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div><div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div><div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div><div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>{routing ? <><div className="detail-section-heading"><dt>{t("usage.routingDiagnostics")}</dt><dd /></div><div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div><div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div><div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div><div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div><div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div></> : null}</dl><p className="form-note">{t("usage.redactionHint")}</p></Dialog>;
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}><dl className="detail-list"><div><dt>{t("usage.requestId")}</dt><dd><code>{row.requestId ?? "-"}</code></dd></div><div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div><div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div><div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div><div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div><div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div><div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div><div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div><div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div><div><dt>{t("usage.totalTime")}</dt><dd>{row.duration} ms</dd></div><div><dt>{t("usage.generationSpeed")}</dt><dd>{formatTokenSpeed(generationTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.effectiveSpeed")}</dt><dd>{formatTokenSpeed(effectiveTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div><div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div><div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div><div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div><div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div><div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>{routing ? <><div className="detail-section-heading"><dt>{t("usage.routingDiagnostics")}</dt><dd /></div><div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div><div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>{row.candidateKind === "account" ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div> : null}<div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div><div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div></> : null}</dl><p className="form-note">{t("usage.redactionHint")}</p></Dialog>;
+}
+
+function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {
+  if (!row.serviceTier) return fallback;
+  const requested = t(`pool.serviceTiers.${row.serviceTier}`);
+  if (!row.appliedServiceTier || row.appliedServiceTier === row.serviceTier) return requested;
+  return `${requested} → ${t(`pool.serviceTiers.${row.appliedServiceTier}`)}`;
 }
 
 function formatErrorCategory(category: string | null, t: TFunction): string {
@@ -477,7 +421,13 @@ function totalsFromRows(rows: UsageRow[]): UsageTotals {
       totals.speedOutputTokens += visibleOutputTokens;
       totals.speedDurationMs += row.duration;
     }
-    totals.apiEquivalent.unpricedTokens += row.tokens ?? 0;
+    if (row.apiEquivalent) {
+      totals.apiEquivalent.microUsd += row.apiEquivalent.microUsd;
+      totals.apiEquivalent.pricedTokens += row.apiEquivalent.pricedTokens;
+      totals.apiEquivalent.unpricedTokens += row.apiEquivalent.unpricedTokens;
+    } else {
+      totals.apiEquivalent.unpricedTokens += row.tokens ?? 0;
+    }
     return totals;
   }, emptyTotals());
 }
@@ -518,6 +468,7 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
     duration: totals.latencyMs,
     speed: totals.speedDurationMs ? totals.speedOutputTokens * 1_000 / totals.speedDurationMs : null,
     generationSpeed: totals.generationMs ? totals.generationOutputTokens * 1_000 / totals.generationMs : null,
+    apiEquivalent: totals.apiEquivalent,
   };
 }
 
@@ -545,4 +496,82 @@ function formatApiEquivalent(value: UsageTotals["apiEquivalent"], locale: string
     maximumFractionDigits: 4,
   }).format(value.microUsd / 1_000_000);
   return `≈${amount}${value.unpricedTokens ? "*" : ""}`;
+}
+
+function AccountUsageEconomics({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const economics = account.economics;
+  const nowMs = Date.now();
+  const windows = (["primary", "secondary"] as const).map((kind) => ({
+    kind,
+    quota: account.quota[kind],
+    economics: economics?.windows?.find((window) => window.kind === kind),
+    benchmark: economics?.windows?.find((window) => window.kind === kind)?.planBenchmark ?? null,
+  })).filter(({ quota }) => Boolean(quota));
+  const benchmarkPotential = windows
+    .filter(({ benchmark }) => benchmark?.potentialMicroUsd != null)
+    .sort((left, right) => (right.quota?.windowMinutes ?? 0) - (left.quota?.windowMinutes ?? 0))[0]
+    ?.benchmark?.potentialMicroUsd ?? null;
+  const benchmarkAvailableNow = windows
+    .map(({ benchmark }) => benchmark?.potentialMicroUsd ?? null)
+    .filter((value): value is number => value != null)
+    .sort((left, right) => left - right)[0] ?? null;
+  const potential = economics?.potentialMicroUsd ?? benchmarkPotential;
+  const availableNow = economics?.availableNowMicroUsd ?? benchmarkAvailableNow;
+  const estimateSource = economics?.potentialMicroUsd != null ? t("usage.estimateSourceAccount") : benchmarkPotential != null ? t("usage.estimateSourcePlan") : undefined;
+  const potentialRequests = economics?.potentialRequests ?? null;
+  const observedPercent = (economics?.observedBasisPoints ?? 0) / 100;
+  const potentialDetail = economics?.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
+    ? t("usage.estimateRange", { low: formatMicroUsd(economics.potentialLowMicroUsd, locale), high: formatMicroUsd(economics.potentialHighMicroUsd, locale) })
+    : undefined;
+  return <section className="usage-account-economics" aria-label={t("usage.accountEconomics", { account: account.label })}>
+    <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details><summary>{t("usage.howCalculated")}</summary><p>{t("usage.calculationHint")}</p></details></header>
+    <div className="usage-account-metrics">
+      <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalentUsed")} value={formatApiEquivalent(totals.apiEquivalent, locale)} />
+      <UsageMetric icon={<Gauge aria-hidden />} label={t("usage.potential")} value={potential == null ? t("usage.collectingEstimate") : formatMicroUsd(potential, locale, true)} detail={potentialDetail ?? estimateSource} />
+      <UsageMetric icon={<Activity aria-hidden />} label={t("usage.availableNow")} value={availableNow == null ? "—" : formatMicroUsd(availableNow, locale, true)} />
+      <UsageMetric icon={<Activity aria-hidden />} label={t("usage.similarRequests")} value={potentialRequests == null ? "—" : `≈${formatCompactNumber(potentialRequests, locale)}`} />
+      <UsageMetric icon={<Database aria-hidden />} label={t("usage.calibration")} value={`${new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(observedPercent)}%`} detail={economics ? t("usage.sampleCount", { count: economics.sampleCount }) : undefined} />
+    </div>
+    <div className="relay-table-wrap"><table className="relay-table usage-window-table"><thead><tr><th>{t("usage.window")}</th><th>{t("usage.remaining")}</th><th>{t("usage.potential")}</th><th>{t("usage.planBenchmark")}</th><th>{t("usage.tokens")}</th><th>{t("usage.similarRequests")}</th><th>{t("usage.serviceTier")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{windows.map(({ kind, quota, economics: windowEconomics, benchmark }) => <tr key={kind}><th scope="row">{formatWindowDuration(quota?.windowMinutes ?? null, locale, t("usage.window"))}</th><td>{formatQuotaRemaining(quota?.availableBasisPoints ?? null, locale)}</td><td>{formatPotentialEstimate(windowEconomics, locale, t)}</td><td>{benchmark ? <div className="usage-estimate-value"><strong>{benchmark.potentialMicroUsd == null ? "—" : formatMicroUsd(benchmark.potentialMicroUsd, locale, true)}</strong><small>{t("usage.planBenchmarkDetail", { plan: formatAccountPlan(benchmark.plan, t("common.unknown")), tier: t(`pool.serviceTiers.${benchmark.serviceTier}`), count: benchmark.accountCount, cycles: benchmark.cycleCount })}</small><small>{t("usage.planBenchmarkRange", { low: formatMicroUsd(benchmark.lowFullWindowMicroUsd, locale), high: formatMicroUsd(benchmark.highFullWindowMicroUsd, locale), mean: formatMicroUsd(benchmark.meanFullWindowMicroUsd, locale) })}</small>{benchmark.weeklyEquivalentMicroUsd != null ? <small>{t("usage.weeklyEquivalent", { value: formatMicroUsd(benchmark.weeklyEquivalentMicroUsd, locale, true) })}</small> : null}{benchmark.stale ? <small>{t("usage.estimateStale")}</small> : null}</div> : "—"}</td><td>{windowEconomics?.potentialTotalTokens == null ? "—" : `≈${formatCompactNumber(windowEconomics.potentialTotalTokens, locale)}`}</td><td>{windowEconomics?.potentialRequests == null ? "—" : `≈${formatCompactNumber(windowEconomics.potentialRequests, locale)}`}</td><td>{formatTierEstimates(windowEconomics?.serviceTiers, locale, t)}</td><td>{quota?.resetAtMs == null ? "—" : formatDetailedRemainingTime(quota.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div>
+    {economics?.cycles?.length ? <div className="relay-table-wrap"><table className="relay-table usage-cycle-table"><thead><tr><th>{t("usage.cycle")}</th><th>{t("common.status")}</th><th>{t("usage.serviceTier")}</th><th>{t("usage.apiEquivalent")}</th><th>{t("usage.completed")}</th></tr></thead><tbody>{economics.cycles.map((cycle) => <tr key={`${cycle.fingerprint}-${cycle.windowKind}`}><td>{formatWindowDuration(cycle.windowMinutes, locale, t("usage.window"))}</td><td>{t(`usage.cycleStatuses.${cycle.status}`)}</td><td>{cycle.serviceTier ? t(`pool.serviceTiers.${cycle.serviceTier}`) : t("usage.mixedTier")}</td><td>{cycle.apiEquivalentMicroUsd == null ? "—" : formatMicroUsd(cycle.apiEquivalentMicroUsd, locale, true)}</td><td>{new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(cycle.completedAtMs)}</td></tr>)}</tbody></table></div> : null}
+    {economics?.observations?.length ? <div className="relay-table-wrap"><table className="relay-table usage-quota-observation-table"><thead><tr><th>{t("usage.observed")}</th><th>{t("usage.window")}</th><th>{t("usage.observationSource")}</th><th>{t("usage.used")}</th><th>{t("usage.remaining")}</th><th>{t("usage.quotaChange")}</th><th>{t("usage.resolution")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{economics.observations.map((observation) => <tr key={`${observation.windowKind}-${observation.observedAtMs}-${observation.source}`}><td>{new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(observation.observedAtMs)}</td><td>{formatWindowDuration(observation.windowMinutes, locale, t("usage.window"))}</td><td>{t(`usage.observationSources.${observation.source}`)}</td><td>{formatQuotaRemaining(observation.usedBasisPoints, locale)}</td><td>{formatQuotaRemaining(observation.availableBasisPoints, locale)}</td><td>{formatQuotaDelta(observation.deltaBasisPoints, locale)}</td><td>{formatQuotaRemaining(observation.resolutionBasisPoints, locale)}</td><td>{observation.resetAtMs == null ? "—" : formatDetailedRemainingTime(observation.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div> : null}
+  </section>;
+}
+
+function formatPotentialEstimate(economics: AccountWindowEconomics | undefined, locale: string, t: TFunction) {
+  if (economics?.potentialMicroUsd == null) return "—";
+  const range = economics.potentialLowMicroUsd != null && economics.potentialHighMicroUsd != null
+    ? t("usage.estimateRange", { low: formatMicroUsd(economics.potentialLowMicroUsd, locale), high: formatMicroUsd(economics.potentialHighMicroUsd, locale) })
+    : null;
+  const perPercent = economics.fullWindowMicroUsd == null ? null : formatMicroUsd(economics.fullWindowMicroUsd / 100, locale);
+  return <div className="usage-estimate-value"><strong>{formatMicroUsd(economics.potentialMicroUsd, locale, true)}</strong>{perPercent ? <small>{t("usage.perQuotaPercent", { value: perPercent })}</small> : null}{range ? <small>{range}</small> : null}{economics.confidence ? <small>{t("usage.estimateConfidence", { value: t(`accounts.economics.confidenceLevels.${economics.confidence}`) })}</small> : null}</div>;
+}
+
+function formatWindowDuration(minutes: number | null, locale: string, fallback: string) {
+  if (!minutes) return fallback;
+  const units: Array<[number, Intl.NumberFormatOptions["unit"]]> = [[10_080, "week"], [1_440, "day"], [60, "hour"], [1, "minute"]];
+  const [size, unit] = units.find(([size]) => minutes % size === 0) ?? units[units.length - 1];
+  return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 1 }).format(minutes / size);
+}
+
+function formatTierEstimates(tiers: Array<{ serviceTier: DefaultServiceTier; potentialMicroUsd: number | null }> | undefined, locale: string, t: TFunction) {
+  if (!tiers?.length) return "—";
+  return <div className="usage-tier-breakdown">{tiers.map((tier) => <span key={tier.serviceTier}>{t(`pool.serviceTiers.${tier.serviceTier}`)} {tier.potentialMicroUsd == null ? "—" : formatMicroUsd(tier.potentialMicroUsd, locale, true)}</span>)}</div>;
+}
+
+function formatMicroUsd(value: number, locale: string, approximate = false) {
+  const amount = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value / 1_000_000);
+  return `${approximate ? "≈" : ""}${amount}`;
+}
+
+function formatQuotaRemaining(basisPoints: number | null, locale: string) {
+  return basisPoints == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(basisPoints / 10_000);
+}
+
+function formatQuotaDelta(basisPoints: number, locale: string) {
+  if (!basisPoints) return "—";
+  const value = new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1, signDisplay: "always" }).format(basisPoints / 10_000);
+  return value;
 }

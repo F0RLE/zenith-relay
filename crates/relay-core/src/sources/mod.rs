@@ -1,3 +1,9 @@
+mod stats;
+
+pub use stats::{fetch_source_provider_stats, SourceProviderStats, SourceStatsProvider};
+#[cfg(test)]
+use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
+
 use crate::{Error, Result};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
@@ -204,5 +210,57 @@ mod tests {
             "https://provider.example.test/v1",
             "https://relay.example.test/v1"
         ));
+    }
+
+    #[test]
+    fn provider_stats_use_numeric_micro_usd_and_reject_lookalike_hosts() {
+        assert_eq!(
+            source_stats_endpoint(
+                SourceStatsProvider::Zenith,
+                "https://api.zenithmarket.dev/v1"
+            )
+            .unwrap()
+            .as_str(),
+            "https://api.zenithmarket.dev/v1/zenith/key/stats"
+        );
+        assert_eq!(
+            source_stats_endpoint(
+                SourceStatsProvider::OpenRouter,
+                "https://openrouter.ai/api/v1/"
+            )
+            .unwrap()
+            .as_str(),
+            "https://openrouter.ai/api/v1/credits"
+        );
+        assert_eq!(
+            source_stats_provider("https://api.zenithmarket.dev/v1"),
+            SourceStatsProvider::Zenith
+        );
+        assert_eq!(
+            source_stats_provider("https://openrouter.ai.evil.test/api/v1"),
+            SourceStatsProvider::Unsupported
+        );
+        let stats = openrouter_stats(&serde_json::json!({
+            "data": { "total_credits": 12.5, "total_usage": 2.25 }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&stats).unwrap()["provider"],
+            "openrouter"
+        );
+        assert_eq!(stats.balance_micro_usd, Some(10_250_000));
+        assert_eq!(stats.spent_micro_usd, Some(2_250_000));
+        let stats = zenith_stats(&serde_json::json!({
+            "data": {
+                "displayBalanceMicrousd": 1234567,
+                "spentCents": 250,
+                "requests": 7,
+                "totalTokens": 99
+            }
+        }))
+        .unwrap();
+        assert_eq!(stats.balance_micro_usd, Some(1_234_567));
+        assert_eq!(stats.spent_micro_usd, Some(2_500_000));
+        assert_eq!(stats.requests, Some(7));
     }
 }

@@ -5,6 +5,7 @@ use crate::local_pool::{
         proxy::{COMMON_PROXY_SECRET_REF, PROXY_POOL_SECRET_REF},
         NativeSecretBackend,
     },
+    commands::profiles::restore_managed_profiles_before_reset,
     error::{CommandError, ErrorCode, LocalPoolError},
     state::DesktopState,
     store::secret_store,
@@ -14,7 +15,7 @@ use std::{fs, path::Path};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use zenith_relay_core::accounts::AccountExportDocument;
+use zenith_relay_core::{accounts::AccountExportDocument, DefaultServiceTier};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -44,6 +45,8 @@ pub struct UsageExportRow {
     request_id: Option<String>,
     http_status: Option<u16>,
     error_category: Option<String>,
+    service_tier: Option<DefaultServiceTier>,
+    applied_service_tier: Option<DefaultServiceTier>,
 }
 
 #[derive(Clone, Serialize)]
@@ -124,6 +127,7 @@ pub fn open_relay_folder(
 #[tauri::command]
 pub async fn reset_local_pool_data(state: State<'_, DesktopState>) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
+    restore_managed_profiles_before_reset(&state).await?;
     state.gateway.stop().await;
     let (source_refs, account_ids, key_refs) = {
         let mut store = state.store()?;
@@ -342,6 +346,8 @@ mod tests {
             request_id: Some("request-test".into()),
             http_status: Some(200),
             error_category: None,
+            service_tier: Some(DefaultServiceTier::Fast),
+            applied_service_tier: Some(DefaultServiceTier::Standard),
         };
         assert!(!invalid_export_row(&row));
         row.connection = "bad\nvalue".into();

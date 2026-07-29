@@ -1,17 +1,17 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Database, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { APP_VERSION, restartApplication } from "../../../../tauri";
+import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
 import { relayCommands } from "../../api/commands";
 import type { RelayStorageInfo } from "../../api/types";
-import { Button, OptionMenu, PageHeader, StatusBadge, useConfirm } from "../../components/Ui";
+import { Button, OptionMenu, PageHeader, SettingToggle, StatusBadge, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -44,6 +44,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       </SettingsGroup>
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>
+        <SettingToggle className="settings-profile-backup-toggle" label={t("settings.profileSwitchBackupPrompt")} description={t("settings.profileSwitchBackupPromptHint")} checked={profileSwitchBackupPrompt} onChange={setProfileSwitchBackupPrompt} />
         <div className="settings-control-row settings-danger-row"><div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button></div>
       </SettingsGroup> : null}
     </div>

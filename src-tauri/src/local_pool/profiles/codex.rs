@@ -341,7 +341,10 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
         let config_path = profile_dir.join(CONFIG_FILE);
         let config = read_optional_bytes(&config_path)?;
         let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-        let active = managed_config_matches(&document, &backup);
+        let auth_path = profile_dir.join(AUTH_FILE);
+        let auth = read_optional_bytes(&auth_path)?;
+        let active = managed_config_matches(&document, &backup)
+            && managed_auth_matches_snapshot(&auth, &auth_path, &backup)?;
         bindings.push(ProfileBinding {
             profile_dir: profile_dir.to_string_lossy().into_owned(),
             credential_kind: ProfileCredentialKind::LocalGateway,
@@ -353,6 +356,17 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
             bound_oauth_account_id: backup.bound_oauth_account_id,
             active,
         });
+    } else if codex_home.exists() {
+        let profile_dir = canonical_profile_dir(codex_home)?;
+        let config_path = profile_dir.join(CONFIG_FILE);
+        let config = read_optional_bytes(&config_path)?;
+        let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+        if document_has_provider(&document) {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "managed ChatGPT provider exists without an automatic backup",
+            ));
+        }
     }
     bindings.sort_by(|left, right| left.profile_dir.cmp(&right.profile_dir));
     Ok(bindings)
@@ -2250,6 +2264,20 @@ mod tests {
     }
 
     #[test]
+    fn profile_bindings_fail_closed_when_managed_provider_has_no_backup() {
+        let (root, home, backups) = profile_dirs("missing-reset-backup");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"zenith_relay_local\"\n\n[model_providers.zenith_relay_local]\nname = \"Zenith Relay\"\n",
+        )
+        .unwrap();
+
+        let error = profile_bindings(&home, &backups).unwrap_err();
+        assert!(matches!(error.code, ErrorCode::RecoveryRequired));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn restore_blocks_changed_provider_origin() {
         let (root, home, backups) = profile_dirs("changed-origin");
         fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
@@ -2961,6 +2989,11 @@ base_url = "https://custom.example.com/v1"
         )
         .unwrap();
         assert!(profile_bindings(&home, &backups).unwrap()[0].active);
+
+        let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
+        fs::write(home.join(AUTH_FILE), r#"{"auth_mode":"apikey"}"#).unwrap();
+        assert!(!profile_bindings(&home, &backups).unwrap()[0].active);
+        fs::write(home.join(AUTH_FILE), managed_auth).unwrap();
 
         fs::write(
             home.join(CONFIG_FILE),

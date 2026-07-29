@@ -161,6 +161,13 @@ pub trait TokenPersistenceAdapter: Send + Sync {
         account_id: &'a str,
         auth_state: AccountAuthState,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>>;
+
+    fn persist_agent_task_id<'a>(
+        &'a self,
+        account_id: &'a str,
+        expected_task_id: Option<&'a str>,
+        task_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -745,6 +752,15 @@ mod tests {
                     .push((account_id.to_string(), auth_state));
                 Ok(())
             })
+        }
+
+        fn persist_agent_task_id<'a>(
+            &'a self,
+            _account_id: &'a str,
+            _expected_task_id: Option<&'a str>,
+            _task_id: &'a str,
+        ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>> {
+            Box::pin(async move { Ok(_task_id.to_string()) })
         }
     }
 

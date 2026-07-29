@@ -11,6 +11,7 @@ const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 type Range = "today" | "week" | "month";
 type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
 type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
+type ActivityItem = { id: number; success: boolean; model: string | null; latencyMs: number };
 type UsageSample = {
   createdAtMs: number;
   success: boolean;
@@ -31,9 +32,10 @@ const DAY_MS = 24 * HOUR_MS;
 
 export function OverviewPage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, localUsage, localUsagePage, remoteUsage, remoteUsagePage, setPage, perform, busy } = useRelayState();
+  const { mode, runtime, runtimeRevision, setPage, perform, busy } = useRelayState();
   const [range, setRange] = useState<Range>("today");
   const [analytics, setAnalytics] = useState<Analytics | null>(null);
+  const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
   const [chartsReady, setChartsReady] = useState(false);
@@ -55,8 +57,13 @@ export function OverviewPage() {
   useEffect(() => {
     let active = true;
     setAnalytics(null);
+    setActivity([]);
     setAnalyticsError(false);
     if (mode === "zenith") {
+      setAnalyticsLoading(false);
+      return () => { active = false; };
+    }
+    if (!runtime) {
       setAnalyticsLoading(false);
       return () => { active = false; };
     }
@@ -66,35 +73,33 @@ export function OverviewPage() {
     }
     setAnalyticsLoading(true);
     const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windows[0].startMs, toMs: windows[windows.length - 1].endMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
-    const request: Promise<Analytics | null> = mode === "local"
-      ? relayCommands.localUsagePage(input).then((page) => analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows))
-      : relayCommands.remoteUsage(input).then((page) => page ? analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows) : null);
+    const request = mode === "local"
+      ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows), activity: page.events.map(activityFromUsage) }))
+      : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows), activity: page.events.map(activityFromUsage) } : null);
     request
       .then((result) => {
         if (!active || !result) return;
-        setAnalytics(result);
+        setAnalytics(result.analytics);
+        setActivity(result.activity);
       })
       .catch(() => active && setAnalyticsError(true))
       .finally(() => active && setAnalyticsLoading(false));
     return () => { active = false; };
-  }, [mode, range, windows, runtime?.capabilities.features]);
+  }, [mode, range, windows, runtimeRevision, runtime?.capabilities.features]);
 
   if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} />;
 
-  const fallbackTotals = mode === "local" ? localUsagePage?.totals : remoteUsagePage?.totals;
-  const totals = analytics?.totals ?? fallbackTotals ?? emptyTotals();
+  const totals = analytics?.totals ?? emptyTotals();
   const requests = totals.requests;
   const models = runtime?.gateway.visibleModelIds.length ?? 0;
   const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
   const errors = Math.max(0, totals.requests - totals.successfulRequests);
-  const poolUsage = mode === "remote" ? remoteUsagePage?.events ?? remoteUsage : localUsagePage?.events ?? localUsage;
-  const activity = poolUsage.slice(0, 5).map((item) => ({ id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latency: `${item.latencyMs} ms` }));
 
   const primary = mode === "local" ? <Button variant="primary" busy={busy === "gateway"} icon={running ? <Square aria-hidden /> : <Play aria-hidden />} onClick={() => perform("gateway", () => running ? relayCommands.stopGateway() : relayCommands.startGateway(), running ? "feedback.stopped" : "feedback.started")}>{running ? t("gateway.stop") : t("gateway.start")}</Button> : <Button variant="primary" icon={<Server aria-hidden />} onClick={() => setPage("connections")}>{runtime ? t("overview.openServer") : t("remote.connect")}</Button>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t(`overview.subtitles.${mode}`)} actions={primary} />
     {!running && !runtime ? <EmptyState title={t("overview.emptyTitle")} description={t("overview.emptyDescription")} action={<Button variant="primary" onClick={() => setPage("connections")}>{t("overview.openConnections")}</Button>} /> : <>
-      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}<section className="activity-section"><header><h2>{t("overview.activity")}</h2><Button variant="ghost" onClick={() => setPage("usage")}>{t("overview.viewUsage")}</Button></header>{activity.length ? <ul>{activity.map((item) => <li key={item.id}><StatusIcon status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /><code>{item.model ?? "-"}</code><span>{item.latency}</span></li>)}</ul> : <p className="muted">{t("usage.empty")}</p>}</section>
+      <div className="metric-band overview-metrics"><div><Activity aria-hidden /><span>{t("overview.requestsToday")}</span><strong>{formatCompactNumber(requests, locale)}</strong></div><div><Users aria-hidden /><span>{t("overview.healthy")}</span><strong>{healthy}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.models")}</span><strong>{models || "-"}</strong></div><div><CircleAlert aria-hidden /><span>{t("overview.errors")}</span><strong>{formatCompactNumber(errors, locale)}</strong></div></div>{chartsReady ? <Suspense fallback={<section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}><AnalyticsPanel range={range} setRange={setRange} windows={windows} analytics={analytics} loading={analyticsLoading} error={analyticsError} /></Suspense> : <section className="overview-analytics loading" aria-busy="true"><div className="relay-loading">{t("common.loading")}</div></section>}<section className="activity-section"><header><h2>{t("overview.activity")}</h2><Button variant="ghost" onClick={() => setPage("usage")}>{t("overview.viewUsage")}</Button></header>{activity.length ? <ul>{activity.map((item) => <li key={item.id}><StatusIcon status={item.success ? "ready" : "error"} label={item.success ? t("common.success") : t("common.failed")} /><code>{item.model ?? "-"}</code><span>{item.latencyMs} ms</span></li>)}</ul> : <p className="muted">{t("usage.empty")}</p>}</section>
     </>}
   </section>;
 }
@@ -130,16 +135,18 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
     localStorage.setItem("relay.directSourceId", sourceId);
     setSelection(sourceId);
   };
+  const locale = i18n.resolvedLanguage ?? i18n.language;
   const display = (value: string | null | undefined) => statsLoading ? "…" : value || "—";
-  const requests = stats?.requestsDisplay ?? (stats?.requests == null ? null : new Intl.NumberFormat(i18n.resolvedLanguage ?? i18n.language).format(stats.requests));
-  const totalTokens = stats?.totalTokensDisplay ?? (stats?.totalTokens == null ? null : new Intl.NumberFormat(i18n.resolvedLanguage ?? i18n.language).format(stats.totalTokens));
+  const money = (value: number | null | undefined) => value == null ? null : new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000);
+  const requests = stats?.requests == null ? null : new Intl.NumberFormat(locale).format(stats.requests);
+  const totalTokens = stats?.totalTokens == null ? null : new Intl.NumberFormat(locale).format(stats.totalTokens);
   const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading} disabled={!source} onClick={() => setStatsRevision((value) => value + 1)}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;
 
   return <section className="relay-page"><PageHeader title={t("nav.overview")} subtitle={t("overview.subtitles.zenith")} actions={actions} />
     {!source ? <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} action={<Button variant="primary" onClick={onOpen}>{t("sources.add")}</Button>} /> : <div className="direct-api-overview">
       <div className="direct-api-toolbar"><div><strong>{source.name}</strong><code>{source.baseUrl}</code></div><OptionMenu className="direct-api-source-menu" label={t("overview.selectedSource")} value={source.id} onChange={select} options={sources.map((item) => ({ value: item.id, label: `${item.name} · ${sourceHost(item.baseUrl)}` }))} /></div>
-      <div className="metric-band direct-api-metrics"><div><CreditCard aria-hidden /><span>{t("overview.balance")}</span><strong>{display(stats?.balance)}</strong></div><div><Activity aria-hidden /><span>{t("usage.requests")}</span><strong>{display(requests)}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.spent")}</span><strong>{display(stats?.spent)}</strong></div><div><Gauge aria-hidden /><span>{t("overview.totalTokens")}</span><strong>{display(totalTokens)}</strong></div></div>
-      {statsError ? <p className="direct-api-stats-note error-text" role="alert">{t("overview.sourceStatsUnavailable")}</p> : stats && !stats.supported ? <p className="direct-api-stats-note">{t("overview.sourceStatsUnsupported")}</p> : null}
+      <div className="metric-band direct-api-metrics"><div><CreditCard aria-hidden /><span>{t("overview.balance")}</span><strong>{display(money(stats?.balanceMicroUsd))}</strong></div><div><Activity aria-hidden /><span>{t("usage.requests")}</span><strong>{display(requests)}</strong></div><div><ArrowRight aria-hidden /><span>{t("overview.spent")}</span><strong>{display(money(stats?.spentMicroUsd))}</strong></div><div><Gauge aria-hidden /><span>{t("overview.totalTokens")}</span><strong>{display(totalTokens)}</strong></div></div>
+      {statsError ? <p className="direct-api-stats-note error-text" role="alert">{t("overview.sourceStatsUnavailable")}</p> : stats?.provider === "unsupported" ? <p className="direct-api-stats-note">{t("overview.sourceStatsUnsupported")}</p> : null}
       <section className="direct-api-models"><header><div><h2>{t("overview.availableModels")}</h2><p>{t("overview.availableModelsHint")}</p></div><strong>{source.models.length}</strong></header><ul>{source.models.map((model) => <li key={model}><code>{model}</code></li>)}</ul></section>
     </div>}
   </section>;
@@ -210,6 +217,10 @@ function localSamples(events: LocalUsage[]): UsageSample[] {
 
 function remoteSamples(events: RemoteUsage[]): UsageSample[] {
   return events.map((item) => ({ ...item, ttftMs: item.ttftMs ?? null, generationMs: item.generationMs ?? null }));
+}
+
+function activityFromUsage(item: LocalUsage | RemoteUsage): ActivityItem {
+  return { id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latencyMs: item.latencyMs };
 }
 
 function emptyTotals(): UsageTotals {

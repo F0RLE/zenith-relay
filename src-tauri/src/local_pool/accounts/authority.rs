@@ -20,6 +20,7 @@ use zenith_relay_core::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 
 const MAX_LOCK_BYTES: u64 = 4 * 1024;
 
@@ -346,6 +347,34 @@ where
                 .persist_auth_state(local_account_id, auth_state)
                 .await
                 .map_err(|_| TokenPersistenceFailure::new("metadata_persist_failed"))
+        })
+    }
+
+    fn persist_agent_task_id<'a>(
+        &'a self,
+        local_account_id: &'a str,
+        expected_task_id: Option<&'a str>,
+        task_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, TokenPersistenceFailure>> + Send + 'a>> {
+        Box::pin(async move {
+            let current = self
+                .credentials
+                .require(local_account_id)
+                .map_err(|_| TokenPersistenceFailure::new("credential_load_failed"))?;
+            if let Some(current_task_id) = current
+                .agent_identity()
+                .and_then(AgentIdentityCredential::task_id)
+                .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
+            {
+                return Ok(current_task_id.to_string());
+            }
+            let updated = current
+                .with_agent_task_id(task_id.to_string())
+                .map_err(|_| TokenPersistenceFailure::new("invalid_agent_task_id"))?;
+            self.credentials
+                .save(&updated)
+                .map_err(|_| TokenPersistenceFailure::new("credential_persist_failed"))?;
+            Ok(task_id.to_string())
         })
     }
 }

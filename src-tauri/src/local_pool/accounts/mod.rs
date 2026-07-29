@@ -1,16 +1,21 @@
 pub(crate) mod authority;
 pub(crate) mod credentials;
+pub(crate) mod export_ops;
 pub(crate) mod exports;
+pub(crate) mod import_orchestrator;
 pub(crate) mod import_session;
-pub(crate) mod imports;
 pub(crate) mod models;
+pub(crate) mod mutations;
 pub(crate) mod oauth;
 pub(crate) mod oauth_flow;
 pub(crate) mod proxy;
-pub(crate) mod quota;
+pub(crate) mod quota_refresh;
 pub(crate) mod quota_service;
 pub(crate) mod records;
 pub(crate) mod wake;
+
+#[cfg(test)]
+mod operation_tests;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct NativeSecretBackend;

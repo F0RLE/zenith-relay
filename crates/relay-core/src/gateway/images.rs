@@ -1,9 +1,36 @@
-use super::*;
+use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
+use super::errors::{
+    api_error, api_error_type, apply_cooldown, apply_failure_cooldown_with_body,
+    apply_failure_cooldown_with_hint, apply_failure_state, canonical_upstream_status,
+    classify_upstream_error_value, cooldown_error, rate_limit_body_hint_value, retryable_failure,
+    upstream_failure_status, upstream_status_from_value, AttemptFailure, RateLimitBodyHint,
+    TRANSIENT_COOLDOWN_MS,
+};
+use super::now_ms;
+use super::request::request_id;
+use super::response::{
+    apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
+    proxy_sse_response, usage_event,
+};
+use super::streaming::sse_event_end;
+use crate::protocol::ClientWireApi;
 use crate::runtime::IMAGE_API_MODEL;
+use crate::runtime::{AuthenticatedKey, ExecutorRoute};
+use crate::{GatewayRuntime, UsageEvent, WireApi};
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
+use axum::response::IntoResponse;
+use axum::Json;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use futures_util::stream;
 use multer::{Constraints, Multipart, SizeLimit};
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
 use std::io;
+use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
 const MAX_IMAGE_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -90,6 +117,9 @@ async fn execute(
     let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
         return unauthorized();
     };
+    if !runtime.allows_client_wire_api(&key, ClientWireApi::ChatCompletions) {
+        return client_api_forbidden();
+    }
     let prepared = match prepare_request(&runtime, &key, &headers, body, endpoint).await {
         Ok(prepared) => prepared,
         Err(response) => return response,

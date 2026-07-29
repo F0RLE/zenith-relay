@@ -4,6 +4,7 @@ use crate::local_pool::{
     store::telemetry_db::{LocalUsagePage, UsageLog},
 };
 use chrono::{DateTime, Days, Local, Utc};
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
 use zenith_relay_core::protocol::{UsageQuery, UsageRange};
@@ -24,12 +25,23 @@ pub fn get_local_usage_page(
     input: Option<UsageQuery>,
     state: State<'_, DesktopState>,
 ) -> Result<LocalUsagePage, CommandError> {
-    let price_overrides = state.store()?.gateway().model_price_overrides.clone();
+    let (price_overrides, source_price_overrides) = {
+        let store = state.store()?;
+        (
+            store.gateway().model_price_overrides.clone(),
+            store
+                .sources()
+                .iter()
+                .map(|source| (source.id.clone(), source.model_price_overrides.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    };
     state
         .telemetry
         .usage_page_with_price_overrides(
             &normalize_usage_query(input.unwrap_or_default()),
             &price_overrides,
+            &source_price_overrides,
         )
         .map_err(Into::into)
 }

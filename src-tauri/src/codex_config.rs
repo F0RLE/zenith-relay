@@ -505,7 +505,7 @@ fn config_selects_zenith_provider(content: &str) -> bool {
 }
 
 fn is_zenith_customer_key(key: &str) -> bool {
-    key.starts_with("znt_") || key.starts_with("zrk_")
+    key.starts_with("znt_")
 }
 
 fn upsert_zenith_provider(original: &str) -> String {
@@ -915,6 +915,7 @@ name = "OpenAI"
     #[test]
     fn local_pool_key_is_not_a_zenith_customer_key() {
         assert!(!is_zenith_customer_key("zlr_local_generated_key"));
+        assert!(!is_zenith_customer_key("zrk_retired_reseller_key"));
         assert!(is_zenith_customer_key("znt_customer_key"));
         assert!(zenith_auth_key_if_configured(
             "model_provider = \"zenith_relay_local\"",

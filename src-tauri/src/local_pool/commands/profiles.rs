@@ -1,24 +1,35 @@
 use crate::{
+    codex_config::load_api_key_for_launch,
     launcher::{is_codex_running, launch_codex_with_profile, stop_codex_and_wait},
     local_pool::{
-        accounts::records::{
-            candidate_health, candidate_quota_with_stale_after, quota_stale_after_ms_for_interval,
-        },
-        commands::accounts::{
-            prepare_account_credentials, sync_managed_account_profile, PreparedAccountCredentials,
+        accounts::{
+            credentials::CredentialStore,
+            quota_refresh::{
+                prepare_account_credentials, sync_managed_account_profile,
+                PreparedAccountCredentials,
+            },
+            records::{candidate_health, candidate_quota_with_stale_after},
+            NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
         models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
         profiles::{codex, repair, snapshots},
+        remote::client::RemoteProfileCredential,
         state::DesktopState,
         store::secret_store,
     },
     platform::default_codex_home,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::State;
-use zenith_relay_core::{protocol::Feature, CandidateQuota, WireApi};
+use url::Url;
+use zenith_relay_core::{
+    protocol::{Feature, ProfileKeyRotation},
+    CandidateQuota, WireApi, QUOTA_STALE_AFTER_MS,
+};
+
+const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -53,7 +64,14 @@ pub(crate) fn synchronize_codex_history(
 }
 
 pub(crate) fn rollback_codex_history(state: &DesktopState, backup_id: &str) -> Result<(), String> {
-    repair::rollback(&state.history_repair_backup_root(), backup_id).map(|_| ())
+    repair::rollback(&state.history_repair_backup_root(), backup_id)?;
+    repair::discard(&state.history_repair_backup_root(), backup_id)
+}
+
+pub(crate) fn discard_codex_history_backup(state: &DesktopState, backup_id: Option<&str>) {
+    if let Some(backup_id) = backup_id {
+        let _ = repair::discard(&state.history_repair_backup_root(), backup_id);
+    }
 }
 
 #[derive(Deserialize)]
@@ -191,29 +209,121 @@ pub async fn attach_codex_to_remote_gateway(
         )
         .into());
     }
-    let credential = client
+    let current_credential = client
         .profile_credential()
         .await
         .map_err(super::remote_server::remote_error)?;
+    let rotate_profile_key = capabilities.supports(Feature::ProfileKeyRotation);
     let profile_dir = default_codex_home();
     let stopped = stop_codex_and_sync_account(&state).await?;
-    let result: Result<ProfileActivation, CommandError> = (|| {
+    let result: Result<ProfileActivation, CommandError> = async {
         let history_backup = synchronize_history_for_command(
             &state,
             &profile_dir,
             CodexHistoryProvider::LocalGateway,
         )?;
+        let rotation = if rotate_profile_key {
+            Some(
+                client
+                    .prepare_profile_key_rotation()
+                    .await
+                    .map_err(super::remote_server::remote_error)?,
+            )
+        } else {
+            None
+        };
+        let (key_id, base_url, secret) = rotation
+            .as_ref()
+            .map(|rotation| {
+                (
+                    rotation.key_id.as_str(),
+                    rotation.base_url.as_str(),
+                    rotation.secret.as_str(),
+                )
+            })
+            .unwrap_or((
+                current_credential.key_id.as_str(),
+                current_credential.base_url.as_str(),
+                current_credential.secret.as_str(),
+            ));
         let attached = codex::attach(
             &profile_dir,
             &state.profile_backup_root(),
-            &credential.key_id,
-            &credential.base_url,
-            &credential.secret,
+            key_id,
+            base_url,
+            secret,
         )
         .map_err(Into::into);
-        let binding = rollback_history_on_error(&state, history_backup.as_deref(), attached)?;
+        let binding = match rollback_history_on_error(&state, history_backup.as_deref(), attached) {
+            Ok(binding) => binding,
+            Err(mut error) => {
+                if let Some(rotation) = rotation.as_ref() {
+                    append_remote_cleanup_error(
+                        &mut error,
+                        client
+                            .abort_profile_key_rotation(&rotation.rotation_id)
+                            .await,
+                    );
+                }
+                return Err(error);
+            }
+        };
+        if let Some(rotation) = rotation.as_ref() {
+            if let Err(mut error) = verify_remote_profile_binding(
+                &profile_dir,
+                &state.profile_backup_root(),
+                &rotation.key_id,
+            ) {
+                append_profile_rollback_error(
+                    &mut error,
+                    &profile_dir,
+                    &state.profile_backup_root(),
+                    &current_credential,
+                );
+                append_remote_cleanup_error(
+                    &mut error,
+                    client
+                        .abort_profile_key_rotation(&rotation.rotation_id)
+                        .await,
+                );
+                return Err(error);
+            }
+            if let Err(commit_error) = client
+                .commit_profile_key_rotation(&rotation.rotation_id)
+                .await
+            {
+                let mut error = super::remote_server::remote_error(commit_error);
+                let observed = client.profile_credential().await;
+                match profile_rotation_commit_state(
+                    observed.as_ref().ok(),
+                    &current_credential,
+                    rotation,
+                ) {
+                    ProfileRotationCommitState::Committed => {
+                        return Ok(ProfileActivation { binding });
+                    }
+                    ProfileRotationCommitState::NotCommitted => {
+                        append_profile_rollback_error(
+                            &mut error,
+                            &profile_dir,
+                            &state.profile_backup_root(),
+                            &current_credential,
+                        );
+                        append_remote_cleanup_error(
+                            &mut error,
+                            client
+                                .abort_profile_key_rotation(&rotation.rotation_id)
+                                .await,
+                        );
+                    }
+                    ProfileRotationCommitState::Unknown => {}
+                }
+                return Err(error);
+            }
+        }
         Ok(ProfileActivation { binding })
-    })();
+    }
+    .await;
     restart_codex_after_failed_change(stopped, result, launch_codex_with_profile)
 }
 
@@ -266,7 +376,7 @@ async fn resolve_gateway_oauth_binding(
     let automatic = requested_account_id.is_none();
     let mut candidates = {
         let store = state.store()?;
-        let gateway = store.gateway();
+        let credentials = CredentialStore::from_backend(NativeSecretBackend);
         let mut candidates = Vec::new();
         for account in store.accounts() {
             let explicitly_requested = requested_account_id == Some(account.account.id.as_str());
@@ -286,25 +396,21 @@ async fn resolve_gateway_oauth_binding(
                     zenith_relay_core::accounts::AccountAuthMode::OAuth
                         | zenith_relay_core::accounts::AccountAuthMode::ImportedToken
                 )
-                || (!explicitly_requested
-                    && !super::account_routing_allowed(gateway, &account.account.subscription))
-                || account.account.secret_refs.is_empty()
             {
                 continue;
             }
-            let mut secrets_available = true;
-            for secret_ref in &account.account.secret_refs {
-                if secret_store::load(secret_ref)?.is_none() {
-                    secrets_available = false;
-                    break;
-                }
-            }
-            if secrets_available {
+            if credentials
+                .load(&account.account.id)
+                .map_err(|error| {
+                    LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+                })?
+                .is_some()
+            {
                 let Some(remaining) = profile_quota_rank(
                     candidate_quota_with_stale_after(
                         &account.account.quota,
                         super::current_time_ms(),
-                        quota_stale_after_ms_for_interval(gateway.quota_refresh_interval_seconds),
+                        QUOTA_STALE_AFTER_MS,
                     ),
                     explicitly_requested,
                 ) else {
@@ -445,7 +551,8 @@ pub async fn launch_managed_codex_profile(
             Some(codex::ProfileCredentialKind::ApiKey) | None => None,
         };
         if let Some(provider) = provider {
-            synchronize_history_for_command(&state, &profile_dir, provider)?;
+            let backup = synchronize_history_for_command(&state, &profile_dir, provider)?;
+            discard_codex_history_backup(&state, backup.as_deref());
         }
     }
     launch_codex_with_profile().map_err(|error| {
@@ -484,8 +591,13 @@ pub async fn launch_codex_source(
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     validate_direct_source(source.enabled, source.wire_api)?;
-    let api_key = secret_store::load(&source.secret_ref)?
-        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    let api_key = load_direct_source_api_key(
+        &source.base_url,
+        &source.secret_ref,
+        secret_store::load,
+        load_api_key_for_launch,
+        secret_store::save,
+    )?;
     let profile_dir = default_codex_home();
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result =
@@ -538,7 +650,7 @@ pub async fn restore_codex_account_profile(
 #[tauri::command]
 pub fn list_codex_profile_snapshots(
     state: State<'_, DesktopState>,
-) -> Result<Vec<snapshots::ProfileSnapshotSummary>, CommandError> {
+) -> Result<snapshots::ProfileSnapshotList, CommandError> {
     snapshots::list(&state.profile_backup_root()).map_err(Into::into)
 }
 
@@ -548,8 +660,10 @@ pub async fn create_codex_profile_snapshot(
     state: State<'_, DesktopState>,
 ) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
     let _mutation = state.setup_guard().await;
-    snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
-        .map_err(Into::into)
+    let stopped = stop_codex_and_sync_account(&state).await?;
+    let result = snapshots::create(&default_codex_home(), &state.profile_backup_root(), &name)
+        .map_err(Into::into);
+    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
 }
 
 #[tauri::command]
@@ -577,6 +691,56 @@ pub async fn delete_codex_profile_snapshot(
 ) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     snapshots::delete(&state.profile_backup_root(), &snapshot_id).map_err(Into::into)
+}
+
+pub(crate) async fn restore_managed_profiles_before_reset(
+    state: &DesktopState,
+) -> Result<(), CommandError> {
+    let profile_dir = default_codex_home();
+    let backup_root = state.profile_backup_root();
+    let bindings = codex::profile_bindings(&profile_dir, &backup_root)?;
+    if bindings.is_empty() {
+        return Ok(());
+    }
+
+    let stopped = stop_codex_for_profile_change()?;
+    let result: Result<(), CommandError> = async {
+        let mut account_ids = bindings
+            .iter()
+            .filter(|binding| binding.credential_kind == codex::ProfileCredentialKind::OAuthAccount)
+            .map(|binding| binding.credential_id.clone())
+            .collect::<Vec<_>>();
+        account_ids.sort();
+        account_ids.dedup();
+        for account_id in account_ids {
+            if state.store()?.account(&account_id).is_some() {
+                sync_managed_account_profile(state, &account_id).await?;
+            }
+        }
+
+        let bindings = codex::profile_bindings(&profile_dir, &backup_root)?;
+        if bindings.iter().any(|binding| !binding.active) {
+            return Err(LocalPoolError::new(
+                ErrorCode::ProfileRestoreBlocked,
+                "ChatGPT profile changed after the automatic backup; local data was not reset",
+            )
+            .into());
+        }
+        for binding in bindings {
+            let profile = Path::new(&binding.profile_dir);
+            let history_backup =
+                synchronize_history_for_command(state, profile, CodexHistoryProvider::ChatGpt)?;
+            let restored = codex::restore(profile, &backup_root).map_err(Into::into);
+            rollback_history_on_error(state, history_backup.as_deref(), restored)?;
+        }
+        Ok(())
+    }
+    .await;
+    let result = restart_codex_after_restore(stopped, result, launch_codex_with_profile);
+    if result.is_ok() {
+        set_runtime_pool_interface_reserve(state, None, 0).await;
+    }
+    result
 }
 
 async fn activate_account_profile(
@@ -634,7 +798,10 @@ fn rollback_history_on_error<T>(
     result: Result<T, CommandError>,
 ) -> Result<T, CommandError> {
     match result {
-        Ok(value) => Ok(value),
+        Ok(value) => {
+            discard_codex_history_backup(state, backup_id);
+            Ok(value)
+        }
         Err(mut error) => {
             if let Some(backup_id) = backup_id {
                 if let Err(rollback) = rollback_codex_history(state, backup_id) {
@@ -646,6 +813,91 @@ fn rollback_history_on_error<T>(
             }
             Err(error)
         }
+    }
+}
+
+fn verify_remote_profile_binding(
+    profile_dir: &std::path::Path,
+    backup_root: &std::path::Path,
+    key_id: &str,
+) -> Result<(), CommandError> {
+    let active = codex::profile_bindings(profile_dir, backup_root)?
+        .into_iter()
+        .any(|binding| {
+            binding.active
+                && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
+                && binding.credential_id == key_id
+        });
+    if active {
+        Ok(())
+    } else {
+        Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "the updated ChatGPT profile could not be verified",
+        )
+        .into())
+    }
+}
+
+fn append_profile_rollback_error(
+    error: &mut CommandError,
+    profile_dir: &std::path::Path,
+    backup_root: &std::path::Path,
+    credential: &RemoteProfileCredential,
+) {
+    if let Err(rollback) = codex::attach(
+        profile_dir,
+        backup_root,
+        &credential.key_id,
+        &credential.base_url,
+        &credential.secret,
+    ) {
+        error.message = format!(
+            "{}; automatic ChatGPT profile rollback failed: {}",
+            error.message, rollback.message
+        );
+    }
+}
+
+fn append_remote_cleanup_error(
+    error: &mut CommandError,
+    cleanup: Result<(), impl std::fmt::Display>,
+) {
+    if let Err(cleanup) = cleanup {
+        error.message = format!(
+            "{}; remote profile key cleanup failed: {cleanup}",
+            error.message
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileRotationCommitState {
+    Committed,
+    NotCommitted,
+    Unknown,
+}
+
+fn profile_rotation_commit_state(
+    observed: Option<&RemoteProfileCredential>,
+    current: &RemoteProfileCredential,
+    rotation: &ProfileKeyRotation,
+) -> ProfileRotationCommitState {
+    let Some(observed) = observed else {
+        return ProfileRotationCommitState::Unknown;
+    };
+    if observed.key_id == rotation.key_id
+        && observed.base_url == rotation.base_url
+        && observed.secret == rotation.secret
+    {
+        ProfileRotationCommitState::Committed
+    } else if observed.key_id == current.key_id
+        && observed.base_url == current.base_url
+        && observed.secret == current.secret
+    {
+        ProfileRotationCommitState::NotCommitted
+    } else {
+        ProfileRotationCommitState::Unknown
     }
 }
 
@@ -663,6 +915,40 @@ fn validate_direct_source(enabled: bool, wire_api: WireApi) -> LocalResult<()> {
         ));
     }
     Ok(())
+}
+
+fn load_direct_source_api_key(
+    base_url: &str,
+    secret_ref: &str,
+    load: impl FnOnce(&str) -> LocalResult<Option<String>>,
+    load_legacy_zenith_key: impl FnOnce() -> Option<String>,
+    save: impl FnOnce(&str, &str) -> LocalResult<()>,
+) -> LocalResult<String> {
+    if let Some(api_key) = load(secret_ref)? {
+        return Ok(api_key);
+    }
+    let api_key = is_zenith_api_base_url(base_url)
+        .then(load_legacy_zenith_key)
+        .flatten()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
+    save(secret_ref, &api_key)?;
+    Ok(api_key)
+}
+
+fn is_zenith_api_base_url(base_url: &str) -> bool {
+    let Ok(url) = Url::parse(base_url) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case(ZENITH_API_HOST))
+        && url.port_or_known_default() == Some(443)
+        && url.path().trim_end_matches('/') == "/v1"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
 fn stop_codex_for_profile_change() -> Result<bool, CommandError> {
@@ -688,7 +974,9 @@ async fn stop_codex_and_sync_account_at(
         if let Some(account_id) =
             codex::active_managed_account_id(profile_dir, &state.profile_backup_root())?
         {
-            sync_managed_account_profile(state, &account_id).await?;
+            if state.store()?.account(&account_id).is_some() {
+                sync_managed_account_profile(state, &account_id).await?;
+            }
         }
         Ok(())
     }
@@ -766,7 +1054,49 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn lost_profile_rotation_commit_response_is_reconciled_without_a_blind_rollback() {
+        let current = RemoteProfileCredential {
+            key_id: "key_system".into(),
+            base_url: "https://relay.example/v1".into(),
+            secret: "zrs_current_secret_value_000000".into(),
+        };
+        let rotation = ProfileKeyRotation {
+            schema_version: 1,
+            rotation_id: "key_profile_rotation_test".into(),
+            key_id: "key_system".into(),
+            base_url: current.base_url.clone(),
+            secret: "zrs_rotated_secret_value_000000".into(),
+        };
+        let committed = RemoteProfileCredential {
+            key_id: rotation.key_id.clone(),
+            base_url: rotation.base_url.clone(),
+            secret: rotation.secret.clone(),
+        };
+        let unrelated = RemoteProfileCredential {
+            secret: "zrs_unrelated_secret_value_0000".into(),
+            ..current.clone()
+        };
+
+        assert_eq!(
+            profile_rotation_commit_state(Some(&committed), &current, &rotation),
+            ProfileRotationCommitState::Committed
+        );
+        assert_eq!(
+            profile_rotation_commit_state(Some(&current), &current, &rotation),
+            ProfileRotationCommitState::NotCommitted
+        );
+        assert_eq!(
+            profile_rotation_commit_state(Some(&unrelated), &current, &rotation),
+            ProfileRotationCommitState::Unknown
+        );
+        assert_eq!(
+            profile_rotation_commit_state(None, &current, &rotation),
+            ProfileRotationCommitState::Unknown
+        );
+    }
 
     #[test]
     fn failed_profile_change_restarts_a_previously_running_codex() {
@@ -882,5 +1212,41 @@ mod tests {
         assert!(validate_direct_source(true, WireApi::Responses).is_ok());
         assert!(validate_direct_source(false, WireApi::Responses).is_err());
         assert!(validate_direct_source(true, WireApi::ChatCompletions).is_err());
+    }
+
+    #[test]
+    fn missing_zenith_source_secret_is_recovered_once() {
+        let saved = RefCell::new(None);
+        let api_key = load_direct_source_api_key(
+            "https://api.zenithmarket.dev/v1/",
+            "source:zenith",
+            |_| Ok(None),
+            || Some("znt_legacy_key".into()),
+            |secret_ref, value| {
+                saved.replace(Some((secret_ref.to_string(), value.to_string())));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(api_key, "znt_legacy_key");
+        assert_eq!(
+            saved.into_inner(),
+            Some(("source:zenith".into(), "znt_legacy_key".into()))
+        );
+    }
+
+    #[test]
+    fn custom_source_does_not_reuse_the_legacy_zenith_key() {
+        let error = load_direct_source_api_key(
+            "https://api.example.com/v1",
+            "source:custom",
+            |_| Ok(None),
+            || Some("znt_legacy_key".into()),
+            |_, _| panic!("custom source secret must not be synthesized"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::NotFound);
     }
 }

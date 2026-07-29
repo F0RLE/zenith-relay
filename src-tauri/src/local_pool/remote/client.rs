@@ -4,13 +4,15 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::accounts::{AccountExportDocument, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientProtocolRange, ConfigurationPresetApplyInput,
-    ConfigurationPresetApplyResult, ConfigurationPresetDocument, ConfigurationPresetPreview,
-    ConfigurationPresetPreviewInput, GatewayDiagnostic, HealthResponse, NegotiatedProtocol,
+    negotiate, Capabilities, ClientKeyCreateInput, ClientKeyPatch, ClientProtocolRange,
+    ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetDocument,
+    ConfigurationPresetPreview, ConfigurationPresetPreviewInput, GatewayDiagnostic,
+    GeneratedClientKey, HealthResponse, KeySummary, NegotiatedProtocol, ProfileKeyRotation,
     RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery, UsageRange,
+    CLIENT_ACCESS_SCHEMA_VERSION, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
-use zenith_relay_core::CandidateRuntimeSnapshot;
 use zenith_relay_core::WireApi;
+use zenith_relay_core::{CandidateRuntimeSnapshot, SourceProviderStats};
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
@@ -55,7 +57,7 @@ pub struct RemoteClient {
     http: reqwest::Client,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RemoteProfileCredential {
     pub key_id: String,
@@ -166,6 +168,54 @@ impl RemoteClient {
         validate_profile_credential(&self.origin, credential)
     }
 
+    pub(crate) async fn prepare_profile_key_rotation(
+        &self,
+    ) -> Result<ProfileKeyRotation, RemoteClientError> {
+        let rotation: ProfileKeyRotation = self
+            .request(
+                Method::POST,
+                "/profile/credential/rotations",
+                Option::<&()>::None,
+                true,
+            )
+            .await?;
+        validate_profile_key_rotation(&self.origin, rotation)
+    }
+
+    pub(crate) async fn commit_profile_key_rotation(
+        &self,
+        rotation_id: &str,
+    ) -> Result<(), RemoteClientError> {
+        let response = self
+            .mutate(
+                Method::POST,
+                &remote_object_path("profile/credential/rotations", rotation_id)?,
+                None,
+            )
+            .await?;
+        response
+            .is_null()
+            .then_some(())
+            .ok_or(RemoteClientError::InvalidResponse)
+    }
+
+    pub(crate) async fn abort_profile_key_rotation(
+        &self,
+        rotation_id: &str,
+    ) -> Result<(), RemoteClientError> {
+        let response = self
+            .mutate(
+                Method::DELETE,
+                &remote_object_path("profile/credential/rotations", rotation_id)?,
+                None,
+            )
+            .await?;
+        response
+            .is_null()
+            .then_some(())
+            .ok_or(RemoteClientError::InvalidResponse)
+    }
+
     pub async fn runtime_order(&self) -> Result<Vec<CandidateRuntimeSnapshot>, RemoteClientError> {
         self.request(Method::GET, "/routing/runtime", Option::<&()>::None, true)
             .await
@@ -177,6 +227,19 @@ impl RemoteClient {
             .await
     }
 
+    pub async fn source_stats(
+        &self,
+        source_id: &str,
+    ) -> Result<SourceProviderStats, RemoteClientError> {
+        self.request(
+            Method::GET,
+            &format!("{}/stats", remote_object_path("sources", source_id)?),
+            Option::<&()>::None,
+            true,
+        )
+        .await
+    }
+
     pub async fn diagnose(&self, stream: bool) -> Result<GatewayDiagnostic, RemoteClientError> {
         self.request(
             Method::POST,
@@ -185,6 +248,56 @@ impl RemoteClient {
             true,
         )
         .await
+    }
+
+    pub async fn create_client_key(
+        &self,
+        input: &ClientKeyCreateInput,
+    ) -> Result<GeneratedClientKey, RemoteClientError> {
+        let generated = self
+            .request(Method::POST, "/keys", Some(input), true)
+            .await?;
+        validate_generated_client_key(generated)
+    }
+
+    pub async fn update_client_key(
+        &self,
+        key_id: &str,
+        input: &ClientKeyPatch,
+    ) -> Result<KeySummary, RemoteClientError> {
+        self.request(
+            Method::PATCH,
+            &remote_object_path("keys", key_id)?,
+            Some(input),
+            true,
+        )
+        .await
+    }
+
+    pub async fn rotate_client_key(
+        &self,
+        key_id: &str,
+    ) -> Result<GeneratedClientKey, RemoteClientError> {
+        let generated = self
+            .request(
+                Method::POST,
+                &format!("{}/rotate", remote_object_path("keys", key_id)?),
+                Option::<&()>::None,
+                true,
+            )
+            .await?;
+        validate_generated_client_key(generated)
+    }
+
+    pub async fn revoke_client_key(&self, key_id: &str) -> Result<(), RemoteClientError> {
+        let response = self
+            .mutate(Method::DELETE, &remote_object_path("keys", key_id)?, None)
+            .await?;
+        if response.is_null() {
+            Ok(())
+        } else {
+            Err(RemoteClientError::InvalidResponse)
+        }
     }
 
     pub async fn export_accounts(
@@ -303,27 +416,82 @@ fn validate_profile_credential(
     origin: &PinnedOrigin,
     credential: RemoteProfileCredential,
 ) -> Result<RemoteProfileCredential, RemoteClientError> {
-    let expected_base_url = origin.endpoint("/v1")?;
-    let actual_base_url =
-        url::Url::parse(&credential.base_url).map_err(|_| RemoteClientError::InvalidResponse)?;
-    if actual_base_url != expected_base_url
-        || credential.key_id.is_empty()
-        || credential.key_id.len() > 128
-        || !credential
-            .key_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || !credential.secret.starts_with("zrs_")
-        || credential.secret.len() < 24
-        || credential.secret.len() > 256
-        || credential
-            .secret
-            .bytes()
-            .any(|byte| byte.is_ascii_control())
+    validate_profile_credential_fields(
+        origin,
+        &credential.key_id,
+        &credential.base_url,
+        &credential.secret,
+    )?;
+    Ok(credential)
+}
+
+fn validate_profile_key_rotation(
+    origin: &PinnedOrigin,
+    rotation: ProfileKeyRotation,
+) -> Result<ProfileKeyRotation, RemoteClientError> {
+    if rotation.schema_version != PROFILE_KEY_ROTATION_SCHEMA_VERSION
+        || remote_object_path("profile/credential/rotations", &rotation.rotation_id).is_err()
     {
         return Err(RemoteClientError::InvalidResponse);
     }
-    Ok(credential)
+    validate_profile_credential_fields(
+        origin,
+        &rotation.key_id,
+        &rotation.base_url,
+        &rotation.secret,
+    )?;
+    Ok(rotation)
+}
+
+fn validate_profile_credential_fields(
+    origin: &PinnedOrigin,
+    key_id: &str,
+    base_url: &str,
+    secret: &str,
+) -> Result<(), RemoteClientError> {
+    let expected_base_url = origin.endpoint("/v1")?;
+    let actual_base_url =
+        url::Url::parse(base_url).map_err(|_| RemoteClientError::InvalidResponse)?;
+    if actual_base_url != expected_base_url
+        || key_id.is_empty()
+        || key_id.len() > 128
+        || !key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !secret.starts_with("zrs_")
+        || secret.len() < 24
+        || secret.len() > 256
+        || secret.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(RemoteClientError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_generated_client_key(
+    generated: GeneratedClientKey,
+) -> Result<GeneratedClientKey, RemoteClientError> {
+    if generated.schema_version != CLIENT_ACCESS_SCHEMA_VERSION
+        || !generated.secret.starts_with("zrs_")
+        || generated.secret.len() < 24
+        || generated.secret.len() > 256
+        || generated.secret.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(RemoteClientError::InvalidResponse);
+    }
+    Ok(generated)
+}
+
+fn remote_object_path(collection: &str, id: &str) -> Result<String, RemoteClientError> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(RemoteClientError::InvalidResponse);
+    }
+    Ok(format!("/{collection}/{id}"))
 }
 
 fn usage_path(query: &UsageQuery) -> String {
@@ -435,6 +603,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
     };
+    use tokio::sync::Notify;
 
     #[tokio::test]
     async fn redirect_is_not_followed_and_token_never_reaches_other_origin() {
@@ -504,6 +673,41 @@ mod tests {
         assert!(uri.contains("success=true"));
         assert!(uri.contains("bucketMs=60000"));
         assert!(!uri.contains("modelQuery=gpt+test&success=false"));
+    }
+
+    #[tokio::test]
+    async fn in_flight_request_finishes_after_external_client_owner_is_dropped() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let handler_entered = entered.clone();
+        let handler_release = release.clone();
+        let server = spawn(Router::new().route(
+            "/usage",
+            get(move || {
+                let entered = handler_entered.clone();
+                let release = handler_release.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Json(serde_json::json!({
+                        "events": [], "total": 0, "page": 1, "pageSize": 25, "totalPages": 0
+                    }))
+                }
+            }),
+        ))
+        .await;
+        let owner = Arc::new(
+            RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap(),
+        );
+        let request_client = owner.clone();
+        let request =
+            tokio::spawn(async move { request_client.usage(&UsageQuery::default()).await });
+
+        entered.notified().await;
+        drop(owner);
+        release.notify_one();
+
+        assert_eq!(request.await.unwrap().unwrap().total, 0);
     }
 
     #[tokio::test]

@@ -29,8 +29,9 @@
   mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
-- Treat `docs/project-structure.md` as the canonical source for target paths,
-  package names, and module ownership. Do not invent parallel module trees.
+- Treat `PLANNING.md` as the canonical source for public boundaries, target
+  paths, package ownership, and supported behavior. Do not invent parallel
+  module trees.
 
 ## Checks
 
@@ -73,7 +74,8 @@ bun run app:build
 - The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
 - Model and balance displays come from Zenith API responses.
 - UI copy should describe Zenith Relay behavior.
-- Product direction for the future open app lives in
-  `docs/product-direction.md`.
+- Current product direction and supported behavior live in
+  `PLANNING.md`; incomplete work and acceptance gates live in
+  `ROADMAP.md`.
 - Personal local-pool account data is local user data. It is not Zenith
   customer billing state and not server account-pool inventory.

@@ -2,7 +2,7 @@ import { Activity, ArchiveRestore, Cable, Check, ChevronDown, CircleHelp, Downlo
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../../../tauri";
+import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../../../platform/desktop";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -18,6 +18,7 @@ const GatewayPage = lazy(async () => ({ default: (await import("../pages/gateway
 const UsagePage = lazy(async () => ({ default: (await import("../pages/usage/UsagePage")).UsagePage }));
 const ProfilesPage = lazy(async () => ({ default: (await import("../pages/profiles/ProfilesPage")).ProfilesPage }));
 const SettingsPage = lazy(async () => ({ default: (await import("../pages/settings/SettingsPage")).SettingsPage }));
+const HelpCenter = lazy(async () => ({ default: (await import("../help/HelpCenter")).HelpCenter }));
 
 const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
   { id: "overview", icon: LayoutDashboard },
@@ -31,7 +32,7 @@ const pages: Array<{ id: PageId; icon: typeof LayoutDashboard }> = [
 
 export function RelayShell() {
   const { t } = useTranslation();
-  const { mode, setMode, page, setPage, feedback, clearFeedback, loading, resetOnboarding } = useRelayState();
+  const { mode, setMode, page, setPage, feedback, clearFeedback, loading } = useRelayState();
   const [collapsed, setCollapsed] = useState(() => window.matchMedia?.("(max-width: 1023px)").matches ?? false);
   const [modeOpen, setModeOpen] = useState(false);
   const [importRequest, setImportRequest] = useState<{ id: number; paths?: string[] } | null>(null);
@@ -221,7 +222,7 @@ export function RelayShell() {
         <div className="sidebar-footer">
           {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
           <div className="sidebar-footer-row">
-            <button className="sidebar-help" type="button" aria-label={t("common.help")} title={t("common.help")} onClick={resetOnboarding}>
+            <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
               <CircleHelp aria-hidden />
               <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
             </button>
@@ -260,6 +261,7 @@ function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates 
   if (page === "gateway") return <GatewayPage />;
   if (page === "usage") return <UsagePage />;
   if (page === "profiles") return <ProfilesPage />;
+  if (page === "help") return <HelpCenter />;
   return <SettingsPage updateCheckState={updateCheckState} updateVersion={updateVersion} onCheckUpdates={onCheckUpdates} />;
 }
 

@@ -180,7 +180,7 @@ impl Subscription {
     pub fn normalize(input: SubscriptionInput) -> Self {
         let plan_type = input
             .plan_type
-            .map(|value| value.trim().to_string())
+            .map(|value| normalize_subscription_plan(&value))
             .filter(|value| !value.is_empty());
         let status = if input.forbidden {
             SubscriptionStatus::Forbidden
@@ -205,7 +205,34 @@ impl Subscription {
     pub fn is_free_plan(&self) -> bool {
         self.plan_type
             .as_deref()
-            .is_some_and(|plan| plan.trim().to_ascii_lowercase().contains("free"))
+            .is_some_and(|plan| normalize_subscription_plan(plan) == "free")
+    }
+}
+
+pub(crate) fn normalize_subscription_plan(value: &str) -> String {
+    let value = value.trim().to_ascii_lowercase();
+    let compact = value
+        .bytes()
+        .filter(u8::is_ascii_alphanumeric)
+        .map(char::from)
+        .collect::<String>();
+    match compact.as_str() {
+        "free" | "freeplan" | "freetier" | "chatgptfree" | "chatgptfreeplan"
+        | "chatgptfreetier" => "free".to_string(),
+        "plus" | "plusplan" | "chatgptplus" | "chatgptplusplan" => "plus".to_string(),
+        "pro" | "proplan" | "chatgptpro" | "chatgptproplan" => "pro".to_string(),
+        "business"
+        | "businessplan"
+        | "team"
+        | "teamplan"
+        | "chatgptbusiness"
+        | "chatgptbusinessplan"
+        | "chatgptteam"
+        | "chatgptteamplan" => "business".to_string(),
+        "enterprise" | "enterpriseplan" | "chatgptenterprise" | "chatgptenterpriseplan" => {
+            "enterprise".to_string()
+        }
+        _ => value,
     }
 }
 
@@ -400,5 +427,18 @@ mod tests {
         assert!(subscription("chatgpt_free_tier").is_free_plan());
         assert!(!subscription("plus").is_free_plan());
         assert!(!Subscription::default().is_free_plan());
+    }
+
+    #[test]
+    fn subscription_normalizes_known_openai_plan_aliases() {
+        for (input, expected) in [
+            ("chatgptplusplan", "plus"),
+            ("ChatGPT Pro Plan", "pro"),
+            ("chatgpt_business_plan", "business"),
+            ("team", "business"),
+            ("chatgpt_free_tier", "free"),
+        ] {
+            assert_eq!(normalize_subscription_plan(input), expected);
+        }
     }
 }

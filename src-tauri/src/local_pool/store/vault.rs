@@ -87,6 +87,10 @@ impl Vault {
         Ok(self.lock()?.values.get(secret_ref).cloned())
     }
 
+    pub fn secret_refs(&self) -> Result<Vec<String>, String> {
+        Ok(self.lock()?.values.keys().cloned().collect())
+    }
+
     pub fn delete(&self, secret_ref: &str) -> Result<bool, String> {
         validate_ref(secret_ref)?;
         let mut data = self.lock()?;
@@ -243,6 +247,7 @@ mod tests {
         drop(vault);
 
         let reopened = Vault::open(&root, [3; 32]).unwrap();
+        assert_eq!(reopened.secret_refs().unwrap(), ["import-session:test"]);
         assert_eq!(
             reopened.load("import-session:test").unwrap().as_deref(),
             Some(value.as_str())

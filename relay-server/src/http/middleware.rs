@@ -48,16 +48,16 @@ impl ManagementAuth {
             Ok(failures) => failures,
             Err(_) => return AuthResult::Blocked,
         };
+        let supplied: [u8; 32] = Sha256::digest(token.unwrap_or_default().as_bytes()).into();
+        if self.inner.expected_hash.ct_eq(&supplied).into() {
+            failures.remove(&ip);
+            return AuthResult::Allowed;
+        }
         if failures
             .get(&ip)
             .is_some_and(|state| state.blocked_until_ms > now_ms)
         {
             return AuthResult::Blocked;
-        }
-        let supplied: [u8; 32] = Sha256::digest(token.unwrap_or_default().as_bytes()).into();
-        if self.inner.expected_hash.ct_eq(&supplied).into() {
-            failures.remove(&ip);
-            return AuthResult::Allowed;
         }
         let state = failures.entry(ip).or_insert(FailureState {
             failures: 0,
@@ -136,12 +136,16 @@ mod tests {
             );
         }
         assert_eq!(
-            auth.authorize(ip, Some("synthetic-management-token-value"), 7),
+            auth.authorize(ip, Some("local-pool-key"), 7),
             AuthResult::Blocked
         );
         assert_eq!(
-            auth.authorize(ip, Some("synthetic-management-token-value"), BLOCK_MS + 8),
+            auth.authorize(ip, Some("synthetic-management-token-value"), 8),
             AuthResult::Allowed
+        );
+        assert_eq!(
+            auth.authorize(ip, Some("local-pool-key"), 9),
+            AuthResult::Denied
         );
     }
 }

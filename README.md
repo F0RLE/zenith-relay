@@ -1,147 +1,177 @@
-# Zenith Relay
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="Zenith Relay">
+  <h1>Zenith Relay</h1>
+  <p>One private, OpenAI-compatible endpoint for your accounts and compatible API sources.</p>
+  <p><a href="#english">English</a> | <a href="#русский">Русский</a></p>
+</div>
 
-Zenith Relay is a Tauri desktop application for routing a user's own accounts
-and compatible APIs through one OpenAI-compatible endpoint.
+<a id="english"></a>
 
-```text
-Codex / OpenCode / another client
-              |
-      one local or remote /v1 endpoint
-              |
-   scoped client key and per-request scheduler
-              |
-  OAuth account or user-owned compatible API
-```
+## English
 
-## Runtime Modes
+Zenith Relay is a local-first desktop application for managing your own
+ChatGPT accounts and compatible API sources. It presents the available,
+allowed models through one OpenAI-compatible endpoint, records safe usage
+metadata, and can attach that endpoint to a supported client profile with a
+reversible backup.
 
-- **This computer** runs a private loopback endpoint from the desktop app.
-- **My server** manages the same personal pool on a server controlled by the
-  user, so requests continue while the desktop is closed.
-- **Ready API** connects Codex to Zenith API and shows balance, usage, and
-  top-up actions without exposing the saved key to the frontend.
+### Choose where it runs
 
-Personal pool features include OAuth accounts, compatible API sources, quota
-windows and reset times, a shared scheduler, local client keys, model rules,
-usage diagnostics, quota-wake automation, profile backup/restore, and RU/EN UI.
+| Mode | What it does | Use it when |
+| --- | --- | --- |
+| **Choose API** | Connects a compatible hosted API directly. No local account pool is started. | You already have an API key. |
+| **Computer** | Runs a private account and API-source pool on this computer. The app must remain open. | You want your own accounts and sources behind one local endpoint. |
+| **On your server** | Manages the same personal pool on a server you operate. The server continues after the desktop app closes. | You need a persistent endpoint for your own devices. |
 
-The public app never contains Zenith private selling-pool inventory, billing,
-provider economy, or internal routing policy. User credentials stay in the
-device secret store or encrypted vault on the server selected by that user.
+### What is in the app
 
-## Product Tour
+- **Connections** stores compatible API sources, current ChatGPT sign-ins or
+  imported sessions, optional proxies, and quota automations.
+- **Pool** controls membership, drain state, order, source fallback, and
+  model rules. A candidate must be enabled, allowed, healthy, and able to
+  serve the requested model before it can receive a request.
+- **API & ChatGPT** exposes the endpoint, creates scoped client keys, and
+  attaches it to a supported profile without overwriting an unrelated setup.
+- **Usage** shows requests, model, selected pool member, token breakdown,
+  time to first output, speed, result, and API-equivalent estimate. Prompt and
+  response bodies are not stored in ordinary usage history.
+- **Recovery** keeps encrypted profile snapshots and restores a selected
+  snapshot or removes Relay-managed configuration safely.
 
-All screenshots use synthetic Playwright data. They contain no real account,
-API key, proxy, prompt, or response content.
+Quota windows come from the provider response. Relay does not assume that
+every account has a fixed five-hour or weekly limit. Monitoring and routing are
+separate: an enabled account may be checked even when it is not currently
+routable, while routing requires all of its pool and credential conditions.
 
-### Overview
+### Screenshots
 
-The first screen shows the active endpoint, usable capacity, visible models,
-errors, and recent request health.
+<p align="center">
+  <img src="docs/screenshots/overview.png" width="49%" alt="Overview">
+  <img src="docs/screenshots/connections.png" width="49%" alt="Connections">
+</p>
+<p align="center">
+  <img src="docs/screenshots/pool.png" width="49%" alt="Pool">
+  <img src="docs/screenshots/usage.png" width="49%" alt="Usage">
+</p>
 
-![Zenith Relay overview](docs/screenshots/overview.png)
+### Privacy and safety
 
-### Connections And Pool
+Desktop secrets use the operating-system credential store. A self-hosted
+server keeps secrets in its encrypted vault. A server management token and a
+pool request key are different credentials and are never interchangeable.
+Relay redacts secrets from normal UI state, diagnostics, and usage records.
 
-Connections are the user's inventory. Adding an account or API source does not
-silently enable it for traffic. The user chooses pool membership, then assigns
-an API source as `API first`, `Stabilizer`, or `Last resort`.
+The self-hosted server is a personal deployment, not a public Zenith account
+inventory or customer billing service. Keep the server behind HTTPS, retain the
+vault key separately from its data directory, and test a restore before relying
+on a backup.
 
-| API sources | Pool routing order |
-| --- | --- |
-| ![API source inventory and pool membership](docs/screenshots/api-sources.png) | ![Pool members and routing state](docs/screenshots/pool.png) |
+### Guides
 
-### Usage
+| Mode | English | Russian |
+| --- | --- | --- |
+| Computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
+| Choose API | [Guide](docs/help/en/zenith-api.md) | [Инструкция](docs/help/ru/zenith-api.md) |
+| On your server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
 
-Usage keeps request metadata, latency, token classes, routing attempts, and
-errors without storing prompt or response bodies.
+### Current scope
 
-![Request usage diagnostics](docs/screenshots/usage.png)
+The released account connector is ChatGPT OAuth and compatible session import.
+Compatible API sources are supported independently. Additional account systems
+and client-profile integrations are planned only after their authentication,
+terms, quota semantics, and safe recovery path are understood; see
+[ROADMAP.md](ROADMAP.md).
 
-## Screen Responsibilities
+Relay returns only models that the active pool and the selected client key
+allow. The next model-catalog work will make Relay-provided models visibly
+separate from a client's native models instead of maintaining a hard-coded
+client list.
 
-- **Connections** owns accounts, compatible API sources, proxies, import/export,
-  OAuth sign-in, and quota-wake automation.
-- **Pool** owns traffic eligibility, API-source roles, client access keys, model
-  visibility, quota refresh, and routing policy.
-- **Gateway** owns the local endpoint, bind scope, common proxy, Codex setup,
-  diagnostics, and redacted support bundles.
-- **Usage** owns request, model, connection, latency, token, and error views.
-- **Profiles** owns reversible Codex/OpenCode attachment, snapshots, restore,
-  and repair.
-- **Settings** owns language, theme, local storage, updates, security, and data
-  recovery.
+### Development
 
-## Components
-
-- `src` - React/Vite frontend and Playwright tests.
-- `src-tauri` - Rust/Tauri desktop host, OS secret storage, OAuth, local
-  endpoint, client profiles, and remote management client.
-- `crates/relay-core` - shared scheduler, gateway, quota, automation, protocol,
-  usage, and redaction logic.
-- `relay-server` - standalone encrypted user-managed runtime.
-- `docs` - product, architecture, runtime, UX, and active release gates.
-
-Start with the [documentation map](docs/README.md). Exact paths and ownership
-live in [project-structure.md](docs/project-structure.md); unfinished release
-work lives in [local-pool-final-planning.md](docs/local-pool-final-planning.md).
-
-## Development
-
-```bash
+~~~powershell
 cd src
 bun install
-bun run app:dev
-```
-
-Verification:
-
-```bash
-cd src
 bun run verify
 bun run test:e2e
-bun run app:build
-```
+bun run screenshots
+~~~
 
-Dependency and server gates:
+The desktop bundle is built with <code>bun run app:build</code> from
+<code>src</code>. The user-managed server is the
+<code>relay-server</code> crate; start its release binary only with its
+HTTPS origin, management token, vault key, and data directory configured.
+The current architecture and operating rules are in
+[PLANNING.md](PLANNING.md); contribution and verification rules are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
-```bash
-cd src
-bun audit
-cd ..
-cargo audit --file src-tauri/Cargo.lock
-cargo audit --file relay-server/Cargo.lock
-cargo build --manifest-path relay-server/Cargo.toml --release --locked
-```
+<a id="русский"></a>
 
-Run the user-managed server:
+## Русский
 
-```bash
-cargo run --manifest-path relay-server/Cargo.toml --release
-```
+Zenith Relay - локальное desktop-приложение для управления собственными
+учётными записями ChatGPT и совместимыми API. Оно отдаёт разрешённые и реально
+доступные модели через один OpenAI-совместимый адрес, сохраняет безопасную
+статистику использования и может подключить этот адрес к поддерживаемому
+профилю клиента с обратимой резервной копией.
 
-See [relay-server/README.md](relay-server/README.md) for encrypted deployment,
-backup, and restore instructions.
+### Где работает Relay
 
-## Platforms
+| Режим | Что делает | Когда выбирать |
+| --- | --- | --- |
+| **Выбор API** | Подключает готовый совместимый API напрямую. Локальный пул не запускается. | Уже есть API-ключ. |
+| **Компьютер** | Запускает приватный пул аккаунтов и API-источников на этом компьютере. Приложение должно быть открыто. | Нужен единый локальный адрес для своих аккаунтов и источников. |
+| **На своём сервере** | Управляет тем же личным пулом на вашем сервере. Сервер работает после закрытия desktop-приложения. | Нужен постоянный адрес для своих устройств. |
 
-The release workflow builds Windows x64/ARM64, macOS Intel/Apple Silicon, and
-Linux x64/ARM64. Release artifacts include portable/setup/MSI packages on
-Windows, app/DMG packages on macOS, and AppImage/DEB/RPM packages on Linux.
+### Что умеет приложение
 
-## Zenith API
+- **Подключения**: совместимые API, текущие входы ChatGPT, импортированные
+  сессии, необязательные прокси и автоматизации квот.
+- **Пул**: состав участников, дренирование, порядок, fallback API-источников
+  и правила моделей. Запрос получит только включённый, разрешённый, здоровый
+  участник, который реально умеет обслужить выбранную модель.
+- **API и ChatGPT**: адрес, ключи для клиентов и обратимое подключение
+  поддерживаемого профиля.
+- **Использование**: запросы, модель, выбранный участник, токены, время до
+  первого вывода, скорость, результат и API-эквивалент. Тексты промптов и
+  ответов в обычной истории не хранятся.
+- **Восстановление**: зашифрованные снимки профиля и безопасное возвращение
+  выбранного снимка или удаление настроек, которыми управляет Relay.
 
-The recommended Ready API preset is:
+Окна квоты берутся из ответа провайдера. Relay не считает, что у каждого
+аккаунта обязательно есть одинаковые лимиты на пять часов или неделю.
+Наблюдение за квотой и маршрутизация разделены: включённый аккаунт можно
+проверять вне пула, но маршрутизация требует всех условий пула и доступных
+учётных данных.
 
-```text
-https://api.zenithmarket.dev/v1
-```
+### Конфиденциальность и безопасность
 
-Telegram top-up bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+На компьютере секреты находятся в системном хранилище учётных данных. На
+своём сервере они лежат в зашифрованном vault. Управляющий токен сервера и
+ключ запросов пула - разные учётные данные и не взаимозаменяемы. Relay не
+выводит секреты в обычном состоянии интерфейса, диагностике и истории
+использования.
 
-Public API documentation: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+Серверный режим предназначен для личного развёртывания, а не для публичного
+хранилища аккаунтов Zenith или клиентского биллинга. Используйте HTTPS,
+храните ключ vault отдельно от каталога данных и заранее проверяйте
+восстановление резервной копии.
 
-## License
+### Справка и развитие
 
-Copyright (C) 2026 FORLE. Licensed under
-[GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
+Инструкции для каждого режима доступны в таблице выше и внутри раздела
+«Помощь» приложения. Сейчас поддержан вход ChatGPT через OAuth и совместимый
+импорт сессии, а также независимые совместимые API-источники.
+
+Будущая поддержка других подписок, например Kiro или Antigravity, и
+подключение других программ будет добавляться только при наличии безопасного
+официального пути входа, понятной семантики квот и обратимого восстановления.
+План разделённого каталога моделей, где модели Relay отдельно видны в Codex и
+содержат только доступные модели пула, описан в
+[PLANNING.md](PLANNING.md) и [ROADMAP.md](ROADMAP.md).
+
+### Лицензия
+
+Copyright (C) 2026 FORLE. Лицензия:
+[GNU Affero General Public License v3.0 only](LICENSE)
+(<code>AGPL-3.0-only</code>).

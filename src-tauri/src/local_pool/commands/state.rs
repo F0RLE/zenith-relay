@@ -1,9 +1,7 @@
-use super::account_routing_allowed;
 use crate::local_pool::{
     accounts::{
         credentials::CredentialStore,
         proxy::{common_proxy_available, proxy_status},
-        records::candidate_health,
         NativeSecretBackend,
     },
     error::CommandError,
@@ -12,14 +10,20 @@ use crate::local_pool::{
     state::DesktopState,
     store::secret_store,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    operational_status, pool_model_summaries, AccountRoutingExclusion, AccountSummary,
-    Capabilities, GatewaySummary, KeySummary, OperationalStatus, RuntimeStateSnapshot,
-    RuntimeTargetSummary, SourceSummary,
+    account_operational_state, operational_status, pool_model_summaries, AccountOperationalInput,
+    AccountSummary, Capabilities, GatewaySummary, KeySummary, OperationalStatus,
+    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
-use zenith_relay_core::{ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot};
+use zenith_relay_core::{
+    quota::{
+        attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
+    },
+    ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
+};
 
 #[tauri::command]
 pub async fn get_local_pool_state(
@@ -32,6 +36,7 @@ pub async fn get_local_pool_state(
 pub async fn get_local_runtime_state(
     state: State<'_, DesktopState>,
 ) -> Result<RuntimeStateSnapshot, CommandError> {
+    let started = Instant::now();
     let snapshot = state.snapshot().await?;
     let running = snapshot.runtime_target.connected;
     let routing_order = state
@@ -46,9 +51,15 @@ pub async fn get_local_runtime_state(
         .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
         .collect::<HashMap<_, _>>();
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
-    let equivalents = state
-        .telemetry
-        .api_equivalents_with_price_overrides(&snapshot.gateway.model_price_overrides)?;
+    let snapshot_at_ms = current_time_ms();
+    let equivalents = state.telemetry.api_equivalents_with_price_overrides(
+        &snapshot.gateway.model_price_overrides,
+        &snapshot
+            .sources
+            .iter()
+            .map(|source| (source.id.clone(), source.model_price_overrides.clone()))
+            .collect::<BTreeMap<_, _>>(),
+    )?;
     let managed_key_ids = codex::profile_bindings(
         &crate::platform::default_codex_home(),
         &state.profile_backup_root(),
@@ -78,7 +89,7 @@ pub async fn get_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let account_summaries = snapshot
+    let mut account_summaries = snapshot
         .accounts
         .iter()
         .map(|record| {
@@ -91,9 +102,31 @@ pub async fn get_local_runtime_state(
                     .get(&record.account.id)
                     .copied()
                     .unwrap_or_default(),
+                snapshot_at_ms,
+                state.quota_refresh_in_flight(&record.account.id)?,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let economics_revision = zenith_relay_core::quota::quota_valuation_revision();
+    let plan_benchmarks = quota_plan_benchmarks(
+        snapshot
+            .accounts
+            .iter()
+            .map(|account| (account.account.id.as_str(), &account.economics)),
+        snapshot_at_ms,
+        economics_revision,
+    );
+    for (record, summary) in snapshot.accounts.iter().zip(&mut account_summaries) {
+        attach_quota_plan_benchmarks(
+            &mut summary.economics,
+            "chatgpt",
+            record.account.subscription.plan_type.as_deref(),
+            &record.account.quota,
+            snapshot.gateway.default_service_tier,
+            economics_revision,
+            &plan_benchmarks,
+        );
+    }
     let mut models = pool_model_summaries(
         &source_summaries,
         &account_summaries,
@@ -111,6 +144,8 @@ pub async fn get_local_runtime_state(
                     .cached_input_micro_usd_per_million
                     .unwrap_or(price.input_micro_usd_per_million),
             );
+            model.cache_write_5m_micro_usd_per_million = price.cache_write_5m_micro_usd_per_million;
+            model.cache_write_1h_micro_usd_per_million = price.cache_write_1h_micro_usd_per_million;
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
@@ -134,7 +169,7 @@ pub async fn get_local_runtime_state(
         "http://{}:{}/v1",
         snapshot.gateway.client_host, snapshot.gateway.port
     );
-    Ok(RuntimeStateSnapshot {
+    let response = RuntimeStateSnapshot {
         schema_version: snapshot.schema_version,
         configuration_revision: None,
         runtime_target: RuntimeTargetSummary {
@@ -162,9 +197,7 @@ pub async fn get_local_runtime_state(
             common_proxy_available,
             common_proxy_id: None,
             account_proxy_required: snapshot.gateway.account_proxy_required,
-            quota_refresh_interval_seconds: snapshot.gateway.quota_refresh_interval_seconds,
             quota_request_timeout_seconds: snapshot.gateway.quota_request_timeout_seconds,
-            use_free_accounts: snapshot.gateway.use_free_accounts,
             chatgpt_interface_quota_reserve_basis_points: Some(
                 snapshot
                     .gateway
@@ -184,7 +217,25 @@ pub async fn get_local_runtime_state(
         automations: snapshot.automations,
         wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
-    })
+    };
+    let _ = state.record_performance(
+        "full_snapshot_native",
+        started.elapsed().as_secs_f64() * 1_000.0,
+        Some("local"),
+    );
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn record_local_performance_sample(
+    name: String,
+    duration_ms: f64,
+    context: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    state
+        .record_performance(&name, duration_ms, context.as_deref())
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -224,6 +275,8 @@ fn local_source_summary(
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        recovery_delay_seconds: record.recovery_delay_seconds,
+        model_price_overrides: record.model_price_overrides.clone(),
         api_equivalent,
         secret_available,
         last_error_code: record.last_error.clone(),
@@ -235,15 +288,9 @@ fn local_account_summary(
     settings: &crate::local_pool::models::GatewaySettings,
     common_proxy_available: bool,
     api_equivalent: ApiEquivalentSummary,
+    now_ms: u64,
+    refreshing: bool,
 ) -> crate::local_pool::error::Result<AccountSummary> {
-    let secret_available = record
-        .account
-        .secret_refs
-        .iter()
-        .map(|secret_ref| secret_store::load(secret_ref))
-        .collect::<crate::local_pool::error::Result<Vec<_>>>()?
-        .into_iter()
-        .all(|value| value.is_some());
     let credentials = CredentialStore::from_backend(NativeSecretBackend)
         .load(&record.account.id)
         .map_err(|error| {
@@ -252,26 +299,26 @@ fn local_account_summary(
                 error.to_string(),
             )
         })?;
+    let secret_available = credentials.is_some();
     let (proxy_mode, proxy_available) = credentials
         .as_ref()
         .map(|credentials| proxy_status(settings, credentials, common_proxy_available))
         .unwrap_or((zenith_relay_core::protocol::ProxyMode::Direct, false));
-    let routing_exclusion = (!account_routing_allowed(settings, &record.account.subscription))
-        .then_some(AccountRoutingExclusion::FreePlanPolicy);
-    let quota_wait = routing_exclusion.is_some()
-        || record.account.quota.limit_reached
-        || record
-            .account
-            .quota
-            .primary
-            .iter()
-            .chain(record.account.quota.secondary.iter())
-            .any(|window| window.available_basis_points == Some(0));
-    let configured_available = !record.account.draining
-        && secret_available
-        && proxy_available
-        && routing_exclusion.is_none()
-        && candidate_health(&record.account).is_eligible();
+    let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: record.account.enabled,
+        in_pool: record.account.in_pool,
+        draining: record.account.draining,
+        secret_available,
+        proxy_available,
+        auth_state: record.account.auth_state,
+        health: record.account.health,
+        subscription: &record.account.subscription,
+        quota: &record.account.quota,
+        last_error_code: record.account.last_error_code.as_deref(),
+        now_ms,
+        quota_stale_after_ms,
+    });
     Ok(AccountSummary {
         id: record.account.id.clone(),
         label: record.account.label.clone(),
@@ -285,12 +332,7 @@ fn local_account_summary(
         enabled: record.account.enabled,
         in_pool: record.account.in_pool,
         draining: record.account.draining,
-        operational_status: operational_status(
-            record.account.enabled,
-            quota_wait,
-            configured_available,
-            None,
-        ),
+        operational_status: operational.status,
         auth_state: record.account.auth_state,
         health: format!("{:?}", record.account.health).to_ascii_lowercase(),
         models: record.models.clone(),
@@ -299,6 +341,14 @@ fn local_account_summary(
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
+        economics: quota_economics_summary_for_revision(
+            &record.economics,
+            &record.account.quota,
+            settings.default_service_tier,
+            now_ms,
+            quota_stale_after_ms,
+            zenith_relay_core::quota::quota_valuation_revision(),
+        ),
         subscription: record.account.subscription.clone(),
         quota: record.account.quota.clone(),
         secret_available,
@@ -306,7 +356,12 @@ fn local_account_summary(
         proxy_mode,
         proxy_available,
         proxy_id: None,
-        routing_exclusion,
+        quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
+            record.account.auth_state,
+            &record.account.quota,
+            refreshing,
+        ),
+        routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
     })
 }
@@ -322,6 +377,9 @@ fn local_key_summary(record: &LocalGatewayKeyRecord, managed_by_chatgpt: bool) -
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
         model_prefix: record.model_prefix.clone(),
+        wire_apis: None,
+        soft_budget_micro_usd: None,
+        usage_totals: Default::default(),
         created_at_ms: timestamp_ms(&record.created_at).unwrap_or_default(),
         last_used_at_ms: record.last_used_at.as_deref().and_then(timestamp_ms),
     }
@@ -331,6 +389,13 @@ fn timestamp_ms(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
+}
+
+fn current_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -364,9 +429,7 @@ mod parity_tests {
                 common_proxy_available: false,
                 common_proxy_id: None,
                 account_proxy_required: false,
-                quota_refresh_interval_seconds: 300,
                 quota_request_timeout_seconds: 20,
-                use_free_accounts: false,
                 chatgpt_interface_quota_reserve_basis_points: Some(100),
                 routing_order: Vec::new(),
             },

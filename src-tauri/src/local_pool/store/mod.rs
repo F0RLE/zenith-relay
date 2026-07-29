@@ -64,7 +64,13 @@ impl LocalPoolStore {
         gateway
             .validate()
             .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-        let sources = state.sources;
+        let mut sources = state.sources;
+        for source in &mut sources {
+            source.normalize();
+            source
+                .validate_price_overrides()
+                .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
+        }
         let accounts = state.accounts;
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
@@ -169,6 +175,17 @@ impl LocalPoolStore {
         self.replace_accounts_and_keys(next, self.keys.clone())
     }
 
+    pub fn reset_quota_economics_learning(&mut self) -> Result<()> {
+        let mut accounts = self.accounts.clone();
+        for account in &mut accounts {
+            account.economics.reset_learning();
+            account
+                .economics
+                .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
+        }
+        self.replace_accounts_and_keys(accounts, self.keys.clone())
+    }
+
     pub fn replace_records(
         &mut self,
         sources: Vec<ProviderSourceRecord>,
@@ -222,12 +239,39 @@ impl LocalPoolStore {
         self.replace_all_records(self.sources.clone(), accounts, keys, automations)
     }
 
+    pub fn delete_account_state(
+        &mut self,
+        account_id: &str,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        automations: AutomationRecords,
+    ) -> Result<()> {
+        self.replace_all_records_inner(
+            self.sources.clone(),
+            accounts,
+            keys,
+            automations,
+            Some(account_id),
+        )
+    }
+
     fn replace_all_records(
         &mut self,
         sources: Vec<ProviderSourceRecord>,
         accounts: Vec<LocalAccountRecord>,
         keys: Vec<LocalGatewayKeyRecord>,
         automations: AutomationRecords,
+    ) -> Result<()> {
+        self.replace_all_records_inner(sources, accounts, keys, automations, None)
+    }
+
+    fn replace_all_records_inner(
+        &mut self,
+        sources: Vec<ProviderSourceRecord>,
+        accounts: Vec<LocalAccountRecord>,
+        keys: Vec<LocalGatewayKeyRecord>,
+        automations: AutomationRecords,
+        deleted_account_id: Option<&str>,
     ) -> Result<()> {
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
@@ -258,7 +302,12 @@ impl LocalPoolStore {
         if changed.automations {
             values.push((STATE_AUTOMATIONS, serialize_state(&automations)?));
         }
-        self.database.replace_state_json(&values)?;
+        match deleted_account_id {
+            Some(account_id) => self
+                .database
+                .replace_state_json_and_delete_account_data(&values, account_id)?,
+            None => self.database.replace_state_json(&values)?,
+        }
 
         self.sources = sources;
         self.accounts = accounts;
@@ -673,9 +722,7 @@ mod tests {
         let root = temp_root();
         let mut store = LocalPoolStore::open(root.clone()).unwrap();
         let mut gateway = store.gateway().clone();
-        gateway.quota_refresh_interval_seconds = 120;
         gateway.quota_request_timeout_seconds = 10;
-        gateway.use_free_accounts = true;
         gateway.chatgpt_interface_quota_reserve_basis_points = 700;
         gateway.routing_strategy = RoutingStrategy::SubscriptionExpiry;
         gateway.subscription_plan_order = vec!["business".into(), "plus".into()];
@@ -685,6 +732,8 @@ mod tests {
             zenith_relay_core::ApiModelPriceOverride {
                 input_micro_usd_per_million: 1_250_000,
                 cached_input_micro_usd_per_million: Some(125_000),
+                cache_write_5m_micro_usd_per_million: None,
+                cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 7_500_000,
             },
         );
@@ -692,9 +741,7 @@ mod tests {
         drop(store);
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
-        assert_eq!(reopened.gateway().quota_refresh_interval_seconds, 120);
         assert_eq!(reopened.gateway().quota_request_timeout_seconds, 10);
-        assert!(reopened.gateway().use_free_accounts);
         assert_eq!(
             reopened
                 .gateway()
@@ -718,6 +765,8 @@ mod tests {
             Some(&zenith_relay_core::ApiModelPriceOverride {
                 input_micro_usd_per_million: 1_250_000,
                 cached_input_micro_usd_per_million: Some(125_000),
+                cache_write_5m_micro_usd_per_million: None,
+                cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 7_500_000,
             })
         );
@@ -860,6 +909,8 @@ mod tests {
                 excluded_models: Vec::new(),
                 priority: 0,
                 weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: Default::default(),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
@@ -915,6 +966,8 @@ mod tests {
             excluded_models: Vec::new(),
             priority: 0,
             weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
             last_used_at: None,
             last_test_at: None,
             last_test_status: None,
@@ -969,6 +1022,8 @@ mod tests {
             excluded_models: Vec::new(),
             priority: 0,
             weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
             last_used_at: None,
             last_test_at: None,
             last_test_status: None,
@@ -1090,6 +1145,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
+            economics: Default::default(),
             remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],

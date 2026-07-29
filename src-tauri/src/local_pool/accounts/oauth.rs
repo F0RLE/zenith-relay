@@ -626,7 +626,7 @@ fn parse_identity_claims(jwt: &str) -> Result<OAuthIdentityClaims, OAuthError> {
         subscription_active_until_ms: auth
             .as_ref()
             .and_then(|auth| auth.chatgpt_subscription_active_until.as_ref())
-            .and_then(zenith_relay_core::quota::parse_subscription_timestamp_ms),
+            .and_then(zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms),
         user_id: auth.as_ref().and_then(|auth| {
             nonempty(auth.chatgpt_user_id.clone()).or_else(|| nonempty(auth.user_id.clone()))
         }),

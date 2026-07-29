@@ -6,31 +6,16 @@ use crate::local_pool::{
     store::secret_store,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, time::Duration};
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashSet};
 use tauri::State;
-use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models, source_points_to_gateway, ProviderSource, WireApi,
+    discover_source_models, fetch_source_provider_stats, source_points_to_gateway,
+    ApiModelPriceOverride, ProviderSource, SourceProviderStats, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
-const OPENROUTER_CREDITS_URL: &str = "https://openrouter.ai/api/v1/credits";
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceStats {
-    source_id: String,
-    provider: String,
-    supported: bool,
-    balance: Option<String>,
-    spent: Option<String>,
-    requests: Option<i64>,
-    requests_display: Option<String>,
-    total_tokens: Option<i64>,
-    total_tokens_display: Option<String>,
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +37,10 @@ pub struct CreateSourceInput {
     priority: i32,
     #[serde(default = "default_weight")]
     weight: u32,
+    #[serde(default)]
+    recovery_delay_seconds: u64,
+    #[serde(default)]
+    model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +61,10 @@ pub struct UpdateSourceInput {
     excluded_models: Vec<String>,
     priority: i32,
     weight: u32,
+    #[serde(default)]
+    recovery_delay_seconds: u64,
+    #[serde(default)]
+    model_price_overrides: Option<BTreeMap<String, ApiModelPriceOverride>>,
 }
 
 #[tauri::command]
@@ -118,6 +111,8 @@ pub async fn create_local_source(
         excluded_models: input.excluded_models,
         priority: input.priority,
         weight: input.weight,
+        recovery_delay_seconds: input.recovery_delay_seconds,
+        model_price_overrides: input.model_price_overrides,
         last_used_at: None,
         last_test_at: Some(Utc::now().to_rfc3339()),
         last_test_status: Some("ok".into()),
@@ -165,6 +160,10 @@ pub async fn update_local_source(
         excluded_models: input.excluded_models,
         priority: input.priority,
         weight: input.weight,
+        recovery_delay_seconds: input.recovery_delay_seconds,
+        model_price_overrides: input
+            .model_price_overrides
+            .unwrap_or(current.model_price_overrides),
         last_used_at: current.last_used_at,
         last_test_at: current.last_test_at,
         last_test_status: current.last_test_status,
@@ -354,149 +353,30 @@ pub async fn test_local_source(
 pub async fn get_local_source_stats(
     source_id: String,
     state: State<'_, DesktopState>,
-) -> CommandResult<SourceStats> {
+) -> CommandResult<SourceProviderStats> {
     let source = state
         .store()?
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    let provider = source_stats_provider(&source.base_url);
-    if provider == "unsupported" {
-        return Ok(unsupported_source_stats(source_id));
-    }
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
-    match provider {
-        "zenith" => {
-            let stats = crate::fetch_key_stats(&api_key)
-                .await
-                .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message))?;
-            Ok(SourceStats {
-                source_id,
-                provider: "zenith".into(),
-                supported: true,
-                balance: Some(stats.balance),
-                spent: Some(stats.spent),
-                requests: Some(stats.requests),
-                requests_display: Some(stats.requests_display),
-                total_tokens: Some(stats.total_tokens),
-                total_tokens_display: Some(stats.total_tokens_display),
-            })
-        }
-        "openrouter" => fetch_openrouter_stats(source_id, &api_key).await,
-        _ => unreachable!(),
-    }
-}
-
-async fn fetch_openrouter_stats(source_id: String, api_key: &str) -> CommandResult<SourceStats> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|_| {
-            LocalPoolError::new(
-                ErrorCode::GatewayUnavailable,
-                "OpenRouter stats request could not be initialized",
-            )
-        })?;
-    let response = client
-        .get(OPENROUTER_CREDITS_URL)
-        .bearer_auth(api_key)
-        .send()
+    fetch_source_provider_stats(&source.base_url, &api_key)
         .await
-        .map_err(|_| {
-            LocalPoolError::new(
-                ErrorCode::GatewayUnavailable,
-                "OpenRouter stats request failed",
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(LocalPoolError::new(
-            ErrorCode::GatewayUnavailable,
-            format!(
-                "OpenRouter stats request failed ({})",
-                response.status().as_u16()
-            ),
-        )
-        .into());
-    }
-    let payload = response.json::<serde_json::Value>().await.map_err(|_| {
-        LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "OpenRouter stats response is invalid",
-        )
-    })?;
-    openrouter_stats_from_value(source_id, &payload).map_err(Into::into)
-}
-
-fn openrouter_stats_from_value(
-    source_id: String,
-    payload: &serde_json::Value,
-) -> LocalResult<SourceStats> {
-    let data = payload.get("data").unwrap_or(payload);
-    let total_credits =
-        number_field(data, &["total_credits", "totalCredits"]).ok_or_else(|| {
-            LocalPoolError::new(ErrorCode::InvalidState, "OpenRouter credits are missing")
-        })?;
-    let total_usage = number_field(data, &["total_usage", "totalUsage"]).ok_or_else(|| {
-        LocalPoolError::new(ErrorCode::InvalidState, "OpenRouter usage is missing")
-    })?;
-    Ok(SourceStats {
-        source_id,
-        provider: "openrouter".into(),
-        supported: true,
-        balance: format_usd(total_credits - total_usage),
-        spent: format_usd(total_usage),
-        requests: None,
-        requests_display: None,
-        total_tokens: None,
-        total_tokens_display: None,
-    })
-}
-
-fn source_stats_provider(base_url: &str) -> &'static str {
-    let Ok(url) = Url::parse(base_url) else {
-        return "unsupported";
-    };
-    match url.host_str().map(str::to_ascii_lowercase).as_deref() {
-        Some("api.zenithmarket.dev") => "zenith",
-        Some("openrouter.ai") => "openrouter",
-        _ => "unsupported",
-    }
-}
-
-fn unsupported_source_stats(source_id: String) -> SourceStats {
-    SourceStats {
-        source_id,
-        provider: "unsupported".into(),
-        supported: false,
-        balance: None,
-        spent: None,
-        requests: None,
-        requests_display: None,
-        total_tokens: None,
-        total_tokens_display: None,
-    }
-}
-
-fn number_field(value: &serde_json::Value, names: &[&str]) -> Option<f64> {
-    names.iter().find_map(|name| value.get(name)?.as_f64())
-}
-
-fn format_usd(value: f64) -> Option<String> {
-    if !value.is_finite() {
-        return None;
-    }
-    let microusd = (value * 1_000_000.0).round();
-    if microusd < i64::MIN as f64 || microusd > i64::MAX as f64 {
-        return None;
-    }
-    Some(crate::format_money_microusd(microusd as i64))
+        .map_err(|message| LocalPoolError::new(ErrorCode::GatewayUnavailable, message).into())
 }
 
 fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -> LocalResult<()> {
     ensure_supported_wire_api(source.wire_api)?;
+    if source.recovery_delay_seconds > 24 * 60 * 60 {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "source recovery delay must not exceed 24 hours",
+        ));
+    }
+    source
+        .validate_price_overrides()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     if source.models.is_empty() {
@@ -619,36 +499,5 @@ mod tests {
                 .code,
             ErrorCode::InvalidState
         ));
-    }
-
-    #[test]
-    fn stats_provider_requires_an_exact_known_host() {
-        assert_eq!(
-            source_stats_provider("https://api.zenithmarket.dev/v1"),
-            "zenith"
-        );
-        assert_eq!(
-            source_stats_provider("https://openrouter.ai/api/v1"),
-            "openrouter"
-        );
-        assert_eq!(
-            source_stats_provider("https://openrouter.ai.evil.test/api/v1"),
-            "unsupported"
-        );
-        assert_eq!(source_stats_provider("not a URL"), "unsupported");
-    }
-
-    #[test]
-    fn openrouter_credits_are_normalized_without_inventing_usage_fields() {
-        let stats = openrouter_stats_from_value(
-            "source_1".into(),
-            &serde_json::json!({"data": {"total_credits": 25.5, "total_usage": 4.25}}),
-        )
-        .unwrap();
-        assert_eq!(stats.provider, "openrouter");
-        assert_eq!(stats.balance.as_deref(), Some("$21.250000"));
-        assert_eq!(stats.spent.as_deref(), Some("$4.250000"));
-        assert_eq!(stats.requests, None);
-        assert_eq!(stats.total_tokens, None);
     }
 }

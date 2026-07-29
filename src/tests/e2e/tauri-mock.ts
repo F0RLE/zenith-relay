@@ -15,19 +15,24 @@ export type MockOptions = {
   usageAccountIndex?: number;
   usageActive?: boolean;
   usageFailure?: boolean;
+  usageCandidateKind?: "account" | "source";
   usageTotalPages?: number;
+  planBenchmark?: boolean;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBindingActive?: boolean;
   codexBindingKind?: "oauth_account" | "local_gateway";
   codexBoundOauthAccountId?: string | null;
   profileSwitchError?: boolean;
+  recoveryLoadError?: boolean;
+  canonicalProfilePath?: boolean;
   moveAccountsError?: boolean;
   profileSnapshotsEmpty?: boolean;
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
   quotaAvailable?: boolean;
+  quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
   poolKeyPresent?: boolean;
@@ -47,6 +52,8 @@ export type MockOptions = {
   updateVersion?: string;
   updateBody?: string;
   updateDate?: string;
+  profileSwitchBackupPrompt?: boolean;
+  mixedModels?: boolean;
 };
 
 export async function emitTauriEvent(page: Page, event: string, payload: unknown) {
@@ -63,6 +70,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
     localStorage.setItem("relay.theme", input.theme ?? "light");
+    localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
     type MockOperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
@@ -79,7 +87,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       limitReached: false,
       resetCreditsAvailable: 1,
       updatedAtMs: Date.now(),
-      error: null as { code: string; observedAtMs: number } | null,
+      error: null as { code: string; occurredAtMs: number } | null,
     };
     const source = {
       id: "source_synthetic",
@@ -88,13 +96,17 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       inPool: input.poolMembers ?? true,
       draining: false,
       operationalStatus: "rotation" as MockOperationalStatus,
-      baseUrl: "https://example.invalid/v1",
+      baseUrl: "https://api.zenithmarket.dev/v1",
       wireApi: "responses",
-      models: ["gpt-5.4", "gpt-5.4-mini"],
+      models: input.mixedModels
+        ? ["gpt-5.4", "claude-opus-4-8", "gemini-3.1-pro-preview", "grok-4.5", "glm-5.2", "private-model"]
+        : ["gpt-5.4", "gpt-5.4-mini"],
       allowedModels: [],
       excludedModels: [],
       priority: 10,
       weight: 100,
+      recoveryDelaySeconds: 0,
+      modelPriceOverrides: {},
       apiEquivalent: { microUsd: 8_500, pricedTokens: 1_400, unpricedTokens: 0 },
       secretAvailable: true,
       lastErrorCode: null,
@@ -114,14 +126,30 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       excludedModels: [],
       priority: 20,
       weight: 100,
-      apiEquivalent: { microUsd: 170, pricedTokens: 28, unpricedTokens: 0 },
+      apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
+      economics: {
+        purchaseCostMicroUsd: 18_000_000,
+        potentialMicroUsd: 24_000_000,
+        potentialLowMicroUsd: 20_000_000,
+        potentialHighMicroUsd: 28_000_000,
+        potentialRequests: 220,
+        potentialTotalTokens: 2_400_000,
+        estimateState: "estimated" as const,
+        confidence: "medium" as const,
+        observedBasisPoints: 340,
+        sampleCount: 3,
+        windows: [
+          { kind: "primary" as const, potentialMicroUsd: 4_200_000, potentialLowMicroUsd: 3_800_000, potentialHighMicroUsd: 4_700_000, potentialRequests: 38, potentialTotalTokens: 420_000, fullWindowMicroUsd: 5_830_000, estimateState: "estimated" as const, confidence: "medium" as const, observedBasisPoints: 340, sampleCount: 3, serviceTiers: [{ serviceTier: "standard" as const, potentialMicroUsd: 4_200_000, potentialRequests: 38, potentialTotalTokens: 420_000, observedBasisPoints: 340, sampleCount: 3 }] },
+          { kind: "secondary" as const, potentialMicroUsd: 24_000_000, potentialLowMicroUsd: 20_000_000, potentialHighMicroUsd: 28_000_000, potentialRequests: 220, potentialTotalTokens: 2_400_000, fullWindowMicroUsd: 37_500_000, estimateState: "estimated" as const, confidence: "medium" as const, observedBasisPoints: 340, sampleCount: 3, serviceTiers: [{ serviceTier: "standard" as const, potentialMicroUsd: 24_000_000, potentialRequests: 220, potentialTotalTokens: 2_400_000, observedBasisPoints: 340, sampleCount: 3 }] },
+        ],
+      },
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
+      quotaRefreshStatus: input.quotaRefreshStatus ?? "updated" as "pending" | "refreshing" | "updated" | "failed" | "requires_reauth",
       secretAvailable: true,
       remoteLocation: null as { serverId: string; remoteAccountId: string } | null,
       proxyMode: "common",
       proxyAvailable: true,
-      routingExclusion: null as "free_plan_policy" | null,
       lastErrorCode: input.staleAccountError ? "quota_transport" : input.accountAuthReason ? "quota_token_prepare" : null as string | null,
     };
     const accountCount = Math.max(1, Math.min(input.accountCount ?? 1, 6));
@@ -146,22 +174,91 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.proxyMode = variant.proxyMode;
       item.models = [...variant.models];
       item.priority = variant.priority;
-      item.apiEquivalent.microUsd = 170 * (index + 1);
-      item.apiEquivalent.pricedTokens = 28 * (index + 1);
+      const economics = [
+        null,
+        { used: 31_500_000, purchase: 24_000_000, potential: 62_000_000, low: 57_000_000, high: 68_000_000, state: "estimated", confidence: "high", samples: 4, observed: 420 },
+        { used: 3_800_000, purchase: 8_000_000, potential: null, low: null, high: null, state: "stale", confidence: null, samples: 1, observed: 80 },
+        { used: 65_000_000, purchase: 70_000_000, potential: 120_000_000, low: 98_000_000, high: 136_000_000, state: "estimated", confidence: "medium", samples: 3, observed: 250 },
+        { used: 500_000, purchase: 12_000_000, potential: null, low: null, high: null, state: "collecting", confidence: null, samples: 0, observed: 4 },
+        { used: 4_200_000, purchase: null, potential: 9_000_000, low: 5_000_000, high: 14_000_000, state: "estimated", confidence: "low", samples: 2, observed: 40 },
+      ][index % 6];
+      if (economics) {
+        item.apiEquivalent.microUsd = economics.used;
+        item.apiEquivalent.pricedTokens = 2_800_000 * (index + 1);
+        item.economics = {
+          purchaseCostMicroUsd: economics.purchase,
+          potentialMicroUsd: economics.potential,
+          potentialLowMicroUsd: economics.low,
+          potentialHighMicroUsd: economics.high,
+          potentialRequests: economics.potential == null ? null : 120,
+          potentialTotalTokens: economics.potential == null ? null : 1_200_000,
+          estimateState: economics.state as "collecting" | "estimated" | "stale",
+          confidence: economics.confidence as "low" | "medium" | "high" | null,
+          observedBasisPoints: economics.observed,
+          sampleCount: economics.samples,
+          windows: [],
+        };
+      }
       const healthyFree = variant.plan === "free" && input.freeAccountHealthy;
       item.health = healthyFree ? "healthy" : variant.health;
-      item.routingExclusion = variant.plan === "free" ? "free_plan_policy" : null;
       item.lastErrorCode = healthyFree ? null : variant.error;
       item.quota.error = healthyFree ? null : variant.error ? { code: variant.error, observedAtMs: Date.now() } : null;
-      if (variant.primary === null) item.quota.primary = null;
+      if (variant.primary === null) {
+        item.quota.primary = null;
+        item.quota.secondary = null;
+        item.quota.updatedAtMs = null;
+      }
       else if (item.quota.primary) {
         item.quota.primary.availableBasisPoints = variant.primary;
         item.quota.primary.windowMinutes = variant.primaryMinutes;
       }
       if (variant.secondary === null) item.quota.secondary = null;
       else if (item.quota.secondary) item.quota.secondary.availableBasisPoints = variant.secondary;
+      item.quotaRefreshStatus = item.quota.error ? "failed" : item.quota.updatedAtMs == null ? "pending" : "updated";
       return item;
     });
+    if (input.planBenchmark) {
+      for (const [index, label, plan, multiplier] of [
+        [1, "Peer Plus", account.subscription.planType, 1.2],
+        [2, "Outlier Plus", account.subscription.planType, 20],
+        [3, "Peer Business", "team", 100],
+      ] as const) {
+        const peer = accounts[index];
+        if (!peer) continue;
+        peer.label = label;
+        peer.subscription.planType = plan;
+        peer.quota = structuredClone(account.quota);
+        peer.economics = structuredClone(account.economics);
+        for (const window of peer.economics.windows) {
+          window.fullWindowMicroUsd = Math.round(window.fullWindowMicroUsd * multiplier);
+        }
+      }
+      for (const [window, quotaWindow] of [[account.economics.windows[0], account.quota.primary], [account.economics.windows[1], account.quota.secondary]] as const) {
+        const fullWindowMicroUsd = Math.round(window.fullWindowMicroUsd * 1.2);
+        const availableBasisPoints = quotaWindow?.availableBasisPoints ?? 0;
+        Object.assign(window, {
+          planBenchmark: {
+            provider: "chatgpt",
+            plan: "plus",
+            windowKind: window.kind,
+            windowMinutes: quotaWindow?.windowMinutes ?? 0,
+            serviceTier: "standard",
+            pricingRevision: "mock-pricing",
+            accountCount: 3,
+            cycleCount: 9,
+            latestCompletedAtMs: Date.now() - dayMs,
+            stale: false,
+            confidence: "low",
+            fullWindowMicroUsd,
+            meanFullWindowMicroUsd: Math.round(window.fullWindowMicroUsd * 7.4),
+            lowFullWindowMicroUsd: window.fullWindowMicroUsd,
+            highFullWindowMicroUsd: window.fullWindowMicroUsd * 20,
+            potentialMicroUsd: Math.round(fullWindowMicroUsd * availableBasisPoints / 10_000),
+            weeklyEquivalentMicroUsd: null,
+          },
+        });
+      }
+    }
     const key = {
       id: "key_synthetic",
       label: "ChatGPT",
@@ -172,18 +269,20 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       allowedModels: [],
       excludedModels: [],
       modelPrefix: null,
+      wireApis: null as Array<"responses" | "chat_completions" | "images"> | null,
       createdAtMs: Date.now() - 86_400_000,
       lastUsedAtMs: Date.now() - 60_000,
     };
+    const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
       id: "11111111-1111-4111-8111-111111111111",
       name: locale === "ru" ? "Исходный профиль" : "Original profile",
-      profileDir: "C:\\Users\\Test\\.codex",
+      profileDir,
       createdAtMs: Date.now() - 3_600_000,
       configAvailable: true,
       authAvailable: true,
     }];
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -207,9 +306,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRefreshIntervalSeconds: 300, quotaRequestTimeoutSeconds: 20, useFreeAccounts: false, chatgptInterfaceQuotaReserveBasisPoints: 100, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "free_account_policy", "runtime_routing"] },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing"], supportedWireApis: ["responses", "chat_completions"] as Array<"responses" | "chat_completions" | "messages"> },
       sources: populated ? [source] : [],
       accounts: populated ? accounts : [],
       keys: populated && input.poolKeyPresent !== false ? [key] : [],
@@ -251,16 +350,17 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.1.0" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
+    remoteRuntime.keys = [];
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "keys", "profile_attach", "diagnostics", "wake_tasks", "account_proxies", "free_account_policy", "runtime_routing", "configuration_presets"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "keys", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "client_access", "client_key_budgets", "images"], supportedWireApis: ["responses", "chat_completions"] };
     const configurationPreset = {
       format: "zenith-relay-configuration",
-      schemaVersion: 1,
+      schemaVersion: 2,
       settings: {
-        sources: remoteRuntime.sources.map((item) => ({ id: item.id, name: item.name, baseUrl: item.baseUrl, wireApi: item.wireApi, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight })),
+        sources: remoteRuntime.sources.map((item) => ({ id: item.id, name: item.name, baseUrl: item.baseUrl, wireApi: item.wireApi, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight, recoveryDelaySeconds: item.recoveryDelaySeconds, modelPriceOverrides: item.modelPriceOverrides })),
         accounts: remoteRuntime.accounts.map((item) => ({ id: item.id, identityHint: item.identityHint, enabled: item.enabled, inPool: item.inPool, allowedModels: item.allowedModels, excludedModels: item.excludedModels, priority: item.priority, weight: item.weight, proxyId: null })),
         routing: { maxRetryCandidates: 4, routingStrategy: remoteRuntime.gateway.routingStrategy, subscriptionPlanOrder: remoteRuntime.gateway.subscriptionPlanOrder, defaultServiceTier: remoteRuntime.gateway.defaultServiceTier, imageBaseModel: null },
-        quota: { refreshIntervalSeconds: remoteRuntime.gateway.quotaRefreshIntervalSeconds, requestTimeoutSeconds: remoteRuntime.gateway.quotaRequestTimeoutSeconds, useFreeAccounts: remoteRuntime.gateway.useFreeAccounts, accountProxyRequired: remoteRuntime.gateway.accountProxyRequired, commonProxyId: null },
+        quota: { requestTimeoutSeconds: remoteRuntime.gateway.quotaRequestTimeoutSeconds, accountProxyRequired: remoteRuntime.gateway.accountProxyRequired, commonProxyId: null },
         hiddenModels: [],
         modelPriceOverrides: {},
       },
@@ -294,16 +394,19 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         excludedModels: payload.excludedModels as string[] ?? [],
         priority: Number(payload.priority ?? 0),
         weight: Number(payload.weight ?? 100),
+        recoveryDelaySeconds: Number(payload.recoveryDelaySeconds ?? 0),
+        modelPriceOverrides: payload.modelPriceOverrides as typeof source.modelPriceOverrides ?? {},
         draining: Boolean(payload.draining),
         inPool: false,
         operationalStatus: "disabled" as MockOperationalStatus,
       };
     }
 
-    const routing = { reason: "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: 6300, inFlightBefore: 0, dispatchesBefore: 3 };
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, routing }] : [];
-    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: "account", candidateHint: input.remoteUsageLabelMissing ? "4f5c821a909b" : usageAccount.identityHint, candidateLabel: input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, createdAtMs: Date.now(), routing }] : [];
-    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null }>) {
+    const sourceUsage = input.usageCandidateKind === "source";
+    const routing = { reason: sourceUsage ? "weighted_rotation" : "quota_headroom", eligibleCandidates: 4, quotaRemainingBasisPoints: sourceUsage ? null : 6300, inFlightBefore: 0, dispatchesBefore: 3 };
+    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28, unpricedTokens: 0 }, routing }] : [];
+    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: "gpt-5.4", resolvedModel: "gpt-5.4", wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25, unpricedTokens: 0 }, createdAtMs: Date.now(), routing }] : [];
+    function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const visibleOutputTokens = Math.max(0, (item.outputTokens ?? 0) - (item.reasoningTokens ?? 0));
         totals.requests += 1; totals.successfulRequests += Number(item.success); totals.latencyMs += item.latencyMs;
@@ -312,11 +415,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         totals.inputTokens += item.inputTokens ?? 0; totals.cachedInputTokens += item.cachedInputTokens ?? 0; totals.cachedInputSamples += Number(item.cachedInputTokens != null);
         totals.reasoningTokens += item.reasoningTokens ?? 0; totals.outputTokens += item.outputTokens ?? 0; totals.totalTokens += item.totalTokens ?? 0;
         if (item.success && visibleOutputTokens && item.latencyMs) { totals.speedOutputTokens += visibleOutputTokens; totals.speedDurationMs += item.latencyMs; }
-        totals.apiEquivalent.microUsd += 148; totals.apiEquivalent.pricedTokens += item.totalTokens ?? 0;
+        totals.apiEquivalent.microUsd += item.apiEquivalent?.microUsd ?? 0; totals.apiEquivalent.pricedTokens += item.apiEquivalent?.pricedTokens ?? 0; totals.apiEquivalent.unpricedTokens += item.apiEquivalent?.unpricedTokens ?? item.totalTokens ?? 0;
         return totals;
       }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
-    let readyKey = input.readyConnected === false ? "" : "zrk_synthetic_ready_key";
+    let readyKey = input.readyConnected === false ? "" : "znt_synthetic_ready_key";
     let readyActive = Boolean(readyKey) && (input.readyActive ?? true);
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();
@@ -350,11 +453,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_system_locale": return locale;
           case "get_platform": return "windows";
           case "get_state": return { providerActive: readyActive, codexRunning: false, hasSavedApiKey: Boolean(readyKey) };
-          case "get_key_stats":
-          case "get_saved_key_stats": return { maskedKey: "zrk_••••••••cdef", label: "Personal API", enabled: true, status: "active", balanceCents: 4250, spentCents: 750, totalCreditsCents: 5000, requests: 18, inputTokens: 1700, cachedInputTokens: 300, reasoningTokens: 100, outputTokens: 400, totalTokens: 2500, dailySpentCents: 150, weeklySpentCents: 450, monthlySpentCents: 750, balance: "$42.50", spent: "$7.50", totalCredits: "$50.00", requestsDisplay: "18", inputTokensDisplay: "1,700", cachedInputTokensDisplay: "300", reasoningTokensDisplay: "100", outputTokensDisplay: "400", totalTokensDisplay: "2,500", dailySpent: "$1.50", weeklySpent: "$4.50", monthlySpent: "$7.50" };
           case "get_saved_key_models": return ["gpt-5.4", "gpt-5.4-mini"];
-          case "get_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
-          case "get_saved_key_usage_history": return { usage: populated ? [{ id: 3, createdAt: new Date().toISOString(), status: "success", model: "gpt-5.4", modelDisplay: "gpt-5.4", streamDurationMs: 390, timeToFirstByteMs: 120, inputTokens: 20, cachedInputTokens: 10, reasoningTokens: 4, outputTokens: 10, totalTokens: 30, costMicrousd: 148, displayCostMicrousd: 1_480, requestId: "req_synthetic_ready", responseTimeDisplay: "390 ms" }] : [], limit: 100, sinceId: null };
           case "create_saved_top_up_intent_and_open": return null;
           case "open_api_key_page": return null;
           case "save_key": readyKey = String(args.apiKey ?? ""); if (args.activate !== false) readyActive = true; return readyKey;
@@ -373,21 +472,22 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
-            const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0] ? Date.parse(events[0].createdAt) : 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
             const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: account.id, label: account.label, totals }] : [] };
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : account.id, label: sourceUsage ? source.name : account.label, totals }] : [] };
           }
           case "get_remote_server_usage": {
             const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
-            const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.candidateHint.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            const sourceOrAccountQuery = query.sourceOrAccountQuery === account.id ? "a1b2c3d4e5f6" : query.sourceOrAccountQuery;
+            const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!sourceOrAccountQuery || item.candidateHint.includes(sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0]?.createdAtMs ?? 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
             const buckets = bucketStart == null ? [] : [{ startMs: bucketStart, totals }];
-            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: "a1b2c3d4e5f6", label: account.label, totals }] : [] };
+            return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : "a1b2c3d4e5f6", label: sourceUsage ? source.name : account.label, totals }] : [] };
           }
           case "create_local_source": {
             const created = sourceFromPayload(args.input as Record<string, unknown>, `source_created_${localRuntime.sources.length + 1}`);
@@ -410,12 +510,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "delete_local_source": localRuntime.sources = []; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "test_local_source": return structuredClone(source);
-          case "get_local_source_stats": {
+          case "get_local_source_stats":
+          case "get_remote_source_stats": {
             const selected = localRuntime.sources.find((item) => item.id === String(args.sourceId));
             const host = selected ? new URL(selected.baseUrl).host.toLowerCase() : "";
-            if (host === "api.zenithmarket.dev") return { sourceId: selected?.id, provider: "zenith", supported: true, balance: "$42.50", spent: "$7.50", requests: 128, requestsDisplay: "128", totalTokens: 987_654, totalTokensDisplay: "987,654" };
-            if (host === "openrouter.ai") return { sourceId: selected?.id, provider: "openrouter", supported: true, balance: "$21.25", spent: "$3.75", requests: null, requestsDisplay: null, totalTokens: null, totalTokensDisplay: null };
-            return { sourceId: selected?.id ?? String(args.sourceId), provider: "unsupported", supported: false, balance: null, spent: null, requests: null, requestsDisplay: null, totalTokens: null, totalTokensDisplay: null };
+            if (host === "api.zenithmarket.dev") return { provider: "zenith", balanceMicroUsd: 42_500_000, spentMicroUsd: 7_500_000, requests: 128, totalTokens: 987_654 };
+            if (host === "openrouter.ai") return { provider: "openrouter", balanceMicroUsd: 21_250_000, spentMicroUsd: 3_750_000, requests: null, totalTokens: null };
+            return { provider: "unsupported", balanceMicroUsd: null, spentMicroUsd: null, requests: null, totalTokens: null };
           }
           case "start_local_account_import": return importSession("11111111-2222-4333-8444-555555555555");
           case "current_chatgpt_profile_available": return input.currentProfileAvailable ?? true;
@@ -442,13 +543,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "cancel_local_account_import": return null;
           case "refresh_local_account_quota": return structuredClone(localRuntime);
-          case "refresh_all_local_account_quotas": return structuredClone(localRuntime);
+          case "refresh_all_local_account_quotas": return localRuntime.accounts.map((item) => ({ accountId: item.id, status: "succeeded" }));
           case "update_local_account": {
-            const request = args.input as { accountId?: string; priority?: number; weight?: number; draining?: boolean };
+            const request = args.input as { accountId?: string; priority?: number; weight?: number; draining?: boolean; purchaseCostMicroUsd?: number };
             const target = localRuntime.accounts.find((item) => item.id === request.accountId);
             if (target && typeof request.priority === "number") target.priority = request.priority;
             if (target && typeof request.weight === "number") target.weight = request.weight;
             if (target && typeof request.draining === "boolean") target.draining = request.draining;
+            if (target && typeof request.purchaseCostMicroUsd === "number" && target.economics) target.economics.purchaseCostMicroUsd = request.purchaseCostMicroUsd || null;
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
           }
@@ -479,24 +581,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "set_local_model_price": {
-            const request = args.input as { modelId: string; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null };
+            const request = args.input as { modelId: string; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion: number | null; cacheWrite1hMicroUsdPerMillion: number | null; outputMicroUsdPerMillion: number | null };
             const target = localRuntime.gateway.models.find((model) => model.id === request.modelId);
             if (target) {
               const custom = request.inputMicroUsdPerMillion != null && request.cachedInputMicroUsdPerMillion != null && request.outputMicroUsdPerMillion != null;
               const catalog = modelPrices[target.id.toLowerCase()] ?? { catalogRank: null, inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null };
               target.inputMicroUsdPerMillion = custom ? request.inputMicroUsdPerMillion : catalog.inputMicroUsdPerMillion;
               target.cachedInputMicroUsdPerMillion = custom ? request.cachedInputMicroUsdPerMillion : catalog.cachedInputMicroUsdPerMillion;
+              target.cacheWrite5mMicroUsdPerMillion = custom ? request.cacheWrite5mMicroUsdPerMillion : null;
+              target.cacheWrite1hMicroUsdPerMillion = custom ? request.cacheWrite1hMicroUsdPerMillion : null;
               target.outputMicroUsdPerMillion = custom ? request.outputMicroUsdPerMillion : catalog.outputMicroUsdPerMillion;
               target.customPrice = custom;
             }
-            return structuredClone(localRuntime);
-          }
-          case "update_local_quota_policy": {
-            const request = args.input as { refreshIntervalSeconds: number; requestTimeoutSeconds: number; useFreeAccounts: boolean };
-            localRuntime.gateway.quotaRefreshIntervalSeconds = request.refreshIntervalSeconds;
-            localRuntime.gateway.quotaRequestTimeoutSeconds = request.requestTimeoutSeconds;
-            localRuntime.gateway.useFreeAccounts = request.useFreeAccounts;
-            applyFreeRoutingPolicy(localRuntime);
             return structuredClone(localRuntime);
           }
           case "update_chatgpt_interface_quota_reserve": {
@@ -526,15 +622,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "set_local_account_proxy": {
-            const request = args.input as { accountId: string; proxyUrl: string | null };
+            const request = args.input as { accountId: string; proxyUrl: string | null; bypassCommonProxy?: boolean };
             const target = localRuntime.accounts.find((item) => item.id === request.accountId);
             for (const entry of proxyEntries) entry.assignedAccountIds = entry.assignedAccountIds.filter((accountId) => accountId !== request.accountId);
             if (request.proxyUrl) {
               proxyEntries.push({ id: `proxy_synthetic_${proxyEntries.length + 1}`, endpoint: `http://custom-proxy.example.test:1080`, assignedAccountIds: [request.accountId], countryCode: null, region: null, createdAtMs: Date.now() });
             }
             if (target) {
-              target.proxyMode = request.proxyUrl ? "account" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
-              target.proxyAvailable = true;
+              target.proxyMode = request.proxyUrl ? "account" : request.bypassCommonProxy ? "direct" : localRuntime.gateway.commonProxyConfigured ? "common" : "direct";
+              target.proxyAvailable = target.proxyMode !== "direct" || !localRuntime.gateway.accountProxyRequired;
             }
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
@@ -740,8 +836,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
           }
-          case "diagnose_local_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 321, bytesReceived: 64 };
-          case "diagnose_remote_gateway": return { stream: Boolean(args.stream), model: "gpt-5.4-mini", latencyMs: 345, bytesReceived: 72 };
           case "create_quota_wake_automation": Object.assign(automation, args.input); localRuntime.automations = [automation]; return structuredClone(localRuntime);
           case "update_quota_wake_automation": Object.assign(automation, args.input); return structuredClone(localRuntime);
           case "set_quota_wake_automation_enabled": automation.enabled = Boolean(args.enabled); return structuredClone(localRuntime);
@@ -752,14 +846,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "launch_saved_codex":
           case "restore_codex_profile":
           case "restore_codex_account_profile": return null;
-          case "list_codex_profile_snapshots": return structuredClone(profileSnapshots);
+          case "list_codex_profile_snapshots": if (input.recoveryLoadError) throw { code: "recovery_required" }; return { snapshots: structuredClone(profileSnapshots), invalidCount: 0 };
           case "create_codex_profile_snapshot": {
-            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir: "C:\\Users\\Test\\.codex", createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+            const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.name), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
             profileSnapshots = [snapshot, ...profileSnapshots];
             return structuredClone(snapshot);
           }
           case "restore_codex_profile_snapshot": {
-            const safety = { id: `33333333-3333-4333-8333-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.safetyName), profileDir: "C:\\Users\\Test\\.codex", createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+            const safety = { id: `33333333-3333-4333-8333-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.safetyName), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
             profileSnapshots = [safety, ...profileSnapshots];
             return structuredClone(safety);
           }
@@ -777,12 +871,28 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "export_usage": return "C:\\Temp\\usage.json";
           case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.1.0", platform: "windows", mode: "local", schemaVersion: 10, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
-          case "list_codex_account_bindings": return populated && input.codexBindings !== false ? [{ profileDir: "C:\\Users\\Test\\.codex", credentialKind: input.codexBindingKind ?? "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
+          case "list_codex_account_bindings": if (input.recoveryLoadError) throw { code: "recovery_required" }; return populated && input.codexBindings !== false ? [{ profileDir, credentialKind: input.codexBindingKind ?? "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.1.0", protocolVersion: 2, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "get_remote_linked_account_count": return localRuntime.accounts.filter((account) => account.remoteLocation?.serverId === "server-synthetic").length;
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
           case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };
+          case "create_remote_client_key": {
+            const request = args.input as { label: string; sourceIds: string[] | null; accountIds: string[] | null; allowedModels: string[]; excludedModels: string[]; modelPrefix: string | null; wireApis: Array<"responses" | "chat_completions" | "images"> | null };
+            const created = { ...key, ...request, id: `key_remote_${remoteRuntime.keys.length + 1}`, enabled: true, system: false, usageTotals: usageTotals([]), createdAtMs: Date.now(), lastUsedAtMs: null };
+            remoteRuntime.keys = [...remoteRuntime.keys, created];
+            return { schemaVersion: 1, key: structuredClone(created), secret: "zrs_synthetic_remote_client_key_000000000000" };
+          }
+          case "update_remote_client_key": {
+            const target = remoteRuntime.keys.find((item) => item.id === args.keyId);
+            if (target) Object.assign(target, args.input);
+            return structuredClone(target);
+          }
+          case "rotate_remote_client_key": {
+            const target = remoteRuntime.keys.find((item) => item.id === args.keyId);
+            return { schemaVersion: 1, key: structuredClone(target), secret: "zrs_synthetic_rotated_client_key_0000000000" };
+          }
+          case "revoke_remote_client_key": remoteRuntime.keys = remoteRuntime.keys.filter((item) => item.id !== args.keyId); return null;
           case "execute_remote_server_action": return remoteAction(args);
           case "plugin:event|listen": {
             const eventId = nextEventListener++;
@@ -828,15 +938,13 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           : !item.draining && item.secretAvailable ? "rotation" : "unavailable";
       }
       for (const item of runtime.accounts) {
-        const quotaWait = item.routingExclusion != null
-          || item.quota.limitReached
+        const quotaWait = item.quota.limitReached
           || [item.quota.primary, item.quota.secondary].some((window) => window?.availableBasisPoints === 0);
         const available = !item.draining
           && item.authState.state === "active"
           && ["unknown", "healthy", "degraded"].includes(item.health)
           && item.secretAvailable
-          && item.proxyAvailable
-          && !item.routingExclusion;
+          && item.proxyAvailable;
         item.operationalStatus = !item.enabled
           ? "disabled"
           : !available ? "unavailable" : quotaWait ? "quotaWait" : "rotation";
@@ -848,7 +956,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         && member.inPool
         && !member.draining
         && member.secretAvailable
-        && ("baseUrl" in member || member.proxyAvailable && !member.routingExclusion));
+        && ("baseUrl" in member || member.proxyAvailable));
       runtime.gateway.candidateCount = eligible.length;
       runtime.gateway.routingOrder = members
         .filter((member) => member.inPool)
@@ -870,7 +978,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       runtime.gateway.models = ids.map((id) => {
         const current = currentModels.get(id.toLowerCase());
         const price = current?.customPrice
-          ? { catalogRank: current.catalogRank, inputMicroUsdPerMillion: current.inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion: current.cachedInputMicroUsdPerMillion, outputMicroUsdPerMillion: current.outputMicroUsdPerMillion }
+          ? { catalogRank: current.catalogRank, inputMicroUsdPerMillion: current.inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion: current.cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion: current.cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion: current.cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion: current.outputMicroUsdPerMillion }
           : modelPrices[id.toLowerCase()] ?? { catalogRank: null, inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, outputMicroUsdPerMillion: null };
         return {
           id,
@@ -881,14 +989,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         };
       }).sort((left, right) => (left.catalogRank ?? Number.MAX_SAFE_INTEGER) - (right.catalogRank ?? Number.MAX_SAFE_INTEGER) || left.id.localeCompare(right.id));
       runtime.gateway.visibleModelIds = runtime.gateway.models.filter((model) => model.enabled).map((model) => model.id);
-    }
-
-    function applyFreeRoutingPolicy(runtime: typeof localRuntime) {
-      for (const item of runtime.accounts) {
-        const free = item.subscription.planType?.toLowerCase().includes("free") ?? false;
-        item.routingExclusion = free && !runtime.gateway.useFreeAccounts ? "free_plan_policy" : null;
-      }
-      refreshGatewayModels(runtime);
     }
 
     function remoteAction(args: Record<string, unknown>) {
@@ -924,6 +1024,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (target && typeof input.payload?.draining === "boolean") target.draining = input.payload.draining;
         if (target && typeof input.payload?.priority === "number") target.priority = input.payload.priority;
         if (target && typeof input.payload?.weight === "number") target.weight = input.payload.weight;
+        if (target && typeof input.payload?.purchaseCostMicroUsd === "number" && target.economics) target.economics.purchaseCostMicroUsd = input.payload.purchaseCostMicroUsd || null;
         refreshGatewayModels(remoteRuntime);
         return structuredClone(target ?? null);
       }
@@ -957,8 +1058,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       if (type === "set_account_proxy") {
         const target = remoteRuntime.accounts.find((item) => item.id === input.action?.id);
         if (target) {
-          target.proxyMode = input.payload?.proxyUrl ? "account" : remoteRuntime.gateway.commonProxyConfigured ? "common" : "direct";
-          target.proxyAvailable = true;
+          target.proxyMode = input.payload?.proxyUrl ? "account" : input.payload?.bypassCommonProxy ? "direct" : remoteRuntime.gateway.commonProxyConfigured ? "common" : "direct";
+          target.proxyAvailable = target.proxyMode !== "direct" || !remoteRuntime.gateway.accountProxyRequired;
         }
         refreshGatewayModels(remoteRuntime);
         return structuredClone(target ?? null);
@@ -996,16 +1097,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (target) {
           target.inputMicroUsdPerMillion = input.payload?.inputMicroUsdPerMillion as number | null;
           target.cachedInputMicroUsdPerMillion = input.payload?.cachedInputMicroUsdPerMillion as number | null;
+          target.cacheWrite5mMicroUsdPerMillion = input.payload?.cacheWrite5mMicroUsdPerMillion as number | null;
+          target.cacheWrite1hMicroUsdPerMillion = input.payload?.cacheWrite1hMicroUsdPerMillion as number | null;
           target.outputMicroUsdPerMillion = input.payload?.outputMicroUsdPerMillion as number | null;
           target.customPrice = target.inputMicroUsdPerMillion != null && target.outputMicroUsdPerMillion != null;
         }
-        return structuredClone(remoteRuntime);
-      }
-      if (type === "set_quota_policy") {
-        remoteRuntime.gateway.quotaRefreshIntervalSeconds = Number(input.payload?.refreshIntervalSeconds);
-        remoteRuntime.gateway.quotaRequestTimeoutSeconds = Number(input.payload?.requestTimeoutSeconds);
-        remoteRuntime.gateway.useFreeAccounts = Boolean(input.payload?.useFreeAccounts);
-        applyFreeRoutingPolicy(remoteRuntime);
         return structuredClone(remoteRuntime);
       }
       if (type === "set_routing_policy") {

@@ -26,19 +26,19 @@ test("usage report columns move with pointer input and persist independently", a
 
   let table = page.locator(".usage-request-table");
   await dragColumn(page, table, "time", "status");
-  await expect.poll(() => columnOrder(table)).toEqual(["status", "time", "model", "connection", "timing", "speed", "tokens", "request"]);
+  await expect.poll(() => columnOrder(table)).toEqual(["status", "time", "model", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
   await expectCentered(table);
 
   await page.getByRole("tab", { name: "Models" }).click();
   table = page.locator(".usage-aggregate-table");
   await dragColumn(page, table, "name", "requests");
-  await expect.poll(() => columnOrder(table)).toEqual(["requests", "name", "success", "breakdown", "total", "speed", "timing"]);
+  await expect.poll(() => columnOrder(table)).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
   await expectCentered(table);
 
   await page.getByRole("tab", { name: "Pool members" }).click();
   table = page.locator(".usage-aggregate-table");
   await dragColumn(page, table, "name", "success");
-  await expect.poll(() => columnOrder(table)).toEqual(["requests", "success", "name", "breakdown", "total", "speed", "timing"]);
+  await expect.poll(() => columnOrder(table)).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
   await expectCentered(table);
 
   await page.getByRole("tab", { name: "Errors" }).click();
@@ -49,13 +49,19 @@ test("usage report columns move with pointer input and persist independently", a
 
   await page.reload();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
-  await expect.poll(() => columnOrder(page.locator(".usage-request-table"))).toEqual(["status", "time", "model", "connection", "timing", "speed", "tokens", "request"]);
+  await expect.poll(() => columnOrder(page.locator(".usage-request-table"))).toEqual(["status", "time", "model", "tier", "connection", "timing", "speed", "tokens", "equivalent", "request"]);
   await page.getByRole("tab", { name: "Models" }).click();
-  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "name", "success", "breakdown", "total", "speed", "timing"]);
+  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "name", "input", "output", "cache", "equivalent"]);
   await page.getByRole("tab", { name: "Pool members" }).click();
-  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "success", "name", "breakdown", "total", "speed", "timing"]);
+  await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
   await page.getByRole("tab", { name: "Errors" }).click();
   await expect.poll(() => columnOrder(page.locator(".usage-error-table"))).toEqual(["model", "time", "connection", "error", "request"]);
+
+  await page.getByRole("button", { name: "Overview", exact: true }).click();
+  const activity = page.locator(".activity-section li").first();
+  await expect(activity).toBeVisible();
+  await expect(activity.locator("[data-column]")).toHaveCount(0);
+  await expect(activity.locator(":scope > *")).toHaveCount(3);
 });
 
 test("account grouping is explicit and saved on connections", async ({ page }) => {

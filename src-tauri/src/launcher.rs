@@ -30,6 +30,8 @@ const CODEX_PROCESS_NAMES: &[&str] = &[
 ];
 const CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "windows")]
+const CODEX_STOP_STABLE_WINDOW: Duration = Duration::from_millis(750);
+#[cfg(target_os = "windows")]
 const CODEX_START_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub fn launch_codex() -> String {
@@ -54,15 +56,19 @@ pub fn stop_codex_and_wait() -> Result<bool, String> {
     }
 
     #[cfg(target_os = "windows")]
-    stop_codex_windows(&pids)?;
+    {
+        stop_codex_windows(&pids, CODEX_STOP_TIMEOUT)?;
+        Ok(true)
+    }
 
     #[cfg(not(target_os = "windows"))]
-    stop_codex_processes(&pids);
-
-    if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT) {
-        Ok(true)
-    } else {
-        Err("ChatGPT did not exit before the profile switch timeout".to_string())
+    {
+        stop_codex_processes(&pids);
+        if wait_for_pids_exit(&pids, CODEX_STOP_TIMEOUT) {
+            Ok(true)
+        } else {
+            Err("ChatGPT did not exit before the profile switch timeout".to_string())
+        }
     }
 }
 
@@ -79,21 +85,53 @@ fn stop_codex_processes(pids: &[u32]) {
 }
 
 #[cfg(target_os = "windows")]
-fn stop_codex_windows(pids: &[u32]) -> Result<(), String> {
-    for pid in pids {
-        let _ = windows_hidden_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T"])
-            .status();
+fn stop_codex_windows(initial_pids: &[u32], timeout: Duration) -> Result<(), String> {
+    let started = Instant::now();
+    let mut signaled = Vec::new();
+    let mut forced = Vec::new();
+    let mut empty_since = None;
+
+    for pid in initial_pids {
+        signal_windows_process(*pid, false);
+        signaled.push(*pid);
     }
-    if wait_for_pids_exit(pids, Duration::from_secs(2)) {
-        return Ok(());
+
+    loop {
+        let running = codex_process_pids();
+        let now = Instant::now();
+        let elapsed = now.duration_since(started);
+        if elapsed >= timeout {
+            return Err("ChatGPT did not exit before the profile switch timeout".to_string());
+        }
+        if process_stop_is_stable(
+            !running.is_empty(),
+            &mut empty_since,
+            now,
+            CODEX_STOP_STABLE_WINDOW,
+        ) {
+            return Ok(());
+        }
+
+        let force = elapsed >= Duration::from_secs(2);
+        for pid in running {
+            let attempted = if force { &mut forced } else { &mut signaled };
+            if !attempted.contains(&pid) {
+                signal_windows_process(pid, force);
+                attempted.push(pid);
+            }
+        }
+        thread::sleep(Duration::from_millis(100));
     }
-    for pid in running_target_pids(pids) {
-        let _ = windows_hidden_command("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .status();
+}
+
+#[cfg(target_os = "windows")]
+fn signal_windows_process(pid: u32, force: bool) {
+    let mut command = windows_hidden_command("taskkill");
+    command.args(["/PID", &pid.to_string(), "/T"]);
+    if force {
+        command.arg("/F");
     }
-    Ok(())
+    let _ = command.status();
 }
 
 fn launch_codex_checked(inject_saved_key: bool) -> Result<(), String> {
@@ -299,6 +337,7 @@ fn codex_process_pids() -> Vec<u32> {
         .collect()
 }
 
+#[cfg(any(not(target_os = "windows"), test))]
 fn running_target_pids(targets: &[u32]) -> Vec<u32> {
     let system = codex_process_system();
     system
@@ -370,6 +409,7 @@ fn wait_for_codex_state(running: bool, timeout: Duration) -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn wait_for_pids_exit(pids: &[u32], timeout: Duration) -> bool {
     let started = Instant::now();
     loop {
@@ -381,6 +421,21 @@ fn wait_for_pids_exit(pids: &[u32], timeout: Duration) -> bool {
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn process_stop_is_stable(
+    processes_running: bool,
+    empty_since: &mut Option<Instant>,
+    now: Instant,
+    stable_window: Duration,
+) -> bool {
+    if processes_running {
+        *empty_since = None;
+        return false;
+    }
+    let since = empty_since.get_or_insert(now);
+    now.duration_since(*since) >= stable_window
 }
 
 #[cfg(test)]
@@ -408,6 +463,38 @@ mod tests {
         let current = std::process::id();
         assert_eq!(running_target_pids(&[current]), vec![current]);
         assert!(running_target_pids(&[u32::MAX]).is_empty());
+    }
+
+    #[test]
+    fn stable_stop_wait_resets_when_process_reappears() {
+        let started = Instant::now();
+        let window = Duration::from_millis(500);
+        let mut empty_since = None;
+
+        assert!(!process_stop_is_stable(
+            false,
+            &mut empty_since,
+            started,
+            window
+        ));
+        assert!(!process_stop_is_stable(
+            true,
+            &mut empty_since,
+            started + window,
+            window
+        ));
+        assert!(!process_stop_is_stable(
+            false,
+            &mut empty_since,
+            started + window,
+            window
+        ));
+        assert!(process_stop_is_stable(
+            false,
+            &mut empty_since,
+            started + window + window,
+            window
+        ));
     }
 
     #[cfg(target_os = "windows")]

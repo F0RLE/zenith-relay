@@ -1,6 +1,6 @@
 use super::{provider_account_failure, AccountHealthState, ProviderAccountFailure};
 use crate::quota::{
-    CodexQuotaRefreshData, QuotaErrorState, QuotaNormalizationError, QuotaRefreshFailure,
+    QuotaErrorState, QuotaNormalizationError, QuotaRefreshFailure, QuotaRefreshResult,
     QuotaSnapshot, QuotaTransition, QuotaWindowKind, Subscription,
 };
 
@@ -24,7 +24,7 @@ pub fn reduce_account_quota(
     previous_subscription: &Subscription,
     previous_health: AccountHealthState,
     previous_last_error_code: Option<&str>,
-    result: Result<CodexQuotaRefreshData, QuotaRefreshFailure>,
+    result: Result<QuotaRefreshResult, QuotaRefreshFailure>,
     failure_observed_at_ms: u64,
 ) -> Result<AccountQuotaUpdate, QuotaNormalizationError> {
     match result {
@@ -40,7 +40,8 @@ pub fn reduce_account_quota(
                         .and_then(|window| window.full_transition_from(previous_quota.window(kind)))
                 })
                 .collect();
-            let health = if data.allowed == Some(false) && data.limit_reached != Some(true) {
+            let health = if data.allowed == Some(false) && data.reported_limit_reached != Some(true)
+            {
                 AccountHealthState::Blocked
             } else {
                 AccountHealthState::Healthy
@@ -105,10 +106,7 @@ pub fn reduce_account_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        quota::{parse_codex_usage, SubscriptionInput},
-        CandidateQuota,
-    };
+    use crate::{providers::chatgpt::parse_codex_usage, quota::SubscriptionInput, CandidateQuota};
 
     fn subscription() -> Subscription {
         Subscription::normalize(SubscriptionInput {

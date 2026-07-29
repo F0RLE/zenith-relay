@@ -1,5 +1,5 @@
 use crate::{
-    app::account_proxy_config,
+    app::{account_proxy_config, prepare_server_account_authorization},
     jobs::quota_refresh,
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
@@ -15,11 +15,12 @@ use std::{
 };
 use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
-    accounts::{AccountAuthMode, AccountIdentity, AccountRecord, CodexIdentityEnvelope},
+    accounts::{AccountAuthMode, AccountIdentity, AccountRecord},
     automations::{
         model_lightness_rank, verify_wake_countdown, WakeAdapterPolicy, WakeCompletion,
         WakeCompletionOutcome, WakeCoordinator, WakeModel, WakePermit,
     },
+    providers::chatgpt::CodexIdentityEnvelope,
     quota::{QuotaTransition, QuotaWindowKind},
 };
 
@@ -142,9 +143,10 @@ async fn execute_inner(
         .ok_or_else(|| "wake_secret_missing".to_string())?;
     let credential: AccountCredential =
         serde_json::from_str(&secret).map_err(|_| "wake_secret_invalid".to_string())?;
-    let tokens = state.prepare_account_tokens(&account.id).await?;
-    let authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
-        .map_err(|_| "wake_access_token_invalid".to_string())?;
+    let (mut credential, mut authorization) =
+        prepare_server_account_authorization(state, &account, credential, None)
+            .await
+            .map_err(|_| "wake_authorization_prepare".to_string())?;
     let identity = CodexIdentityEnvelope::standard(&credential.chatgpt_account_id)
         .map_err(|_| "wake_account_id_invalid".to_string())?;
     let proxy = account_proxy_config(state, &account, &credential)
@@ -160,32 +162,37 @@ async fn execute_inner(
     }
     .build()
     .map_err(|_| "wake_client_init".to_string())?;
-    let response = identity
-        .apply(
-            client
-                .post(&credential.responses_url)
-                .header(AUTHORIZATION, authorization)
-                .json(&serde_json::json!({
-                    "model": permit.model_id,
-                    "input": WAKE_PROMPT,
-                    "stream": false,
-                    "max_output_tokens": permit.output_token_cap,
-                    "reasoning": { "effort": "minimal" },
-                    "tools": []
-                })),
+    let (mut status, mut bytes) = send_wake_request(
+        &client,
+        &identity,
+        &credential.responses_url,
+        authorization,
+        permit,
+    )
+    .await?;
+    if credential.is_agent_identity()
+        && zenith_relay_core::providers::chatgpt::is_agent_identity_task_invalid_response(
+            status.as_u16(),
+            &bytes,
         )
-        .send()
+    {
+        let expected_task_id = credential.agent_task_id.clone().unwrap_or_default();
+        (credential, authorization) = prepare_server_account_authorization(
+            state,
+            &account,
+            credential,
+            Some(&expected_task_id),
+        )
         .await
-        .map_err(|_| "wake_transport".to_string())?;
-    let status = response.status();
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "wake_transport".to_string())?;
-        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err("wake_response_too_large".to_string());
-        }
-        bytes.extend_from_slice(&chunk);
+        .map_err(|_| "wake_authorization_prepare".to_string())?;
+        (status, bytes) = send_wake_request(
+            &client,
+            &identity,
+            &credential.responses_url,
+            authorization,
+            permit,
+        )
+        .await?;
     }
     if !status.is_success() {
         return Err(match status.as_u16() {
@@ -221,6 +228,43 @@ async fn execute_inner(
         .and_then(|value| value.get("output_tokens"))
         .and_then(serde_json::Value::as_u64);
     Ok((outcome, input_tokens, output_tokens))
+}
+
+async fn send_wake_request(
+    client: &reqwest::Client,
+    identity: &CodexIdentityEnvelope,
+    responses_url: &str,
+    authorization: HeaderValue,
+    permit: &WakePermit,
+) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
+    let response = identity
+        .apply(
+            client
+                .post(responses_url)
+                .header(AUTHORIZATION, authorization)
+                .json(&serde_json::json!({
+                    "model": permit.model_id,
+                    "input": WAKE_PROMPT,
+                    "stream": false,
+                    "max_output_tokens": permit.output_token_cap,
+                    "reasoning": { "effort": "minimal" },
+                    "tools": []
+                })),
+        )
+        .send()
+        .await
+        .map_err(|_| "wake_transport".to_string())?;
+    let status = response.status();
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| "wake_transport".to_string())?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err("wake_response_too_large".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((status, bytes))
 }
 
 fn core_account(account: &ServerAccountRecord) -> Result<AccountRecord, String> {
@@ -305,12 +349,14 @@ mod tests {
             weight: 1,
             subscription: Subscription::default(),
             quota: Default::default(),
+            economics: Default::default(),
             cooldowns: Default::default(),
             consecutive_failures: 0,
             created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
             proxy_id: None,
+            bypass_common_proxy: false,
         };
         let mapped = core_account(&account).unwrap();
         assert_eq!(mapped.id, "account_test");

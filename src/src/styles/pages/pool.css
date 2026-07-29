@@ -1,0 +1,569 @@
+
+.table-toolbar {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.table-toolbar .search-field {
+  min-width: 220px;
+  margin-right: auto;
+}
+
+.pool-member-toolbar {
+  min-height: 50px;
+  padding: 8px 10px;
+  row-gap: 8px;
+}
+
+.pool-member-toolbar .pool-priority-label {
+  order: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.pool-member-toolbar .pool-priority-label > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  color: var(--relay-accent-hover);
+}
+
+.pool-member-toolbar .pool-priority-label > span {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.pool-member-toolbar .pool-priority-label strong,
+.pool-member-toolbar .pool-priority-label small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-toolbar .pool-priority-label strong {
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.pool-member-toolbar .pool-priority-label small {
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.pool-member-toolbar .pool-quota-actions {
+  order: 2;
+  margin-left: auto;
+  gap: 10px;
+}
+
+.pool-member-toolbar .pool-control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pool-member-toolbar .pool-control-group + .pool-control-group {
+  margin-left: 2px;
+  padding-left: 10px;
+  border-left: 1px solid var(--relay-border);
+}
+
+.pool-speed-control {
+  height: 34px;
+  position: relative;
+  display: grid;
+  grid-template-columns: 14px minmax(66px, auto) 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 7px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-surface);
+  color: var(--relay-muted);
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.pool-speed-control:hover {
+  border-color: var(--relay-border-strong);
+  background: var(--relay-subtle);
+}
+
+.pool-speed-control:has(> input:focus-visible) {
+  outline: 2px solid var(--relay-focus);
+  outline-offset: 2px;
+}
+
+.pool-speed-control:has(> input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.pool-speed-control > svg {
+  width: 14px;
+  height: 14px;
+  transition: color 160ms ease, transform 160ms ease;
+}
+
+.pool-speed-control[data-fast="true"] > svg {
+  color: var(--relay-accent-hover);
+  transform: scale(1.08);
+}
+
+.pool-speed-copy {
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  text-align: left;
+}
+
+.pool-speed-copy small,
+.pool-speed-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-speed-copy small {
+  color: var(--relay-muted);
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 11px;
+}
+
+.pool-speed-copy strong {
+  color: var(--relay-text);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.pool-member-toolbar .pool-speed-control > input {
+  position: absolute;
+  z-index: 1;
+  top: 7px;
+  right: 7px;
+  width: 32px;
+  height: 18px;
+  min-height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.pool-speed-track {
+  width: 32px;
+  height: 18px;
+  position: relative;
+  display: block;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 9px;
+  background: var(--relay-subtle);
+  transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+}
+
+.pool-speed-track > span {
+  width: 12px;
+  height: 12px;
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: var(--relay-muted);
+  box-shadow: var(--relay-shadow-soft);
+  transition: transform 180ms ease, background 180ms ease;
+}
+
+.pool-speed-control > input:checked + .pool-speed-track {
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-accent) 16%, transparent);
+}
+
+.pool-speed-control > input:checked + .pool-speed-track > span {
+  background: var(--relay-accent-hover);
+  transform: translateX(14px);
+}
+
+.pool-controls {
+  margin: 10px 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+}
+
+.pool-member-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  align-items: stretch;
+  gap: 10px;
+}
+
+.pool-economics-toggle[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.pool-member-card {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(82px, 1fr) auto auto auto;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.pool-member-card:hover {
+  border-color: var(--relay-border-strong);
+}
+
+.pool-member-card.selected {
+  border-color: var(--relay-accent);
+}
+
+.pool-member-card.current {
+  border-color: color-mix(in srgb, var(--relay-accent) 55%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-accent) 4%, var(--relay-surface));
+  box-shadow: var(--relay-shadow-soft);
+}
+
+.pool-member-card.current::before {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
+  background: var(--relay-accent);
+  pointer-events: none;
+  content: "";
+}
+
+.pool-member-identity {
+  grid-area: identity;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.pool-member-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pool-member-meta > small {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-meta .account-plan-badge {
+  flex: 0 0 auto;
+}
+
+.pool-member-card .pool-member-identity small {
+  overflow: hidden;
+  color: var(--relay-muted);
+  font-size: 11px;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-subscription-date,
+.pool-member-subscription-expiry {
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-member-subscription-expiry {
+  color: var(--relay-secondary);
+  font-weight: 600;
+}
+
+.pool-member-actions {
+  grid-area: actions;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  justify-self: end;
+}
+
+.pool-member-card-header {
+  min-width: 0;
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.pool-member-card-header .pool-member-kind-icon,
+.pool-member-card-header .pool-member-identity {
+  grid-area: auto;
+}
+
+.pool-member-card-header .pool-member-kind-icon {
+  width: 46px;
+  height: 100%;
+  min-height: 54px;
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--relay-border);
+  border-radius: 0;
+  background: var(--relay-subtle);
+  color: var(--relay-muted);
+  transition: background-color 240ms ease, color 240ms ease;
+}
+
+.pool-member-card-header .pool-member-identity {
+  align-content: center;
+  padding: 7px 10px;
+}
+
+.pool-member-card-header .pool-member-kind-icon[data-status="ready"] {
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.pool-member-card-header .pool-member-kind-icon[data-status="warning"] {
+  background: var(--relay-warning-soft);
+  color: var(--relay-warning);
+}
+
+.pool-member-card-header .pool-member-kind-icon[data-status="error"] {
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
+}
+
+.pool-member-card-header .pool-member-kind-icon[data-status="info"] {
+  background: var(--relay-info-soft);
+  color: var(--relay-info);
+}
+
+.pool-member-card-header .pool-member-kind-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.pool-member-card-quota {
+  min-width: 0;
+  min-height: 82px;
+  display: grid;
+  align-content: center;
+  padding: 10px 12px;
+}
+
+.pool-member-card-quota .quota-stack {
+  gap: 7px;
+}
+
+.pool-member-card-quota .quota-meter {
+  width: 100%;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-member-card-quota .quota-meter-heading small {
+  overflow: hidden;
+  font-size: 9px;
+  line-height: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-card-quota .quota-track {
+  height: 4px;
+  margin-top: 4px;
+}
+
+.pool-source-stats {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.pool-source-stats > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 7px 8px;
+  text-align: center;
+}
+
+.pool-source-stats > div:nth-child(even) {
+  border-left: 1px solid var(--relay-border);
+}
+
+.pool-source-stats > div:nth-child(n + 3) {
+  border-top: 1px solid var(--relay-border);
+}
+
+.pool-source-stats dt,
+.pool-source-stats dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-source-stats dt {
+  color: var(--relay-muted);
+  font-size: 10px;
+  line-height: 13px;
+}
+
+.pool-source-stats dd {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-source-stats dd[data-muted="true"] {
+  color: var(--relay-muted);
+  font-size: 11px;
+}
+
+.pool-member-context {
+  min-width: 0;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0 12px 10px;
+  padding: 7px 4px 0;
+  overflow: hidden;
+  border: 0;
+  border-top: 1px solid var(--relay-border);
+  border-radius: 0;
+  background: transparent;
+  color: var(--relay-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.pool-member-context[data-kind="source"] {
+  color: var(--relay-muted);
+}
+
+.pool-member-context[data-kind="account"] {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-member-context span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pool-member-context .pool-member-context-separator {
+  flex: 0 0 auto;
+  overflow: visible;
+  color: var(--relay-muted);
+}
+
+.pool-member-card-footer {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--relay-border);
+}
+
+.pool-member-card-footer .pool-member-actions {
+  grid-area: auto;
+  justify-self: auto;
+  margin-left: auto;
+}
+
+.pool-member-card-footer .pool-member-actions .relay-icon-button {
+  width: 40px;
+  min-height: 40px;
+}
+
+.pool-member-card-footer[data-kind="account"],
+.pool-member-card-footer[data-kind="source"] {
+  min-height: 52px;
+  padding: 0;
+}
+
+.pool-member-card-footer[data-kind="account"] .pool-member-actions,
+.pool-member-card-footer[data-kind="source"] .pool-member-actions {
+  width: 100%;
+  align-self: stretch;
+  gap: 0;
+}
+
+.pool-member-card-footer[data-kind="account"] .pool-member-actions .relay-icon-button,
+.pool-member-card-footer[data-kind="source"] .pool-member-actions .relay-icon-button {
+  width: auto;
+  min-height: 51px;
+  flex: 1 1 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.pool-member-card-footer .pool-member-actions .relay-icon-button.danger,
+.account-card-actions .relay-icon-button.danger {
+  color: var(--relay-text);
+}
+
+.pool-member-card-footer .pool-member-actions .relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled),
+.account-card-actions .relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--relay-text);
+}
+
+.pool-member-card-footer .pool-member-actions .relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled) svg,
+.account-card-actions .relay-icon-button.danger:is(:hover, :focus-visible):not(:disabled) svg {
+  color: var(--relay-error);
+}
+
+.pool-member-card-footer[data-kind="account"] .pool-member-actions .relay-icon-button + .relay-icon-button,
+.pool-member-card-footer[data-kind="source"] .pool-member-actions .relay-icon-button + .relay-icon-button {
+  border-left: 1px solid var(--relay-border);
+}

@@ -390,6 +390,15 @@ pub fn rollback(backup_root: &Path, backup_id: &str) -> Result<RollbackResult, S
     })
 }
 
+pub fn discard(backup_root: &Path, backup_id: &str) -> Result<(), String> {
+    validate_id(backup_id, "history_repair_")?;
+    let directory = backup_root.join(backup_id);
+    if directory.exists() {
+        fs::remove_dir_all(directory).map_err(io_error)?;
+    }
+    Ok(())
+}
+
 fn preview_from_snapshot(snapshot: &RepairSnapshot, codex_running: bool) -> RepairPreview {
     RepairPreview {
         session_id: snapshot.session_id.clone(),
@@ -1070,6 +1079,25 @@ mod tests {
         assert!(!root.join(&ids[2]).exists());
         assert!(!root.join(&ids[3]).exists());
         assert!(user_snapshot.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discard_removes_only_a_valid_internal_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-repair-discard-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let backup_id = format!("history_repair_{}", uuid::Uuid::new_v4().simple());
+        let backup = root.join(&backup_id);
+        let unrelated = root.join("keep");
+        fs::create_dir_all(&backup).unwrap();
+        fs::create_dir_all(&unrelated).unwrap();
+
+        discard(&root, &backup_id).unwrap();
+        assert!(!backup.exists());
+        assert!(discard(&root, "../keep").is_err());
+        assert!(unrelated.exists());
         fs::remove_dir_all(root).unwrap();
     }
 

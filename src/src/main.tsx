@@ -1,8 +1,8 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { App } from "./App";
+import { App } from "./app/App";
 import { initI18n } from "./i18n";
-import { getSystemLocale } from "./tauri";
+import { getSystemLocale, recordPerformance } from "./platform/desktop";
 
 void bootstrap();
 
@@ -20,6 +20,7 @@ async function bootstrap() {
   performance.mark("zenith:react-rendered");
   requestAnimationFrame(() => requestAnimationFrame(() => {
     performance.mark("zenith:first-frame");
-    performance.measure("zenith:first-frame", "zenith:html-start", "zenith:first-frame");
+    const measure = performance.measure("zenith:first-frame", "zenith:html-start", "zenith:first-frame");
+    void recordPerformance("first_frame", measure.duration, "startup");
   }));
 }

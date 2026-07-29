@@ -473,6 +473,7 @@ pub fn effective_proxy_url(
 ) -> Result<Option<String>> {
     let proxy = choose_proxy_url(
         credentials.proxy_url(),
+        credentials.bypass_common_proxy(),
         settings.common_proxy_configured,
         || secret_store::load(COMMON_PROXY_SECRET_REF),
     )?;
@@ -527,6 +528,9 @@ pub fn proxy_status(
                 .is_some_and(|value| ProxyConfig::parse(value).is_ok()),
         );
     }
+    if credentials.bypass_common_proxy() {
+        return (ProxyMode::Direct, !settings.account_proxy_required);
+    }
     if settings.common_proxy_configured {
         return (ProxyMode::Common, common_available);
     }
@@ -553,11 +557,15 @@ pub fn common_proxy_available(settings: &GatewaySettings) -> bool {
 
 fn choose_proxy_url(
     account_proxy: Option<&str>,
+    bypass_common_proxy: bool,
     common_configured: bool,
     load_common: impl FnOnce() -> Result<Option<String>>,
 ) -> Result<Option<String>> {
     if let Some(value) = account_proxy {
         return Ok(Some(value.to_string()));
+    }
+    if bypass_common_proxy {
+        return Ok(None);
     }
     if !common_configured {
         return Ok(None);
@@ -652,15 +660,22 @@ mod tests {
 
     #[test]
     fn account_proxy_overrides_common_and_missing_common_fails_closed() {
-        let account = choose_proxy_url(Some("http://account.example:8080/"), true, || {
+        let account = choose_proxy_url(Some("http://account.example:8080/"), false, true, || {
             panic!("common proxy must not be loaded for an account override")
         })
         .unwrap();
         assert_eq!(account.as_deref(), Some("http://account.example:8080/"));
 
-        let error = choose_proxy_url(None, true, || Ok(None)).unwrap_err();
+        assert_eq!(
+            choose_proxy_url(None, true, true, || panic!("common proxy must be bypassed")).unwrap(),
+            None
+        );
+        let error = choose_proxy_url(None, false, true, || Ok(None)).unwrap_err();
         assert!(matches!(error.code, ErrorCode::SecretStoreUnavailable));
-        assert_eq!(choose_proxy_url(None, false, || Ok(None)).unwrap(), None);
+        assert_eq!(
+            choose_proxy_url(None, false, false, || Ok(None)).unwrap(),
+            None
+        );
     }
 
     #[test]

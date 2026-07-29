@@ -1,6 +1,6 @@
 import { Cloud, ExternalLink, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { openApiKeyPage } from "../../../tauri";
+import { openApiKeyPage } from "../../../platform/desktop";
 import { OptionMenu, SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
@@ -48,6 +48,7 @@ export function apiProviderSourceInput(value: ApiProviderValue) {
     draining: false,
     priority: 0,
     weight: 100,
+    recoveryDelaySeconds: 0,
   };
 }
 

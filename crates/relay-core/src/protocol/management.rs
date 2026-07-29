@@ -1,11 +1,13 @@
 use super::Capabilities;
 use crate::{
-    accounts::AccountAuthState,
+    account_candidate_health,
+    accounts::{AccountAuthState, AccountHealthState},
     api_model_price,
     automations::{WakeHistory, WakeTask},
-    quota::{QuotaSnapshot, Subscription},
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateRuntimeSnapshot, DefaultServiceTier,
-    ModelRules, RoutingDiagnostics, RoutingStrategy, WireApi,
+    quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
+    ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateQuota,
+    CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
+    WireApi,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -58,10 +60,7 @@ pub struct GatewaySummary {
     #[serde(default)]
     pub account_proxy_required: bool,
     #[serde(default)]
-    pub quota_refresh_interval_seconds: u64,
-    #[serde(default)]
     pub quota_request_timeout_seconds: u64,
-    pub use_free_accounts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_interface_quota_reserve_basis_points: Option<u64>,
     #[serde(default)]
@@ -77,6 +76,10 @@ pub struct ModelSummary {
     pub catalog_rank: Option<u32>,
     pub input_micro_usd_per_million: Option<u64>,
     pub cached_input_micro_usd_per_million: Option<u64>,
+    #[serde(default)]
+    pub cache_write_5m_micro_usd_per_million: Option<u64>,
+    #[serde(default)]
+    pub cache_write_1h_micro_usd_per_million: Option<u64>,
     pub output_micro_usd_per_million: Option<u64>,
     #[serde(default)]
     pub custom_price: bool,
@@ -93,8 +96,73 @@ pub enum ProxyMode {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AccountRoutingExclusion {
-    FreePlanPolicy,
+pub enum AccountRoutingBlockReason {
+    Disabled,
+    NotInPool,
+    Draining,
+    SecretUnavailable,
+    ProxyUnavailable,
+    ReauthRequired,
+    AuthError,
+    Checkpoint,
+    Captcha,
+    SubscriptionForbidden,
+    SubscriptionExpired,
+    AccountUnhealthy,
+    QuotaExhausted,
+}
+
+pub struct AccountOperationalInput<'a> {
+    pub enabled: bool,
+    pub in_pool: bool,
+    pub draining: bool,
+    pub secret_available: bool,
+    pub proxy_available: bool,
+    pub auth_state: AccountAuthState,
+    pub health: AccountHealthState,
+    pub subscription: &'a Subscription,
+    pub quota: &'a QuotaSnapshot,
+    pub last_error_code: Option<&'a str>,
+    pub now_ms: u64,
+    pub quota_stale_after_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AccountOperationalState {
+    pub status: OperationalStatus,
+    pub health: CandidateHealth,
+    pub quota: CandidateQuota,
+    pub routing_eligible: bool,
+    pub routing_block_reason: Option<AccountRoutingBlockReason>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaRefreshStatus {
+    #[default]
+    Pending,
+    Refreshing,
+    Updated,
+    Failed,
+    RequiresReauth,
+}
+
+pub fn quota_refresh_status(
+    auth_state: AccountAuthState,
+    quota: &QuotaSnapshot,
+    refreshing: bool,
+) -> QuotaRefreshStatus {
+    if matches!(auth_state, AccountAuthState::RequiresReauth(_)) {
+        QuotaRefreshStatus::RequiresReauth
+    } else if refreshing {
+        QuotaRefreshStatus::Refreshing
+    } else if quota.error.is_some() {
+        QuotaRefreshStatus::Failed
+    } else if quota.updated_at_ms.is_some() {
+        QuotaRefreshStatus::Updated
+    } else {
+        QuotaRefreshStatus::Pending
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -128,6 +196,80 @@ pub fn operational_status(
     }
 }
 
+pub fn account_operational_state(input: AccountOperationalInput<'_>) -> AccountOperationalState {
+    let health = account_candidate_health(
+        input.auth_state,
+        input.health,
+        input.subscription.status,
+        input.last_error_code,
+    );
+    let quota =
+        CandidateQuota::from_snapshot(input.quota, input.now_ms, input.quota_stale_after_ms);
+    let configured_available =
+        !input.draining && input.secret_available && input.proxy_available && health.is_eligible();
+    let status = operational_status(
+        input.enabled,
+        quota == CandidateQuota::Exhausted,
+        configured_available,
+        None,
+    );
+    let routing_block_reason = account_routing_block_reason(&input, health, quota);
+    AccountOperationalState {
+        status,
+        health,
+        quota,
+        routing_eligible: routing_block_reason.is_none(),
+        routing_block_reason,
+    }
+}
+
+fn account_routing_block_reason(
+    input: &AccountOperationalInput<'_>,
+    health: CandidateHealth,
+    quota: CandidateQuota,
+) -> Option<AccountRoutingBlockReason> {
+    if !input.enabled {
+        return Some(AccountRoutingBlockReason::Disabled);
+    }
+    if !input.in_pool {
+        return Some(AccountRoutingBlockReason::NotInPool);
+    }
+    if input.draining {
+        return Some(AccountRoutingBlockReason::Draining);
+    }
+    if !input.secret_available {
+        return Some(AccountRoutingBlockReason::SecretUnavailable);
+    }
+    if !input.proxy_available {
+        return Some(AccountRoutingBlockReason::ProxyUnavailable);
+    }
+    match input.auth_state {
+        AccountAuthState::RequiresReauth(_) => {
+            return Some(AccountRoutingBlockReason::ReauthRequired)
+        }
+        AccountAuthState::Error => return Some(AccountRoutingBlockReason::AuthError),
+        _ => {}
+    }
+    match input.last_error_code {
+        Some("checkpoint" | "upstream_account_verification_required") => {
+            return Some(AccountRoutingBlockReason::Checkpoint)
+        }
+        Some("captcha") => return Some(AccountRoutingBlockReason::Captcha),
+        _ => {}
+    }
+    match input.subscription.status {
+        SubscriptionStatus::Forbidden => {
+            return Some(AccountRoutingBlockReason::SubscriptionForbidden)
+        }
+        SubscriptionStatus::Expired => return Some(AccountRoutingBlockReason::SubscriptionExpired),
+        _ => {}
+    }
+    if !health.is_eligible() {
+        return Some(AccountRoutingBlockReason::AccountUnhealthy);
+    }
+    (quota == CandidateQuota::Exhausted).then_some(AccountRoutingBlockReason::QuotaExhausted)
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceSummary {
@@ -145,6 +287,10 @@ pub struct SourceSummary {
     pub excluded_models: Vec<String>,
     pub priority: i32,
     pub weight: u32,
+    #[serde(default)]
+    pub recovery_delay_seconds: u64,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
     pub secret_available: bool,
@@ -178,8 +324,12 @@ pub struct AccountSummary {
     pub weight: u32,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
+    #[serde(default)]
+    pub economics: crate::quota::QuotaEconomicsSummary,
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
+    #[serde(default)]
+    pub quota_refresh_status: QuotaRefreshStatus,
     pub secret_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_location: Option<RemoteAccountLocation>,
@@ -189,8 +339,8 @@ pub struct AccountSummary {
     pub proxy_available: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_id: Option<String>,
-    #[serde(default)]
-    pub routing_exclusion: Option<AccountRoutingExclusion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_block_reason: Option<AccountRoutingBlockReason>,
     pub last_error_code: Option<String>,
 }
 
@@ -224,12 +374,108 @@ pub struct KeySummary {
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
     pub model_prefix: Option<String>,
+    #[serde(default)]
+    pub wire_apis: Option<Vec<ClientWireApi>>,
+    #[serde(default)]
+    pub soft_budget_micro_usd: Option<u64>,
+    #[serde(default)]
+    pub usage_totals: UsageTotals,
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
 }
 
+pub const CLIENT_ACCESS_SCHEMA_VERSION: u16 = 1;
+pub const PROFILE_KEY_ROTATION_SCHEMA_VERSION: u16 = 1;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientWireApi {
+    Responses,
+    ChatCompletions,
+    Images,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClientKeyCreateInput {
+    pub schema_version: u16,
+    pub label: String,
+    pub source_ids: Option<Vec<String>>,
+    pub account_ids: Option<Vec<String>>,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+    pub model_prefix: Option<String>,
+    pub wire_apis: Option<Vec<ClientWireApi>>,
+    #[serde(default)]
+    pub soft_budget_micro_usd: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClientKeyPatch {
+    pub schema_version: u16,
+    pub label: Option<String>,
+    pub enabled: Option<bool>,
+    pub source_ids: Option<Option<Vec<String>>>,
+    pub account_ids: Option<Option<Vec<String>>>,
+    pub allowed_models: Option<Vec<String>>,
+    pub excluded_models: Option<Vec<String>>,
+    pub model_prefix: Option<Option<String>>,
+    pub wire_apis: Option<Option<Vec<ClientWireApi>>>,
+    pub soft_budget_micro_usd: Option<Option<u64>>,
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GeneratedClientKey {
+    pub schema_version: u16,
+    pub key: KeySummary,
+    pub secret: String,
+}
+
+impl fmt::Debug for GeneratedClientKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GeneratedClientKey")
+            .field("schema_version", &self.schema_version)
+            .field("key", &self.key)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProfileKeyRotation {
+    pub schema_version: u16,
+    pub rotation_id: String,
+    pub key_id: String,
+    pub base_url: String,
+    pub secret: String,
+}
+
+impl fmt::Debug for ProfileKeyRotation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProfileKeyRotation")
+            .field("schema_version", &self.schema_version)
+            .field("rotation_id", &self.rotation_id)
+            .field("key_id", &self.key_id)
+            .field("base_url", &self.base_url)
+            .field("secret", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClientAccessDocument {
+    pub schema_version: u16,
+    pub keys: Vec<KeySummary>,
+}
+
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
-pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 1;
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -263,6 +509,10 @@ pub struct SourcePresetRule {
     pub excluded_models: Vec<String>,
     pub priority: i32,
     pub weight: u32,
+    #[serde(default)]
+    pub recovery_delay_seconds: u64,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -277,6 +527,8 @@ pub struct AccountPresetRule {
     pub priority: i32,
     pub weight: u32,
     pub proxy_id: Option<String>,
+    #[serde(default)]
+    pub bypass_common_proxy: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -292,9 +544,7 @@ pub struct PresetRoutingPolicy {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PresetQuotaPolicy {
-    pub refresh_interval_seconds: u64,
     pub request_timeout_seconds: u64,
-    pub use_free_accounts: bool,
     pub account_proxy_required: bool,
     pub common_proxy_id: Option<String>,
 }
@@ -384,7 +634,6 @@ pub fn pool_model_summaries(
             && !account.draining
             && account.secret_available
             && account.proxy_available
-            && account.routing_exclusion.is_none()
     }) {
         add_member_models(
             &mut models,
@@ -409,6 +658,10 @@ pub fn pool_model_summaries(
                 input_micro_usd_per_million: price.map(|price| price.input_micro_usd_per_million),
                 cached_input_micro_usd_per_million: price
                     .map(|price| price.cached_input_micro_usd_per_million),
+                cache_write_5m_micro_usd_per_million: price
+                    .and_then(|price| price.cache_write_5m_micro_usd_per_million),
+                cache_write_1h_micro_usd_per_million: price
+                    .and_then(|price| price.cache_write_1h_micro_usd_per_million),
                 output_micro_usd_per_million: price.map(|price| price.output_micro_usd_per_million),
                 custom_price: false,
             }
@@ -464,6 +717,10 @@ pub struct UsageSummary {
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: WireApi,
+    #[serde(default)]
+    pub service_tier: crate::DefaultServiceTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied_service_tier: Option<crate::DefaultServiceTier>,
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
@@ -480,6 +737,8 @@ pub struct UsageSummary {
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub api_equivalent: ApiEquivalentSummary,
     pub created_at_ms: u64,
 }
 
@@ -599,6 +858,7 @@ pub struct ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::quota::{QuotaWindow, QuotaWindowKind};
 
     #[test]
     fn model_summaries_apply_member_rules_hidden_state_and_catalog_order() {
@@ -621,6 +881,8 @@ mod tests {
             excluded_models: vec!["gpt-old".into()],
             priority: 0,
             weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
@@ -684,6 +946,147 @@ mod tests {
         assert_eq!(
             operational_status(true, false, true, None),
             OperationalStatus::Rotation
+        );
+    }
+
+    #[test]
+    fn account_operational_state_is_shared_and_does_not_invent_fresh_exhaustion() {
+        let subscription = Subscription {
+            plan_type: Some("plus".into()),
+            active_until_ms: None,
+            status: SubscriptionStatus::Active,
+            updated_at_ms: Some(1),
+        };
+        let mut quota = QuotaSnapshot {
+            primary: Some(QuotaWindow {
+                kind: QuotaWindowKind::Primary,
+                available_basis_points: Some(0),
+                explicitly_full: None,
+                reset_at_ms: None,
+                window_minutes: None,
+                observed_at_ms: 1,
+                full_transition_fingerprint: None,
+            }),
+            updated_at_ms: Some(1),
+            ..Default::default()
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &quota,
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10,
+        });
+        assert_eq!(state.quota, CandidateQuota::Stale);
+        assert_eq!(state.status, OperationalStatus::Rotation);
+        assert!(state.routing_eligible);
+        assert_eq!(state.routing_block_reason, None);
+
+        quota.updated_at_ms = Some(1_000);
+        quota.primary.as_mut().unwrap().available_basis_points = Some(5_000);
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: false,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &quota,
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10,
+        });
+        assert_eq!(state.status, OperationalStatus::Rotation);
+        assert!(!state.routing_eligible);
+        assert_eq!(
+            state.routing_block_reason,
+            Some(AccountRoutingBlockReason::NotInPool)
+        );
+
+        quota.primary.as_mut().unwrap().available_basis_points = Some(0);
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &quota,
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10,
+        });
+        assert_eq!(state.quota, CandidateQuota::Exhausted);
+        assert_eq!(state.status, OperationalStatus::QuotaWait);
+        assert_eq!(
+            state.routing_block_reason,
+            Some(AccountRoutingBlockReason::QuotaExhausted)
+        );
+    }
+
+    #[test]
+    fn unavailable_credentials_always_win_over_pending_quota() {
+        let subscription = Subscription {
+            plan_type: Some("plus".into()),
+            active_until_ms: None,
+            status: SubscriptionStatus::Active,
+            updated_at_ms: Some(1),
+        };
+        let state = account_operational_state(AccountOperationalInput {
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            secret_available: false,
+            proxy_available: true,
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            subscription: &subscription,
+            quota: &QuotaSnapshot::default(),
+            last_error_code: None,
+            now_ms: 1_000,
+            quota_stale_after_ms: 10,
+        });
+        assert_eq!(state.status, OperationalStatus::Unavailable);
+        assert_eq!(
+            state.routing_block_reason,
+            Some(AccountRoutingBlockReason::SecretUnavailable)
+        );
+    }
+
+    #[test]
+    fn quota_refresh_status_has_one_visible_precedence() {
+        let mut quota = QuotaSnapshot::default();
+        assert_eq!(
+            quota_refresh_status(AccountAuthState::Active, &quota, false),
+            QuotaRefreshStatus::Pending
+        );
+        assert_eq!(
+            quota_refresh_status(AccountAuthState::Active, &quota, true),
+            QuotaRefreshStatus::Refreshing
+        );
+        quota.updated_at_ms = Some(1);
+        assert_eq!(
+            quota_refresh_status(AccountAuthState::Active, &quota, false),
+            QuotaRefreshStatus::Updated
+        );
+        assert_eq!(
+            quota_refresh_status(
+                AccountAuthState::RequiresReauth(crate::accounts::ReauthReason::InvalidGrant),
+                &quota,
+                true,
+            ),
+            QuotaRefreshStatus::RequiresReauth
         );
     }
 }

@@ -9,7 +9,7 @@ use crate::{
             credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION},
+        models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
         state::DesktopState,
         store::secret_store,
     },
@@ -59,21 +59,21 @@ pub fn export_local_configuration_preset(
             excluded_models: record.excluded_models,
             priority: record.priority,
             weight: record.weight,
+            recovery_delay_seconds: record.recovery_delay_seconds,
+            model_price_overrides: record.model_price_overrides,
         })
         .collect();
     let accounts = accounts
         .into_iter()
         .map(|record| {
-            let proxy_id = credentials
-                .load(&record.account.id)
-                .map_err(|error| {
-                    LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
-                })?
-                .and_then(|credential| {
-                    credential
-                        .proxy_url()
-                        .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
-                });
+            let credential = credentials.load(&record.account.id).map_err(|error| {
+                LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+            })?;
+            let proxy_id = credential.as_ref().and_then(|credential| {
+                credential
+                    .proxy_url()
+                    .and_then(|value| zenith_relay_core::proxy_reference_id(value).ok())
+            });
             Ok(AccountPresetRule {
                 id: record.account.id,
                 identity_hint: record
@@ -90,6 +90,8 @@ pub fn export_local_configuration_preset(
                 priority: record.priority,
                 weight: record.weight,
                 proxy_id,
+                bypass_common_proxy: credential
+                    .is_some_and(|credential| credential.bypass_common_proxy()),
             })
         })
         .collect::<LocalResult<Vec<_>>>()?;
@@ -114,9 +116,7 @@ pub fn export_local_configuration_preset(
                 image_base_model: gateway.image_base_model,
             },
             quota: PresetQuotaPolicy {
-                refresh_interval_seconds: gateway.quota_refresh_interval_seconds,
                 request_timeout_seconds: gateway.quota_request_timeout_seconds,
-                use_free_accounts: gateway.use_free_accounts,
                 account_proxy_required: gateway.account_proxy_required,
                 common_proxy_id,
             },
@@ -245,14 +245,6 @@ pub struct PoolMembershipInput {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct QuotaPolicyInput {
-    refresh_interval_seconds: u64,
-    request_timeout_seconds: u64,
-    use_free_accounts: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetModelEnabledInput {
     model_id: String,
     enabled: bool,
@@ -264,6 +256,8 @@ pub struct SetModelPriceInput {
     model_id: String,
     input_micro_usd_per_million: Option<u64>,
     cached_input_micro_usd_per_million: Option<u64>,
+    cache_write_5m_micro_usd_per_million: Option<u64>,
+    cache_write_1h_micro_usd_per_million: Option<u64>,
     output_micro_usd_per_million: Option<u64>,
 }
 
@@ -295,31 +289,14 @@ pub async fn set_local_model_price(
     input: SetModelPriceInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
-    let price = match (
+    let price = ApiModelPriceOverride::from_optional_fields(
         input.input_micro_usd_per_million,
         input.cached_input_micro_usd_per_million,
+        input.cache_write_5m_micro_usd_per_million,
+        input.cache_write_1h_micro_usd_per_million,
         input.output_micro_usd_per_million,
-    ) {
-        (Some(input), cached_input, Some(output))
-            if input <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-                && cached_input.unwrap_or(input) <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-                && output <= MAX_MODEL_PRICE_MICRO_USD_PER_MILLION =>
-        {
-            Some(ApiModelPriceOverride {
-                input_micro_usd_per_million: input,
-                cached_input_micro_usd_per_million: Some(cached_input.unwrap_or(input)),
-                output_micro_usd_per_million: output,
-            })
-        }
-        (None, None, None) => None,
-        _ => {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "input, cached input, and output model prices must be valid",
-            )
-            .into())
-        }
-    };
+    )
+    .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
     let _mutation = state.setup_guard().await;
     let canonical = canonical_pool_model(&state, &input.model_id)?;
     let old_gateway = state.store()?.gateway().clone();
@@ -331,7 +308,9 @@ pub async fn set_local_model_price(
         gateway.model_price_overrides.remove(&key);
     }
     if gateway != old_gateway {
-        state.store()?.replace_gateway(gateway)?;
+        let mut store = state.store()?;
+        store.replace_gateway(gateway)?;
+        store.reset_quota_economics_learning()?;
     }
     state.snapshot().await.map_err(Into::into)
 }
@@ -360,47 +339,6 @@ fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<Str
         .find(|model| model.eq_ignore_ascii_case(requested))
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
-}
-
-#[tauri::command]
-pub async fn update_local_quota_policy(
-    input: QuotaPolicyInput,
-    state: State<'_, DesktopState>,
-) -> CommandResult<LocalPoolSnapshot> {
-    let _mutation = state.setup_guard().await;
-    let old_gateway = state.store()?.gateway().clone();
-    let mut gateway = old_gateway.clone();
-    gateway.quota_refresh_interval_seconds = input.refresh_interval_seconds;
-    gateway.quota_request_timeout_seconds = input.request_timeout_seconds;
-    gateway.use_free_accounts = input.use_free_accounts;
-    gateway
-        .validate()
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
-    if gateway == old_gateway {
-        return state.snapshot().await.map_err(Into::into);
-    }
-    let refresh_earlier =
-        gateway.quota_refresh_interval_seconds < old_gateway.quota_refresh_interval_seconds;
-    let runtime_policy_changed = gateway.use_free_accounts != old_gateway.use_free_accounts
-        || gateway.quota_refresh_interval_seconds != old_gateway.quota_refresh_interval_seconds;
-    state.store()?.replace_gateway(gateway)?;
-    if runtime_policy_changed {
-        sync_gateway_or_rollback(&state, old_gateway).await?;
-    }
-    if refresh_earlier {
-        let account_ids = state
-            .store()?
-            .accounts()
-            .iter()
-            .filter(|account| account.account.enabled && account.account.in_pool)
-            .map(|account| account.account.id.clone())
-            .collect::<Vec<_>>();
-        let now_ms = super::current_time_ms();
-        for account_id in account_ids {
-            state.mark_quota_refresh(&account_id, now_ms)?;
-        }
-    }
-    state.snapshot().await.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -745,6 +683,7 @@ pub(super) fn has_usable_source(
     key: &LocalGatewayKeyRecord,
 ) -> LocalResult<bool> {
     let store = state.store()?;
+    let credentials = CredentialStore::from_backend(NativeSecretBackend);
     for source in store.sources() {
         let scoped = key
             .source_ids
@@ -771,14 +710,13 @@ pub(super) fn has_usable_source(
         {
             continue;
         }
-        let mut secrets_available = !account.account.secret_refs.is_empty();
-        for secret_ref in &account.account.secret_refs {
-            if secret_store::load(secret_ref)?.is_none() {
-                secrets_available = false;
-                break;
-            }
-        }
-        if secrets_available {
+        if credentials
+            .load(&account.account.id)
+            .map_err(|error| {
+                LocalPoolError::new(ErrorCode::SecretStoreUnavailable, error.to_string())
+            })?
+            .is_some()
+        {
             return Ok(true);
         }
     }

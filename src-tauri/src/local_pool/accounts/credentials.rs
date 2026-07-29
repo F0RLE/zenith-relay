@@ -1,7 +1,9 @@
 use super::{import_session::SecretBackend, oauth::OAuthTokenSet};
+use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
 use zenith_relay_core::accounts::{TokenRefresh, TokenSet};
+use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 
 const CREDENTIAL_VERSION: u32 = 1;
 const MAX_SECRET_JSON_BYTES: usize = 256 * 1024;
@@ -61,6 +63,8 @@ pub struct StoredCodexCredentials {
     plan_type: Option<String>,
     account_is_fedramp: bool,
     proxy_url: Option<String>,
+    bypass_common_proxy: bool,
+    agent_identity: Option<AgentIdentityCredential>,
 }
 
 impl StoredCodexCredentials {
@@ -105,6 +109,48 @@ impl StoredCodexCredentials {
             plan_type: nonempty(plan_type),
             account_is_fedramp,
             proxy_url: None,
+            bypass_common_proxy: false,
+            agent_identity: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_agent_identity(
+        local_account_id: &str,
+        agent_identity: AgentIdentityCredential,
+        issued_at_ms: u64,
+        generation: u64,
+        email: Option<String>,
+        provider_account_id: Option<String>,
+        provider_user_id: Option<String>,
+        organization_id: Option<String>,
+        plan_type: Option<String>,
+        account_is_fedramp: bool,
+    ) -> Result<Self, CredentialError> {
+        validate_local_account_id(local_account_id)?;
+        validate_optional(email.as_deref(), MAX_EMAIL_BYTES)?;
+        validate_optional(provider_account_id.as_deref(), MAX_ID_BYTES)?;
+        validate_optional(provider_user_id.as_deref(), MAX_ID_BYTES)?;
+        validate_optional(organization_id.as_deref(), MAX_ID_BYTES)?;
+        validate_optional(plan_type.as_deref(), MAX_PLAN_BYTES)?;
+        Ok(Self {
+            version: CREDENTIAL_VERSION,
+            local_account_id: local_account_id.to_string(),
+            access_token: String::new(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms,
+            generation,
+            email: nonempty(email),
+            provider_account_id: nonempty(provider_account_id),
+            provider_user_id: nonempty(provider_user_id),
+            organization_id: nonempty(organization_id),
+            plan_type: nonempty(plan_type),
+            account_is_fedramp,
+            proxy_url: None,
+            bypass_common_proxy: false,
+            agent_identity: Some(agent_identity),
         })
     }
 
@@ -114,6 +160,60 @@ impl StoredCodexCredentials {
 
     pub fn access_token(&self) -> &str {
         &self.access_token
+    }
+
+    pub fn agent_identity(&self) -> Option<&AgentIdentityCredential> {
+        self.agent_identity.as_ref()
+    }
+
+    pub fn with_agent_identity(mut self, agent_identity: AgentIdentityCredential) -> Self {
+        self.agent_identity = Some(agent_identity);
+        self
+    }
+
+    pub fn with_agent_task_id(&self, task_id: String) -> Result<Self, CredentialError> {
+        let agent = self.agent_identity.as_ref().ok_or_else(|| {
+            CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "stored credential is not an Agent Identity",
+            )
+        })?;
+        let mut updated = self.clone();
+        updated.agent_identity = Some(agent.with_task_id(task_id).map_err(|_| {
+            CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "Agent Identity task id is invalid",
+            )
+        })?);
+        Ok(updated)
+    }
+
+    pub fn is_agent_identity(&self) -> bool {
+        self.agent_identity.is_some()
+    }
+
+    pub fn has_oauth(&self) -> bool {
+        !self.access_token.is_empty()
+    }
+
+    pub fn authorization(&self, now_ms: u64) -> Result<HeaderValue, CredentialError> {
+        if let Some(agent) = self.agent_identity.as_ref() {
+            return agent.authorization(now_ms).map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored Agent Identity credential is invalid",
+                )
+            });
+        }
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.access_token))
+            .map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored ChatGPT token is invalid",
+                )
+            })?;
+        authorization.set_sensitive(true);
+        Ok(authorization)
     }
 
     pub fn refresh_token(&self) -> Option<&str> {
@@ -160,7 +260,21 @@ impl StoredCodexCredentials {
         self.proxy_url.as_deref()
     }
 
-    pub fn with_proxy_url(mut self, proxy_url: Option<String>) -> Result<Self, CredentialError> {
+    pub fn bypass_common_proxy(&self) -> bool {
+        self.bypass_common_proxy
+    }
+
+    pub fn with_proxy_route(
+        mut self,
+        proxy_url: Option<String>,
+        bypass_common_proxy: bool,
+    ) -> Result<Self, CredentialError> {
+        if proxy_url.is_some() && bypass_common_proxy {
+            return Err(CredentialError::new(
+                CredentialErrorCode::InvalidSecret,
+                "account proxy route is ambiguous",
+            ));
+        }
         self.proxy_url = proxy_url
             .map(|value| zenith_relay_core::normalize_proxy_url(&value))
             .transpose()
@@ -170,7 +284,12 @@ impl StoredCodexCredentials {
                     "account proxy URL is invalid",
                 )
             })?;
+        self.bypass_common_proxy = bypass_common_proxy;
         Ok(self)
+    }
+
+    pub fn with_proxy_url(self, proxy_url: Option<String>) -> Result<Self, CredentialError> {
+        self.with_proxy_route(proxy_url, false)
     }
 
     pub fn expire_access_at(&mut self, now_ms: u64) {
@@ -215,7 +334,7 @@ impl StoredCodexCredentials {
     }
 
     pub fn with_token_set(&self, tokens: &TokenSet) -> Result<Self, CredentialError> {
-        Self::new(
+        let mut updated = Self::new(
             &self.local_account_id,
             tokens.access_token().to_string(),
             tokens
@@ -236,7 +355,9 @@ impl StoredCodexCredentials {
             self.plan_type.clone(),
             self.account_is_fedramp,
         )?
-        .with_proxy_url(self.proxy_url.clone())
+        .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
+        updated.agent_identity = self.agent_identity.clone();
+        Ok(updated)
     }
 
     pub fn apply_refresh(
@@ -244,7 +365,7 @@ impl StoredCodexCredentials {
         refresh: CredentialRefresh,
         issued_at_ms: u64,
     ) -> Result<Self, CredentialError> {
-        Self::new(
+        let mut updated = Self::new(
             &self.local_account_id,
             refresh.access_token,
             refresh.refresh_token.or_else(|| self.refresh_token.clone()),
@@ -259,7 +380,9 @@ impl StoredCodexCredentials {
             self.plan_type.clone(),
             self.account_is_fedramp,
         )?
-        .with_proxy_url(self.proxy_url.clone())
+        .with_proxy_route(self.proxy_url.clone(), self.bypass_common_proxy)?;
+        updated.agent_identity = self.agent_identity.clone();
+        Ok(updated)
     }
 
     pub fn snapshot(&self) -> StoredCredentialSnapshot {
@@ -276,6 +399,7 @@ impl StoredCodexCredentials {
             plan_type: self.plan_type.clone(),
             account_is_fedramp: self.account_is_fedramp,
             proxy_configured: self.proxy_url.is_some(),
+            agent_identity: self.agent_identity.is_some(),
         }
     }
 
@@ -315,22 +439,61 @@ impl StoredCodexCredentials {
                 "stored ChatGPT credential version is unsupported",
             ));
         }
-        Self::new(
-            &wire.local_account_id,
-            wire.access_token,
-            wire.refresh_token,
-            wire.id_token,
-            wire.expires_at_ms,
-            wire.issued_at_ms,
-            wire.generation,
-            wire.email,
-            wire.provider_account_id,
-            wire.provider_user_id,
-            wire.organization_id,
-            wire.plan_type,
-            wire.account_is_fedramp,
-        )?
-        .with_proxy_url(wire.proxy_url)
+        let agent_identity = wire
+            .agent_identity
+            .map(|agent| match agent.task_id {
+                Some(task_id) => {
+                    AgentIdentityCredential::new(agent.private_key, agent.runtime_id, task_id)
+                }
+                None => AgentIdentityCredential::unregistered(agent.private_key, agent.runtime_id),
+            })
+            .transpose()
+            .map_err(|_| {
+                CredentialError::new(
+                    CredentialErrorCode::InvalidSecret,
+                    "stored Agent Identity credential is invalid",
+                )
+            })?;
+        let credentials = if wire.access_token.is_empty() {
+            Self::new_agent_identity(
+                &wire.local_account_id,
+                agent_identity.ok_or_else(|| {
+                    CredentialError::new(
+                        CredentialErrorCode::InvalidSecret,
+                        "stored ChatGPT credential has no authorization method",
+                    )
+                })?,
+                wire.issued_at_ms,
+                wire.generation,
+                wire.email,
+                wire.provider_account_id,
+                wire.provider_user_id,
+                wire.organization_id,
+                wire.plan_type,
+                wire.account_is_fedramp,
+            )?
+        } else {
+            let credentials = Self::new(
+                &wire.local_account_id,
+                wire.access_token,
+                wire.refresh_token,
+                wire.id_token,
+                wire.expires_at_ms,
+                wire.issued_at_ms,
+                wire.generation,
+                wire.email,
+                wire.provider_account_id,
+                wire.provider_user_id,
+                wire.organization_id,
+                wire.plan_type,
+                wire.account_is_fedramp,
+            )?;
+            match agent_identity {
+                Some(agent_identity) => credentials.with_agent_identity(agent_identity),
+                None => credentials,
+            }
+        };
+        credentials.with_proxy_route(wire.proxy_url, wire.bypass_common_proxy)
     }
 }
 
@@ -365,6 +528,8 @@ impl fmt::Debug for StoredCodexCredentials {
             .field("plan_type", &self.plan_type)
             .field("account_is_fedramp", &self.account_is_fedramp)
             .field("proxy_url", &self.proxy_url.as_ref().map(|_| "[redacted]"))
+            .field("bypass_common_proxy", &self.bypass_common_proxy)
+            .field("agent_identity", &self.agent_identity)
             .finish()
     }
 }
@@ -384,6 +549,7 @@ pub struct StoredCredentialSnapshot {
     pub plan_type: Option<String>,
     pub account_is_fedramp: bool,
     pub proxy_configured: bool,
+    pub agent_identity: bool,
 }
 
 pub struct CredentialRefresh {
@@ -535,6 +701,19 @@ struct CredentialWire {
     account_is_fedramp: bool,
     #[serde(default)]
     proxy_url: Option<String>,
+    #[serde(default)]
+    bypass_common_proxy: bool,
+    #[serde(default)]
+    agent_identity: Option<AgentIdentityWire>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentIdentityWire {
+    private_key: String,
+    runtime_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    task_id: Option<String>,
 }
 
 impl From<&StoredCodexCredentials> for CredentialWire {
@@ -555,6 +734,15 @@ impl From<&StoredCodexCredentials> for CredentialWire {
             plan_type: value.plan_type.clone(),
             account_is_fedramp: value.account_is_fedramp,
             proxy_url: value.proxy_url.clone(),
+            bypass_common_proxy: value.bypass_common_proxy,
+            agent_identity: value
+                .agent_identity
+                .as_ref()
+                .map(|agent| AgentIdentityWire {
+                    private_key: agent.private_key().to_string(),
+                    runtime_id: agent.runtime_id().to_string(),
+                    task_id: agent.task_id().map(str::to_string),
+                }),
         }
     }
 }
@@ -702,6 +890,93 @@ mod tests {
         assert_eq!(updated.provider_account_id(), Some(PROVIDER_ACCOUNT));
         assert_eq!(updated.proxy_url(), Some(PROXY));
         assert_eq!(updated.generation(), 8);
+    }
+
+    #[test]
+    fn direct_route_survives_storage_and_token_refresh() {
+        let backend = Arc::new(MemorySecrets::default());
+        let store = CredentialStore::new(backend);
+        let direct = fixture().with_proxy_route(None, true).unwrap();
+        store.save(&direct).unwrap();
+
+        let loaded = store.require("relay_account_1").unwrap();
+        assert!(loaded.bypass_common_proxy());
+        let tokens = TokenSet::new("new-access", None, None, Some(9_000), 2_000, 8).unwrap();
+        assert!(loaded
+            .with_token_set(&tokens)
+            .unwrap()
+            .bypass_common_proxy());
+    }
+
+    #[test]
+    fn agent_identity_round_trips_without_becoming_an_oauth_token() {
+        const PRIVATE_KEY: &str =
+            "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+        let backend = Arc::new(MemorySecrets::default());
+        let store = CredentialStore::new(backend);
+        let credential = StoredCodexCredentials::new_agent_identity(
+            "agent_account",
+            AgentIdentityCredential::new(
+                PRIVATE_KEY.into(),
+                "runtime-test".into(),
+                "task-test".into(),
+            )
+            .unwrap(),
+            1,
+            2,
+            Some("agent@example.test".into()),
+            Some("provider-agent".into()),
+            None,
+            None,
+            Some("team".into()),
+            false,
+        )
+        .unwrap();
+        store.save(&credential).unwrap();
+
+        let loaded = store.require("agent_account").unwrap();
+        assert!(loaded.is_agent_identity());
+        assert!(loaded.access_token().is_empty());
+        assert!(loaded.to_token_set().is_err());
+        assert!(loaded
+            .authorization(1_785_000_000_000)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("AgentAssertion "));
+        assert!(!format!("{loaded:?}").contains(PRIVATE_KEY));
+    }
+
+    #[test]
+    fn oauth_fallback_round_trips_and_survives_token_refresh_with_agent_identity() {
+        const PRIVATE_KEY: &str =
+            "MC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g";
+        let backend = Arc::new(MemorySecrets::default());
+        let store = CredentialStore::new(backend);
+        let credentials = fixture().with_agent_identity(
+            AgentIdentityCredential::new(
+                PRIVATE_KEY.into(),
+                "runtime-test".into(),
+                "task-test".into(),
+            )
+            .unwrap(),
+        );
+        store.save(&credentials).unwrap();
+
+        let loaded = store.require("relay_account_1").unwrap();
+        assert!(loaded.is_agent_identity());
+        assert!(loaded.has_oauth());
+        assert_eq!(loaded.to_token_set().unwrap().access_token(), ACCESS);
+        let refreshed = loaded
+            .with_token_set(
+                &TokenSet::new("new-access", None, None, Some(9_000), 2_000, 8).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(refreshed.access_token(), "new-access");
+        assert_eq!(
+            refreshed.agent_identity().unwrap().task_id(),
+            Some("task-test")
+        );
     }
 
     fn fixture() -> StoredCodexCredentials {

@@ -1,4 +1,3 @@
-pub(crate) mod accounts;
 pub(crate) mod automations;
 pub(crate) mod connections;
 pub(crate) mod gateway;
@@ -16,10 +15,7 @@ use super::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
         credentials::CredentialStore,
         proxy::{effective_proxy_config, ProxyRefreshClient},
-        records::{
-            candidate_health, candidate_quota_with_stale_after, quota_stale_after_ms_for_interval,
-            CODEX_RESPONSES_URL,
-        },
+        records::{candidate_health, candidate_quota_with_stale_after, CODEX_RESPONSES_URL},
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
@@ -28,10 +24,11 @@ use super::{
     state::DesktopState,
     store::secret_store,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use zenith_relay_core::{
-    quota::Subscription, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
-    RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
+    protocol::{account_operational_state, AccountOperationalInput},
+    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
+    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, QUOTA_STALE_AFTER_MS,
 };
 
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
@@ -53,8 +50,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             store.gateway().clone(),
         )
     };
-    let quota_stale_after_ms =
-        quota_stale_after_ms_for_interval(settings.quota_refresh_interval_seconds);
+    let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     let mut sources = Vec::new();
     for source in source_records {
         let Some(api_key) = secret_store::load(&source.secret_ref)? else {
@@ -73,6 +69,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             draining: source.draining,
             priority: source.priority,
             weight: source.weight,
+            recovery_delay_seconds: source.recovery_delay_seconds,
             allowed_models: source.allowed_models,
             excluded_models: source.excluded_models,
             last_used_at_ms: source.last_used_at.as_deref().and_then(timestamp_ms),
@@ -82,9 +79,9 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     let authority = state.token_authority();
     let mut accounts = Vec::new();
     let mut refresh_proxies = Vec::new();
+    let mut agent_identities = HashMap::new();
     for account in account_records {
         let account_id = account.account.id.clone();
-        let routing_allowed = account_routing_allowed(&settings, &account.account.subscription);
         let Some(secret) = credentials
             .load(&account_id)
             .map_err(account_credential_error)?
@@ -97,34 +94,47 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         let Ok(proxy) = effective_proxy_config(&settings, &secret) else {
             continue;
         };
-        authority
-            .register(
-                &account_id,
-                secret.to_token_set().map_err(account_credential_error)?,
-                account.account.auth_state,
-            )
-            .await
-            .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
-        let health = candidate_health(&account.account);
-        let quota = candidate_quota_with_stale_after(
-            &account.account.quota,
-            current_time_ms(),
+        if let Some(agent) = secret.agent_identity() {
+            agent_identities.insert(account_id.clone(), agent.clone());
+        }
+        if secret.has_oauth() {
+            authority
+                .register(
+                    &account_id,
+                    secret.to_token_set().map_err(account_credential_error)?,
+                    account.account.auth_state,
+                )
+                .await
+                .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+        }
+        let operational = account_operational_state(AccountOperationalInput {
+            enabled: account.account.enabled,
+            in_pool: account.account.in_pool,
+            draining: account.account.draining,
+            secret_available: true,
+            proxy_available: true,
+            auth_state: account.account.auth_state,
+            health: account.account.health,
+            subscription: &account.account.subscription,
+            quota: &account.account.quota,
+            last_error_code: account.account.last_error_code.as_deref(),
+            now_ms: current_time_ms(),
             quota_stale_after_ms,
-        );
-        accounts.push(RuntimeAccount {
+        });
+        accounts.push(RuntimeChatGptAccount {
             id: account_id.clone(),
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
             models: account.models,
-            enabled: account.account.enabled && account.account.in_pool && routing_allowed,
+            enabled: operational.routing_eligible,
             draining: account.account.draining,
             priority: account.priority,
             weight: account.weight,
             allowed_models: account.allowed_models,
             excluded_models: account.excluded_models,
-            health,
-            quota,
+            health: operational.health,
+            quota: operational.quota,
             quota_updated_at_ms: account.account.quota.updated_at_ms,
             quota_snapshot: account.account.quota.clone(),
             subscription_plan_type: account.account.subscription.plan_type.clone(),
@@ -134,7 +144,9 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             consecutive_failures: 0,
             proxy: proxy.clone(),
         });
-        refresh_proxies.push((account_id, proxy));
+        if secret.has_oauth() {
+            refresh_proxies.push((account_id, proxy));
+        }
     }
     let mut keys = Vec::new();
     for key in key_records {
@@ -153,6 +165,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             allowed_models: key.allowed_models,
             excluded_models: key.excluded_models,
             model_prefix: key.model_prefix,
+            wire_apis: None,
         });
     }
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
@@ -173,11 +186,12 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         sources,
         accounts,
         keys,
-        RuntimeAccountAuth {
+        RuntimeChatGptAuth {
             token_authority: authority,
             refresh_adapter: refresh,
             persistence_adapter: persistence,
             refresh_skew_ms: 60_000,
+            agent_identities,
         },
         GatewayRuntimeOptions {
             max_retry_candidates: usize::from(settings.max_retry_candidates),
@@ -200,20 +214,13 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     Ok(Arc::new(runtime))
 }
 
-pub(crate) fn account_routing_allowed(
-    settings: &GatewaySettings,
-    subscription: &Subscription,
-) -> bool {
-    settings.use_free_accounts || !subscription.is_free_plan()
-}
-
 fn timestamp_ms(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
 }
 
-fn current_time_ms() -> u64 {
+pub(super) fn current_time_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
@@ -223,7 +230,7 @@ fn account_credential_error(
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
-async fn sync_records_or_rollback(
+pub(super) async fn sync_records_or_rollback(
     state: &DesktopState,
     old_sources: Vec<ProviderSourceRecord>,
     old_keys: Vec<LocalGatewayKeyRecord>,
@@ -234,7 +241,7 @@ async fn sync_records_or_rollback(
     .await
 }
 
-async fn sync_accounts_or_rollback(
+pub(super) async fn sync_accounts_or_rollback(
     state: &DesktopState,
     old_accounts: Vec<super::models::LocalAccountRecord>,
     old_keys: Vec<LocalGatewayKeyRecord>,
@@ -247,7 +254,7 @@ async fn sync_accounts_or_rollback(
     .await
 }
 
-async fn sync_refreshed_account_or_rollback(
+pub(super) async fn sync_refreshed_account_or_rollback(
     state: &DesktopState,
     account_id: &str,
     models_changed: bool,
@@ -266,14 +273,12 @@ async fn sync_refreshed_account_or_rollback(
             .account(account_id)
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
         (
-            account.account.enabled
-                && account.account.in_pool
-                && account_routing_allowed(store.gateway(), &account.account.subscription),
+            account.account.enabled && account.account.in_pool,
             candidate_health(&account.account),
             candidate_quota_with_stale_after(
                 &account.account.quota,
                 current_time_ms(),
-                quota_stale_after_ms_for_interval(store.gateway().quota_refresh_interval_seconds),
+                QUOTA_STALE_AFTER_MS,
             ),
             account.account.quota.updated_at_ms,
         )
@@ -388,18 +393,6 @@ mod tests {
         assert_eq!(timestamp_ms("not-a-date"), None);
     }
 
-    #[test]
-    fn free_account_routing_requires_explicit_opt_in() {
-        let subscription = Subscription {
-            plan_type: Some("free".into()),
-            ..Subscription::default()
-        };
-        let mut settings = GatewaySettings::default();
-        assert!(!account_routing_allowed(&settings, &subscription));
-        settings.use_free_accounts = true;
-        assert!(account_routing_allowed(&settings, &subscription));
-    }
-
     #[tokio::test]
     async fn runtime_creates_and_reuses_the_system_gateway_key() {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -424,6 +417,8 @@ mod tests {
                 excluded_models: Vec::new(),
                 priority: 0,
                 weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: Default::default(),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
@@ -487,6 +482,8 @@ mod tests {
                 excluded_models: Vec::new(),
                 priority: 0,
                 weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: Default::default(),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
@@ -608,6 +605,8 @@ mod tests {
                 excluded_models: Vec::new(),
                 priority: 0,
                 weight: 1,
+                recovery_delay_seconds: 0,
+                model_price_overrides: Default::default(),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,

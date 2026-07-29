@@ -7,7 +7,7 @@ use crate::state::{AppState, ServerAccountRecord};
 use futures_util::{stream, StreamExt};
 use std::sync::Arc;
 use tokio::{sync::watch, task::JoinHandle};
-use zenith_relay_core::accounts::automatic_quota_refresh_eligible;
+use zenith_relay_core::accounts::automatic_quota_monitoring_eligible;
 
 const QUOTA_REFRESH_BATCH_SIZE: usize = 5;
 
@@ -64,15 +64,7 @@ pub(crate) async fn refresh_automatic_accounts_now(
         .store
         .accounts()?
         .into_iter()
-        .filter(|account| {
-            automatic_quota_refresh_eligible(
-                account.enabled,
-                account.in_pool,
-                account.draining,
-                account.auth_state,
-                account.health,
-            )
-        })
+        .filter(|account| automatic_quota_monitoring_eligible(account.enabled, account.auth_state))
         .collect::<Vec<_>>();
     refresh_accounts_now(state, accounts, false).await
 }
@@ -105,6 +97,10 @@ async fn refresh_accounts_now(
             failed += 1;
             continue;
         };
+        if updated.quota.error.is_some() {
+            failed += 1;
+            continue;
+        }
         if !transitions.is_empty()
             && wake_automation::schedule_transitions(state, &updated, &transitions)
                 .await

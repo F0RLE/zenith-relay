@@ -4,25 +4,22 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    normalize_subscription_plan_order,
+    normalize_model_price_overrides, normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
+    quota::QuotaEconomicsState,
     ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
 pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
-pub const DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 300;
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
 pub const MIN_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 100;
 pub const MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS: u64 = 9_900;
-pub const MIN_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 120;
-pub const MAX_QUOTA_REFRESH_INTERVAL_SECONDS: u64 = 3_600;
 pub const MIN_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 10;
 pub const MAX_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
 pub const MAX_LOCAL_ACCOUNTS: usize = 1_024;
-pub const MAX_MODEL_PRICE_MICRO_USD_PER_MILLION: u64 = 1_000_000_000_000;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,12 +48,8 @@ pub struct GatewaySettings {
     pub common_proxy_configured: bool,
     #[serde(default)]
     pub account_proxy_required: bool,
-    #[serde(default = "default_quota_refresh_interval_seconds")]
-    pub quota_refresh_interval_seconds: u64,
     #[serde(default = "default_quota_request_timeout_seconds")]
     pub quota_request_timeout_seconds: u64,
-    #[serde(default)]
-    pub use_free_accounts: bool,
     #[serde(default = "default_chatgpt_interface_quota_reserve_basis_points")]
     pub chatgpt_interface_quota_reserve_basis_points: u64,
     #[serde(default)]
@@ -219,6 +212,10 @@ pub struct ProviderSourceRecord {
     #[serde(default = "default_weight")]
     pub weight: u32,
     #[serde(default)]
+    pub recovery_delay_seconds: u64,
+    #[serde(default)]
+    pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
     pub last_used_at: Option<String>,
     pub last_test_at: Option<String>,
     pub last_test_status: Option<String>,
@@ -252,6 +249,8 @@ pub struct LocalGatewayKeyRecord {
 #[serde(rename_all = "camelCase")]
 pub struct LocalAccountRecord {
     pub account: AccountRecord,
+    #[serde(default)]
+    pub economics: QuotaEconomicsState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_location: Option<RemoteAccountLocation>,
     pub wire_api: WireApi,
@@ -315,9 +314,7 @@ impl Default for GatewaySettings {
             image_base_model: None,
             common_proxy_configured: false,
             account_proxy_required: false,
-            quota_refresh_interval_seconds: DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS,
             quota_request_timeout_seconds: DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS,
-            use_free_accounts: false,
             chatgpt_interface_quota_reserve_basis_points:
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             hidden_models: Vec::new(),
@@ -345,11 +342,6 @@ impl GatewaySettings {
         {
             return Err("image base model id is invalid");
         }
-        if !(MIN_QUOTA_REFRESH_INTERVAL_SECONDS..=MAX_QUOTA_REFRESH_INTERVAL_SECONDS)
-            .contains(&self.quota_refresh_interval_seconds)
-        {
-            return Err("quota refresh interval must be between 120 and 3600 seconds");
-        }
         if !(MIN_QUOTA_REQUEST_TIMEOUT_SECONDS..=MAX_QUOTA_REQUEST_TIMEOUT_SECONDS)
             .contains(&self.quota_request_timeout_seconds)
         {
@@ -362,24 +354,9 @@ impl GatewaySettings {
         {
             return Err("ChatGPT account quota reserve must be disabled or between 1% and 99%");
         }
-        if self.model_price_overrides.iter().any(|(model, price)| {
-            model.trim().is_empty()
-                || model.len() > 256
-                || model.chars().any(char::is_control)
-                || price.input_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-                || price
-                    .cached_input_micro_usd_per_million
-                    .is_some_and(|value| value > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION)
-                || price.output_micro_usd_per_million > MAX_MODEL_PRICE_MICRO_USD_PER_MILLION
-        }) {
-            return Err("model price override is invalid");
-        }
+        validate_model_price_overrides(&self.model_price_overrides)?;
         Ok(())
     }
-}
-
-fn default_quota_refresh_interval_seconds() -> u64 {
-    DEFAULT_QUOTA_REFRESH_INTERVAL_SECONDS
 }
 
 fn default_quota_request_timeout_seconds() -> u64 {
@@ -397,8 +374,23 @@ impl ProviderSourceRecord {
         self.models = normalized_values(std::mem::take(&mut self.models));
         self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
         self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
+        self.model_price_overrides = self
+            .model_price_overrides
+            .iter()
+            .map(|(model, price)| (model.trim().to_ascii_lowercase(), *price))
+            .collect();
         self.weight = self.weight.max(1);
     }
+
+    pub fn validate_price_overrides(&self) -> Result<(), &'static str> {
+        validate_model_price_overrides(&self.model_price_overrides)
+    }
+}
+
+fn validate_model_price_overrides(
+    overrides: &BTreeMap<String, ApiModelPriceOverride>,
+) -> Result<(), &'static str> {
+    normalize_model_price_overrides(overrides.clone()).map(drop)
 }
 
 impl LocalGatewayKeyRecord {
@@ -482,9 +474,6 @@ mod tests {
     fn gateway_validation_bounds_quota_policy() {
         let mut settings = GatewaySettings::default();
         assert!(settings.validate().is_ok());
-        settings.quota_refresh_interval_seconds = MIN_QUOTA_REFRESH_INTERVAL_SECONDS - 1;
-        assert!(settings.validate().is_err());
-        settings.quota_refresh_interval_seconds = MAX_QUOTA_REFRESH_INTERVAL_SECONDS;
         settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS - 1;
         assert!(settings.validate().is_err());
         settings.quota_request_timeout_seconds = MIN_QUOTA_REQUEST_TIMEOUT_SECONDS;

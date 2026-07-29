@@ -62,6 +62,12 @@ impl QuotaRefreshQueue {
         self.entries.is_empty()
     }
 
+    pub fn is_in_flight(&self, account_id: &str) -> bool {
+        self.entries
+            .get(account_id)
+            .is_some_and(|entry| entry.status == QueueStatus::InFlight)
+    }
+
     pub fn upsert(
         &mut self,
         account_id: &str,
@@ -311,6 +317,7 @@ mod tests {
         assert_eq!(queue.next_due(), Some(30));
         assert!(queue.claim_due(29, 1).is_empty());
         assert_eq!(queue.claim_due(30, 2).len(), 1);
+        assert!(queue.is_in_flight("account-1"));
         assert!(queue.claim_due(u64::MAX, 1).is_empty());
     }
 

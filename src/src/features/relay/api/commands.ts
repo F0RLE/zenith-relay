@@ -6,11 +6,13 @@ import type {
   AccountImportProgress,
   AccountTransferProgress,
   CandidateRuntimeSnapshot,
+  ClientKeyCreateInput,
+  ClientKeyPatch,
   ConfirmAccountImportResponse,
   ConfigurationPresetApplyResult,
   ConfigurationPresetPreview,
   DefaultServiceTier,
-  GatewayDiagnostic,
+  GeneratedClientKey,
   ImportSession,
   KeySummary,
   LocalUsage,
@@ -22,6 +24,7 @@ import type {
   ProfileActivation,
   ProfileBinding,
   ProfileSnapshot,
+  ProfileSnapshotList,
   ProxyPoolImportResult,
   ProxyPoolSummary,
   RelayStorageInfo,
@@ -39,7 +42,15 @@ import type {
   WakeTask,
 } from "./types";
 
+export type UiState = {
+  providerActive: boolean;
+  codexRunning: boolean;
+  hasSavedApiKey: boolean;
+};
+
 export const relayCommands = {
+  readyState: () => invoke<UiState>("get_state"),
+  onStateChanged: (callback: () => void) => listen("zenith-state-changed", callback),
   localState: () => invoke<RuntimeSnapshot>("get_local_runtime_state"),
   localRuntimeOrder: () => invoke<CandidateRuntimeSnapshot[]>("get_local_runtime_order"),
   remoteState: () => invoke<RuntimeSnapshot | null>("get_remote_server_state"),
@@ -48,7 +59,6 @@ export const relayCommands = {
   localUsage: (limit = 100) => invoke<LocalUsage[]>("get_local_usage", { limit }),
   localUsagePage: (input: RemoteUsageQuery = {}) => invoke<LocalUsagePage>("get_local_usage_page", { input }),
   clearLocalUsage: () => invoke("clear_local_usage"),
-  diagnoseRemoteGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_remote_gateway", { stream }),
 
   createSource: (input: Record<string, unknown>) => invoke("create_local_source", { input }),
   updateSource: (input: Record<string, unknown>) => invoke("update_local_source", { input }),
@@ -57,6 +67,7 @@ export const relayCommands = {
   deleteSource: (sourceId: string) => invoke("delete_local_source", { sourceId }),
   testSource: (sourceId: string) => invoke("test_local_source", { sourceId }),
   localSourceStats: (sourceId: string) => invoke<SourceStats>("get_local_source_stats", { sourceId }),
+  remoteSourceStats: (sourceId: string) => invoke<SourceStats>("get_remote_source_stats", { sourceId }),
 
   startImport: (content: string) => invoke<ImportSession>("start_local_account_import", { input: { content } }),
   previewImportFiles: (paths?: string[]) => invoke<ImportSession | null>("preview_local_account_import_files", paths ? { paths } : {}),
@@ -68,13 +79,13 @@ export const relayCommands = {
   onImportProgress: (callback: (event: AccountImportProgress) => void) => listen<AccountImportProgress>("relay-account-import-progress", (event) => callback(event.payload)),
   cancelImport: (sessionId: string) => invoke("cancel_local_account_import", { sessionId }),
   refreshAccountQuota: (accountId: string) => invoke("refresh_local_account_quota", { accountId }),
-  refreshAllAccountQuotas: () => invoke("refresh_all_local_account_quotas"),
+  refreshAllAccountQuotas: () => invoke<Array<{ accountId: string; status: "succeeded" | "failed" }>>("refresh_all_local_account_quotas"),
   updateAccount: (input: Record<string, unknown>) => invoke("update_local_account", { input }),
   setAccountEnabled: (accountId: string, enabled: boolean) => invoke("set_local_account_enabled", { accountId, enabled }),
   setAccountDraining: (accountId: string, draining: boolean) => invoke("set_local_account_draining", { accountId, draining }),
   deleteAccount: (accountId: string) => invoke("delete_local_account", { accountId }),
   deleteAccounts: (accountIds: string[]) => invoke("delete_local_accounts", { accountIds }),
-  setAccountProxy: (accountId: string, proxyUrl: string | null) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl } }),
+  setAccountProxy: (accountId: string, proxyUrl: string | null, bypassCommonProxy = false) => invoke("set_local_account_proxy", { input: { accountId, proxyUrl, bypassCommonProxy } }),
   getProxyPool: () => invoke<ProxyPoolSummary>("get_local_proxy_pool"),
   importProxyPool: (proxyUrls: string[]) => invoke<ProxyPoolImportResult>("import_local_proxy_pool", { input: { proxyUrls } }),
   deleteStoredProxy: (proxyId: string) => invoke<ProxyPoolSummary>("delete_local_stored_proxy", { proxyId }),
@@ -104,10 +115,9 @@ export const relayCommands = {
   deleteKey: (keyId: string) => invoke("delete_local_gateway_key", { keyId }),
   setPoolMembership: (accountIds: string[], sourceIds: string[], inPool: boolean) => invoke("set_local_pool_membership", { input: { accountIds, sourceIds, inPool } }),
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
-  setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, outputMicroUsdPerMillion } }),
+  setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, cacheWrite5mMicroUsdPerMillion: number | null, cacheWrite1hMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, defaultServiceTier: DefaultServiceTier, subscriptionPlanOrder: string[]) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, defaultServiceTier, subscriptionPlanOrder } }),
-  updateQuotaPolicy: (refreshIntervalSeconds: number, requestTimeoutSeconds: number, useFreeAccounts: boolean) => invoke("update_local_quota_policy", { input: { refreshIntervalSeconds, requestTimeoutSeconds, useFreeAccounts } }),
   startGateway: () => invoke("start_local_gateway"),
   stopGateway: () => invoke("stop_local_gateway"),
   restartGateway: () => invoke("restart_local_gateway"),
@@ -115,7 +125,6 @@ export const relayCommands = {
   updateChatgptQuotaReserve: (reserveBasisPoints: number) => invoke("update_chatgpt_interface_quota_reserve", { input: { reserveBasisPoints } }),
   setCommonProxy: (proxyUrl: string | null) => invoke("set_local_common_proxy", { input: { proxyUrl } }),
   setAccountProxyRequired: (required: boolean) => invoke("set_local_account_proxy_required", { input: { required } }),
-  diagnoseGateway: (stream: boolean) => invoke<GatewayDiagnostic>("diagnose_local_gateway", { stream }),
 
   createAutomation: (input: Record<string, unknown>) => invoke("create_quota_wake_automation", { input }),
   updateAutomation: (taskId: string, input: Record<string, unknown>) => invoke("update_quota_wake_automation", { taskId, input }),
@@ -135,7 +144,7 @@ export const relayCommands = {
   profileBindings: () => invoke<ProfileBinding[]>("list_codex_account_bindings"),
   restoreAccountProfile: (profileDir: string) => invoke("restore_codex_account_profile", { profileDir }),
   restoreDefaultAccountProfile: () => invoke("restore_codex_account_profile", { profileDir: null }),
-  profileSnapshots: () => invoke<ProfileSnapshot[]>("list_codex_profile_snapshots"),
+  profileSnapshots: () => invoke<ProfileSnapshotList>("list_codex_profile_snapshots"),
   createProfileSnapshot: (name: string) => invoke<ProfileSnapshot>("create_codex_profile_snapshot", { name }),
   restoreProfileSnapshot: (snapshotId: string, safetyName: string) => invoke<ProfileSnapshot>("restore_codex_profile_snapshot", { snapshotId, safetyName }),
   deleteProfileSnapshot: (snapshotId: string) => invoke("delete_codex_profile_snapshot", { snapshotId }),
@@ -155,6 +164,10 @@ export const relayCommands = {
   applyRemoteConfigurationPreset: (preview: ConfigurationPresetPreview) => invoke<ConfigurationPresetApplyResult>("apply_remote_configuration_preset", { input: { baseRevision: preview.baseRevision, preset: preview.preset } }),
   prepareRemoteDeployment: (publicBaseUrl: string) => invoke<{ directory: string; publicBaseUrl: string; managementToken: string; vaultKey: string; composeCommand: string }>("prepare_remote_server_deployment", { input: { publicBaseUrl } }),
   remoteAction: (action: Record<string, unknown>, payload?: unknown) => invoke("execute_remote_server_action", { input: { action, payload: payload ?? null } }),
+  createRemoteClientKey: (input: ClientKeyCreateInput) => invoke<GeneratedClientKey>("create_remote_client_key", { input }),
+  updateRemoteClientKey: (keyId: string, input: ClientKeyPatch) => invoke<KeySummary>("update_remote_client_key", { keyId, input }),
+  rotateRemoteClientKey: (keyId: string) => invoke<GeneratedClientKey>("rotate_remote_client_key", { keyId }),
+  revokeRemoteClientKey: (keyId: string) => invoke("revoke_remote_client_key", { keyId }),
 };
 
 export function defaultWakeInput(name: string): Omit<WakeTask, "id" | "createdAtMs" | "updatedAtMs" | "trigger"> {

@@ -23,9 +23,11 @@ pub enum Feature {
     WakeTasks,
     Backups,
     AccountProxies,
-    FreeAccountPolicy,
     RuntimeRouting,
     ConfigurationPresets,
+    ClientAccess,
+    ClientKeyBudgets,
+    ProfileKeyRotation,
     Images,
 }
 
@@ -49,9 +51,11 @@ impl Feature {
             Self::WakeTasks => "wake_tasks",
             Self::Backups => "backups",
             Self::AccountProxies => "account_proxies",
-            Self::FreeAccountPolicy => "free_account_policy",
             Self::RuntimeRouting => "runtime_routing",
             Self::ConfigurationPresets => "configuration_presets",
+            Self::ClientAccess => "client_access",
+            Self::ClientKeyBudgets => "client_key_budgets",
+            Self::ProfileKeyRotation => "profile_key_rotation",
             Self::Images => "images",
         }
     }
@@ -111,9 +115,11 @@ impl Capabilities {
             Feature::WakeTasks,
             Feature::Backups,
             Feature::AccountProxies,
-            Feature::FreeAccountPolicy,
             Feature::RuntimeRouting,
             Feature::ConfigurationPresets,
+            Feature::ClientAccess,
+            Feature::ClientKeyBudgets,
+            Feature::ProfileKeyRotation,
             Feature::Images,
         ]
         .into_iter()

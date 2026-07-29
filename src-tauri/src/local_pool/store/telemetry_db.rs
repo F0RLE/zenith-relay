@@ -7,14 +7,20 @@ use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+    time::Instant,
 };
 use zenith_relay_core::{
-    estimate_api_equivalent_with_price_override,
+    api_pricing_revision, estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, ResponseAffinityBinding, RoutingDiagnostics,
-    UsageEvent, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ResponseAffinityBinding,
+    RoutingDiagnostics, UsageEvent, WireApi,
 };
+
+pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
 
 const MIGRATION_001: &str = r#"
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -182,14 +188,117 @@ PRAGMA user_version = 15;
 COMMIT;
 "#;
 
-const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 15;
+const MIGRATION_016: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN service_tier TEXT NOT NULL DEFAULT 'standard';
+ALTER TABLE request_logs ADD COLUMN effective_credits_milli INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 16;
+COMMIT;
+"#;
+
+const MIGRATION_017: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs DROP COLUMN effective_credits_milli;
+PRAGMA user_version = 17;
+COMMIT;
+"#;
+
+const MIGRATION_018: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN applied_service_tier TEXT;
+PRAGMA user_version = 18;
+COMMIT;
+"#;
+
+const MIGRATION_019: &str = r#"
+BEGIN IMMEDIATE;
+DROP TRIGGER IF EXISTS request_logs_retention;
+CREATE TABLE usage_candidate_rollups (
+    candidate_kind TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    input_samples INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_samples INTEGER NOT NULL DEFAULT 0,
+    cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_input_samples INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    output_samples INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    total_samples INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(candidate_kind, candidate_id, model)
+) WITHOUT ROWID;
+PRAGMA user_version = 19;
+COMMIT;
+"#;
+
+const MIGRATION_020: &str = r#"
+BEGIN IMMEDIATE;
+CREATE TABLE performance_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    name TEXT NOT NULL,
+    duration_ms REAL NOT NULL,
+    context TEXT
+);
+CREATE INDEX performance_samples_created_idx ON performance_samples(created_at DESC);
+CREATE TRIGGER performance_samples_retention
+AFTER INSERT ON performance_samples
+BEGIN
+    DELETE FROM performance_samples WHERE created_at < datetime('now', '-30 days');
+    DELETE FROM performance_samples WHERE id <= NEW.id - 2048;
+END;
+PRAGMA user_version = 20;
+COMMIT;
+"#;
+
+const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 20;
 const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
-const PRUNE_USAGE_SQL: &str =
-    "DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days')";
+const ARCHIVE_USAGE_SQL: &str = r#"
+INSERT INTO usage_candidate_rollups(
+    candidate_kind, candidate_id, model,
+    input_tokens, input_samples, cached_input_tokens, cached_input_samples,
+    cache_write_input_tokens, cache_write_input_samples, output_tokens, output_samples,
+    total_tokens, total_samples
+)
+SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+    COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+    COALESCE(SUM(input_tokens), 0), COUNT(input_tokens),
+    COALESCE(SUM(cached_input_tokens), 0), COUNT(cached_input_tokens),
+    COALESCE(SUM(cache_write_input_tokens), 0), COUNT(cache_write_input_tokens),
+    COALESCE(SUM(output_tokens), 0), COUNT(output_tokens),
+    COALESCE(SUM(total_tokens), 0), COUNT(total_tokens)
+FROM request_logs
+WHERE created_at < datetime('now', '-30 days')
+GROUP BY 1, 2, 3
+ON CONFLICT(candidate_kind, candidate_id, model) DO UPDATE SET
+    input_tokens=input_tokens + excluded.input_tokens,
+    input_samples=input_samples + excluded.input_samples,
+    cached_input_tokens=cached_input_tokens + excluded.cached_input_tokens,
+    cached_input_samples=cached_input_samples + excluded.cached_input_samples,
+    cache_write_input_tokens=cache_write_input_tokens + excluded.cache_write_input_tokens,
+    cache_write_input_samples=cache_write_input_samples + excluded.cache_write_input_samples,
+    output_tokens=output_tokens + excluded.output_tokens,
+    output_samples=output_samples + excluded.output_samples,
+    total_tokens=total_tokens + excluded.total_tokens,
+    total_samples=total_samples + excluded.total_samples;
+DELETE FROM request_logs WHERE created_at < datetime('now', '-30 days');
+"#;
 
 pub struct TelemetryDb {
     connection: Mutex<Connection>,
+    usage_revision: AtomicU64,
+    api_equivalent_cache: Mutex<Option<CachedUsageEquivalents>>,
+    open_duration_ms: f64,
+}
+
+#[derive(Clone)]
+struct CachedUsageEquivalents {
+    usage_revision: u64,
+    pricing_revision: String,
+    value: UsageEquivalents,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -207,6 +316,8 @@ pub struct UsageLog {
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
     pub wire_api: String,
+    pub service_tier: DefaultServiceTier,
+    pub applied_service_tier: Option<DefaultServiceTier>,
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
@@ -219,6 +330,7 @@ pub struct UsageLog {
     pub reasoning_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    pub api_equivalent: ApiEquivalentSummary,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -235,7 +347,7 @@ pub struct LocalUsagePage {
     pub buckets: Vec<UsageBucket>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct UsageEquivalents {
     pub accounts: HashMap<String, ApiEquivalentSummary>,
     pub sources: HashMap<String, ApiEquivalentSummary>,
@@ -243,6 +355,7 @@ pub struct UsageEquivalents {
 
 impl TelemetryDb {
     pub fn open(path: &Path) -> Result<Self> {
+        let started = Instant::now();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(io_error)?;
         }
@@ -303,10 +416,67 @@ impl TelemetryDb {
         if version <= 14 {
             connection.execute_batch(MIGRATION_015).map_err(db_error)?;
         }
-        connection.execute(PRUNE_USAGE_SQL, []).map_err(db_error)?;
+        if version <= 15 {
+            connection.execute_batch(MIGRATION_016).map_err(db_error)?;
+        }
+        if version <= 16 {
+            connection.execute_batch(MIGRATION_017).map_err(db_error)?;
+        }
+        if version <= 17 {
+            connection.execute_batch(MIGRATION_018).map_err(db_error)?;
+        }
+        if version <= 18 {
+            connection.execute_batch(MIGRATION_019).map_err(db_error)?;
+        }
+        if version <= 19 {
+            connection.execute_batch(MIGRATION_020).map_err(db_error)?;
+        }
+        connection
+            .execute_batch(ARCHIVE_USAGE_SQL)
+            .map_err(db_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
+            usage_revision: AtomicU64::new(0),
+            api_equivalent_cache: Mutex::new(None),
+            open_duration_ms: started.elapsed().as_secs_f64() * 1_000.0,
         })
+    }
+
+    pub fn open_duration_ms(&self) -> f64 {
+        self.open_duration_ms
+    }
+
+    pub fn record_performance(
+        &self,
+        name: &str,
+        duration_ms: f64,
+        context: Option<&str>,
+    ) -> Result<()> {
+        if !valid_performance_name(name)
+            || !duration_ms.is_finite()
+            || !(0.0..=600_000.0).contains(&duration_ms)
+            || context.is_some_and(|value| {
+                value.is_empty()
+                    || value.len() > 64
+                    || !value.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':')
+                    })
+            })
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "performance sample is invalid",
+            ));
+        }
+        self.connection
+            .lock()
+            .map_err(lock_error)?
+            .execute(
+                "INSERT INTO performance_samples(name, duration_ms, context) VALUES (?1, ?2, ?3)",
+                params![name, duration_ms, context],
+            )
+            .map_err(db_error)?;
+        Ok(())
     }
 
     pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
@@ -336,6 +506,22 @@ impl TelemetryDb {
     }
 
     pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
+        self.replace_state_json_with_account_purge(values, None)
+    }
+
+    pub(crate) fn replace_state_json_and_delete_account_data(
+        &self,
+        values: &[(&str, String)],
+        account_id: &str,
+    ) -> Result<()> {
+        self.replace_state_json_with_account_purge(values, Some(account_id))
+    }
+
+    fn replace_state_json_with_account_purge(
+        &self,
+        values: &[(&str, String)],
+        account_id: Option<&str>,
+    ) -> Result<()> {
         for (key, value) in values {
             validate_state_key(key)?;
             if value.len() > MAX_STATE_JSON_BYTES {
@@ -358,7 +544,32 @@ impl TelemetryDb {
                 )
                 .map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)
+        if let Some(account_id) = account_id {
+            transaction
+                .execute(
+                    "DELETE FROM request_logs WHERE account_id = ?1",
+                    [account_id],
+                )
+                .map_err(db_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM usage_candidate_rollups
+                     WHERE candidate_kind = 'account' AND candidate_id = ?1",
+                    [account_id],
+                )
+                .map_err(db_error)?;
+            transaction
+                .execute(
+                    "DELETE FROM response_affinity WHERE candidate_id = ?1",
+                    [account_id],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)?;
+        if account_id.is_some() {
+            self.invalidate_usage_cache();
+        }
+        Ok(())
     }
 
     pub fn record(&self, event: &UsageEvent) -> Result<()> {
@@ -379,16 +590,19 @@ impl TelemetryDb {
                     format!("usage routing diagnostics serialization failed: {error}"),
                 )
             })?;
-        self.connection
+        let connection = self
+            .connection
             .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let changed = connection
             .execute(
                 "INSERT INTO request_logs (
                     request_id, attempt, local_key_id, source_id, candidate_id, account_id,
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
+                    service_tier, applied_service_tier, routing_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
                 ON CONFLICT(request_id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     attempt = excluded.attempt,
@@ -411,6 +625,8 @@ impl TelemetryDb {
                     reasoning_tokens = excluded.reasoning_tokens,
                     output_tokens = excluded.output_tokens,
                     total_tokens = excluded.total_tokens,
+                    service_tier = excluded.service_tier,
+                    applied_service_tier = excluded.applied_service_tier,
                     routing_json = excluded.routing_json
                 WHERE excluded.attempt >= request_logs.attempt",
                 params![
@@ -435,11 +651,23 @@ impl TelemetryDb {
                     event.reasoning_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
+                    service_tier_name(event.service_tier),
+                    event.applied_service_tier.map(service_tier_name),
                     routing_json,
                 ],
             )
-            .map(|_| ())
-            .map_err(db_error)
+            .map_err(db_error)?
+            > 0;
+        if connection.last_insert_rowid() % 256 == 0 {
+            connection
+                .execute_batch(ARCHIVE_USAGE_SQL)
+                .map_err(db_error)?;
+        }
+        drop(connection);
+        if changed {
+            self.invalidate_usage_cache();
+        }
+        Ok(())
     }
 
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
@@ -453,7 +681,8 @@ impl TelemetryDb {
                     local_key_id, source_id, candidate_id, account_id, requested_model,
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
                     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
+                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
+                    service_tier, applied_service_tier, routing_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -467,13 +696,14 @@ impl TelemetryDb {
 
     #[cfg(test)]
     pub fn usage_page(&self, query: &UsageQuery) -> Result<LocalUsagePage> {
-        self.usage_page_with_price_overrides(query, &BTreeMap::new())
+        self.usage_page_with_price_overrides(query, &BTreeMap::new(), &BTreeMap::new())
     }
 
     pub fn usage_page_with_price_overrides(
         &self,
         query: &UsageQuery,
         price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+        source_price_overrides: &SourcePriceOverrides,
     ) -> Result<LocalUsagePage> {
         let page = query.page.max(1);
         let page_size = if query.page_size == 0 {
@@ -493,17 +723,15 @@ impl TelemetryDb {
             &values,
             "COALESCE(resolved_model, requested_model, '')",
         )?;
+        let mut model_equivalents = usage_model_equivalents(
+            &connection,
+            &where_sql,
+            &values,
+            price_overrides,
+            source_price_overrides,
+        )?;
         for group in &mut models {
-            group.totals.api_equivalent = estimate_api_equivalent_with_price_override(
-                (!group.key.is_empty()).then_some(group.key.as_str()),
-                Some(group.totals.input_tokens),
-                (group.totals.cached_input_samples > 0).then_some(group.totals.cached_input_tokens),
-                (group.totals.cache_write_input_samples > 0)
-                    .then_some(group.totals.cache_write_input_tokens),
-                Some(group.totals.output_tokens),
-                Some(group.totals.total_tokens),
-                configured_model_price(price_overrides, Some(group.key.as_str())),
-            );
+            group.totals.api_equivalent = model_equivalents.remove(&group.key).unwrap_or_default();
             totals.api_equivalent.merge(group.totals.api_equivalent);
         }
         let pool_members = usage_groups(
@@ -512,7 +740,14 @@ impl TelemetryDb {
             &values,
             "COALESCE(account_id, source_id, '')",
         )?;
-        let buckets = usage_buckets(&connection, &where_sql, &values, query, price_overrides)?;
+        let buckets = usage_buckets(
+            &connection,
+            &where_sql,
+            &values,
+            query,
+            price_overrides,
+            source_price_overrides,
+        )?;
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
@@ -520,18 +755,46 @@ impl TelemetryDb {
                 local_key_id, source_id, candidate_id, account_id, requested_model,
                 resolved_model, wire_api, success, http_status, error_category, latency_ms,
                 ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, routing_json
+                cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
+                service_tier, applied_service_tier, routing_json
              FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
         let mut page_values = values;
         page_values.push(SqlValue::Integer(i64::from(page_size)));
         page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
-        let events = statement
+        let mut events = statement
             .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
             .map_err(db_error)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_error)?;
+        for event in &mut events {
+            let candidate_kind = if event.account_id.is_some() {
+                "account"
+            } else {
+                "source"
+            };
+            let candidate_id = event.account_id.as_deref().unwrap_or(&event.source_id);
+            let model = event
+                .resolved_model
+                .as_deref()
+                .or(event.requested_model.as_deref());
+            event.api_equivalent = estimate_api_equivalent_with_price_override(
+                model,
+                event.input_tokens,
+                event.cached_input_tokens,
+                event.cache_write_input_tokens,
+                event.output_tokens,
+                event.total_tokens,
+                configured_model_price(
+                    price_overrides,
+                    source_price_overrides,
+                    candidate_kind,
+                    candidate_id,
+                    model,
+                ),
+            );
+        }
         let total_pages = if total == 0 {
             0
         } else {
@@ -552,26 +815,64 @@ impl TelemetryDb {
 
     #[cfg(test)]
     pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
-        self.api_equivalents_with_price_overrides(&BTreeMap::new())
+        self.api_equivalents_with_price_overrides(&BTreeMap::new(), &BTreeMap::new())
     }
 
     pub fn api_equivalents_with_price_overrides(
         &self,
         price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+        source_price_overrides: &SourcePriceOverrides,
     ) -> Result<UsageEquivalents> {
+        let usage_revision = self.usage_revision.load(Ordering::Acquire);
+        let pricing_revision = serde_json::to_string(&(
+            api_pricing_revision(),
+            price_overrides,
+            source_price_overrides,
+        ))
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("usage pricing revision serialization failed: {error}"),
+            )
+        })?;
+        if let Some(cached) = self
+            .api_equivalent_cache
+            .lock()
+            .map_err(lock_error)?
+            .as_ref()
+            .filter(|cached| {
+                cached.usage_revision == usage_revision
+                    && cached.pricing_revision == pricing_revision
+            })
+        {
+            return Ok(cached.value.clone());
+        }
         let connection = self
             .connection
             .lock()
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
         let mut statement = connection
             .prepare(
-                "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
-                    COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model),
+                "SELECT candidate_kind, candidate_id, model,
                     SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
-                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
-                 FROM request_logs
-                 GROUP BY 1, 2, 3",
+                    SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
+                    SUM(cached_input_samples), SUM(cache_write_input_samples)
+                 FROM (
+                    SELECT candidate_kind, candidate_id, model,
+                        input_tokens, cached_input_tokens, cache_write_input_tokens,
+                        output_tokens, total_tokens, input_samples,
+                        cached_input_samples, cache_write_input_samples
+                    FROM usage_candidate_rollups
+                    UNION ALL
+                    SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+                        COALESCE(account_id, source_id),
+                        COALESCE(resolved_model, requested_model, ''),
+                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+                        COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
+                        COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
+                    FROM request_logs GROUP BY 1, 2, 3
+                 ) GROUP BY candidate_kind, candidate_id, model",
             )
             .map_err(db_error)?;
         let rows = statement
@@ -585,9 +886,11 @@ impl TelemetryDb {
                 let cached_samples: i64 = row.get(9)?;
                 let cache_write_samples: i64 = row.get(10)?;
                 let model = row.get::<_, Option<String>>(2)?;
+                let kind = row.get::<_, String>(0)?;
+                let id = row.get::<_, String>(1)?;
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
+                    kind.clone(),
+                    id.clone(),
                     estimate_api_equivalent_with_price_override(
                         model.as_deref(),
                         input_tokens.map(rust_u64),
@@ -599,7 +902,13 @@ impl TelemetryDb {
                             .flatten(),
                         output_tokens.map(rust_u64),
                         total_tokens.map(rust_u64),
-                        configured_model_price(price_overrides, model.as_deref()),
+                        configured_model_price(
+                            price_overrides,
+                            source_price_overrides,
+                            &kind,
+                            &id,
+                            model.as_deref(),
+                        ),
                     ),
                 ))
             })
@@ -614,6 +923,18 @@ impl TelemetryDb {
             };
             values.entry(id).or_default().merge(estimate);
         }
+        drop(statement);
+        drop(connection);
+        if self.usage_revision.load(Ordering::Acquire) == usage_revision {
+            self.api_equivalent_cache
+                .lock()
+                .map_err(lock_error)?
+                .replace(CachedUsageEquivalents {
+                    usage_revision,
+                    pricing_revision,
+                    value: equivalents.clone(),
+                });
+        }
         Ok(equivalents)
     }
 
@@ -621,9 +942,17 @@ impl TelemetryDb {
         self.connection
             .lock()
             .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
-            .execute("DELETE FROM request_logs", [])
-            .map(|_| ())
-            .map_err(db_error)
+            .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
+            .map_err(db_error)?;
+        self.invalidate_usage_cache();
+        Ok(())
+    }
+
+    fn invalidate_usage_cache(&self) {
+        self.usage_revision.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut cached) = self.api_equivalent_cache.lock() {
+            *cached = None;
+        }
     }
 
     pub fn affinity_bindings(&self, now_ms: u64) -> Result<Vec<ResponseAffinityBinding>> {
@@ -699,6 +1028,18 @@ impl TelemetryDb {
             .execute(
                 "DELETE FROM response_affinity WHERE response_key = ?1",
                 [key],
+            )
+            .map(|_| ())
+            .map_err(db_error)
+    }
+
+    pub fn delete_candidate_affinities(&self, candidate_id: &str) -> Result<()> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .execute(
+                "DELETE FROM response_affinity WHERE candidate_id = ?1",
+                [candidate_id],
             )
             .map(|_| ())
             .map_err(db_error)
@@ -828,12 +1169,77 @@ fn usage_groups(
         .map_err(db_error)
 }
 
+fn usage_model_equivalents(
+    connection: &Connection,
+    where_sql: &str,
+    values: &[SqlValue],
+    price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    source_price_overrides: &SourcePriceOverrides,
+) -> Result<HashMap<String, ApiEquivalentSummary>> {
+    let sql = format!(
+        "SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+            COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model, ''),
+            SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+            SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens),
+            COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
+            COUNT(output_tokens), COUNT(total_tokens)
+         FROM request_logs{where_sql} GROUP BY 1, 2, 3"
+    );
+    let mut statement = connection.prepare(&sql).map_err(db_error)?;
+    let rows = statement
+        .query_map(params_from_iter(values.iter()), |row| {
+            let kind = row.get::<_, String>(0)?;
+            let candidate_id = row.get::<_, String>(1)?;
+            let model = row.get::<_, String>(2)?;
+            let input_tokens = row.get::<_, Option<i64>>(3)?.map(rust_u64);
+            let cached_input_tokens = row.get::<_, Option<i64>>(4)?.map(rust_u64);
+            let cache_write_input_tokens = row.get::<_, Option<i64>>(5)?.map(rust_u64);
+            let output_tokens = row.get::<_, Option<i64>>(6)?.map(rust_u64);
+            let total_tokens = row.get::<_, Option<i64>>(7)?.map(rust_u64);
+            let input_samples = rust_u64(row.get(8)?);
+            let cached_samples = rust_u64(row.get(9)?);
+            let cache_write_samples = rust_u64(row.get(10)?);
+            let output_samples = rust_u64(row.get(11)?);
+            let total_samples = rust_u64(row.get(12)?);
+            Ok((
+                model.clone(),
+                estimate_api_equivalent_with_price_override(
+                    (!model.is_empty()).then_some(model.as_str()),
+                    (input_samples > 0).then_some(input_tokens).flatten(),
+                    (input_samples > 0 && cached_samples == input_samples)
+                        .then_some(cached_input_tokens)
+                        .flatten(),
+                    (input_samples > 0 && cache_write_samples == input_samples)
+                        .then_some(cache_write_input_tokens)
+                        .flatten(),
+                    (output_samples > 0).then_some(output_tokens).flatten(),
+                    (total_samples > 0).then_some(total_tokens).flatten(),
+                    configured_model_price(
+                        price_overrides,
+                        source_price_overrides,
+                        &kind,
+                        &candidate_id,
+                        (!model.is_empty()).then_some(model.as_str()),
+                    ),
+                ),
+            ))
+        })
+        .map_err(db_error)?;
+    let mut equivalents = HashMap::<String, ApiEquivalentSummary>::new();
+    for row in rows {
+        let (model, estimate) = row.map_err(db_error)?;
+        equivalents.entry(model).or_default().merge(estimate);
+    }
+    Ok(equivalents)
+}
+
 fn usage_buckets(
     connection: &Connection,
     where_sql: &str,
     values: &[SqlValue],
     query: &UsageQuery,
     price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    source_price_overrides: &SourcePriceOverrides,
 ) -> Result<Vec<UsageBucket>> {
     let Some(bucket_ms) = query.bucket_ms else {
         return Ok(Vec::new());
@@ -862,37 +1268,61 @@ fn usage_buckets(
             .map_err(db_error)?
     };
     let price_sql = format!(
-        "SELECT {bucket_sql}, COALESCE(resolved_model, requested_model), \
+        "SELECT {bucket_sql}, CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END, \
+            COALESCE(account_id, source_id), COALESCE(resolved_model, requested_model), \
             SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens), \
-            SUM(output_tokens), SUM(total_tokens), COUNT(cached_input_tokens), \
-            COUNT(cache_write_input_tokens) \
-         FROM request_logs{where_sql} GROUP BY 1, 2"
+            SUM(output_tokens), SUM(total_tokens), COUNT(input_tokens), \
+            COUNT(cached_input_tokens), COUNT(cache_write_input_tokens), \
+            COUNT(output_tokens), COUNT(total_tokens) \
+         FROM request_logs{where_sql} GROUP BY 1, 2, 3, 4"
     );
     let mut statement = connection.prepare(&price_sql).map_err(db_error)?;
     let rows = statement
         .query_map(params_from_iter(parameters.iter()), |row| {
-            let input_tokens: Option<i64> = row.get(2)?;
-            let cached_input_tokens: Option<i64> = row.get(3)?;
-            let cache_write_input_tokens: Option<i64> = row.get(4)?;
-            let output_tokens: Option<i64> = row.get(5)?;
-            let total_tokens: Option<i64> = row.get(6)?;
-            let cached_samples: i64 = row.get(7)?;
-            let cache_write_samples: i64 = row.get(8)?;
-            let model = row.get::<_, Option<String>>(1)?;
+            let kind = row.get::<_, String>(1)?;
+            let candidate_id = row.get::<_, String>(2)?;
+            let model = row.get::<_, Option<String>>(3)?;
+            let input_tokens: Option<i64> = row.get(4)?;
+            let cached_input_tokens: Option<i64> = row.get(5)?;
+            let cache_write_input_tokens: Option<i64> = row.get(6)?;
+            let output_tokens: Option<i64> = row.get(7)?;
+            let total_tokens: Option<i64> = row.get(8)?;
+            let input_samples: i64 = row.get(9)?;
+            let cached_samples: i64 = row.get(10)?;
+            let cache_write_samples: i64 = row.get(11)?;
+            let output_samples: i64 = row.get(12)?;
+            let total_samples: i64 = row.get(13)?;
+            let start_ms = rust_u64(row.get(0)?);
+            let input_tokens = (input_samples > 0)
+                .then(|| input_tokens.map(rust_u64))
+                .flatten();
+            let cached_input_tokens = (input_samples > 0 && cached_samples == input_samples)
+                .then(|| cached_input_tokens.map(rust_u64))
+                .flatten();
+            let cache_write_input_tokens = (input_samples > 0
+                && cache_write_samples == input_samples)
+                .then(|| cache_write_input_tokens.map(rust_u64))
+                .flatten();
             Ok((
-                rust_u64(row.get(0)?),
+                start_ms,
                 estimate_api_equivalent_with_price_override(
                     model.as_deref(),
-                    input_tokens.map(rust_u64),
-                    (cached_samples > 0)
-                        .then(|| cached_input_tokens.map(rust_u64))
+                    input_tokens,
+                    cached_input_tokens,
+                    cache_write_input_tokens,
+                    (output_samples > 0)
+                        .then(|| output_tokens.map(rust_u64))
                         .flatten(),
-                    (cache_write_samples > 0)
-                        .then(|| cache_write_input_tokens.map(rust_u64))
+                    (total_samples > 0)
+                        .then(|| total_tokens.map(rust_u64))
                         .flatten(),
-                    output_tokens.map(rust_u64),
-                    total_tokens.map(rust_u64),
-                    configured_model_price(price_overrides, model.as_deref()),
+                    configured_model_price(
+                        price_overrides,
+                        source_price_overrides,
+                        &kind,
+                        &candidate_id,
+                        model.as_deref(),
+                    ),
                 ),
             ))
         })
@@ -910,9 +1340,21 @@ fn usage_buckets(
 
 fn configured_model_price(
     price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+    source_price_overrides: &SourcePriceOverrides,
+    candidate_kind: &str,
+    candidate_id: &str,
     model: Option<&str>,
 ) -> Option<ApiModelPriceOverride> {
-    model.and_then(|model| price_overrides.get(&model.to_ascii_lowercase()).copied())
+    let model = model?.to_ascii_lowercase();
+    (candidate_kind == "source")
+        .then(|| {
+            source_price_overrides
+                .get(candidate_id)?
+                .get(&model)
+                .copied()
+        })
+        .flatten()
+        .or_else(|| price_overrides.get(&model).copied())
 }
 
 fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<UsageTotals> {
@@ -949,7 +1391,9 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
     let reasoning_tokens: Option<i64> = row.get(20)?;
     let output_tokens: Option<i64> = row.get(21)?;
     let total_tokens: Option<i64> = row.get(22)?;
-    let routing_json: Option<String> = row.get(23)?;
+    let service_tier: String = row.get(23)?;
+    let applied_service_tier: Option<String> = row.get(24)?;
+    let routing_json: Option<String> = row.get(25)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -965,6 +1409,8 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         requested_model: row.get(8)?,
         resolved_model: row.get(9)?,
         wire_api: normalize_wire_api(row.get(10)?),
+        service_tier: parse_service_tier(&service_tier),
+        applied_service_tier: applied_service_tier.as_deref().map(parse_service_tier),
         success: row.get(11)?,
         http_status: row.get(12)?,
         error_category: row.get(13)?,
@@ -977,6 +1423,7 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         reasoning_tokens: reasoning_tokens.map(rust_u64),
         output_tokens: output_tokens.map(rust_u64),
         total_tokens: total_tokens.map(rust_u64),
+        api_equivalent: ApiEquivalentSummary::default(),
     })
 }
 
@@ -1001,6 +1448,21 @@ fn wire_api_name(value: WireApi) -> &'static str {
     }
 }
 
+fn service_tier_name(value: DefaultServiceTier) -> &'static str {
+    match value {
+        DefaultServiceTier::Standard => "standard",
+        DefaultServiceTier::Fast => "fast",
+    }
+}
+
+fn parse_service_tier(value: &str) -> DefaultServiceTier {
+    if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
+        DefaultServiceTier::Fast
+    } else {
+        DefaultServiceTier::Standard
+    }
+}
+
 fn normalize_wire_api(value: String) -> String {
     if value == "chatcompletions" {
         "chat_completions".to_string()
@@ -1015,6 +1477,22 @@ fn sql_u64(value: u64) -> i64 {
 
 fn rust_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
+}
+
+fn valid_performance_name(name: &str) -> bool {
+    matches!(
+        name,
+        "native_startup"
+            | "vault"
+            | "sqlite"
+            | "window"
+            | "first_frame"
+            | "interactive"
+            | "full_snapshot"
+            | "full_snapshot_native"
+            | "mode_switch"
+            | "page_open"
+    )
 }
 
 fn validate_state_key(key: &str) -> Result<()> {
@@ -1059,8 +1537,8 @@ mod tests {
             attempt: 1,
             local_key_id: "key_1".into(),
             source_id: "source_1".into(),
-            candidate_id: Some("source_1".into()),
-            account_id: None,
+            candidate_id: Some("account_1".into()),
+            account_id: Some("account_1".into()),
             routing: Some(RoutingDiagnostics {
                 reason: SelectionReason::QuotaHeadroom,
                 eligible_candidates: 4,
@@ -1068,9 +1546,11 @@ mod tests {
                 in_flight_before: 0,
                 dispatches_before: 3,
             }),
-            requested_model: Some("gpt-test".into()),
-            resolved_model: Some("gpt-test".into()),
+            requested_model: Some("gpt-5.4".into()),
+            resolved_model: Some("gpt-5.4".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Fast,
+            applied_service_tier: Some(DefaultServiceTier::Standard),
             success: true,
             http_status: 200,
             error_category: None,
@@ -1093,15 +1573,54 @@ mod tests {
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert!(logs[0].created_at.ends_with('Z'));
-        assert_eq!(logs[0].candidate_id.as_deref(), Some("source_1"));
+        assert_eq!(logs[0].candidate_id.as_deref(), Some("account_1"));
         assert_eq!(logs[0].ttft_ms, Some(4));
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].cache_write_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
+        assert_eq!(logs[0].service_tier, DefaultServiceTier::Fast);
+        assert_eq!(
+            logs[0].applied_service_tier,
+            Some(DefaultServiceTier::Standard)
+        );
         assert_eq!(
             logs[0].routing.as_ref().map(|routing| routing.reason),
             Some(SelectionReason::QuotaHeadroom)
         );
+        let page = database.usage_page(&UsageQuery::default()).unwrap();
+        // The event carries a measured value and the totals are that same value
+        // merged once, so the relation holds regardless of catalog prices.
+        assert!(page.events[0].api_equivalent.micro_usd > 0);
+        assert_eq!(page.totals.api_equivalent, page.events[0].api_equivalent);
+        let cached = database.api_equivalents().unwrap();
+        assert_eq!(
+            database.api_equivalents().unwrap().accounts,
+            cached.accounts
+        );
+        let mut second = event.clone();
+        second.request_id = "req_2".into();
+        second.input_tokens = Some(20);
+        second.total_tokens = Some(23);
+        database.record(&second).unwrap();
+        assert!(
+            database.api_equivalents().unwrap().accounts["account_1"].micro_usd
+                > cached.accounts["account_1"].micro_usd
+        );
+        database
+            .record_performance("first_frame", 12.5, Some("startup"))
+            .unwrap();
+        assert!(database
+            .record_performance("unknown_metric", 1.0, None)
+            .is_err());
+        let performance_samples: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM performance_samples", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(performance_samples, 1);
         database.clear().unwrap();
         assert!(database.list(10).unwrap().is_empty());
         assert_eq!(logs[0].total_tokens, Some(5));
@@ -1129,6 +1648,62 @@ mod tests {
             Some(binding)
         );
         assert!(database.affinity_bindings(200).unwrap().is_empty());
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_account_data_removes_usage_rollups_and_affinity() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-delete-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO request_logs(
+                    request_id, local_key_id, source_id, candidate_id, account_id,
+                    wire_api, success, http_status, latency_ms
+                 ) VALUES ('request-delete', 'key', 'codex', 'account-delete',
+                    'account-delete', 'responses', 1, 200, 1);
+                 INSERT INTO usage_candidate_rollups(candidate_kind, candidate_id, model)
+                 VALUES ('account', 'account-delete', 'gpt-test');
+                 INSERT INTO response_affinity(
+                    response_key, candidate_id, expires_at_ms, updated_at_ms
+                 ) VALUES ('response-delete', 'account-delete', 1000, 1);",
+            )
+            .unwrap();
+
+        database
+            .replace_state_json_and_delete_account_data(
+                &[("accounts", "[]".to_string())],
+                "account-delete",
+            )
+            .unwrap();
+
+        let remaining: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM request_logs WHERE account_id = 'account-delete') +
+                    (SELECT COUNT(*) FROM usage_candidate_rollups
+                     WHERE candidate_kind = 'account' AND candidate_id = 'account-delete') +
+                    (SELECT COUNT(*) FROM response_affinity
+                     WHERE candidate_id = 'account-delete')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert_eq!(
+            database.state_json("accounts").unwrap().as_deref(),
+            Some("[]")
+        );
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1187,6 +1762,8 @@ mod tests {
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: true,
             http_status: 200,
             error_category: None,
@@ -1256,6 +1833,7 @@ mod tests {
             page.totals.api_equivalent
         );
         assert_eq!(page.events[0].wire_api, "chat_completions");
+        assert_eq!(page.events[0].service_tier, DefaultServiceTier::Standard);
 
         let chat = database
             .usage_page(&UsageQuery {
@@ -1288,6 +1866,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: false,
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
@@ -1343,6 +1923,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: false,
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
@@ -1396,6 +1978,8 @@ mod tests {
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: true,
             http_status: 200,
             error_category: None,
@@ -1447,6 +2031,8 @@ mod tests {
                 requested_model: Some("private-model".into()),
                 resolved_model: Some("private-model".into()),
                 wire_api: WireApi::Responses,
+                service_tier: DefaultServiceTier::Standard,
+                applied_service_tier: None,
                 success: true,
                 http_status: 200,
                 error_category: None,
@@ -1480,24 +2066,123 @@ mod tests {
             ApiModelPriceOverride {
                 input_micro_usd_per_million: 2_000_000,
                 cached_input_micro_usd_per_million: Some(200_000),
+                cache_write_5m_micro_usd_per_million: None,
+                cache_write_1h_micro_usd_per_million: None,
                 output_micro_usd_per_million: 10_000_000,
             },
         )]);
         let page = database
-            .usage_page_with_price_overrides(&UsageQuery::default(), &prices)
+            .usage_page_with_price_overrides(&UsageQuery::default(), &prices, &BTreeMap::new())
             .unwrap();
         assert_eq!(page.totals.api_equivalent.micro_usd, 3_000_000);
         assert_eq!(page.totals.api_equivalent.priced_tokens, 1_100_000);
         assert_eq!(page.totals.api_equivalent.unpriced_tokens, 0);
+        assert_eq!(page.events[0].api_equivalent, page.totals.api_equivalent);
         assert_eq!(
             database
-                .api_equivalents_with_price_overrides(&prices)
+                .api_equivalents_with_price_overrides(&prices, &BTreeMap::new())
                 .unwrap()
                 .sources
                 .get("source_1")
                 .map(|summary| summary.micro_usd),
             Some(3_000_000)
         );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn source_prices_are_applied_before_same_model_usage_is_merged() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-usage-source-prices-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        let mut event = UsageEvent {
+            request_id: "req_source_cheap".into(),
+            attempt: 1,
+            local_key_id: "key_1".into(),
+            source_id: "source_cheap".into(),
+            candidate_id: Some("source_cheap".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("private-model".into()),
+            resolved_model: Some("private-model".into()),
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 100,
+            ttft_ms: Some(10),
+            generation_ms: Some(90),
+            input_tokens: Some(1_000_000),
+            cached_input_tokens: Some(0),
+            cache_write_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+            output_tokens: Some(100_000),
+            total_tokens: Some(1_100_000),
+            quota_snapshot: None,
+        };
+        database.record(&event).unwrap();
+        event.request_id = "req_source_expensive".into();
+        event.source_id = "source_expensive".into();
+        event.candidate_id = Some("source_expensive".into());
+        database.record(&event).unwrap();
+        event.request_id = "req_account".into();
+        event.source_id = "codex".into();
+        event.candidate_id = Some("account_1".into());
+        event.account_id = Some("account_1".into());
+        database.record(&event).unwrap();
+
+        let price = |input, output| ApiModelPriceOverride {
+            input_micro_usd_per_million: input,
+            cached_input_micro_usd_per_million: Some(input / 10),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: output,
+        };
+        let source_prices = BTreeMap::from([
+            (
+                "source_cheap".into(),
+                BTreeMap::from([("private-model".into(), price(1_000_000, 2_000_000))]),
+            ),
+            (
+                "source_expensive".into(),
+                BTreeMap::from([("private-model".into(), price(2_000_000, 4_000_000))]),
+            ),
+        ]);
+        let page = database
+            .usage_page_with_price_overrides(
+                &UsageQuery::default(),
+                &BTreeMap::new(),
+                &source_prices,
+            )
+            .unwrap();
+        assert_eq!(page.totals.api_equivalent.micro_usd, 3_600_000);
+        assert_eq!(page.totals.api_equivalent.unpriced_tokens, 1_100_000);
+        assert_eq!(page.models[0].totals.api_equivalent.micro_usd, 3_600_000);
+        let event_value = |request_id: &str| {
+            page.events
+                .iter()
+                .find(|event| event.request_id == request_id)
+                .unwrap()
+                .api_equivalent
+        };
+        assert_eq!(event_value("req_source_cheap").micro_usd, 1_200_000);
+        assert_eq!(event_value("req_source_expensive").micro_usd, 2_400_000);
+        assert_eq!(event_value("req_account").unpriced_tokens, 1_100_000);
+
+        let equivalents = database
+            .api_equivalents_with_price_overrides(&BTreeMap::new(), &source_prices)
+            .unwrap();
+        assert_eq!(equivalents.sources["source_cheap"].micro_usd, 1_200_000);
+        assert_eq!(equivalents.sources["source_expensive"].micro_usd, 2_400_000);
+        assert_eq!(equivalents.accounts["account_1"].micro_usd, 0);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1659,9 +2344,11 @@ mod tests {
         connection
             .execute(
                 "INSERT INTO request_logs (
-                    request_id, attempt, local_key_id, source_id, wire_api, success,
-                    http_status, latency_ms, created_at
-                ) VALUES ('old-open', 1, 'key', 'source', 'responses', 1, 200, 1,
+                    request_id, attempt, local_key_id, source_id, candidate_id, account_id,
+                    requested_model, resolved_model, wire_api, success, http_status, latency_ms,
+                    input_tokens, cached_input_tokens, output_tokens, total_tokens, created_at
+                ) VALUES ('old-open', 1, 'key', 'source', 'account', 'account',
+                    'gpt-5.4', 'gpt-5.4', 'responses', 1, 200, 1, 20, 10, 8, 28,
                     datetime('now', '-31 days'))",
                 [],
             )
@@ -1670,15 +2357,25 @@ mod tests {
 
         let database = TelemetryDb::open(&path).unwrap();
         assert!(database.list(10).unwrap().is_empty());
+        assert_eq!(
+            database.api_equivalents().unwrap().accounts.get("account"),
+            Some(&ApiEquivalentSummary {
+                micro_usd: 148,
+                priced_tokens: 28,
+                unpriced_tokens: 0,
+            })
+        );
         database
             .connection
             .lock()
             .unwrap()
             .execute(
                 "INSERT INTO request_logs (
-                    id, request_id, attempt, local_key_id, source_id, wire_api, success,
-                    http_status, latency_ms, created_at
-                ) VALUES (255, 'old-trigger', 1, 'key', 'source', 'responses', 1, 200, 1,
+                    id, request_id, attempt, local_key_id, source_id, candidate_id,
+                    requested_model, resolved_model, wire_api, success, http_status, latency_ms,
+                    input_tokens, cached_input_tokens, output_tokens, total_tokens, created_at
+                ) VALUES (255, 'old-trigger', 1, 'key', 'source', 'source',
+                    'gpt-5.4', 'gpt-5.4', 'responses', 1, 200, 1, 20, 10, 8, 28,
                     datetime('now', '-31 days'))",
                 [],
             )
@@ -1695,6 +2392,8 @@ mod tests {
                 requested_model: None,
                 resolved_model: None,
                 wire_api: WireApi::Responses,
+                service_tier: DefaultServiceTier::Standard,
+                applied_service_tier: None,
                 success: true,
                 http_status: 200,
                 error_category: None,
@@ -1714,6 +2413,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(database.list(10).unwrap().len(), 1);
+        assert_eq!(
+            database.api_equivalents().unwrap().sources.get("source"),
+            Some(&ApiEquivalentSummary {
+                micro_usd: 148,
+                priced_tokens: 28,
+                unpriced_tokens: 0,
+            })
+        );
+        database.clear().unwrap();
+        let equivalents = database.api_equivalents().unwrap();
+        assert!(equivalents.accounts.is_empty());
+        assert!(equivalents.sources.is_empty());
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

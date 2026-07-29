@@ -6,6 +6,12 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use std::collections::HashMap;
+
+#[cfg(test)]
+type TestKeyring = HashMap<(String, String), String>;
+
 const KEYRING_SERVICE: &str = "Zenith Relay";
 const LEGACY_KEYRING_SERVICE: &str = "Zenith Codex";
 const KEYRING_USER: &str = "api-key";
@@ -88,6 +94,7 @@ fn keyring_guard() -> Result<MutexGuard<'static, ()>, String> {
         .map_err(|_| "Хранилище секретов заблокировано после внутренней ошибки".to_string())
 }
 
+#[cfg(not(test))]
 fn keyring_entry_for_service(service: &str, user: &str) -> keyring::Entry {
     keyring::Entry::new(service, user).expect("valid keyring service and user")
 }
@@ -212,12 +219,20 @@ fn delete_secret_from_service(service: &str, user: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(test))]
 fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
     keyring_entry_for_service(service, user)
         .set_password(value)
         .map_err(|err| format!("Не удалось сохранить секрет в хранилище ОС: {err}"))
 }
 
+#[cfg(test)]
+fn set_password(service: &str, user: &str, value: &str) -> Result<(), String> {
+    test_keyring()?.insert((service.to_string(), user.to_string()), value.to_string());
+    Ok(())
+}
+
+#[cfg(not(test))]
 fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, String> {
     match keyring_entry_for_service(service, user).get_password() {
         Ok(value) => Ok(Some(value)),
@@ -228,6 +243,14 @@ fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, St
     }
 }
 
+#[cfg(test)]
+fn load_raw_from_service(service: &str, user: &str) -> Result<Option<String>, String> {
+    Ok(test_keyring()?
+        .get(&(service.to_string(), user.to_string()))
+        .cloned())
+}
+
+#[cfg(not(test))]
 fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
     match keyring_entry_for_service(service, user).delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -235,6 +258,21 @@ fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
             "Не удалось удалить секрет из хранилища ОС: {error}"
         )),
     }
+}
+
+#[cfg(test)]
+fn delete_from_service(service: &str, user: &str) -> Result<(), String> {
+    test_keyring()?.remove(&(service.to_string(), user.to_string()));
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_keyring() -> Result<MutexGuard<'static, TestKeyring>, String> {
+    static TEST_KEYRING: OnceLock<Mutex<TestKeyring>> = OnceLock::new();
+    TEST_KEYRING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| "test keyring lock is unavailable".to_string())
 }
 
 fn split_secret(value: &str) -> Vec<String> {

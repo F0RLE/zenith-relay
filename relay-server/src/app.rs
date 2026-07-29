@@ -4,7 +4,7 @@ use crate::state::{
 };
 use crate::store::configuration_revision;
 use futures_util::future::BoxFuture;
-use reqwest::redirect::Policy;
+use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -14,20 +14,23 @@ use std::{
 #[cfg(test)]
 use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
-    account_candidate_health,
     accounts::{
         reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
         AccountUsageState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
         TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
     },
     protocol::{
-        operational_status, AccountRoutingExclusion, AccountSummary, GatewaySummary, KeySummary,
-        OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+        account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
+        GatewaySummary, KeySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot,
+        RuntimeTargetSummary, SourceSummary, UsageTotals,
     },
-    quota_stale_after_ms_for_interval, ApiEquivalentSummary, CandidateHealth, CandidateKind,
-    CandidateQuota, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
-    ProxyConfig, RuntimeAccount, RuntimeAccountAuth, RuntimeMixedLocalKey, RuntimeSource,
-    UsageCallback, UsageEvent,
+    quota::{
+        attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
+        quota_reference_value, quota_valuation_revision,
+    },
+    ApiEquivalentSummary, CandidateKind, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount, RuntimeChatGptAuth,
+    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, QUOTA_STALE_AFTER_MS,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -183,9 +186,7 @@ impl AppState {
             .filter(|key| key.enabled)
             .collect::<Vec<_>>();
         let hidden_models = self.store.hidden_models()?;
-        let (quota_refresh_interval_seconds, _, use_free_accounts) = self.store.quota_policy()?;
-        let quota_stale_after_ms =
-            quota_stale_after_ms_for_interval(quota_refresh_interval_seconds);
+        let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
         let (
             max_retry_candidates,
             routing_strategy,
@@ -208,6 +209,7 @@ impl AppState {
         let mut accounts = Vec::new();
         let mut direct_refresh_accounts = HashSet::new();
         let mut refresh_clients = HashMap::new();
+        let mut agent_identities = HashMap::new();
         for record in account_records {
             let Some(secret) = self.vault.load(&record.secret_ref)? else {
                 continue;
@@ -218,23 +220,27 @@ impl AppState {
                 Ok(proxy) => proxy,
                 Err(_) => continue,
             };
-            self.token_authority
-                .register(&record.id, credential.tokens()?, record.auth_state)
-                .await
-                .map_err(|error| error.to_string())?;
-            if proxy.is_some() {
-                refresh_clients.insert(
-                    record.id.clone(),
-                    CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
-                );
-            } else {
-                direct_refresh_accounts.insert(record.id.clone());
+            if let Some(agent) = credential.agent_identity()? {
+                agent_identities.insert(record.id.clone(), agent);
+            }
+            if credential.has_oauth() {
+                self.token_authority
+                    .register(&record.id, credential.tokens()?, record.auth_state)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if proxy.is_some() {
+                    refresh_clients.insert(
+                        record.id.clone(),
+                        CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
+                    );
+                } else {
+                    direct_refresh_accounts.insert(record.id.clone());
+                }
             }
             accounts.push(runtime_account(
                 record,
                 &credential,
                 proxy,
-                use_free_accounts,
                 quota_stale_after_ms,
             ));
         }
@@ -273,11 +279,12 @@ impl AppState {
             sources,
             accounts,
             keys,
-            RuntimeAccountAuth {
+            RuntimeChatGptAuth {
                 token_authority: self.token_authority.clone(),
                 refresh_adapter: refresh,
                 persistence_adapter: persistence,
                 refresh_skew_ms: 60_000,
+                agent_identities,
             },
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
@@ -332,8 +339,7 @@ impl AppState {
         let common_proxy_id = self.store.common_proxy_id()?;
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
         let account_proxy_required = self.store.account_proxy_required()?;
-        let (quota_refresh_interval_seconds, quota_request_timeout_seconds, use_free_accounts) =
-            self.store.quota_policy()?;
+        let quota_request_timeout_seconds = self.store.quota_request_timeout_seconds()?;
         let (
             max_retry_candidates,
             routing_strategy,
@@ -383,7 +389,7 @@ impl AppState {
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let account_summaries = accounts
+        let mut account_summaries = accounts
             .iter()
             .map(|record| {
                 let secret = self.vault.load(&record.secret_ref)?;
@@ -410,19 +416,44 @@ impl AppState {
                     secret_available,
                     proxy_mode,
                     proxy_available,
-                    use_free_accounts,
                     equivalents
                         .get(&identity_hint(&record.id))
                         .copied()
                         .unwrap_or_default(),
+                    default_service_tier,
+                    QUOTA_STALE_AFTER_MS,
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let economics_revision = quota_valuation_revision();
+        let plan_benchmarks = quota_plan_benchmarks(
+            accounts
+                .iter()
+                .map(|account| (account.id.as_str(), &account.economics)),
+            now_ms(),
+            economics_revision,
+        );
+        for (record, summary) in accounts.iter().zip(&mut account_summaries) {
+            attach_quota_plan_benchmarks(
+                &mut summary.economics,
+                "chatgpt",
+                record.subscription.plan_type.as_deref(),
+                &record.quota,
+                default_service_tier,
+                economics_revision,
+                &plan_benchmarks,
+            );
+        }
         let key_summaries = keys
             .iter()
             .filter(|record| !record.system)
-            .map(key_summary)
-            .collect::<Vec<_>>();
+            .map(|record| {
+                Ok(key_summary(
+                    record,
+                    self.store.key_usage_totals(&record.id)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut models = zenith_relay_core::protocol::pool_model_summaries(
             &source_summaries,
             &account_summaries,
@@ -436,6 +467,10 @@ impl AppState {
                         .cached_input_micro_usd_per_million
                         .unwrap_or(price.input_micro_usd_per_million),
                 );
+                model.cache_write_5m_micro_usd_per_million =
+                    price.cache_write_5m_micro_usd_per_million;
+                model.cache_write_1h_micro_usd_per_million =
+                    price.cache_write_1h_micro_usd_per_million;
                 model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
                 model.custom_price = true;
             }
@@ -485,9 +520,7 @@ impl AppState {
                 common_proxy_available,
                 common_proxy_id,
                 account_proxy_required,
-                quota_refresh_interval_seconds,
                 quota_request_timeout_seconds,
-                use_free_accounts,
                 chatgpt_interface_quota_reserve_basis_points: None,
                 routing_order,
             },
@@ -559,6 +592,17 @@ fn persist_usage_batch(
         let mut natural_use_at_ms = None;
         for queued in events {
             let event = &queued.event;
+            account
+                .economics
+                .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
+            account
+                .economics
+                .set_value_revision(quota_valuation_revision());
+            account.economics.observe_event_at(
+                event,
+                quota_reference_value(event),
+                queued.observed_at_ms,
+            );
             if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
                 snapshot.updated_at_ms.unwrap_or_default()
                     >= account.quota.updated_at_ms.unwrap_or_default()
@@ -649,6 +693,12 @@ pub(crate) fn account_proxy_config(
     if let Some(proxy_id) = record.proxy_id.as_deref() {
         return proxy_config_by_id(state, proxy_id).map(Some);
     }
+    if record.bypass_common_proxy {
+        if state.store.account_proxy_required()? {
+            return Err("an account proxy is required; direct account traffic is blocked".into());
+        }
+        return Ok(None);
+    }
     if let Some(value) = credential.proxy_url.as_deref() {
         return ProxyConfig::parse(value)
             .map(Some)
@@ -670,6 +720,76 @@ pub(crate) fn account_proxy_config(
     ProxyConfig::parse(&value)
         .map(Some)
         .map_err(|_| "stored common proxy URL is invalid".to_string())
+}
+
+pub(crate) async fn ensure_server_agent_identity_task(
+    state: &Arc<AppState>,
+    record: &ServerAccountRecord,
+    credential: AccountCredential,
+    expected_task_id: Option<&str>,
+) -> Result<AccountCredential, String> {
+    let agent = credential
+        .agent_identity()?
+        .ok_or_else(|| "Agent Identity credential is missing".to_string())?;
+    if agent.task_id().is_some()
+        && expected_task_id.is_none_or(|expected| agent.task_id() != Some(expected))
+    {
+        return Ok(credential);
+    }
+    let proxy = account_proxy_config(state, record, &credential)?;
+    let builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(30))
+        .user_agent("Zenith Relay Server");
+    let client = match proxy.as_ref() {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| "Agent Identity task client is unavailable".to_string())?;
+    let new_task_id = agent
+        .register_task(&client)
+        .await
+        .map_err(|error| format!("failed to register Agent Identity task: {error}"))?;
+    ServerTokenPersistence {
+        state: state.clone(),
+    }
+    .persist_agent_task_id(&record.id, agent.task_id(), &new_task_id)
+    .await
+    .map_err(|error| error.code)?;
+    let secret = state
+        .vault
+        .load(&record.secret_ref)?
+        .ok_or_else(|| "stored Agent Identity credential is unavailable".to_string())?;
+    let updated = serde_json::from_str(&secret)
+        .map_err(|_| "stored Agent Identity credential is invalid".to_string())?;
+    state.rebuild_runtime().await?;
+    Ok(updated)
+}
+
+pub(crate) async fn prepare_server_account_authorization(
+    state: &Arc<AppState>,
+    record: &ServerAccountRecord,
+    credential: AccountCredential,
+    expected_task_id: Option<&str>,
+) -> Result<(AccountCredential, HeaderValue), String> {
+    if credential.is_agent_identity() {
+        match ensure_server_agent_identity_task(state, record, credential.clone(), expected_task_id)
+            .await
+        {
+            Ok(credential) => {
+                let authorization = credential.authorization(now_ms())?;
+                return Ok((credential, authorization));
+            }
+            Err(error) if !credential.has_oauth() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    let tokens = state.prepare_account_tokens(&record.id).await?;
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
+        .map_err(|_| "stored account access token is invalid".to_string())?;
+    authorization.set_sensitive(true);
+    Ok((credential, authorization))
 }
 
 fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
@@ -713,6 +833,9 @@ fn account_proxy_status(
             proxy_config_by_id(state, proxy_id).is_ok(),
         );
     }
+    if record.bypass_common_proxy {
+        return (ProxyMode::Direct, !account_proxy_required);
+    }
     if let Some(value) = credential.proxy_url.as_deref() {
         return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
     }
@@ -736,6 +859,7 @@ fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
+        recovery_delay_seconds: record.recovery_delay_seconds,
         allowed_models: record.allowed_models,
         excluded_models: record.excluded_models,
         last_used_at_ms: None,
@@ -746,28 +870,36 @@ fn runtime_account(
     record: ServerAccountRecord,
     credential: &AccountCredential,
     proxy: Option<ProxyConfig>,
-    use_free_accounts: bool,
     quota_stale_after_ms: u64,
-) -> RuntimeAccount {
-    let health = candidate_health(&record);
-    let quota = candidate_quota(&record.quota, now_ms(), quota_stale_after_ms);
-    let enabled = record.enabled
-        && record.in_pool
-        && (use_free_accounts || !record.subscription.is_free_plan());
-    RuntimeAccount {
+) -> RuntimeChatGptAccount {
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        secret_available: true,
+        proxy_available: true,
+        auth_state: record.auth_state,
+        health: record.health,
+        subscription: &record.subscription,
+        quota: &record.quota,
+        last_error_code: record.last_error_code.as_deref(),
+        now_ms: now_ms(),
+        quota_stale_after_ms,
+    });
+    RuntimeChatGptAccount {
         id: record.id,
         source_id: record.source_id,
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
         models: record.models,
-        enabled,
+        enabled: operational.routing_eligible,
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
         allowed_models: record.allowed_models,
         excluded_models: record.excluded_models,
-        health,
-        quota,
+        health: operational.health,
+        quota: operational.quota,
         quota_updated_at_ms: record.quota.updated_at_ms,
         quota_snapshot: record.quota.clone(),
         subscription_plan_type: record.subscription.plan_type.clone(),
@@ -791,24 +923,8 @@ fn runtime_key(record: GatewayKeyRecord, secret: String) -> RuntimeMixedLocalKey
         allowed_models: record.allowed_models,
         excluded_models: record.excluded_models,
         model_prefix: record.model_prefix,
+        wire_apis: record.wire_apis,
     }
-}
-
-fn candidate_health(record: &ServerAccountRecord) -> CandidateHealth {
-    account_candidate_health(
-        record.auth_state,
-        record.health,
-        record.subscription.status,
-        record.last_error_code.as_deref(),
-    )
-}
-
-fn candidate_quota(
-    quota: &zenith_relay_core::quota::QuotaSnapshot,
-    now_ms: u64,
-    stale_after_ms: u64,
-) -> CandidateQuota {
-    CandidateQuota::from_snapshot(quota, now_ms, stale_after_ms)
 }
 
 fn source_summary(
@@ -836,6 +952,8 @@ fn source_summary(
         excluded_models: record.excluded_models.clone(),
         priority: record.priority,
         weight: record.weight,
+        recovery_delay_seconds: record.recovery_delay_seconds,
+        model_price_overrides: record.model_price_overrides.clone(),
         api_equivalent,
         secret_available,
         last_error_code: record.last_error_code.clone(),
@@ -847,24 +965,24 @@ fn account_summary(
     secret_available: bool,
     proxy_mode: ProxyMode,
     proxy_available: bool,
-    use_free_accounts: bool,
     api_equivalent: ApiEquivalentSummary,
+    default_service_tier: DefaultServiceTier,
+    quota_stale_after_ms: u64,
 ) -> AccountSummary {
-    let routing_exclusion = (!use_free_accounts && record.subscription.is_free_plan())
-        .then_some(AccountRoutingExclusion::FreePlanPolicy);
-    let quota_wait = routing_exclusion.is_some()
-        || record.quota.limit_reached
-        || record
-            .quota
-            .primary
-            .iter()
-            .chain(record.quota.secondary.iter())
-            .any(|window| window.available_basis_points == Some(0));
-    let configured_available = !record.draining
-        && secret_available
-        && proxy_available
-        && routing_exclusion.is_none()
-        && candidate_health(record).is_eligible();
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        secret_available,
+        proxy_available,
+        auth_state: record.auth_state,
+        health: record.health,
+        subscription: &record.subscription,
+        quota: &record.quota,
+        last_error_code: record.last_error_code.as_deref(),
+        now_ms: now_ms(),
+        quota_stale_after_ms,
+    });
     AccountSummary {
         id: record.id.clone(),
         label: record.label.clone(),
@@ -872,12 +990,7 @@ fn account_summary(
         enabled: record.enabled,
         in_pool: record.in_pool,
         draining: record.draining,
-        operational_status: operational_status(
-            record.enabled,
-            quota_wait,
-            configured_available,
-            None,
-        ),
+        operational_status: operational.status,
         auth_state: record.auth_state,
         health: format!("{:?}", record.health).to_ascii_lowercase(),
         models: record.models.clone(),
@@ -886,19 +999,32 @@ fn account_summary(
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
+        economics: quota_economics_summary_for_revision(
+            &record.economics,
+            &record.quota,
+            default_service_tier,
+            now_ms(),
+            quota_stale_after_ms,
+            quota_valuation_revision(),
+        ),
         subscription: record.subscription.clone(),
         quota: record.quota.clone(),
+        quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
+            record.auth_state,
+            &record.quota,
+            false,
+        ),
         secret_available,
         remote_location: None,
         proxy_mode,
         proxy_available,
         proxy_id: record.proxy_id.clone(),
-        routing_exclusion,
+        routing_block_reason: operational.routing_block_reason,
         last_error_code: record.last_error_code.clone(),
     }
 }
 
-fn key_summary(record: &GatewayKeyRecord) -> KeySummary {
+fn key_summary(record: &GatewayKeyRecord, usage_totals: UsageTotals) -> KeySummary {
     KeySummary {
         id: record.id.clone(),
         label: record.label.clone(),
@@ -909,6 +1035,9 @@ fn key_summary(record: &GatewayKeyRecord) -> KeySummary {
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
         model_prefix: record.model_prefix.clone(),
+        wire_apis: record.wire_apis.clone(),
+        soft_budget_micro_usd: record.soft_budget_micro_usd,
+        usage_totals,
         created_at_ms: record.created_at_ms,
         last_used_at_ms: record.last_used_at_ms,
     }
@@ -961,6 +1090,43 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
                 .store
                 .save_account(&record)
                 .map_err(persistence_error)
+        })
+    }
+
+    fn persist_agent_task_id<'a>(
+        &'a self,
+        account_id: &'a str,
+        expected_task_id: Option<&'a str>,
+        task_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>> {
+        Box::pin(async move {
+            let record = find_account(&self.state, account_id).map_err(persistence_error)?;
+            let secret = self
+                .state
+                .vault
+                .load(&record.secret_ref)
+                .map_err(persistence_error)?
+                .ok_or_else(|| TokenPersistenceFailure::new("secret_missing"))?;
+            let mut credential: AccountCredential = serde_json::from_str(&secret)
+                .map_err(|_| TokenPersistenceFailure::new("secret_invalid"))?;
+            if !credential.is_agent_identity() {
+                return Err(TokenPersistenceFailure::new("not_agent_identity"));
+            }
+            if let Some(current_task_id) = credential
+                .agent_task_id
+                .as_deref()
+                .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
+            {
+                return Ok(current_task_id.to_string());
+            }
+            credential.agent_task_id = Some(task_id.to_string());
+            let encoded = serde_json::to_string(&credential)
+                .map_err(|_| TokenPersistenceFailure::new("secret_serialize"))?;
+            self.state
+                .vault
+                .save(&record.secret_ref, &encoded)
+                .map_err(persistence_error)?;
+            Ok(task_id.to_string())
         })
     }
 }
@@ -1152,7 +1318,7 @@ mod tests {
     };
     use tempfile::TempDir;
     use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription};
-    use zenith_relay_core::{protocol::UsageQuery, WireApi};
+    use zenith_relay_core::{protocol::UsageQuery, CandidateQuota, WireApi};
 
     #[tokio::test]
     async fn usage_writer_is_reused_and_flushes_before_shutdown() {
@@ -1176,6 +1342,8 @@ mod tests {
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
             wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
             success: true,
             http_status: 200,
             error_category: None,
@@ -1258,11 +1426,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            candidate_quota(&quota, 2_000, zenith_relay_core::QUOTA_STALE_AFTER_MS),
+            CandidateQuota::from_snapshot(&quota, 2_000, zenith_relay_core::QUOTA_STALE_AFTER_MS,),
             CandidateQuota::Available(2_500)
         );
         assert_eq!(
-            candidate_quota(
+            CandidateQuota::from_snapshot(
                 &quota,
                 zenith_relay_core::QUOTA_STALE_AFTER_MS + 1_001,
                 zenith_relay_core::QUOTA_STALE_AFTER_MS,
@@ -1272,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn free_accounts_require_explicit_routing_opt_in() {
+    fn free_accounts_route_like_other_pool_accounts() {
         let record = ServerAccountRecord {
             id: "account-free".into(),
             label: "Free".into(),
@@ -1294,12 +1462,14 @@ mod tests {
                 ..Subscription::default()
             },
             quota: QuotaSnapshot::default(),
+            economics: Default::default(),
             cooldowns: BTreeMap::new(),
             consecutive_failures: 0,
             created_at_ms: 1,
             last_used_at_ms: None,
             last_error_code: None,
             proxy_id: None,
+            bypass_common_proxy: false,
         };
         let credential = AccountCredential {
             access_token: "access".into(),
@@ -1311,24 +1481,16 @@ mod tests {
             chatgpt_account_id: "provider-account".into(),
             responses_url: "https://example.test/responses".into(),
             proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
         };
 
-        assert!(
-            !runtime_account(
-                record.clone(),
-                &credential,
-                None,
-                false,
-                zenith_relay_core::QUOTA_STALE_AFTER_MS,
-            )
-            .enabled
-        );
         assert!(
             runtime_account(
                 record.clone(),
                 &credential,
                 None,
-                true,
                 zenith_relay_core::QUOTA_STALE_AFTER_MS,
             )
             .enabled
@@ -1338,14 +1500,11 @@ mod tests {
             true,
             ProxyMode::Direct,
             true,
-            false,
             ApiEquivalentSummary::default(),
+            DefaultServiceTier::Standard,
+            zenith_relay_core::QUOTA_STALE_AFTER_MS,
         );
-        assert_eq!(
-            summary.routing_exclusion,
-            Some(AccountRoutingExclusion::FreePlanPolicy)
-        );
-        assert_eq!(summary.operational_status, OperationalStatus::Unavailable);
+        assert_eq!(summary.operational_status, OperationalStatus::Rotation);
         assert!(summary.enabled);
         assert!(summary.in_pool);
     }

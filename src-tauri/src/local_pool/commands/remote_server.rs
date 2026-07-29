@@ -1,6 +1,13 @@
 use crate::local_pool::{
-    accounts::exports::{
-        finish_account_export, normalize_account_ids, AccountExportInput, AccountExportResult,
+    accounts::{
+        export_ops::{build_local_account_export_document, mark_local_accounts_moved},
+        exports::{
+            finish_account_export, normalize_account_ids, AccountExportInput, AccountExportResult,
+        },
+        import_orchestrator::{
+            pick_account_import_documents, read_import_documents, stage_returned_remote_account,
+        },
+        quota_refresh::prepare_preserved_remote_account_credentials,
     },
     error::{CommandError, ErrorCode, LocalPoolError},
     models::{OwnershipOperationKind, OwnershipOperationPhase, OwnershipOperationRecord},
@@ -24,27 +31,33 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    AccountSummary, Capabilities, ConfigurationPreset, ConfigurationPresetApplyInput,
-    ConfigurationPresetApplyResult, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
-    Feature, GatewayDiagnostic, HealthResponse, OperationalStatus, RemoteAccountLocation,
-    RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
+    AccountSummary, Capabilities, ClientKeyCreateInput, ClientKeyPatch, ConfigurationPreset,
+    ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetPreview,
+    ConfigurationPresetPreviewInput, Feature, GatewayDiagnostic, GeneratedClientKey,
+    HealthResponse, KeySummary, OperationalStatus, RemoteAccountLocation, RevealedAccountIdentity,
+    RuntimeStateSnapshot, UsagePage, UsageQuery,
 };
-use zenith_relay_core::CandidateRuntimeSnapshot;
+use zenith_relay_core::{CandidateRuntimeSnapshot, SourceProviderStats};
 
-use super::{
-    accounts::{
-        build_local_account_export_document, mark_local_accounts_moved,
-        pick_account_import_documents, prepare_preserved_remote_account_credentials,
-        read_import_documents, stage_returned_remote_account,
-    },
-    pool::write_configuration_preset,
-    restart_or_rollback,
-};
+use super::{pool::write_configuration_preset, restart_or_rollback};
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
 const ACCOUNT_TRANSFER_PROGRESS_EVENT: &str = "relay-account-transfer-progress";
 const REMOTE_MISSING_ERROR: &str = "remote_missing";
 const MAX_CONFIGURATION_PRESET_BYTES: usize = 1024 * 1024;
+
+#[tauri::command]
+pub async fn get_remote_source_stats(
+    source_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<SourceProviderStats, CommandError> {
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(
+            LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into(),
+        );
+    };
+    client.source_stats(&source_id).await.map_err(remote_error)
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,10 +108,6 @@ pub enum RemoteServerAction {
     RefreshAllQuotas,
     SetModelEnabled,
     SetModelPrice,
-    CreateKey,
-    UpdateKey { id: String },
-    DeleteKey { id: String },
-    RotateKey { id: String },
     StartGateway,
     StopGateway,
     CreateWakeTask,
@@ -266,8 +275,12 @@ pub async fn connect_remote_server(
     };
     let previous = state.store()?.remote_target().cloned();
     if previous.as_ref().is_some_and(|record| {
-        record.origin == client.origin()
-            && record.identity_fingerprint != negotiated.identity_fingerprint
+        same_origin_identity_changed(
+            record,
+            client.origin(),
+            &negotiated.server_id,
+            &negotiated.identity_fingerprint,
+        )
     }) && !input.confirm_identity_change
     {
         return Err(LocalPoolError::new(
@@ -354,6 +367,64 @@ pub async fn get_remote_server_usage(
         .usage(&input.unwrap_or_default())
         .await
         .map(Some)
+        .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn create_remote_client_key(
+    input: ClientKeyCreateInput,
+    state: State<'_, DesktopState>,
+) -> Result<GeneratedClientKey, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(remote_not_connected());
+    };
+    client.create_client_key(&input).await.map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn update_remote_client_key(
+    key_id: String,
+    input: ClientKeyPatch,
+    state: State<'_, DesktopState>,
+) -> Result<KeySummary, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(remote_not_connected());
+    };
+    client
+        .update_client_key(&key_id, &input)
+        .await
+        .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn rotate_remote_client_key(
+    key_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<GeneratedClientKey, CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(remote_not_connected());
+    };
+    client
+        .rotate_client_key(&key_id)
+        .await
+        .map_err(remote_error)
+}
+
+#[tauri::command]
+pub async fn revoke_remote_client_key(
+    key_id: String,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    let Some((_, client)) = active_client(&state)? else {
+        return Err(remote_not_connected());
+    };
+    client
+        .revoke_client_key(&key_id)
+        .await
         .map_err(remote_error)
 }
 
@@ -1776,6 +1847,17 @@ fn remote_secret_ref(origin: &str) -> String {
     format!("remote:{}", hex::encode(Sha256::digest(origin.as_bytes())))
 }
 
+fn same_origin_identity_changed(
+    previous: &RemoteTargetRecord,
+    origin: &str,
+    server_id: &str,
+    identity_fingerprint: &str,
+) -> bool {
+    previous.origin == origin
+        && (previous.server_id != server_id
+            || previous.identity_fingerprint != identity_fingerprint)
+}
+
 fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool), CommandError> {
     let request = match action {
         RemoteServerAction::CreateSource => (Method::POST, "/sources".to_string(), true),
@@ -1839,14 +1921,6 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::SetModelEnabled => (Method::POST, "/models/rules".to_string(), true),
         RemoteServerAction::SetModelPrice => (Method::POST, "/models/prices".to_string(), true),
-        RemoteServerAction::CreateKey => (Method::POST, "/keys".to_string(), true),
-        RemoteServerAction::UpdateKey { id } => (Method::PATCH, object_path("keys", id)?, true),
-        RemoteServerAction::DeleteKey { id } => (Method::DELETE, object_path("keys", id)?, false),
-        RemoteServerAction::RotateKey { id } => (
-            Method::POST,
-            format!("{}/rotate", object_path("keys", id)?),
-            false,
-        ),
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
         RemoteServerAction::CreateWakeTask => (Method::POST, "/wake-tasks".to_string(), true),
@@ -1884,6 +1958,10 @@ pub(super) fn remote_error(error: impl std::fmt::Display) -> CommandError {
     LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string()).into()
 }
 
+fn remote_not_connected() -> CommandError {
+    LocalPoolError::new(ErrorCode::NotFound, "remote server is not connected").into()
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1894,6 +1972,39 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_origin_server_id_or_fingerprint_change_requires_confirmation() {
+        let target = RemoteTargetRecord {
+            origin: "https://relay.example.test".into(),
+            server_id: "server-one".into(),
+            identity_fingerprint: "fingerprint-one".into(),
+            server_version: "1.1.0".into(),
+            protocol_version: 2,
+            allow_insecure_http: false,
+            secret_ref: "remote:test".into(),
+            connected_at_ms: 1,
+        };
+
+        assert!(same_origin_identity_changed(
+            &target,
+            &target.origin,
+            "server-two",
+            &target.identity_fingerprint,
+        ));
+        assert!(same_origin_identity_changed(
+            &target,
+            &target.origin,
+            &target.server_id,
+            "fingerprint-two",
+        ));
+        assert!(!same_origin_identity_changed(
+            &target,
+            "https://other.example.test",
+            "server-two",
+            "fingerprint-two",
+        ));
+    }
 
     #[test]
     fn access_only_account_cannot_start_server_transfer() {
@@ -2051,10 +2162,10 @@ mod tests {
                 "updatedAtMs": 1,
                 "error": null
             },
+            "quotaRefreshStatus": "updated",
             "secretAvailable": true,
             "proxyMode": "direct",
             "proxyAvailable": true,
-            "routingExclusion": null,
             "lastErrorCode": null
         }))
         .unwrap()

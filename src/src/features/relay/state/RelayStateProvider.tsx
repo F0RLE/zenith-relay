@@ -1,8 +1,9 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { getState, onStateChanged, setWindowBackgroundColor, type KeyStats, type UiState, type UsageLogEntry } from "../../../tauri";
-import { relayCommands } from "../api/commands";
+import { recordPerformance, setWindowBackgroundColor } from "../../../platform/desktop";
+import { relayCommands, type UiState } from "../api/commands";
 import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import { useConfirm } from "../components/Ui";
 
 type Feedback = { kind: "success" | "error"; key: string } | null;
 
@@ -17,6 +18,7 @@ type RelayContextValue = {
   page: PageId;
   setPage: (page: PageId) => void;
   runtime: RuntimeSnapshot | null;
+  runtimeRevision: number;
   accountIdentitiesVisible: boolean;
   accountIdentitiesBusy: boolean;
   canRevealAccountIdentities: boolean;
@@ -24,13 +26,11 @@ type RelayContextValue = {
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
   localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;
-  loadLocalUsage: (query: RemoteUsageQuery) => Promise<void>;
+  loadLocalUsage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
   remoteUsage: RemoteUsage[];
   remoteUsagePage: RemoteUsagePage | null;
-  loadRemoteUsage: (query: RemoteUsageQuery) => Promise<void>;
+  loadRemoteUsage: (query: RemoteUsageQuery) => Promise<RemoteUsagePage | null>;
   readyState: UiState | null;
-  readyStats: KeyStats | null;
-  readyUsage: UsageLogEntry[];
   loading: boolean;
   busy: string | null;
   feedback: Feedback;
@@ -44,6 +44,8 @@ type RelayContextValue = {
   resetOnboarding: () => void;
   theme: "system" | "light" | "dark";
   setTheme: (theme: "system" | "light" | "dark") => void;
+  profileSwitchBackupPrompt: boolean;
+  setProfileSwitchBackupPrompt: (enabled: boolean) => void;
   codexPoolOauthSelection: string;
   setCodexPoolOauthSelection: (selection: string) => void;
 };
@@ -51,90 +53,115 @@ type RelayContextValue = {
 const RelayContext = createContext<RelayContextValue | null>(null);
 
 export function RelayStateProvider({ children }: { children: ReactNode }) {
-  const { i18n } = useTranslation();
+  const { i18n, t } = useTranslation();
+  const confirm = useConfirm();
   const [mode, setModeState] = useState<RelayMode>(() => stored("relay.mode", "local") as RelayMode);
-  const [page, setPage] = useState<PageId>("overview");
+  const [page, setPageState] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
+  const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [localUsage, setLocalUsage] = useState<LocalUsage[]>([]);
   const [localUsagePage, setLocalUsagePage] = useState<LocalUsagePage | null>(null);
   const [remoteUsage, setRemoteUsage] = useState<RemoteUsage[]>([]);
   const [remoteUsagePage, setRemoteUsagePage] = useState<RemoteUsagePage | null>(null);
   const [readyState, setReadyState] = useState<UiState | null>(null);
-  const [readyStats, setReadyStats] = useState<KeyStats | null>(null);
-  const [readyUsage, setReadyUsage] = useState<UsageLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
   const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
+  const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => stored("relay.profileSwitchBackupPrompt", "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => stored("relay.accountIdentitiesVisible", "0") === "1");
   const [accountIdentitiesBusy, setAccountIdentitiesBusy] = useState(false);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
+  const operationRevision = useRef(0);
+  const modeRef = useRef(mode);
+  const pageRef = useRef(page);
+  const stateRevision = useRef(1);
+  const refreshedRevision = useRef(0);
+  const backgroundRefreshPending = useRef(new Set<RelayMode>());
+  const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
+  const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
   const revealableAccountIds = canRevealAccountIdentities ? (runtime?.accounts ?? []).filter((account) => account.secretAvailable).map((account) => account.id) : [];
   const revealableAccountSignature = revealableAccountIds.join("\0");
 
   const refresh = useCallback(async () => {
+    const requestedMode = mode;
+    const requestedRevision = stateRevision.current;
+    const startedAt = performance.now();
     if (mode === "local") {
-      const request = ++localUsageRequest.current;
-      ++remoteUsageRequest.current;
-      const usage = relayCommands.localUsagePage({ page: 1, pageSize: 100, range: "daily" }).catch(() => null);
       const snapshot = await relayCommands.localState();
+      void recordPerformance("full_snapshot", performance.now() - startedAt, "local");
+      if (modeRef.current !== requestedMode) return;
       setRuntime(snapshot);
       setRemoteUsage([]);
       setRemoteUsagePage(null);
-      void usage.then((usagePage) => {
-        if (request !== localUsageRequest.current || !usagePage) return;
-        setLocalUsage(usagePage.events);
-        setLocalUsagePage(usagePage);
-      });
+      refreshedRevision.current = requestedRevision;
+      setRuntimeRevision((current) => current + 1);
       return;
     }
     if (mode === "remote") {
-      const request = ++remoteUsageRequest.current;
-      ++localUsageRequest.current;
-      const usage = relayCommands.remoteUsage({ page: 1, pageSize: 50, range: "daily" }).catch(() => null);
       const snapshot = await relayCommands.remoteState();
+      void recordPerformance("full_snapshot", performance.now() - startedAt, "remote");
+      if (modeRef.current !== requestedMode) return;
       setRuntime(snapshot);
       setLocalUsage([]);
       setLocalUsagePage(null);
-      void usage.then((usagePage) => {
-        if (request !== remoteUsageRequest.current || !usagePage) return;
-        setRemoteUsage(usagePage.events);
-        setRemoteUsagePage(usagePage);
-      });
+      refreshedRevision.current = requestedRevision;
+      setRuntimeRevision((current) => current + 1);
       return;
     }
-    ++localUsageRequest.current;
-    ++remoteUsageRequest.current;
-    const [state, snapshot] = await Promise.all([getState(), relayCommands.localState()]);
+    const [state, snapshot] = await Promise.all([relayCommands.readyState(), relayCommands.localState()]);
+    void recordPerformance("full_snapshot", performance.now() - startedAt, "zenith");
+    if (modeRef.current !== requestedMode) return;
     setReadyState(state);
     setRuntime(snapshot);
     setLocalUsagePage(null);
     setRemoteUsage([]);
     setRemoteUsagePage(null);
-    setReadyStats(null);
-    setReadyUsage([]);
+    refreshedRevision.current = requestedRevision;
+    setRuntimeRevision((current) => current + 1);
   }, [mode]);
 
   const loadLocalUsage = useCallback(async (query: RemoteUsageQuery) => {
     const request = ++localUsageRequest.current;
     const usage = await relayCommands.localUsagePage(query);
-    if (request !== localUsageRequest.current) return;
-    setLocalUsage(usage.events);
-    setLocalUsagePage(usage);
+    if (request === localUsageRequest.current) {
+      setLocalUsage(usage.events);
+      setLocalUsagePage(usage);
+    }
+    return usage;
   }, []);
 
   const loadRemoteUsage = useCallback(async (query: RemoteUsageQuery) => {
     const request = ++remoteUsageRequest.current;
     const usage = await relayCommands.remoteUsage(query);
-    if (request !== remoteUsageRequest.current) return;
-    setRemoteUsage(usage?.events ?? []);
-    setRemoteUsagePage(usage);
+    if (request === remoteUsageRequest.current) {
+      setRemoteUsage(usage?.events ?? []);
+      setRemoteUsagePage(usage);
+    }
+    return usage;
   }, []);
+
+  const runBackgroundRefresh = useCallback(() => {
+    const refreshMode = mode;
+    if (backgroundRefreshPending.current.has(refreshMode) || modeRef.current !== refreshMode) return;
+    backgroundRefreshPending.current.add(refreshMode);
+    void (async () => {
+      try {
+        do {
+          await refresh();
+        } while (modeRef.current === refreshMode && document.visibilityState === "visible" && refreshedRevision.current !== stateRevision.current);
+      } catch {
+        // The next state event, focus, or periodic refresh retries the snapshot.
+      } finally {
+        backgroundRefreshPending.current.delete(refreshMode);
+      }
+    })();
+  }, [mode, refresh]);
 
   useEffect(() => {
     let active = true;
@@ -147,7 +174,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
         if (performance.getEntriesByName("zenith:interactive", "mark").length) return;
         requestAnimationFrame(() => requestAnimationFrame(() => {
           performance.mark("zenith:interactive");
-          performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
+          const measure = performance.measure("zenith:interactive", "zenith:html-start", "zenith:interactive");
+          void recordPerformance("interactive", measure.duration, "startup");
         }));
       });
     return () => {
@@ -220,9 +248,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const refreshVisibleRuntime = () => {
-      if (document.visibilityState === "visible") void refresh().catch(() => undefined);
+      if (document.visibilityState === "visible" && refreshedRevision.current !== stateRevision.current) {
+        runBackgroundRefresh();
+      }
     };
-    const interval = window.setInterval(refreshVisibleRuntime, RUNTIME_REFRESH_INTERVAL_MS);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === "visible") runBackgroundRefresh();
+    }, RUNTIME_REFRESH_INTERVAL_MS);
     window.addEventListener("focus", refreshVisibleRuntime);
     document.addEventListener("visibilitychange", refreshVisibleRuntime);
     return () => {
@@ -230,18 +262,20 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       window.removeEventListener("focus", refreshVisibleRuntime);
       document.removeEventListener("visibilitychange", refreshVisibleRuntime);
     };
-  }, [refresh]);
+  }, [runBackgroundRefresh]);
 
   useEffect(() => {
     let active = true;
     let queued = false;
     let unlisten: (() => void) | undefined;
-    void onStateChanged(() => {
+    void relayCommands.onStateChanged(() => {
+      stateRevision.current += 1;
       if (!active || queued || document.visibilityState !== "visible") return;
       queued = true;
       window.setTimeout(() => {
         if (!active) return;
-        void refresh().catch(() => undefined).finally(() => { queued = false; });
+        runBackgroundRefresh();
+        queued = false;
       }, 200);
     }).then((stop) => {
       if (active) unlisten = stop;
@@ -251,7 +285,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       active = false;
       unlisten?.();
     };
-  }, [refresh]);
+  }, [runBackgroundRefresh]);
 
   useEffect(() => {
     const systemTheme = window.matchMedia("(prefers-color-scheme: dark)");
@@ -275,27 +309,85 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timeout);
   }, [feedback]);
 
-  const setMode = useCallback((next: RelayMode) => {
-    localStorage.setItem("relay.mode", next);
-    setModeState(next);
-    setPage("overview");
-    setFeedback(null);
+  const setPage = useCallback((next: PageId) => {
+    if (pageRef.current === next) return;
+    pageRef.current = next;
+    pageOpenStartedAt.current = { page: next, startedAt: performance.now() };
+    setPageState(next);
   }, []);
 
+  const setMode = useCallback((next: RelayMode) => {
+    if (modeRef.current === next) return;
+    modeSwitchStartedAt.current = { mode: next, startedAt: performance.now() };
+    modeRef.current = next;
+    stateRevision.current += 1;
+    operationRevision.current += 1;
+    ++localUsageRequest.current;
+    ++remoteUsageRequest.current;
+    localStorage.setItem("relay.mode", next);
+    setRuntime(null);
+    setLocalUsage([]);
+    setLocalUsagePage(null);
+    setRemoteUsage([]);
+    setRemoteUsagePage(null);
+    setModeState(next);
+    setPage("overview");
+    setBusy(null);
+    setFeedback(null);
+  }, [setPage]);
+
+  useEffect(() => {
+    const pending = modeSwitchStartedAt.current;
+    if (!runtime || !pending || pending.mode !== mode) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (modeSwitchStartedAt.current !== pending) return;
+        modeSwitchStartedAt.current = null;
+        void recordPerformance("mode_switch", performance.now() - pending.startedAt, mode);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, [mode, runtime]);
+
+  useEffect(() => {
+    const pending = pageOpenStartedAt.current;
+    if (!pending || pending.page !== page) return;
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        if (pageOpenStartedAt.current !== pending) return;
+        pageOpenStartedAt.current = null;
+        void recordPerformance("page_open", performance.now() - pending.startedAt, page);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, [page]);
+
   const perform = useCallback(async (id: string, work: () => Promise<unknown>, successKey?: string) => {
+    const revision = ++operationRevision.current;
     setBusy(id);
     setFeedback(null);
     try {
       await work();
+      if (revision !== operationRevision.current) return false;
       await refresh();
+      if (revision !== operationRevision.current) return false;
       if (successKey) setFeedback({ kind: "success", key: successKey });
       return true;
     } catch (error) {
+      if (revision !== operationRevision.current) return false;
       const code = typeof error === "object" && error && "code" in error ? String(error.code) : "general";
       setFeedback({ kind: "error", key: `errors.${code}` });
       return false;
     } finally {
-      setBusy(null);
+      if (revision === operationRevision.current) setBusy(null);
     }
   }, [refresh]);
 
@@ -310,9 +402,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     work: () => Promise<ProfileActivation>,
     launchAfter = false,
   ) => {
+    if (profileSwitchBackupPrompt && !await confirm(t("profiles.switchBackupMessage"), {
+      title: t("profiles.switchBackupTitle"),
+      confirmLabel: t("profiles.switchBackupAction"),
+    })) return false;
     const activated = await perform(id, work, launchAfter ? undefined : "feedback.profileAttached");
     return activated && (!launchAfter || await launchAttachedCodex());
-  }, [launchAttachedCodex, perform]);
+  }, [confirm, launchAttachedCodex, perform, profileSwitchBackupPrompt, t]);
 
   const launchCodexProfile = useCallback(async (_binding: ProfileBinding) => {
     const stopped = await perform("profile-stop", relayCommands.stopManagedCodex);
@@ -334,6 +430,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const setTheme = useCallback((next: "system" | "light" | "dark") => {
     localStorage.setItem("relay.theme", next);
     setThemeState(next);
+  }, []);
+
+  const setProfileSwitchBackupPrompt = useCallback((enabled: boolean) => {
+    localStorage.setItem("relay.profileSwitchBackupPrompt", enabled ? "1" : "0");
+    setProfileSwitchBackupPromptState(enabled);
   }, []);
 
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
@@ -372,6 +473,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     page,
     setPage,
     runtime: displayRuntime,
+    runtimeRevision,
     accountIdentitiesVisible,
     accountIdentitiesBusy,
     canRevealAccountIdentities,
@@ -384,8 +486,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     remoteUsagePage,
     loadRemoteUsage,
     readyState,
-    readyStats,
-    readyUsage,
     loading,
     busy,
     feedback,
@@ -399,9 +499,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     resetOnboarding,
     theme,
     setTheme,
+    profileSwitchBackupPrompt,
+    setProfileSwitchBackupPrompt,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, readyStats, readyUsage, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

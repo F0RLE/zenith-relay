@@ -63,6 +63,7 @@ pub struct StoredProxyAssignmentResult {
 
 enum ProxyChoice {
     Inherited,
+    Direct,
     Automatic,
     Stored(String),
     Custom(String),
@@ -177,12 +178,28 @@ pub async fn assign_free_local_account_proxies(
     .map_err(Into::into)
 }
 
-pub(super) async fn set_account_proxy_inner(
+pub(crate) async fn set_account_proxy_inner(
     account_id: String,
     proxy_url: Option<String>,
+    bypass_common_proxy: bool,
     state: &DesktopState,
 ) -> Result<StoredProxyAssignmentResult> {
-    let choice = proxy_url.map_or(ProxyChoice::Inherited, ProxyChoice::Custom);
+    if proxy_url.is_some() && bypass_common_proxy {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "an account route cannot use and bypass a proxy at the same time",
+        ));
+    }
+    let choice = proxy_url.map_or_else(
+        || {
+            if bypass_common_proxy {
+                ProxyChoice::Direct
+            } else {
+                ProxyChoice::Inherited
+            }
+        },
+        ProxyChoice::Custom,
+    );
     apply_choices(state, vec![(account_id, choice)]).await
 }
 
@@ -210,28 +227,35 @@ async fn apply_choices(
             ));
         }
         let old = credentials.require(&account_id).map_err(credential_error)?;
-        let next_url = match choice {
+        let (next_url, bypass_common_proxy) = match choice {
             ProxyChoice::Inherited => {
                 pool.release(&account_id);
-                None
+                (None, false)
+            }
+            ProxyChoice::Direct => {
+                pool.release(&account_id);
+                (None, true)
             }
             ProxyChoice::Automatic => match pool.assign_automatic(&account_id) {
-                Some(url) => Some(url),
+                Some(url) => (Some(url), false),
                 None => {
                     unavailable += 1;
                     continue;
                 }
             },
-            ProxyChoice::Stored(proxy_id) => Some(pool.assign_id(&proxy_id, &account_id)?),
-            ProxyChoice::Custom(value) => {
-                Some(pool.assign_url(&value, &account_id, current_time_ms())?)
-            }
+            ProxyChoice::Stored(proxy_id) => (Some(pool.assign_id(&proxy_id, &account_id)?), false),
+            ProxyChoice::Custom(value) => (
+                Some(pool.assign_url(&value, &account_id, current_time_ms())?),
+                false,
+            ),
         };
         let next = old
             .clone()
-            .with_proxy_url(next_url)
+            .with_proxy_route(next_url, bypass_common_proxy)
             .map_err(credential_error)?;
-        if old.proxy_url() == next.proxy_url() {
+        if old.proxy_url() == next.proxy_url()
+            && old.bypass_common_proxy() == next.bypass_common_proxy()
+        {
             unchanged += 1;
         } else {
             updates.push((old, next));

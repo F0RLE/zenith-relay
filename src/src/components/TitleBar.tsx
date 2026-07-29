@@ -1,6 +1,6 @@
 import { Minus, Square, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { closeWindow, minimizeWindow, Platform, toggleMaximizeWindow } from "../tauri";
+import { closeWindow, minimizeWindow, toggleMaximizeWindow, type Platform } from "../platform/desktop";
 
 type TitleBarProps = {
   platform: Platform;

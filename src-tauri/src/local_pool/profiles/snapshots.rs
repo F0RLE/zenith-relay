@@ -32,6 +32,13 @@ pub struct ProfileSnapshotSummary {
     pub auth_available: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileSnapshotList {
+    pub snapshots: Vec<ProfileSnapshotSummary>,
+    pub invalid_count: usize,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SnapshotRecord {
@@ -53,12 +60,20 @@ struct SnapshotPayload {
     auth: Option<String>,
 }
 
-pub fn list(backup_root: &Path) -> Result<Vec<ProfileSnapshotSummary>> {
+pub fn list(backup_root: &Path) -> Result<ProfileSnapshotList> {
+    list_with(backup_root, &OsSnapshotSecrets)
+}
+
+fn list_with(backup_root: &Path, secrets: &impl SnapshotSecrets) -> Result<ProfileSnapshotList> {
     let root = snapshot_root(backup_root);
     if !root.exists() {
-        return Ok(Vec::new());
+        return Ok(ProfileSnapshotList {
+            snapshots: Vec::new(),
+            invalid_count: 0,
+        });
     }
     let mut snapshots = Vec::new();
+    let mut invalid_count = 0;
     for entry in fs::read_dir(&root).map_err(io_error)? {
         let entry = entry.map_err(io_error)?;
         if !entry.file_type().map_err(io_error)?.is_file()
@@ -67,13 +82,27 @@ pub fn list(backup_root: &Path) -> Result<Vec<ProfileSnapshotSummary>> {
             continue;
         }
         let path = entry.path();
-        let record = read_record(&path)?;
         let stem = path
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        validate_record(&record, stem)?;
-        snapshots.push(summary(&record));
+        let record = read_record(&path).and_then(|record| {
+            validate_record(&record, stem)?;
+            let payload = load_payload(&record, secrets)?;
+            if record.config_available != payload.config.is_some()
+                || record.auth_available != payload.auth.is_some()
+            {
+                return Err(LocalPoolError::new(
+                    ErrorCode::RecoveryRequired,
+                    "ChatGPT snapshot metadata does not match its encrypted payload",
+                ));
+            }
+            Ok(record)
+        });
+        match record {
+            Ok(record) => snapshots.push(summary(&record)),
+            Err(_) => invalid_count += 1,
+        }
     }
     snapshots.sort_by(|left, right| {
         right
@@ -81,7 +110,10 @@ pub fn list(backup_root: &Path) -> Result<Vec<ProfileSnapshotSummary>> {
             .cmp(&left.created_at_ms)
             .then_with(|| right.id.cmp(&left.id))
     });
-    Ok(snapshots)
+    Ok(ProfileSnapshotList {
+        snapshots,
+        invalid_count,
+    })
 }
 
 pub fn create(codex_home: &Path, backup_root: &Path, name: &str) -> Result<ProfileSnapshotSummary> {
@@ -456,10 +488,33 @@ mod tests {
             fs::read_to_string(profile.join("auth.json")).unwrap(),
             "{\"token\":\"auth-secret\"}"
         );
-        assert_eq!(list(&backups).unwrap().len(), 3);
+        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 3);
         delete_with(&backups, &safety.id, &secrets).unwrap();
-        assert_eq!(list(&backups).unwrap().len(), 2);
+        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 2);
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_list_keeps_valid_entries_when_one_payload_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-profile-snapshot-missing-{}",
+            Uuid::new_v4()
+        ));
+        let profile = root.join("profile");
+        let backups = root.join("backups");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("config.toml"), "model = \"test\"\n").unwrap();
+        let secrets = MemorySecrets::default();
+        let snapshot = create_with(&profile, &backups, "Missing", &secrets).unwrap();
+        let valid = create_with(&profile, &backups, "Valid", &secrets).unwrap();
+
+        secrets.delete(&payload_secret_ref(&snapshot.id)).unwrap();
+        let list = list_with(&backups, &secrets).unwrap();
+
+        assert_eq!(list.invalid_count, 1);
+        assert_eq!(list.snapshots.len(), 1);
+        assert_eq!(list.snapshots[0].id, valid.id);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1,9 +1,13 @@
-use super::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, apply_usage, emit_usage,
-    has_output_delta, invalid_host, now_ms, rate_limit_body_hint, rate_limit_body_hint_value,
-    unauthorized, usage_event, RateLimitBodyHint, CODEX_RESPONSES_LITE_HEADER,
-    TRANSIENT_COOLDOWN_MS,
+use super::auth::{client_api_forbidden, invalid_host, unauthorized};
+use super::errors::{
+    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
+    rate_limit_body_hint_value, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
+use super::now_ms;
+use super::request::CODEX_RESPONSES_LITE_HEADER;
+use super::response::{apply_usage, emit_usage, usage_event};
+use super::streaming::has_output_delta;
+use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
 use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
@@ -21,8 +25,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};
+const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(180);
 
-const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::MAX_CLIENT_REQUEST_BODY_BYTES;
+const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
 const MAX_WEBSOCKET_ERROR_BYTES: usize = 1024 * 1024;
 const INITIAL_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -62,12 +67,15 @@ pub(super) async fn responses(
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Response<Body> {
-    if !super::valid_local_host(&headers) {
+    if !super::auth::valid_local_host(&headers) {
         return invalid_host();
     }
     let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
         return unauthorized();
     };
+    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
+        return client_api_forbidden();
+    }
 
     websocket
         .max_message_size(MAX_WEBSOCKET_MESSAGE_BYTES)
@@ -163,7 +171,7 @@ impl ClientRequest {
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
-        super::normalize_service_tier(object, runtime.default_service_tier());
+        super::request::normalize_service_tier(object, runtime.default_service_tier());
         if object
             .get("type")
             .and_then(Value::as_str)
@@ -201,7 +209,7 @@ impl ClientRequest {
             value.get("prompt_cache_key").and_then(Value::as_str),
         );
         Ok(Self {
-            request_id: super::request_id(),
+            request_id: super::request::request_id(),
             value,
             requested_model,
             resolved_model,
@@ -225,7 +233,7 @@ impl ClientRequest {
             Value::String(route.source_model.clone()),
         );
         if route.account_id.is_some() {
-            super::normalize_account_request(object, self.responses_lite);
+            super::request::normalize_account_request(object, self.responses_lite);
         }
         serde_json::to_string(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
@@ -244,7 +252,7 @@ impl ClientRequest {
     }
 
     fn has_function_call_output(&self) -> bool {
-        super::contains_function_call_output(&self.value)
+        super::request::contains_function_call_output(&self.value)
     }
 
     fn drop_previous_response_id(&mut self) -> bool {
@@ -261,7 +269,7 @@ impl ClientRequest {
 
     fn recover_invalid_encrypted_content(&mut self) -> bool {
         let mut attempted = false;
-        super::try_recover_encrypted_content(&mut self.value, &mut attempted)
+        super::request::try_recover_encrypted_content(&mut self.value, &mut attempted)
     }
 }
 
@@ -292,8 +300,10 @@ async fn connect_upstream(
     let mut last_failure = None;
 
     'candidates: while attempts_this_run
-        < super::retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-            + usize::from(encrypted_content_recovered)
+        < super::errors::retry_candidate_limit(
+            runtime.max_retry_candidates(),
+            owner_recovery_confirmed,
+        ) + usize::from(encrypted_content_recovered)
     {
         let selected = runtime.select_and_reserve(
             key,
@@ -419,8 +429,8 @@ async fn connect_upstream(
             }
             let response_missing = body
                 .as_deref()
-                .is_some_and(super::previous_response_not_found);
-            let affinity_miss = super::recoverable_response_affinity_miss(
+                .is_some_and(super::errors::previous_response_not_found);
+            let affinity_miss = super::errors::recoverable_response_affinity_miss(
                 status,
                 request.has_previous_response_id(),
                 response_affinity_hit,
@@ -439,7 +449,7 @@ async fn connect_upstream(
                 }
                 continue;
             }
-            if super::retryable_failure(
+            if super::errors::retryable_failure(
                 status,
                 failure.category,
                 request.has_previous_response_id(),
@@ -503,13 +513,16 @@ async fn connect_upstream(
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(false) {
                 let category = terminal.error_category.unwrap_or_else(|| {
-                    super::classify_upstream_error(terminal_failure_status(terminal.status), None)
-                        .category
+                    super::errors::classify_upstream_error(
+                        terminal_failure_status(terminal.status),
+                        None,
+                    )
+                    .category
                 });
                 let status = terminal
                     .status
                     .filter(|status| !status.is_success())
-                    .unwrap_or_else(|| super::upstream_failure_status(category));
+                    .unwrap_or_else(|| super::errors::upstream_failure_status(category));
                 if category == "upstream_encrypted_content_invalid"
                     && !encrypted_content_recovered
                     && request.recover_invalid_encrypted_content()
@@ -523,14 +536,14 @@ async fn connect_upstream(
                     last_failure = Some(failure);
                     continue;
                 }
-                let affinity_miss = super::recoverable_response_affinity_miss(
+                let affinity_miss = super::errors::recoverable_response_affinity_miss(
                     status,
                     request.has_previous_response_id(),
                     response_affinity_hit,
                     terminal.previous_response_not_found,
                 );
                 if affinity_miss
-                    || super::retryable_failure(
+                    || super::errors::retryable_failure(
                         status,
                         category,
                         request.has_previous_response_id(),
@@ -934,8 +947,8 @@ async fn bridge(
             + state
                 .in_flight
                 .as_ref()
-                .map_or(super::SSE_SEMANTIC_TIMEOUT, |in_flight| {
-                    super::SSE_SEMANTIC_TIMEOUT.saturating_sub(in_flight.started.elapsed())
+                .map_or(WEBSOCKET_SEMANTIC_TIMEOUT, |in_flight| {
+                    WEBSOCKET_SEMANTIC_TIMEOUT.saturating_sub(in_flight.started.elapsed())
                 });
         tokio::select! {
             _ = sleep_until(semantic_deadline), if semantic_waiting => {
@@ -1266,10 +1279,10 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
         if has_output_delta(&value, event_type) && in_flight.event.ttft_ms.is_none() {
             in_flight.event.ttft_ms = Some(in_flight.started.elapsed().as_millis() as u64);
         }
-        if let Some(usage) = super::find_usage(&value) {
+        if let Some(usage) = super::response::find_usage(&value) {
             apply_usage(&mut in_flight.event, usage);
         }
-        if let Some(response_id) = super::response_id(&value) {
+        if let Some(response_id) = super::response::response_id(&value) {
             in_flight.response_id = Some(response_id.to_string());
         }
     }
@@ -1288,17 +1301,17 @@ fn event_terminal(value: &Value) -> EventTerminal {
         ) => Some(false),
         _ => None,
     };
-    let status = super::upstream_status_from_value(value);
+    let status = super::errors::upstream_status_from_value(value);
     EventTerminal {
         outcome,
         status,
-        error_category: super::upstream_event_failure_category(
+        error_category: super::errors::upstream_event_failure_category(
             value.get("type").and_then(Value::as_str),
             value,
         ),
         headers: websocket_retry_headers(value),
         body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
-        previous_response_not_found: super::previous_response_not_found_value(value),
+        previous_response_not_found: super::errors::previous_response_not_found_value(value),
     }
 }
 
@@ -1355,16 +1368,17 @@ fn finish_terminal(
         in_flight.event.consecutive_failures = recovered.then_some(0);
     } else {
         let category = terminal.error_category.unwrap_or_else(|| {
-            super::classify_upstream_error(terminal_failure_status(terminal.status), None).category
+            super::errors::classify_upstream_error(terminal_failure_status(terminal.status), None)
+                .category
         });
         let status = terminal
             .status
             .filter(|status| !status.is_success())
-            .unwrap_or_else(|| super::upstream_failure_status(category));
-        let status = super::canonical_upstream_status(status, category);
+            .unwrap_or_else(|| super::errors::upstream_failure_status(category));
+        let status = super::errors::canonical_upstream_status(status, category);
         in_flight.event.http_status = status.as_u16();
         in_flight.event.error_category = Some(category.to_string());
-        if super::retryable_failure(status, category, false) {
+        if super::errors::retryable_failure(status, category, false) {
             let failure_state = apply_failure_cooldown_with_hint(
                 runtime,
                 &in_flight.route.candidate_id,
@@ -1533,11 +1547,11 @@ async fn send_gateway_error(downstream: &mut WebSocket, failure: &GatewayFailure
         "type": "error",
         "status": failure.status.as_u16(),
         "error": {
-            "type": super::api_error_type(
+            "type": super::errors::api_error_type(
                 failure.status,
-                super::api_error_code(failure.category),
+                super::errors::api_error_code(failure.category),
             ),
-            "code": super::api_error_code(failure.category),
+            "code": super::errors::api_error_code(failure.category),
             "message": failure.message,
             "param": null,
         },
@@ -1608,7 +1622,7 @@ impl GatewayFailure {
     }
 
     fn prepare(error: ExecutorPrepareError) -> Self {
-        let failure = super::AttemptFailure::prepare(error);
+        let failure = super::errors::AttemptFailure::prepare(error);
         Self {
             status: failure.status,
             category: failure.category,
@@ -1669,15 +1683,15 @@ impl GatewayFailure {
     }
 
     fn upstream_status(status: StatusCode, body: Option<&[u8]>) -> Self {
-        let classification = super::classify_upstream_error(status, body);
+        let classification = super::errors::classify_upstream_error(status, body);
         Self::classified(status, classification.category)
     }
 
     fn classified(status: StatusCode, category: &'static str) -> Self {
         Self {
-            status: super::canonical_upstream_status(status, category),
+            status: super::errors::canonical_upstream_status(status, category),
             category,
-            message: super::upstream_failure_message(category),
+            message: super::errors::upstream_failure_message(category),
             cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
@@ -1748,7 +1762,7 @@ mod tests {
     fn upstream_status_accepts_string_status_codes() {
         let value = serde_json::json!({"type": "error", "status": "429"});
         assert_eq!(
-            super::super::upstream_status_from_value(&value),
+            crate::gateway::errors::upstream_status_from_value(&value),
             Some(StatusCode::TOO_MANY_REQUESTS)
         );
     }

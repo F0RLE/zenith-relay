@@ -1,7 +1,7 @@
 use crate::local_pool::models::LocalAccountRecord;
 use zenith_relay_core::{
     accounts::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate},
-    quota::{CodexQuotaRefreshData, QuotaRefreshFailure, QuotaTransition},
+    quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,7 +11,7 @@ pub struct AppliedQuota {
 
 pub fn apply_quota_success(
     account: &mut LocalAccountRecord,
-    data: CodexQuotaRefreshData,
+    data: QuotaRefreshResult,
 ) -> Result<AppliedQuota, &'static str> {
     let observed_at_ms = data.quota.observed_at_ms;
     let update = reduce_account_quota(
@@ -28,6 +28,13 @@ pub fn apply_quota_success(
         AccountQuotaOutcome::Failed { .. } => return Err("quota result kind is invalid"),
     };
     apply_update(account, update);
+    account
+        .economics
+        .set_account_context("chatgpt", account.account.subscription.plan_type.as_deref());
+    account
+        .economics
+        .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
+    account.economics.observe_quota(&account.account.quota);
     Ok(AppliedQuota { transitions })
 }
 
@@ -94,8 +101,8 @@ mod tests {
         .unwrap()
     }
 
-    fn refresh(percent: f64, observed_at_ms: u64) -> CodexQuotaRefreshData {
-        CodexQuotaRefreshData {
+    fn refresh(percent: f64, observed_at_ms: u64) -> QuotaRefreshResult {
+        QuotaRefreshResult {
             quota: QuotaRefreshData {
                 primary: Some(QuotaWindowInput {
                     kind: QuotaWindowKind::Primary,
@@ -119,7 +126,7 @@ mod tests {
                 observed_at_ms,
             },
             allowed: Some(true),
-            limit_reached: Some(false),
+            reported_limit_reached: Some(false),
         }
     }
 
@@ -244,7 +251,7 @@ mod tests {
         let mut account = account();
         let mut data = refresh(95.0, 10);
         data.allowed = Some(false);
-        data.limit_reached = Some(false);
+        data.reported_limit_reached = Some(false);
         apply_quota_success(&mut account, data).unwrap();
         assert_eq!(account.account.health, AccountHealthState::Blocked);
         assert_eq!(

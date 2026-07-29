@@ -18,6 +18,7 @@ pub enum ReauthReason {
     ReusedRefreshToken,
     ExpiredRefreshToken,
     InvalidatedRefreshToken,
+    AccessTokenExpired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,24 +72,8 @@ pub enum AccountHealthState {
     Blocked,
 }
 
-pub fn automatic_quota_refresh_eligible(
-    enabled: bool,
-    in_pool: bool,
-    draining: bool,
-    auth_state: AccountAuthState,
-    health: AccountHealthState,
-) -> bool {
-    enabled
-        && in_pool
-        && !draining
-        && !matches!(
-            auth_state,
-            AccountAuthState::RequiresReauth(_) | AccountAuthState::DegradedAccessOnly
-        )
-        && !matches!(
-            health,
-            AccountHealthState::Unhealthy | AccountHealthState::Blocked
-        )
+pub fn automatic_quota_monitoring_eligible(enabled: bool, auth_state: AccountAuthState) -> bool {
+    enabled && !matches!(auth_state, AccountAuthState::RequiresReauth(_))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -312,14 +297,8 @@ pub struct AccountRecord {
 }
 
 impl AccountRecord {
-    pub fn is_automatic_quota_refresh_eligible(&self) -> bool {
-        automatic_quota_refresh_eligible(
-            self.enabled,
-            self.in_pool,
-            self.draining,
-            self.auth_state,
-            self.health,
-        )
+    pub fn is_automatic_quota_monitoring_eligible(&self) -> bool {
+        automatic_quota_monitoring_eligible(self.enabled, self.auth_state)
     }
 
     pub fn is_wake_eligible(&self) -> bool {
@@ -384,34 +363,26 @@ mod tests {
     }
 
     #[test]
-    fn automatic_quota_refresh_only_uses_viable_pool_accounts() {
-        assert!(automatic_quota_refresh_eligible(
+    fn automatic_quota_monitoring_is_independent_of_pool_and_health() {
+        assert!(automatic_quota_monitoring_eligible(
             true,
+            AccountAuthState::Active,
+        ));
+        assert!(automatic_quota_monitoring_eligible(
             true,
+            AccountAuthState::DegradedAccessOnly,
+        ));
+        assert!(automatic_quota_monitoring_eligible(
+            true,
+            AccountAuthState::Error,
+        ));
+        assert!(!automatic_quota_monitoring_eligible(
             false,
             AccountAuthState::Active,
-            AccountHealthState::Degraded,
         ));
-        assert!(!automatic_quota_refresh_eligible(
+        assert!(!automatic_quota_monitoring_eligible(
             true,
-            false,
-            false,
-            AccountAuthState::Active,
-            AccountHealthState::Healthy,
-        ));
-        assert!(!automatic_quota_refresh_eligible(
-            true,
-            true,
-            false,
-            AccountAuthState::Active,
-            AccountHealthState::Unhealthy,
-        ));
-        assert!(!automatic_quota_refresh_eligible(
-            true,
-            true,
-            false,
             AccountAuthState::RequiresReauth(ReauthReason::InvalidGrant),
-            AccountHealthState::Healthy,
         ));
     }
 

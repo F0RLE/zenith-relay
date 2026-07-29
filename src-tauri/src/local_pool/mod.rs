@@ -1,4 +1,4 @@
-mod accounts;
+pub(crate) mod accounts;
 pub(crate) mod background;
 pub mod commands;
 mod error;
@@ -19,11 +19,19 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
         .map_err(|message| error::LocalPoolError::new(error::ErrorCode::Io, message))?;
     create_storage_directory(&root)?;
     let directory_ready = started.elapsed();
+    let vault_started = Instant::now();
     store::secret_store::initialize(&root.join("data"))?;
+    let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
     let state = DesktopState::open(root)?;
     let state_ready = started.elapsed();
     state.set_app_handle(app.clone());
+    let _ = state.record_performance("vault", vault_ms, Some("startup"));
+    let _ = state.record_performance(
+        "sqlite",
+        state.telemetry.open_duration_ms(),
+        Some("startup"),
+    );
     if cfg!(debug_assertions) {
         eprintln!(
             "[startup] storage_dir={}ms secret_store={}ms local_state={}ms total={}ms",

@@ -14,8 +14,6 @@ use zenith_relay_core::{
     CandidateHealth, CandidateQuota, WireApi,
 };
 
-pub use zenith_relay_core::quota_stale_after_ms_for_interval;
-
 pub const CODEX_SOURCE_ID: &str = "openai_codex";
 pub const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
@@ -39,7 +37,9 @@ pub fn new_account_record(
     );
     let secret_fingerprint = hash(
         credentials
-            .refresh_token()
+            .agent_identity()
+            .map(|agent| agent.private_key())
+            .or_else(|| credentials.refresh_token())
             .unwrap_or_else(|| credentials.access_token())
             .as_bytes(),
     );
@@ -57,7 +57,7 @@ pub fn new_account_record(
         .identity
         .clone()
         .unwrap_or_else(|| "ChatGPT account".to_string());
-    let auth_state = if credentials.refresh_token().is_some() {
+    let auth_state = if credentials.is_agent_identity() || credentials.refresh_token().is_some() {
         AccountAuthState::Active
     } else {
         AccountAuthState::DegradedAccessOnly
@@ -93,6 +93,7 @@ pub fn new_account_record(
             last_used_at_ms: None,
             last_error_code: None,
         },
+        economics: Default::default(),
         remote_location: None,
         wire_api: WireApi::Responses,
         models,
@@ -286,14 +287,5 @@ mod tests {
             ),
             CandidateQuota::Stale
         );
-    }
-
-    #[test]
-    fn quota_stale_grace_tracks_a_longer_refresh_interval() {
-        assert_eq!(
-            quota_stale_after_ms_for_interval(120),
-            zenith_relay_core::QUOTA_STALE_AFTER_MS
-        );
-        assert_eq!(quota_stale_after_ms_for_interval(3_600), 65 * 60 * 1_000);
     }
 }
