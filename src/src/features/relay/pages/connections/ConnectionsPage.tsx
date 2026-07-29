@@ -546,7 +546,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
               ? <IconButton className="account-kind-icon account-status-button" data-status="error" label={accountErrorLabel(displayedErrorCode, t)} icon={<UserRound aria-hidden />} onClick={() => setErrorDetails(account)} />
               : <StatusIcon className="account-kind-icon" status={indicatorTone} label={indicatorLabel}><UserRound aria-hidden /></StatusIcon>}
             <div className="account-identity">
-              <strong title={account.label}>{account.label}</strong>
+              <strong className={accountIdentitiesVisible ? "revealed" : undefined} title={account.label}>{account.label}</strong>
               <div className="account-identity-meta"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /></div>
             </div>
             <div className="account-card-header-actions">

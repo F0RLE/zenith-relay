@@ -634,7 +634,7 @@
 .pool-header-actions .relay-button {
   min-height: 32px;
   gap: 6px;
-  padding: 0 10px;
+  padding: 0 8px;
   font-size: 12px;
   line-height: 16px;
 }
