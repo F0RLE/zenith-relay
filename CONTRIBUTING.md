@@ -47,6 +47,7 @@ README.md
 CONTRIBUTING.md
 PLANNING.md
 ROADMAP.md
+docs/help/<locale>/README.md
 docs/help/<locale>/this-computer.md
 docs/help/<locale>/zenith-api.md
 docs/help/<locale>/my-server.md
@@ -60,8 +61,8 @@ historical planning documents. Fold current behavior into
 <code>PLANNING.md</code>, future work into <code>ROADMAP.md</code>, and user
 steps into localized Help files.
 
-To add a locale, add all three Help files, register its translation resources,
-and update the raw Markdown registry in
+To add a locale, add its overview and all three Help files, register its
+translation resources, and update the raw Markdown registry in
 <code>src/src/features/relay/help/HelpCenter.tsx</code>. Keep Help documents
 accurate for the UI's current labels and mode order.
 

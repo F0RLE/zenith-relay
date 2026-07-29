@@ -13,9 +13,9 @@ single OpenAI-compatible endpoint. It has three explicit modes:
 
 | Mode | Runtime | Data ownership |
 | --- | --- | --- |
-| Choose API | A selected compatible hosted API. | The selected source and its local secret reference. |
-| Computer | The desktop process and a loopback endpoint. | The user's computer and OS credential store. |
-| On your server | A user-managed Relay server. | The user's server, encrypted vault, and SQLite database. |
+| Zenith API | A selected compatible hosted API. | The selected source and its local secret reference. |
+| This computer | The desktop process and a loopback endpoint. | The user's computer and OS credential store. |
+| My server | A user-managed Relay server. | The user's server, encrypted vault, and SQLite database. |
 
 The desktop app is not a public account marketplace, a Zenith billing backend,
 or a way to move a user's accounts into Zenith inventory. Secrets remain on the

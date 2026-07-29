@@ -118,8 +118,8 @@ this demand and acceptance evidence.
 ## P6 - Localization, documentation, and release hygiene
 
 1. Keep README, planning, roadmap, and Help aligned with shipped behavior.
-2. For every new UI locale, add the three mode-specific Help documents and
-   register them in Help Center.
+2. For every new UI locale, add the localized overview and three mode-specific
+   Help documents, then register the mode documents in Help Center.
 3. Regenerate screenshots from Playwright after a material layout or
    terminology change.
 4. Run all relevant checks, review generated assets, and perform the P0 live
