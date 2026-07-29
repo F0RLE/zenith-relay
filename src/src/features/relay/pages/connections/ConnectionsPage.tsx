@@ -1297,37 +1297,35 @@ function AutomationDialog({ task, onClose }: { task: WakeTask | null; onClose: (
   const [executionPolicy, setExecutionPolicy] = useState<WakeTask["executionPolicy"]>(mode === "local" ? task?.executionPolicy ?? "automatic" : "automatic");
   const [selectorKind, setSelectorKind] = useState<WakeTask["accountSelector"]["kind"]>(task?.accountSelector.kind ?? "all_eligible");
   const [accountIds, setAccountIds] = useState<string[]>(task?.accountSelector.kind === "account_ids" ? task.accountSelector.values : []);
-  const [modelKind, setModelKind] = useState<WakeTask["modelPolicy"]["kind"]>(task?.modelPolicy.kind ?? "lightest_supported");
   const [modelId, setModelId] = useState(task?.modelPolicy.kind === "explicit" ? task.modelPolicy.value : "");
   const accounts = runtime?.accounts ?? [];
-  const activeAccounts = accounts.filter((account) => account.enabled && !account.draining);
-  const selectedAccounts = accounts.filter((account) => accountIds.includes(account.id));
-  const targetAccounts = selectorKind === "account_ids" ? selectedAccounts.filter((account) => account.enabled && !account.draining) : selectorKind === "all_eligible" ? activeAccounts : [];
+  const poolAccounts = accounts.filter((account) => account.inPool && account.enabled && !account.draining);
+  const selectedAccounts = poolAccounts.filter((account) => accountIds.includes(account.id));
+  const targetAccounts = selectorKind === "account_ids" ? selectedAccounts : selectorKind === "all_eligible" ? poolAccounts : [];
+  const rawPoolModels = runtime?.gateway.visibleModelIds.length
+    ? runtime.gateway.visibleModelIds
+    : (runtime?.gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
+  const poolModels = rawPoolModels.filter((model, index) => rawPoolModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index);
   const modelSets = targetAccounts.map((account) => account.models.filter((model) => (account.allowedModels.length === 0 || account.allowedModels.some((allowed) => allowed.toLowerCase() === model.toLowerCase())) && !account.excludedModels.some((excluded) => excluded.toLowerCase() === model.toLowerCase())));
   const targetModels = selectorKind === "account_ids" && modelSets.length > 1
     ? modelSets[0].filter((model) => modelSets.slice(1).every((set) => set.some((candidate) => candidate.toLowerCase() === model.toLowerCase())))
     : modelSets.flat();
-  const availableModels = targetModels.filter((model, index) => targetModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index).sort();
+  const availableModels = poolModels.filter((model) => targetModels.some((candidate) => candidate.toLowerCase() === model.toLowerCase()));
   const toggleAccount = (id: string) => setAccountIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  const accountSelectionValid = selectorKind === "all_eligible" || (selectorKind === "account_ids" && accountIds.length > 0 && selectedAccounts.length === accountIds.length);
-  const selectedModel = availableModels.find((model) => model.toLowerCase() === modelId.trim().toLowerCase());
-  const modelSelectionValid = modelKind !== "explicit" || Boolean(selectedModel);
-  const valid = Boolean(name.trim() && accountSelectionValid && modelSelectionValid);
+  const accountSelectionValid = selectorKind === "all_eligible" ? poolAccounts.length > 0 : selectorKind === "account_ids" && accountIds.length > 0 && selectedAccounts.length === accountIds.length;
+  const selectedModel = availableModels.find((model) => model.toLowerCase() === modelId.trim().toLowerCase()) ?? availableModels[0] ?? "";
+  const valid = Boolean(name.trim() && accountSelectionValid && selectedModel);
   const selectorOptions = [
     { value: "all_eligible", label: t("automations.allEligible") },
     { value: "account_ids", label: t("automations.selectedAccounts") },
     ...(selectorKind === "tags" ? [{ value: "tags", label: t("automations.matchingTags") }] : []),
   ];
-  const modelOptions = [
-    { value: "", label: t("automations.selectModel") },
-    ...(!selectedModel && modelId ? [{ value: modelId, label: t("automations.unavailableModel", { model: modelId }) }] : []),
-    ...availableModels.map((model) => ({ value: selectedModel?.toLowerCase() === model.toLowerCase() ? modelId : model, label: model })),
-  ];
+  const modelOptions = availableModels.length ? availableModels.map((model) => ({ value: model, label: model })) : [{ value: "", label: t("automations.noPoolModels") }];
   const save = async () => {
     if (!valid) return;
     const now = Date.now();
     const accountSelector = selectorKind === "account_ids" ? { kind: selectorKind, values: accountIds } : { kind: "all_eligible" as const };
-    const modelPolicy = modelKind === "explicit" ? { kind: modelKind, value: modelId } : { kind: modelKind };
+    const modelPolicy = { kind: "explicit" as const, value: selectedModel };
     const base = { ...defaultWakeInput(name), enabled: task?.enabled ?? true, accountSelector, modelPolicy, executionPolicy, jitterSeconds: task?.jitterSeconds ?? 0, maxAttemptsPerCycle: task?.maxAttemptsPerCycle ?? 1 };
     const remoteInput = task ? { ...task, ...base, updatedAtMs: now } : { ...base, id: "", trigger: { kind: "quota_full" }, fallbackSchedule: null, createdAtMs: now, updatedAtMs: now };
     const id = task ? `automation-update-${task.id}` : "automation-create";
@@ -1336,31 +1334,23 @@ function AutomationDialog({ task, onClose }: { task: WakeTask | null; onClose: (
   };
   return <Dialog wide title={task ? t("automations.edit") : t("automations.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === (task ? `automation-update-${task.id}` : "automation-create")} disabled={!valid} onClick={save}>{t("common.save")}</Button></>}>
     <div className="relay-form automation-form">
-      <label className="relay-field automation-name"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
-
-      <div className="automation-condition"><CalendarDays aria-hidden /><span>{t("automations.condition")}</span></div>
-
-      <section className="automation-section">
-        <header><UsersRound aria-hidden /><h3>{t("automations.target")}</h3></header>
-        <div className="automation-target-grid">
-          <div className="relay-field"><span>{t("automations.accountSelection")}</span><OptionMenu className="field-option-menu" label={t("automations.accountSelection")} value={selectorKind} onChange={(value) => setSelectorKind(value as WakeTask["accountSelector"]["kind"])} options={selectorOptions} /></div>
-          <div className="relay-field"><span>{t("automations.modelPolicy")}</span><OptionMenu className="field-option-menu" label={t("automations.modelPolicy")} value={modelKind} onChange={(value) => setModelKind(value as WakeTask["modelPolicy"]["kind"])} options={[{ value: "lightest_supported", label: t("automations.lightest") }, { value: "explicit", label: t("automations.explicitModel") }]} /></div>
-        </div>
-        {selectorKind === "account_ids" ? <fieldset className="automation-account-picker"><legend>{t("automations.selectedAccounts")}</legend><div className="scope-grid">{accounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => toggleAccount(account.id)} /><span>{account.label}</span></label>)}</div></fieldset> : null}
-        {selectorKind === "tags" ? <><label className="relay-field"><span>{t("automations.tags")}</span><input value={task?.accountSelector.kind === "tags" ? task.accountSelector.values.join(", ") : ""} readOnly /></label><p role="alert" className="automation-validation">{t("automations.legacyTags")}</p></> : null}
-        {selectorKind === "account_ids" && !accountSelectionValid ? <p role="alert" className="automation-validation">{t("automations.accountsRequired")}</p> : null}
-        {modelKind === "explicit" ? <div className="relay-field automation-model"><span>{t("common.model")}</span><OptionMenu className="field-option-menu" label={t("common.model")} value={modelId} onChange={setModelId} options={modelOptions} /></div> : null}
-        {modelKind === "explicit" && accountSelectionValid && !modelSelectionValid ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
-      </section>
-
-      <section className="automation-section">
-        <header><Play aria-hidden /><h3>{t("automations.execution")}</h3></header>
-        {mode === "local" ? <div className="automation-execution-grid" role="radiogroup" aria-label={t("automations.execution")}>
-          <label className="automation-choice"><input type="radio" name="automation-execution" checked={executionPolicy === "automatic"} onChange={() => setExecutionPolicy("automatic")} /><span><strong>{t("automations.automatic")}</strong></span></label>
-          <label className="automation-choice"><input type="radio" name="automation-execution" checked={executionPolicy === "require_confirmation"} onChange={() => setExecutionPolicy("require_confirmation")} /><span><strong>{t("automations.manual")}</strong></span></label>
-        </div> : <div className="automation-fixed-execution"><Check aria-hidden /><span><strong>{t("automations.automatic")}</strong></span></div>}
-        {mode !== "local" && task?.executionPolicy === "require_confirmation" ? <p role="status" className="automation-validation">{t("automations.remoteConfirmationMigration")}</p> : null}
-      </section>
+      <label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
+      <div className="automation-target-grid">
+        <div className="relay-field"><span>{t("automations.accountSelection")}</span><OptionMenu className="field-option-menu" label={t("automations.accountSelection")} value={selectorKind} onChange={(value) => setSelectorKind(value as WakeTask["accountSelector"]["kind"])} options={selectorOptions} /></div>
+        <div className="relay-field"><span>{t("common.model")}</span><OptionMenu className="field-option-menu" label={t("common.model")} value={selectedModel} onChange={setModelId} options={modelOptions} disabled={!availableModels.length} /></div>
+      </div>
+      {selectorKind === "account_ids" ? <fieldset className="automation-account-picker"><legend>{t("automations.selectedAccounts")}</legend><div className="scope-grid">{poolAccounts.map((account) => <label key={account.id}><input type="checkbox" checked={accountIds.includes(account.id)} onChange={() => toggleAccount(account.id)} /><span>{account.label}</span></label>)}</div></fieldset> : null}
+      {selectorKind === "tags" ? <><label className="relay-field"><span>{t("automations.tags")}</span><input value={task?.accountSelector.kind === "tags" ? task.accountSelector.values.join(", ") : ""} readOnly /></label><p role="alert" className="automation-validation">{t("automations.legacyTags")}</p></> : null}
+      {!accountSelectionValid ? <p role="alert" className="automation-validation">{t("automations.accountsRequired")}</p> : null}
+      {accountSelectionValid && !selectedModel ? <p role="alert" className="automation-validation">{t("automations.modelUnavailable")}</p> : null}
+      <div className="automation-rule">
+        <span>{t("automations.condition")}</span>
+        {mode === "local" ? <div className="segmented automation-execution" role="group" aria-label={t("automations.execution")}>
+          <button type="button" className={executionPolicy === "automatic" ? "active" : ""} aria-pressed={executionPolicy === "automatic"} onClick={() => setExecutionPolicy("automatic")}>{t("automations.automatic")}</button>
+          <button type="button" className={executionPolicy === "require_confirmation" ? "active" : ""} aria-pressed={executionPolicy === "require_confirmation"} onClick={() => setExecutionPolicy("require_confirmation")}>{t("automations.manual")}</button>
+        </div> : <strong>{t("automations.automatic")}</strong>}
+      </div>
+      {mode !== "local" && task?.executionPolicy === "require_confirmation" ? <p role="status" className="automation-validation">{t("automations.remoteConfirmationMigration")}</p> : null}
     </div>
   </Dialog>;
 }

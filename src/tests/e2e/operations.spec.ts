@@ -104,9 +104,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Automations" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
   const automation = page.getByRole("dialog", { name: "Edit automation" });
-  await chooseOption(page, automation, "Account selection", "account_ids");
+  await chooseOption(page, automation, "Accounts", "account_ids");
   await automation.getByLabel("Personal Plus").check();
-  await chooseOption(page, automation, "Model policy", "explicit");
   await chooseOption(page, automation, "Model", "gpt-5.4-mini");
   await automation.getByRole("button", { name: "Save" }).click();
   const automationRow = page.getByRole("row").filter({ hasText: "Start quota countdown" });
@@ -172,21 +171,21 @@ test("automation editor only saves executable local configurations", async ({ pa
 
   const dialog = page.getByRole("dialog", { name: "Edit automation" });
   const save = dialog.getByRole("button", { name: "Save" });
-  await dialog.getByRole("button", { name: /^Account selection:/ }).click();
+  await dialog.getByRole("button", { name: /^Accounts:/ }).click();
   await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
   await page.locator('[role="option"][data-value="account_ids"]').click();
   await expect(save).toBeDisabled();
 
   await dialog.getByLabel("Personal Plus").check();
   await dialog.getByLabel("Backup account").check();
-  await chooseOption(page, dialog, "Model policy", "explicit");
   await dialog.getByRole("button", { name: /^Model:/ }).click();
   await expect(page.locator('[role="option"][data-value="gpt-5.4-mini"]')).toHaveCount(1);
   await expect(page.locator('[role="option"][data-value="gpt-5.4"]')).toHaveCount(0);
   await expect(page.locator('[role="option"][data-value="o3"]')).toHaveCount(0);
   await page.locator('[role="option"][data-value="gpt-5.4-mini"]').click();
 
-  await dialog.getByRole("radio", { name: "Manual" }).check();
+  await dialog.getByRole("button", { name: "Manual" }).click();
+  await expect(dialog.getByRole("button", { name: "Manual" })).toHaveAttribute("aria-pressed", "true");
   await save.click();
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
@@ -206,15 +205,16 @@ test("remote automation editor exposes only automatic execution", async ({ page 
   await page.getByRole("button", { name: "Edit" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Edit automation" });
-  await expect(dialog.getByRole("radiogroup", { name: "Execution" })).toHaveCount(0);
+  await expect(dialog.getByRole("group", { name: "Run" })).toHaveCount(0);
   await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
-  await dialog.getByRole("button", { name: /^Account selection:/ }).click();
+  await expect(dialog.getByRole("button", { name: /^Model: gpt-5\.4/ })).toBeVisible();
+  await dialog.getByRole("button", { name: /^Accounts:/ }).click();
   await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
   await page.keyboard.press("Escape");
   await dialog.getByRole("button", { name: "Save" }).click();
 
   const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: Record<string, unknown>; payload?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "execute_remote_server_action"));
-  expect(call?.args.input).toMatchObject({ action: { type: "update_wake_task", id: "wake_synthetic" }, payload: { executionPolicy: "automatic" } });
+  expect(call?.args.input).toMatchObject({ action: { type: "update_wake_task", id: "wake_synthetic" }, payload: { executionPolicy: "automatic", modelPolicy: { kind: "explicit", value: "gpt-5.4" } } });
 });
 
 for (const mode of ["local", "remote"] as const) {

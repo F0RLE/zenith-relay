@@ -1,6 +1,6 @@
 
 .relay-dialog.wide:has(.automation-form) {
-  width: min(680px, 100%);
+  width: min(620px, 100%);
 }
 
 .relay-dialog:has(.automation-form) > header,
@@ -9,111 +9,46 @@
 }
 
 .relay-dialog:has(.automation-form) .relay-dialog-body {
-  padding: 12px 18px;
+  padding: 16px 18px;
 }
 
 .automation-form {
-  gap: 0;
+  gap: 12px;
 }
 
-.automation-name {
-  padding-bottom: 8px;
-}
-
-.automation-section {
-  display: grid;
-  gap: 8px;
-  padding: 8px 0;
-  border-top: 1px solid var(--relay-border);
-}
-
-.automation-section:last-child {
-  padding-bottom: 0;
-}
-
-.automation-section > header {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
-  align-items: center;
-  gap: 9px;
-}
-
-.automation-section > header > svg {
-  width: 18px;
-  height: 18px;
-  color: var(--relay-accent-hover);
-}
-
-.automation-section h3,
-.automation-section p {
-  margin: 0;
-}
-
-.automation-section h3 {
-  font-size: 13px;
-}
-
-.automation-execution-grid,
 .automation-target-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.automation-condition {
-  min-height: 34px;
+.automation-rule {
+  min-height: 44px;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 7px 0;
+  justify-content: space-between;
+  gap: 16px;
+  padding-top: 10px;
   border-top: 1px solid var(--relay-border);
+}
+
+.automation-rule > span {
   color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.automation-rule > strong {
   font-size: 12px;
   font-weight: 650;
 }
 
-.automation-condition svg {
-  width: 18px;
-  height: 18px;
-  color: var(--relay-accent-hover);
+.automation-execution {
+  flex: 0 0 auto;
 }
 
-.automation-choice {
-  min-width: 0;
-  min-height: 40px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 9px;
-  border: 1px solid var(--relay-border);
-  border-radius: 6px;
-  background: var(--relay-surface);
-  cursor: pointer;
-}
-
-.automation-choice:hover {
-  border-color: var(--relay-border-strong);
-}
-
-.automation-choice:has(input:checked) {
-  border-color: color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
-  background: var(--relay-accent-soft);
-}
-
-.automation-choice > span,
-.automation-fixed-execution > span {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.automation-choice strong,
-.automation-fixed-execution strong {
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.automation-execution button {
+  min-width: 104px;
 }
 
 .automation-account-picker {
@@ -132,55 +67,41 @@
   white-space: nowrap;
 }
 
-.automation-model {
-  width: calc(50% - 4px);
-}
-
-.automation-fixed-execution {
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 9px;
-  border: 1px solid color-mix(in srgb, var(--relay-accent) 60%, var(--relay-border));
-  border-radius: 6px;
-  background: var(--relay-accent-soft);
-}
-
-.automation-fixed-execution > svg {
-  width: 16px;
-  height: 16px;
-  color: var(--relay-accent-hover);
-}
-
 .automation-validation {
+  margin: -4px 0 0;
   color: var(--relay-error);
   font-size: 11px;
   line-height: 1.4;
 }
 
 @media (max-width: 620px) {
-  .automation-execution-grid,
   .automation-target-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .automation-model {
+  .automation-rule {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .automation-execution {
     width: 100%;
+  }
+
+  .automation-execution button {
+    min-width: 0;
+    flex: 1;
   }
 }
 
 @media (max-height: 600px) {
   .relay-dialog:has(.automation-form) .relay-dialog-body {
-    padding-block: 8px;
+    padding-block: 10px;
   }
 
-  .automation-name {
-    padding-bottom: 4px;
-  }
-
-  .automation-section {
-    padding-block: 6px;
+  .automation-form {
+    gap: 10px;
   }
 }
 

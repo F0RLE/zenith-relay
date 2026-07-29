@@ -1350,17 +1350,24 @@ test("automation table fits the standard window without horizontal scrolling", a
 });
 
 test("automation editor fits the compact window without hidden controls", async ({ page }) => {
-  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, accountCount: 3 });
   await page.setViewportSize({ width: 840, height: 560 });
   await page.goto("/");
   await page.getByRole("button", { name: "Подключения", exact: true }).click();
   await page.getByRole("tab", { name: "Автоматизация" }).click();
-  await page.getByRole("button", { name: "Изменить" }).click();
+  await page.getByRole("button", { name: "Добавить автоматизацию" }).click();
 
-  const dialog = page.getByRole("dialog", { name: "Изменить автоматизацию" });
-  await expect(dialog.getByText("Основная квота восстановлена", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("radio", { name: "Автоматически" })).toBeVisible();
-  await expect(dialog.getByRole("radio", { name: "Вручную" })).toBeVisible();
+  const dialog = page.getByRole("dialog", { name: "Добавить автоматизацию" });
+  await expect(dialog.getByText("После восстановления основной квоты", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Цель", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText("Выполнение", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText("Самая лёгкая поддерживаемая", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: /^Модель:/ }).click();
+  await expect(page.locator('[role="option"][data-value="gpt-5.4"]')).toBeVisible();
+  await expect(page.locator('[role="option"][data-value="gpt-5.4-mini"]')).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog.getByRole("button", { name: "Автоматически" })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByRole("button", { name: "Вручную" })).toHaveAttribute("aria-pressed", "false");
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const body = element.querySelector(".relay-dialog-body");
@@ -1369,6 +1376,18 @@ test("automation editor fits the compact window without hidden controls", async 
       && Boolean(body && body.scrollHeight <= body.clientHeight);
   })).toBe(true);
   await page.screenshot({ path: "output/playwright/automation-dialog-ru-dark-840x560.png" });
+
+  await dialog.getByRole("button", { name: /^Аккаунты:/ }).click();
+  await page.locator('[role="option"][data-value="account_ids"]').click();
+  await dialog.getByLabel("Personal Plus").check();
+  await dialog.getByLabel("Backup account").check();
+  await expect(dialog.getByRole("button", { name: "Модель: gpt-5.4-mini" })).toBeVisible();
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
+      && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/automation-dialog-selected-ru-dark-840x560.png" });
 });
 
 test("ru compact disclosure labels stay readable", async ({ page }) => {
