@@ -36,9 +36,9 @@ export function SourcePriceEditor({ source, drafts, onChange }: { source: Source
     delete next[model];
     onChange(next);
   };
-  return <section className="source-form-section source-price-section">
-    <header><div><h3>{t("sources.apiCost")}</h3><p>{t("sources.apiCostHint")}</p></div></header>
-    <div className="source-price-groups">
+  return <details className="source-price-section source-editor-panel">
+    <summary className="source-editor-panel-summary"><span><strong>{t("sources.apiCost")}</strong><small>{t("sources.apiCostHint")}</small></span><small>{t("sources.groupModelsCount", { count: models.length })}</small></summary>
+    <div className="source-price-content"><div className="source-price-groups">
       {groups.map((group) => {
         const cacheWrite = group.id === "anthropic";
         return <details key={group.id} className="source-price-group">
@@ -66,8 +66,8 @@ export function SourcePriceEditor({ source, drafts, onChange }: { source: Source
         </details>;
       })}
     </div>
-    <small className="form-note">{t("sources.apiCostUnit")}</small>
-  </section>;
+    <small className="form-note">{t("sources.apiCostUnit")}</small></div>
+  </details>;
 }
 
 function PriceInput({ label, value, placeholder, invalid, onChange }: { label: string; value: string; placeholder: string; invalid: boolean; onChange: (value: string) => void }) {

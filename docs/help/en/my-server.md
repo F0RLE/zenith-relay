@@ -64,13 +64,14 @@ same URL. Do not approve an identity change until its cause is understood.
 
 1. Refresh quota and models for the local account first.
 2. Start the move from **Connections**.
-3. Review the preview: account, assigned proxy, and secret availability.
-4. Confirm and wait for the ownership operation to finish.
-5. Verify that the card shows **On server**.
-6. Add the account to the server **Pool** if it is not already routed.
+3. Confirm the selected accounts. Relay validates their protected credentials,
+   server compatibility, proxy state, models, and quota before committing.
+4. Wait for the ownership operation to finish.
+5. Verify that the card shows **On server** and that the account appears in the
+   server **Pool**. A successful move adds it to that pool automatically.
 
-> Do not import the same session again while a move is incomplete. Resume or
-> roll back the existing ownership operation first.
+> Do not import the same session again while a move is incomplete. Reconnect
+> the recorded server and let Relay recover the existing ownership operation.
 
 ## Connect a client
 
@@ -101,16 +102,17 @@ same URL. Do not approve an identity change until its cause is understood.
 | Management API returns `401` | Management token | Replace the management token without changing client keys |
 | `/v1` returns `401` | Client key and its state | Create or re-enable a client key |
 | No eligible participant | Pool state, quota, models, and proxies | Repair the specific participant or enable a fallback |
-| Move was interrupted | Ownership operation log | Resume or roll back; do not create a second copy manually |
+| Move was interrupted | The recorded server connection | Reconnect the same server and let Relay recover the operation; do not create a second copy manually |
 | Usage does not refresh | Server `usage` capability and version | Install a compatible server version and fetch a new snapshot |
 
 ## Security and recovery
 
 Account sessions are encrypted with the server vault key. The management token
 is stored in this computer's credential store. Client keys should expose only
-the required models, budget, and lifetime.
+the required protocols, sources or accounts, models, and budget.
 
-A backup must include the database, encrypted vault, and the stable encryption
-key. A database copy without its original key cannot restore account sessions.
-Desktop **Recovery** protects the local ChatGPT profile and does not replace a
-server backup.
+Use the standalone server `--backup <dir>` and `--restore <dir>` commands so the
+database and encrypted vault are validated together. Preserve the stable vault
+key separately; a backup without its original key cannot restore account
+sessions. Desktop **Recovery** protects the local ChatGPT profile and does not
+replace a server backup.

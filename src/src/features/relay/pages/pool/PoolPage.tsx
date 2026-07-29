@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, CheckCheck, ChevronRight, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
@@ -479,37 +479,35 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
     if (ok) onClose();
   };
   return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave || !purchaseCostValid || (member.kind === "source" && (!sourcePriceOverrides || !sourceWeightValid))} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
-    <div className="relay-form">
+    <div className="relay-form member-editor">
       {member.kind === "source" ? <section className="source-routing-section">
-        <div className="source-routing-toolbar">
-          <header className="source-routing-heading"><Gauge aria-hidden /><h3>{t("sources.poolRole")}</h3></header>
-          <div className="segmented source-role-options" role="radiogroup" aria-label={t("sources.poolRole")}>
-            {(["primary", "stabilizer", "reserve"] as ApiSourceRole[]).map((value) => <button className={sourceRole === value ? "active" : undefined} key={value} type="button" role="radio" aria-checked={sourceRole === value} title={t(`sources.roleHints.${value}`)} onClick={() => setSourceRole(value)}>{t(`sources.roles.${value}`)}</button>)}
-          </div>
-        </div>
-        <div className="source-fallback-row">
+        <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p>{t("sources.routingHint")}</p></div></header>
+        <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
           <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-fallback-flow" aria-label={t("sources.fallbackOrder")}>
-            {sourceStages.map((stage, index) => <div className="source-fallback-step" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} title={stage.names.join("\n") || t("common.notConfigured")}><span><strong>{stage.label}</strong><small>{stage.count}</small></span>{index < sourceStages.length - 1 ? <ChevronRight aria-hidden /> : null}</div>)}
+          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")}>
+            {sourceStages.map((stage, index) => stage.role === "accounts"
+              ? <div className="source-route-stage accounts" key={stage.role} aria-label={`${stage.label}: ${stage.count}`}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></div>
+              : <button className="source-route-stage" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} type="button" role="radio" aria-checked={stage.role === sourceRole} aria-label={`${stage.label}: ${t(`sources.roleHints.${stage.role}`)}`} onClick={() => setSourceRole(stage.role)}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></button>)}
           </div>
         </div>
+        <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
         <div className="source-routing-controls">
-          <label className="relay-field source-routing-control" title={t("sources.trafficWeightHint")}><span>{t("sources.trafficWeight")}</span><input aria-label={t("sources.trafficWeight")} type="number" min="1" max="1000" step="1" value={sourceWeight} onChange={(event) => setSourceWeight(Number(event.target.value))} /></label>
-          <div className="relay-field source-routing-control" title={t("sources.recoveryDelayHint")}><span>{t("sources.recoveryDelay")}</span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /></div>
+          <label className="relay-field source-routing-control"><span>{t("sources.trafficWeight")}</span><input aria-label={t("sources.trafficWeight")} type="number" min="1" max="1000" step="1" value={sourceWeight} onChange={(event) => setSourceWeight(Number(event.target.value))} /><small>{t("sources.trafficWeightHint")}</small></label>
+          <div className="relay-field source-routing-control"><span>{t("sources.recoveryDelay")}</span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /><small>{t("sources.recoveryDelayHint")}</small></div>
         </div>
       </section> : <><div className="settings-row"><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><label className="relay-field"><span>{t("accounts.economics.purchaseCost")}</span><input type="number" min="0" max="1000000" step="0.01" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder="0.00" /><small>{t("accounts.economics.purchaseCostHint")}</small></label></>}
       {member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} /> : null}
-      <section className="member-model-rules">
-        <header><h2>{t("common.models")}</h2></header>
-        {modelIds.length ? <ul>{modelIds.map((model) => {
+      <details className="member-model-rules source-editor-panel">
+        <summary className="source-editor-panel-summary"><span><strong>{t("common.models")}</strong><small>{t("models.memberRulesHint")}</small></span><small>{t("common.enabled")}: {enabledModels.length}/{modelIds.length}</small></summary>
+        <div className="member-model-content">{modelIds.length ? <ul>{modelIds.map((model) => {
           const enabled = enabledModels.includes(model);
           return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
             <code>{model}</code>
             <StatusIcon status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
             <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => setEnabledModels((values) => toggle(values, model))} />
           </li>;
-        })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}
-      </section>
+        })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}</div>
+      </details>
     </div>
   </Dialog>;
 }

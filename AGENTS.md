@@ -7,10 +7,10 @@
 - Keep UI text in `src/src/i18n`.
 - Keep React in `src/src` display-only: local state, components, and Tauri command wrappers.
 - Keep API calls, key storage, Codex config writes, validation, formatting, top-up intents, and process control in `src-tauri/src`.
-- Keep Local Pool, Remote Pool, and Ready API configuration paths separate.
+- Keep local pool, remote pool, and hosted API selection paths separate.
 - Configure Codex/OpenCode through reversible profile attach/restore commands.
 - Render local and remote runtime snapshots returned by Rust commands. Render
-  Ready API account state returned by the Zenith API.
+  hosted API state returned by the selected provider integration.
 - Do not hardcode provider, model, price, routing, or admin assumptions in the desktop UI.
 - Keep public local-pool features local-first. User-owned accounts must stay on
   the user's device by default and must not be uploaded into Zenith server
@@ -25,7 +25,7 @@
   hardcode local pool behavior around Zenith API only.
 - Treat server operator upload as a private/admin capability for Zenith-owned
   accounts only.
-- Keep Zenith API mode, personal local pool mode, and private operator upload
+- Keep hosted API selection, personal local pool, and private operator upload
   mode separate in UI, storage, and docs.
 - Use the existing key storage path.
 - Create top-up links through the project helper endpoint.
@@ -68,11 +68,12 @@ bun run app:build
 
 ## Contracts
 
-- Ready API mode writes Codex config for `https://api.zenithmarket.dev/v1`.
+- API selection writes the chosen compatible endpoint through reversible
+  profile operations.
 - Local and Remote Pool modes write their selected OpenAI-compatible endpoint
   and generated pool key through reversible profile operations.
 - The app uses project-owned helper endpoints for stats, usage history, usage version, and top-up intents.
-- Model and balance displays come from Zenith API responses.
+- Model and balance displays come from the selected provider when available.
 - UI copy should describe Zenith Relay behavior.
 - Current product direction and supported behavior live in
   `PLANNING.md`; incomplete work and acceptance gates live in

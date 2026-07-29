@@ -16,12 +16,12 @@ Each operating mode has its own complete guide:
 | Mode | Runtime | Guide |
 | --- | --- | --- |
 | **This computer** | Personal pool and `/v1` endpoint run inside the desktop app. | [Open guide](this-computer.md) |
-| **Zenith API** | ChatGPT connects directly to a selected compatible hosted API. | [Open guide](zenith-api.md) |
+| **Choose API** | ChatGPT connects directly to a selected compatible hosted API. | [Open guide](choose-api.md) |
 | **My server** | Personal pool runs on a Relay Server you operate. | [Open guide](my-server.md) |
 
 Use **This computer** first when testing personal accounts. Use **My server**
 only when the endpoint must continue after the desktop app closes. Use
-**Zenith API** when an existing hosted API key is enough and no personal pool
+**Choose API** when an existing hosted API key is enough and no personal pool
 is required.
 
 ## Install
@@ -93,7 +93,8 @@ diagnostics and usage records.
 - **This computer** stops when the desktop process stops.
 - **My server** still requires the live production acceptance listed in the
   roadmap before it should be called production-ready.
-- Multi-server distributed leases and prompt affinity are not implemented.
+- Multi-server distributed leases and cross-server prompt affinity are not
+  implemented.
 - Additional account systems and client integrations require a permitted,
   reversible, tested authentication/configuration path.
 

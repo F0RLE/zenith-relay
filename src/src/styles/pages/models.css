@@ -316,20 +316,12 @@
   min-width: 0;
 }
 
-.member-model-rules > header {
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--relay-border);
-}
-
-.member-model-rules h2 {
-  margin: 0;
-  font-size: 13px;
-  line-height: 18px;
-  font-weight: 650;
+.member-model-content {
+  padding: 0 12px 8px;
 }
 
 .member-model-rules ul {
-  max-height: min(38vh, 360px);
+  max-height: min(36vh, 320px);
   margin: 0;
   padding: 0;
   overflow: auto;
@@ -343,7 +335,12 @@
   grid-template-columns: minmax(0, 1fr) auto 36px;
   align-items: center;
   gap: 12px;
+  padding-inline: 2px;
   border-bottom: 1px solid var(--relay-border);
+}
+
+.member-model-rules li:last-child {
+  border-bottom: 0;
 }
 
 .member-model-rules li > code {

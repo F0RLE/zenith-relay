@@ -1,4 +1,4 @@
-# Zenith API
+# Choose API
 
 > ChatGPT connects directly to a hosted OpenAI-compatible API. The account pool
 > and Zenith Relay local API are not involved in this mode.
@@ -25,13 +25,17 @@ keeping Zenith Relay open.
 directly to the ChatGPT profile, so the desktop application may be closed after
 setup.
 
+Direct ChatGPT/Codex profile attachment currently requires a **Responses API**
+source. A Chat Completions source can be saved, but its **Connect ChatGPT**
+action remains unavailable.
+
 This mode has no **Pool**, **API & ChatGPT**, or **Usage** pages. The provider
 owns routing, availability, and request logs. **Overview** displays only the
 balance and counters exposed by the selected provider.
 
 ## Before you start
 
-- A base HTTPS URL for an OpenAI-compatible API.
+- A base HTTPS URL for a Responses-compatible API when connecting ChatGPT.
 - A client API key issued by that service.
 - The required model list, or an endpoint capable of returning it.
 - Current provider prices when they differ from the official catalog.
@@ -41,10 +45,11 @@ A Zenith Relay server management token is not valid here. This mode requires a
 
 ## Connect an API
 
-1. Switch to **Zenith API**.
+1. Switch to **Choose API**.
 2. Open **Connections** and select **Add API**.
 3. Choose a known provider profile or **Custom API**.
-4. Enter a clear name, base URL, and client key.
+4. Enter a clear name, base URL, client key, and select **Responses API** for a
+   direct ChatGPT connection.
 5. Save the source and wait for model discovery.
 6. Open the saved source menu and select **Connect ChatGPT**.
 7. Confirm the profile backup before switching.
@@ -80,7 +85,8 @@ A Zenith Relay server management token is not valid here. This mode requires a
 | `401 Unauthorized` | Key value, expiry, and issuing service | Create or enter a new client key |
 | `404` or no models | Base URL and API compatibility | Remove model-specific paths and verify `/v1` in provider docs |
 | `429 Too Many Requests` | Balance, quota, and provider rate limit | Add balance, wait for reset, or select another source |
-| Model is listed but rejected | Protocol supported by that model | Check Responses, Chat Completions, or Messages support |
+| **Connect ChatGPT** is unavailable | Saved source protocol | Change the source to **Responses API**; direct Chat Completions attachment is not supported |
+| Model is listed but rejected | Protocol supported by that model | Verify Responses API support in the provider documentation |
 | Overview has no balance | Provider statistics support | Use the provider dashboard; re-adding the key is unnecessary |
 | ChatGPT still uses the old endpoint | Active profile | Select **Connect ChatGPT** again on the intended source |
 

@@ -290,6 +290,7 @@ test("API source routing editor stays readable in the standard window", async ({
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-840x560.png" });
   await page.setViewportSize({ width: 1024, height: 681 });
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-1024x681.png" });
+  await dialog.locator(".member-model-rules > summary").click();
   await dialog.locator('[data-member-model-id="gpt-5.4"]').scrollIntoViewIfNeeded();
   await expect(dialog.locator('[data-member-model-id="gpt-5.4"]')).toBeVisible();
   await page.screenshot({ path: "output/playwright/api-source-models-ru-dark-1024x681.png" });
@@ -441,8 +442,9 @@ test("source prices are grouped by provider and Claude exposes cache TTLs", asyn
   await page.getByRole("tab", { name: "Источники API" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Изменить" }).click();
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
-  await dialog.locator("summary").filter({ hasText: "OpenAI" }).click();
-  await dialog.locator("summary").filter({ hasText: "Claude" }).click();
+  await dialog.locator(".source-price-section > summary").click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "Claude" }).click();
   await expect(dialog.getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -952,6 +954,7 @@ for (const viewport of viewports) {
     await expect(modeMenu).toBeHidden();
 
     if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
+      await expect(page.getByRole("button", { name: "Help" })).toBeVisible();
       await page.getByRole("button", { name: "Expand sidebar" }).click();
     } else {
       await page.getByRole("button", { name: "Collapse sidebar" }).click();
@@ -1370,7 +1373,8 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await expect(dialog).not.toContainText("Приоритет при равенстве");
   await expect(dialog).not.toContainText("Доля трафика");
   await expect(dialog.getByText("Не назначать запросы", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Модели" })).toBeVisible();
+  await dialog.locator(".member-model-rules > summary").click();
+  await expect(dialog.locator(".member-model-rules > summary")).toContainText("Модели");
   await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
   expect(await dialog.locator("[data-member-model-id]").evaluateAll((rows) => rows.every((row) => row.scrollWidth <= row.clientWidth))).toBe(true);
   await page.screenshot({ path: "output/playwright/pool-member-dialog-ru-840x560.png" });

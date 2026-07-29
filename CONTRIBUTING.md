@@ -49,7 +49,7 @@ PLANNING.md
 ROADMAP.md
 docs/help/<locale>/README.md
 docs/help/<locale>/this-computer.md
-docs/help/<locale>/zenith-api.md
+docs/help/<locale>/choose-api.md
 docs/help/<locale>/my-server.md
 docs/screenshots/*.png
 ~~~

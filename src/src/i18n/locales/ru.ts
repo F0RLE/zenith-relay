@@ -27,7 +27,7 @@ const legacyRu = {
   },
   modes: {
     label: "Режим работы",
-    readyApi: "Готовый API",
+    readyApi: "Выбор API",
     localPool: "На этом компьютере",
   },
   tabs: {
@@ -306,7 +306,7 @@ const relayRu = {
     },
     connectionLocal: "Подключите личную учётную запись",
     connectionRemote: "Подключите свой сервер",
-    connectionReady: "Подключите готовый API",
+    connectionReady: "Выберите API",
     oauthHint: "Используйте текущий вход ChatGPT, войдите в другую учётную запись или импортируйте файл.",
     oauthHintNoProfile: "Войдите в учётную запись ChatGPT или импортируйте сохранённый файл.",
     importCurrentProfile: "Импортировать текущий профиль",
@@ -329,7 +329,7 @@ const relayRu = {
     quickSetup: "Повторить быструю настройку",
     modes: {
       local: { title: "Этот компьютер" },
-      zenith: { title: "Zenith API" },
+      zenith: { title: "Выбор API" },
       remote: { title: "Мой сервер" },
     },
   },
@@ -976,6 +976,7 @@ const relayRu = {
     other: "Другие",
   },
   models: {
+    memberRulesHint: "Выберите модели, которые может обслуживать этот участник пула.",
     addRule: "Добавить правило",
     emptyTitle: "В пуле нет моделей",
     emptyDescription: "Модели появятся после ответа исправной учётной записи или источника.",
@@ -1005,7 +1006,7 @@ const relayRu = {
     subtitles: {
       local: "Локальный API и подключение ChatGPT",
       remote: "API под управлением вашего сервера",
-      zenith: "Готовый API и настройка ChatGPT",
+      zenith: "Выбранный API и настройка ChatGPT",
     },
     views: "Виды адреса API",
     endpoint: "Адрес API",
@@ -1022,7 +1023,7 @@ const relayRu = {
     runtimeHints: {
       local: "Запросы принимаются только на этом компьютере.",
       remote: "Состояние API синхронизируется с вашим сервером.",
-      zenith: "Подключение использует выбранный готовый API.",
+      zenith: "Подключение использует выбранный API.",
     },
     settings: "Настройка порта",
     port: "Порт",
@@ -1273,7 +1274,7 @@ const relayRu = {
     clearFilters: "Сбросить фильтры",
     clearLogs: "Очистить журналы",
     clearConfirm: "Безвозвратно очистить журналы запросов этой среды?",
-    clearUnavailable: "Использованием готового API управляет его сервис.",
+    clearUnavailable: "Использованием выбранного API управляет его сервис.",
     remoteLoadFailed: "Не удалось загрузить статистику использования. Проверьте подключение и повторите.",
     pagination: "Страницы использования",
     page: "Страница {{page}} из {{total}}",

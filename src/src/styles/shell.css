@@ -502,8 +502,11 @@
 .sidebar-collapsed .mode-picker > button span,
 .sidebar-collapsed .relay-sidebar nav button span,
 .sidebar-collapsed .mode-picker > button svg:last-child,
-.sidebar-collapsed .sidebar-footer-row > .sidebar-help,
 .sidebar-collapsed .sidebar-update > span {
+  display: none;
+}
+
+.sidebar-collapsed .sidebar-help-copy {
   display: none;
 }
 
@@ -512,7 +515,18 @@
 }
 
 .sidebar-collapsed .sidebar-footer-row {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+}
+
+.sidebar-collapsed .sidebar-footer-row > .sidebar-help {
+  width: 34px;
+  min-height: 34px;
   justify-content: center;
+  padding: 0;
+  border: 1px solid var(--relay-border);
+  background: var(--relay-surface);
 }
 
 .sidebar-collapsed .sidebar-update {

@@ -6,18 +6,18 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import enLocal from "../../../../../docs/help/en/this-computer.md?raw";
 import enRemote from "../../../../../docs/help/en/my-server.md?raw";
-import enZenith from "../../../../../docs/help/en/zenith-api.md?raw";
+import enChooseApi from "../../../../../docs/help/en/choose-api.md?raw";
 import ruLocal from "../../../../../docs/help/ru/this-computer.md?raw";
 import ruRemote from "../../../../../docs/help/ru/my-server.md?raw";
-import ruZenith from "../../../../../docs/help/ru/zenith-api.md?raw";
+import ruChooseApi from "../../../../../docs/help/ru/choose-api.md?raw";
 import type { RelayMode } from "../api/types";
 import { Button, PageHeader, Tabs } from "../components/Ui";
 import { useRelayState } from "../state/RelayStateProvider";
 
 const modes: RelayMode[] = ["local", "zenith", "remote"];
 const guides = {
-  en: { local: enLocal, zenith: enZenith, remote: enRemote },
-  ru: { local: ruLocal, zenith: ruZenith, remote: ruRemote },
+  en: { local: enLocal, zenith: enChooseApi, remote: enRemote },
+  ru: { local: ruLocal, zenith: ruChooseApi, remote: ruRemote },
 } satisfies Record<"en" | "ru", Record<RelayMode, string>>;
 const markdownComponents: Components = {
   h1: ({ children }) => <h1 id={headingId(children)}>{children}</h1>,

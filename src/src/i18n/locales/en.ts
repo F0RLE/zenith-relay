@@ -27,7 +27,7 @@ const legacyEn = {
   },
   modes: {
     label: "Runtime mode",
-    readyApi: "Ready API",
+    readyApi: "Choose API",
     localPool: "This computer",
   },
   tabs: {
@@ -306,7 +306,7 @@ const relayEn = {
     },
     connectionLocal: "Connect a personal account",
     connectionRemote: "Connect your server",
-    connectionReady: "Connect a ready API",
+    connectionReady: "Choose an API",
     oauthHint: "Use the current ChatGPT sign-in, sign in to another account, or import a file.",
     oauthHintNoProfile: "Sign in to ChatGPT or import a saved account file.",
     importCurrentProfile: "Import current profile",
@@ -329,7 +329,7 @@ const relayEn = {
     quickSetup: "Repeat quick setup",
     modes: {
       local: { title: "This computer" },
-      zenith: { title: "Zenith API" },
+      zenith: { title: "Choose API" },
       remote: { title: "My server" },
     },
   },
@@ -976,6 +976,7 @@ const relayEn = {
     other: "Other",
   },
   models: {
+    memberRulesHint: "Choose which models this pool member may serve.",
     addRule: "Add rule",
     emptyTitle: "No pool models",
     emptyDescription: "Models appear after a healthy account or source reports them.",
@@ -1005,7 +1006,7 @@ const relayEn = {
     subtitles: {
       local: "Local API and ChatGPT connection",
       remote: "API managed by your server",
-      zenith: "Ready API and ChatGPT setup",
+      zenith: "Selected API and ChatGPT setup",
     },
     views: "Gateway views",
     endpoint: "API endpoint",
@@ -1022,7 +1023,7 @@ const relayEn = {
     runtimeHints: {
       local: "Requests are accepted only on this computer.",
       remote: "API status is synchronized with your server.",
-      zenith: "The connection uses the selected ready API.",
+      zenith: "The connection uses the selected API.",
     },
     settings: "Port settings",
     port: "Port",
@@ -1273,7 +1274,7 @@ const relayEn = {
     clearFilters: "Clear filters",
     clearLogs: "Clear logs",
     clearConfirm: "Permanently clear request logs for this runtime?",
-    clearUnavailable: "Ready API usage is managed by its service.",
+    clearUnavailable: "Usage for the selected API is managed by its service.",
     remoteLoadFailed: "Usage statistics could not be loaded. Check the connection and retry.",
     pagination: "Usage pages",
     page: "Page {{page}} of {{total}}",

@@ -37,7 +37,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await chooseOption(page, sourceDialog, "Protocol", "chat_completions");
   await expect(sourceDialog.getByRole("radiogroup", { name: "API source role" })).toHaveCount(0);
   await expect(sourceDialog.locator("[data-member-model-id]")).toHaveCount(0);
-  await sourceDialog.locator("summary").filter({ hasText: "OpenAI" }).click();
+  await sourceDialog.locator(".source-price-section > summary").click();
+  await sourceDialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await sourceDialog.getByRole("textbox", { name: "Input token price for gpt-5.4", exact: true }).fill("1.25");
   await sourceDialog.getByRole("textbox", { name: "Output token price for gpt-5.4", exact: true }).fill("3.5");
   await sourceDialog.getByRole("button", { name: "Save" }).click();
@@ -124,15 +125,17 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("API first");
   await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("Accounts");
   await sourceRoles.getByRole("radio", { name: /API first/ }).click();
-  await expect(sourcePolicy.locator('.source-fallback-step[data-current="true"]')).toContainText("API first1");
+  await expect(sourcePolicy.locator('.source-route-stage[data-current="true"]')).toContainText("API first");
   await sourcePolicy.getByRole("spinbutton", { name: "Traffic share" }).fill("250");
   await chooseOption(page, sourcePolicy, "Recovery check", "60");
+  await sourcePolicy.locator(".member-model-rules > summary").click();
   await sourcePolicy.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
   await expect(sourcePolicy.getByLabel("Drain")).toHaveCount(0);
   await sourcePolicy.getByRole("button", { name: "Save policy" }).click();
   await page.getByRole("button", { name: "Pool member policy: Personal Plus" }).click();
   await page.getByLabel("Drain").check();
   await page.getByLabel("Purchase cost, USD").fill("25.50");
+  await page.locator(".member-model-rules > summary").click();
   await page.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
   await page.getByRole("button", { name: "Save policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
@@ -180,11 +183,12 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await page.getByRole("tab", { name: "Sources" }).click();
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
+  await dialog.locator(".source-price-section > summary").click();
   await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "ClaudeModels: 1", "Google GeminiModels: 1", "xAI GrokModels: 1", "Zhipu GLMModels: 1", "OtherModels: 1"]);
 
-  await dialog.locator("summary").filter({ hasText: "OpenAI" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await expect(dialog.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
-  await dialog.locator("summary").filter({ hasText: "Claude" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "Claude" }).click();
   await dialog.getByRole("textbox", { name: "Input token price for claude-opus-4-8", exact: true }).fill("1.4");
   await dialog.getByRole("textbox", { name: "Output token price for claude-opus-4-8", exact: true }).fill("7");
   await dialog.getByRole("textbox", { name: "Cached input token price for claude-opus-4-8", exact: true }).fill("1.6");
@@ -1837,7 +1841,7 @@ test("OAuth member policy hides manual routing controls", async ({ page }) => {
   await expect(dialog).not.toContainText("Tie-break priority");
   await expect(dialog).not.toContainText("Traffic share");
   await expect(dialog.getByText("Drain", { exact: true })).toBeVisible();
-  await expect(dialog.getByRole("heading", { name: "Models" })).toBeVisible();
+  await expect(dialog.locator(".member-model-rules > summary")).toContainText("Models");
   await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
   await expect(dialog.getByRole("button", { name: "Remove from pool" })).toHaveCount(0);
 });
@@ -1941,7 +1945,7 @@ test("Help opens the current mode guide and keeps quick setup explicit", async (
   await page.goto("/");
   await page.getByRole("button", { name: "Help" }).click();
   await expect(page.getByRole("heading", { name: "Help" })).toBeVisible();
-  await expect(page.getByRole("tab")).toHaveText(["This computer", "Zenith API", "My server"]);
+  await expect(page.getByRole("tab")).toHaveText(["This computer", "Choose API", "My server"]);
   await expect(page.getByRole("tab", { name: "This computer" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("heading", { name: "This computer", level: 1 })).toBeVisible();
   const troubleshooting = page.getByRole("link", { name: "If requests fail" });

@@ -13,8 +13,8 @@ single OpenAI-compatible endpoint. It has three explicit modes:
 
 | Mode | Runtime | Data ownership |
 | --- | --- | --- |
-| Zenith API | A selected compatible hosted API. | The selected source and its local secret reference. |
 | This computer | The desktop process and a loopback endpoint. | The user's computer and OS credential store. |
+| Choose API | A selected compatible hosted API. | The selected source and its local secret reference. |
 | My server | A user-managed Relay server. | The user's server, encrypted vault, and SQLite database. |
 
 The desktop app is not a public account marketplace, a Zenith billing backend,
@@ -166,9 +166,11 @@ The server is a personal single-deployment runtime:
 
 The desktop client negotiates protocol capabilities before it performs a
 remote management action. It can manage accounts, sources, proxies, keys,
-model/routing settings, usage, backups, and profile attachment through that
-contract. The server is not yet documented as a multi-replica service:
-distributed leases and cross-node prompt affinity remain future work.
+model/routing settings, usage, and profile attachment through that contract.
+Server backup and restore use the standalone server CLI so they can validate
+the database and encrypted vault while the data directory is locked. The
+server is not yet documented as a multi-replica service: distributed leases
+and cross-node prompt affinity remain future work.
 
 ## Future compatibility design
 

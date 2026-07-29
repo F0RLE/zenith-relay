@@ -418,21 +418,77 @@
   gap: 12px;
 }
 
-.source-price-section {
-  padding-top: 14px;
-  border-top: 1px solid var(--relay-border);
+.source-editor-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-surface);
 }
 
-.source-price-section > header > div {
+.source-editor-panel-summary {
+  min-height: 58px;
   display: grid;
-  gap: 3px;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+  list-style: none;
 }
 
-.source-price-section > header p {
-  margin: 0;
+.source-editor-panel-summary::-webkit-details-marker {
+  display: none;
+}
+
+.source-editor-panel-summary::after {
+  width: 7px;
+  height: 7px;
+  justify-self: center;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  color: var(--relay-muted);
+  content: "";
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform 120ms ease;
+}
+
+.source-editor-panel[open] > .source-editor-panel-summary::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.source-editor-panel-summary:hover {
+  background: var(--relay-subtle);
+}
+
+.source-editor-panel-summary > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.source-editor-panel-summary strong {
+  font-size: 13px;
+}
+
+.source-editor-panel-summary small {
   color: var(--relay-muted);
   font-size: 11px;
   line-height: 16px;
+}
+
+.source-editor-panel-summary > small {
+  white-space: nowrap;
+}
+
+.source-editor-panel[open] > .source-editor-panel-summary {
+  border-bottom: 1px solid var(--relay-border);
+}
+
+.source-price-content {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
 }
 
 .source-price-groups {
@@ -561,29 +617,16 @@
 
 .source-routing-section {
   display: grid;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--relay-border);
-}
-
-.source-routing-toolbar {
-  display: grid;
-  grid-template-columns: auto minmax(360px, 1fr);
-  align-items: center;
-  gap: 14px;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-surface);
 }
 
 .source-routing-heading {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  white-space: nowrap;
-}
-
-.source-routing-heading > svg {
-  width: 16px;
-  height: 16px;
-  color: var(--relay-muted);
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--relay-border);
 }
 
 .source-routing-heading h3 {
@@ -591,81 +634,105 @@
   font-size: 13px;
 }
 
-.source-role-options {
-  width: 100%;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+.source-routing-heading p {
+  margin: 3px 0 0;
+  color: var(--relay-muted);
+  font-size: 11px;
+  line-height: 16px;
 }
 
-.source-role-options button {
-  min-width: 0;
-  padding-inline: 8px;
+.source-route-order {
+  display: grid;
+  gap: 7px;
+}
+
+.source-route-order > span {
+  color: var(--relay-muted);
+  font-size: 11px;
   font-weight: 600;
 }
 
-.source-fallback-row {
+.source-route-map {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: center;
-  gap: 12px;
-}
-
-.source-fallback-row > span {
-  color: var(--relay-muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.source-fallback-flow {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  overflow-x: auto;
-}
-
-.source-fallback-step {
-  display: flex;
-  align-items: center;
-  min-width: 104px;
-  flex: 1 0 104px;
-}
-
-.source-fallback-step > span {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-width: 0;
-  width: 100%;
-  min-height: 30px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
-  padding: 5px 7px;
-  border-bottom: 1px solid var(--relay-border);
 }
 
-.source-fallback-step[data-current="true"] > span {
-  border-color: var(--relay-accent);
+.source-route-stage {
+  min-width: 0;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+  background: var(--relay-subtle);
+  color: var(--relay-text);
+  text-align: left;
+}
+
+.source-route-stage:is(button) {
+  cursor: pointer;
+}
+
+.source-route-stage:is(button):hover,
+.source-route-stage:is(button):focus-visible {
+  border-color: var(--relay-border-strong);
+  background: color-mix(in srgb, var(--relay-accent) 5%, var(--relay-surface));
+}
+
+.source-route-stage[data-current="true"] {
+  border-color: color-mix(in srgb, var(--relay-accent) 62%, var(--relay-border));
+  background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);
 }
 
-.source-fallback-step strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
+.source-route-stage > small {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--relay-border);
+  border-radius: 50%;
+  color: var(--relay-muted);
+  font-size: 10px;
 }
 
-.source-fallback-step small {
+.source-route-stage[data-current="true"] > small {
+  border-color: color-mix(in srgb, var(--relay-accent) 50%, var(--relay-border));
+  color: var(--relay-accent-hover);
+}
+
+.source-route-stage strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.source-route-stage > span {
+  min-width: 20px;
+  padding: 2px 5px;
+  border-radius: 10px;
+  background: var(--relay-surface);
   color: var(--relay-muted);
+  font-size: 10px;
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
-.source-fallback-step > svg {
-  width: 15px;
-  height: 15px;
-  flex: 0 0 15px;
-  margin: 0 4px;
+.source-route-stage.accounts {
   color: var(--relay-muted);
+}
+
+.source-role-help {
+  min-height: 18px;
+  margin: 0;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .source-routing-controls {
@@ -687,6 +754,12 @@
 
 .source-routing-control .field-option-menu {
   min-width: 0;
+}
+
+.source-routing-control > small {
+  color: var(--relay-muted);
+  font-size: 10px;
+  line-height: 15px;
 }
 
 .relay-dialog .api-provider-options {

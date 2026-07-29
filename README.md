@@ -21,7 +21,7 @@ the Help Center and GitHub navigation do not depend on one long page.
 | --- | --- | --- |
 | Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
 | This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
-| Zenith API | [Guide](docs/help/en/zenith-api.md) | [Инструкция](docs/help/ru/zenith-api.md) |
+| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
 | My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
 
 ## What Is Shipped
