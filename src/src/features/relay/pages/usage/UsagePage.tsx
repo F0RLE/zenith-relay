@@ -77,13 +77,7 @@ export function UsagePage() {
   const remoteUsageSupported = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const requestFiltersActive = view === "requests";
   const selectedAccount = runtime?.accounts.find((account) => account.id === selectedAccountId) ?? null;
-  const knownPoolMemberGroups = mode === "local" ? localUsagePage?.poolMembers : mode === "remote" ? remoteUsagePage?.poolMembers : undefined;
-  const selectedAccountGroup = selectedAccount && mode === "remote"
-    ? knownPoolMemberGroups?.find((group) => (accountDisplayName(null, group.label) ?? group.label) === selectedAccount.label)
-    : null;
-  const selectedAccountQuery = selectedAccount
-    ? mode === "remote" ? selectedAccountGroup?.key ?? selectedAccount.id : selectedAccount.id
-    : undefined;
+  const selectedAccountQuery = selectedAccount?.id;
   const usageQuery = useMemo<RemoteUsageQuery>(() => ({
     page,
     pageSize: 50,
