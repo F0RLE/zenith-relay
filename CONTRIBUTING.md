@@ -134,9 +134,11 @@ behavior.
 6. Merge reviewed work into <code>main</code>. Tag and publish only after the
    release checks and live acceptance pass.
 
-The updater changelog is read from the GitHub Release body. Keep each language
-in a marked section; the app selects the exact locale, its base language, then
-English as the fallback:
+### Updater changelog for release admins
+
+The updater changelog is read from the GitHub Release body. In the published
+Release, put each translation after a <code>relay-notes:&lt;locale&gt;</code>
+marker. A section continues until the next marker:
 
 ~~~markdown
 <!-- relay-notes:en -->
@@ -146,6 +148,11 @@ English as the fallback:
 - Изменения на русском
 ~~~
 
-Use the same marker with a new locale code when localization grows. After
-editing a published Release, rerun the <code>Publish updater manifest</code>
-job so <code>latest.json</code> receives the revised text.
+Use lowercase locale codes. For a new language, add another section such as
+<code>&lt;!-- relay-notes:zh --&gt;</code>; no updater code change is required. The
+app selects the exact locale, then its base language, then English, and finally
+the first available section.
+
+After editing the Release, rerun the <code>Publish updater manifest</code> job.
+It copies the current Release body into <code>latest.json</code>; editing the
+Release without rerunning that job does not update the in-app changelog.
