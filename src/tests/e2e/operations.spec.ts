@@ -2261,23 +2261,31 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
 });
 
-test("pool account economics are visible by default and the preference persists", async ({ page }) => {
+test("account economics visibility is shared by connections and pool and persists", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const economics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const connectionEconomics = page.locator(".account-card .account-economics-strip");
 
-  await expect(economics.first()).toBeVisible();
+  await expect(connectionEconomics.first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account economics" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Hide account economics" }).click();
-  await expect(economics).toHaveCount(0);
+  await expect(connectionEconomics).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
-  await page.reload();
+
   await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const poolEconomics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
   await expect(page.getByRole("button", { name: "Show account economics" })).toHaveAttribute("aria-pressed", "false");
-  await expect(economics).toHaveCount(0);
+  await expect(poolEconomics).toHaveCount(0);
   await page.getByRole("button", { name: "Show account economics" }).click();
-  await expect(economics.first()).toBeVisible();
+  await expect(poolEconomics.first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Hide account economics" })).toHaveAttribute("aria-pressed", "true");
+  await expect(connectionEconomics.first()).toBeVisible();
+  await page.reload();
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(connectionEconomics.first()).toBeVisible();
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

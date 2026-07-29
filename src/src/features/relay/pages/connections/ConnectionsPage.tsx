@@ -1,6 +1,6 @@
 import { ChangeEvent, FormEvent, Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
-import { CalendarDays, Check, CircleAlert, Clock3, Copy, Database, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, MapPin, Network, Pencil, Play, Plus, Power, RefreshCw, Server, Shuffle, Square, Trash2, Upload, UserRound, UsersRound, WifiOff, X } from "lucide-react";
+import { CalendarDays, Check, CircleAlert, Clock3, Copy, Database, DollarSign, Download, ExternalLink, Eye, EyeOff, Layers3, ListMinus, ListPlus, Loader2, LogIn, MapPin, Network, Pencil, Play, Plus, Power, RefreshCw, Server, Shuffle, Square, Trash2, Upload, UserRound, UsersRound, WifiOff, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
 import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
@@ -269,7 +269,7 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
 
 function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible } = useRelayState();
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
@@ -488,6 +488,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           <IconButton className="danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
+          <IconButton className="pool-economics-toggle" label={t(accountEconomicsVisible ? "pool.hideEconomics" : "pool.showEconomics")} icon={<DollarSign aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} />
           {canRevealAccountIdentities && allAccounts.some((account) => account.secretAvailable) ? <IconButton label={t(accountIdentitiesVisible ? "accounts.hideAllIdentities" : "accounts.revealAllIdentities")} icon={accountIdentitiesBusy ? <Loader2 className="spin" aria-hidden /> : accountIdentitiesVisible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={accountIdentitiesBusy} onClick={() => setAccountIdentitiesVisible(!accountIdentitiesVisible)} /> : null}
           {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
@@ -563,7 +564,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
           </div>
           <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
           <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
-          <QuotaEconomicsStrip account={account} />
+          {accountEconomicsVisible ? <QuotaEconomicsStrip account={account} /> : null}
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer
               ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />

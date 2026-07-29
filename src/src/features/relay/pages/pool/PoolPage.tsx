@@ -93,7 +93,7 @@ function formatConfigurationValue(value: unknown) {
 
 function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy, codexPoolOauthSelection, localUsage, remoteUsage } = useRelayState();
+  const { mode, runtime, perform, busy, codexPoolOauthSelection, localUsage, remoteUsage, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -102,7 +102,6 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [errorDetails, setErrorDetails] = useState<AccountSummary | null>(null);
-  const [economicsVisible, setEconomicsVisible] = useState(() => localStorage.getItem("relay.poolEconomicsVisible") !== "false");
   const [nowMs, setNowMs] = useState(Date.now());
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
@@ -204,11 +203,6 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
       : relayCommands.remoteAction({ type: "refresh_account", id: account.id }),
     "feedback.refreshed",
   );
-  const toggleEconomics = () => setEconomicsVisible((current) => {
-    const next = !current;
-    localStorage.setItem("relay.poolEconomicsVisible", String(next));
-    return next;
-  });
   const updateServiceTier = (fast: boolean) => {
     const defaultServiceTier = fast ? "fast" : "standard";
     if (defaultServiceTier === serviceTier) return;
@@ -242,7 +236,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
-            <IconButton className="pool-economics-toggle" label={t(economicsVisible ? "pool.hideEconomics" : "pool.showEconomics")} icon={<DollarSign aria-hidden />} aria-pressed={economicsVisible} onClick={toggleEconomics} />
+            <IconButton className="pool-economics-toggle" label={t(accountEconomicsVisible ? "pool.hideEconomics" : "pool.showEconomics")} icon={<DollarSign aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} />
             <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
           </div>
         </div>
@@ -298,7 +292,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>{member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}</div>
           <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}</> : <span>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</span>}</div>
-          {member.kind === "account" && economicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
+          {member.kind === "account" && accountEconomicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
               <IconButton className="danger" label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} />

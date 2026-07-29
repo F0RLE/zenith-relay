@@ -23,6 +23,8 @@ type RelayContextValue = {
   accountIdentitiesBusy: boolean;
   canRevealAccountIdentities: boolean;
   setAccountIdentitiesVisible: (visible: boolean) => void;
+  accountEconomicsVisible: boolean;
+  setAccountEconomicsVisible: (visible: boolean) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
   localUsage: LocalUsage[];
   localUsagePage: LocalUsagePage | null;
@@ -72,6 +74,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => stored("relay.profileSwitchBackupPrompt", "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => stored("relay.accountIdentitiesVisible", "0") === "1");
+  const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => stored("relay.poolEconomicsVisible", "true") !== "false");
   const [accountIdentitiesBusy, setAccountIdentitiesBusy] = useState(false);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
@@ -449,6 +452,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (!visible) setRevealedAccountIdentities({});
   }, []);
 
+  const setAccountEconomicsVisible = useCallback((visible: boolean) => {
+    localStorage.setItem("relay.poolEconomicsVisible", String(visible));
+    setAccountEconomicsVisibleState(visible);
+  }, []);
+
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
     const accounts = runtime?.accounts ?? [];
     const matches = accountId
@@ -478,6 +486,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountIdentitiesBusy,
     canRevealAccountIdentities,
     setAccountIdentitiesVisible,
+    accountEconomicsVisible,
+    setAccountEconomicsVisible,
     accountDisplayName,
     localUsage,
     localUsagePage,
@@ -503,7 +513,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSwitchBackupPrompt,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
