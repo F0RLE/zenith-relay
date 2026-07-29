@@ -1029,7 +1029,7 @@ for (const viewport of viewports) {
 
 for (const theme of themes) {
   test(`manual update dialog ${theme}`, async ({ page }) => {
-    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, updateVersion: "1.1.0", updateBody: "Ускорена параллельная маршрутизация\nОбновлён экран настроек" });
+    await installTauriMock(page, { locale: "ru", mode: "local", theme, populated: true, bundleType: null, updateVersion: "1.1.0", updateBody: "<!-- relay-notes:en -->\nFaster parallel routing\nUpdated settings\n<!-- relay-notes:ru -->\nУскорена параллельная маршрутизация\nОбновлён экран настроек" });
     await page.setViewportSize({ width: 840, height: 560 });
     await page.goto("/");
     const updateButton = page.getByRole("button", { name: "Открыть обновление 1.1.0" });
@@ -1037,6 +1037,9 @@ for (const theme of themes) {
     await updateButton.click();
     const dialog = page.getByRole("dialog", { name: "Обновление 1.1.0" });
     await expect(dialog).toContainText("Ускорена параллельная маршрутизация");
+    await expect(dialog).not.toContainText("Faster parallel routing");
+    await expect(dialog.getByRole("button", { name: "Пропустить 1.1.0" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Обновить", exact: true })).toBeVisible();
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;

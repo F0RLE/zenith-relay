@@ -1972,7 +1972,7 @@ test("updates are checked without downloading and require an explicit action", a
   await updateButton.click();
   let dialog = page.getByRole("dialog", { name: "Update 1.1.0" });
   await expect(dialog).toContainText("Faster parallel routing");
-  await dialog.getByRole("button", { name: "Skip this version" }).click();
+  await dialog.getByRole("button", { name: "Skip 1.1.0" }).click();
   await expect(updateButton).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.skippedUpdate"))).toBe("1.1.0");
 
@@ -1984,6 +1984,26 @@ test("updates are checked without downloading and require an explicit action", a
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command))).toEqual(expect.arrayContaining(["plugin:updater|download_and_install", "plugin:process|restart"]));
   commands = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.map((call) => call.command));
   expect(commands.filter((command) => command === "plugin:updater|download_and_install")).toHaveLength(1);
+});
+
+test("portable updates replace the same executable through the verified helper path", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, bundleType: null, updateVersion: "1.1.1", updateBody: "<!-- relay-notes:en -->\nPortable self-update\n<!-- relay-notes:ru -->\nСамообновление portable-версии" });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Open update 1.1.1" }).click();
+  const dialog = page.getByRole("dialog", { name: "Update 1.1.1" });
+  await expect(dialog).toContainText("Portable self-update");
+  await expect(dialog).not.toContainText("Самообновление portable-версии");
+  await expect(dialog.getByRole("button", { name: "Skip 1.1.1", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Update", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Later", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Update", exact: true }).click();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.find((call) => call.command === "plugin:updater|check")?.args).toMatchObject({ target: "windows-x86_64-portable" });
+  expect(calls.some((call) => call.command === "install_portable_update")).toBe(true);
+  expect(calls.some((call) => call.command === "plugin:updater|download_and_install")).toBe(false);
+  expect(calls.some((call) => call.command === "plugin:process|restart")).toBe(false);
 });
 
 test("OAuth sign-in exposes only safe recovery actions", async ({ page }) => {

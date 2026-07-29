@@ -111,6 +111,14 @@
   white-space: pre-wrap;
 }
 
+.update-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .update-progress {
   display: grid;
   gap: 7px;

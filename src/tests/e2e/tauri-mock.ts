@@ -52,6 +52,7 @@ export type MockOptions = {
   updateVersion?: string;
   updateBody?: string;
   updateDate?: string;
+  bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
   mixedModels?: boolean;
 };
@@ -431,6 +432,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (listener.event === event) callbacks.get(listener.handler)?.({ event, id, payload });
       }
     };
+    const sendChannel = (channel: unknown, message: unknown, index = 0) => {
+      const id = Number((channel as { id?: number } | null)?.id);
+      if (Number.isFinite(id)) callbacks.get(id)?.({ index, message });
+    };
 
     const tauri = {
       metadata: {
@@ -445,7 +450,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       unregisterCallback(id: number) { callbacks.delete(id); },
       convertFileSrc(path: string) { return path; },
       async invoke(command: string, args: Record<string, unknown> = {}) {
-        const recordedArgs = command === "plugin:updater|download_and_install"
+        const recordedArgs = command === "plugin:updater|download_and_install" || command === "install_portable_update"
           ? JSON.parse(JSON.stringify(args)) as Record<string, unknown>
           : structuredClone(args);
         invocations.push({ command, args: recordedArgs });
@@ -900,7 +905,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return eventId;
           }
           case "plugin:event|unlisten": eventListeners.delete(Number(args.eventId)); return null;
+          case "plugin:app|bundle_type": return input.bundleType === null ? null : input.bundleType ?? "nsis";
+          case "get_portable_update_target": return input.bundleType === null ? "windows-x86_64-portable" : null;
           case "plugin:updater|check": return input.updateVersion ? { rid: 901, currentVersion: "1.1.0", version: input.updateVersion, date: input.updateDate ?? "2026-07-15T12:00:00Z", body: input.updateBody ?? "Faster routing\nImproved settings", rawJson: {} } : null;
+          case "install_portable_update":
+            sendChannel(args.onEvent, { event: "Started", data: { contentLength: 100 } }, 0);
+            sendChannel(args.onEvent, { event: "Progress", data: { chunkLength: 100 } }, 1);
+            sendChannel(args.onEvent, { event: "Finished" }, 2);
+            return null;
           case "plugin:updater|download_and_install":
           case "plugin:resources|close":
           case "plugin:process|restart":

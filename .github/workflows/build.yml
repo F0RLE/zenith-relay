@@ -124,7 +124,7 @@ jobs:
           | x86-64 (64-bit) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-x64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-x64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-intel.dmg) |
           | AArch64 (ARM64) | [EXE](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.exe) · [Setup](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64-setup.exe) · [MSI](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-windows-arm64.msi) | [AppImage](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.AppImage) · [DEB](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.deb) · [RPM](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-linux-arm64.rpm) | [DMG](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/zenith-relay-macos-arm64.dmg) |
 
-          Windows: use **Setup** for normal installation and auto-updates, or **EXE** for a portable launch.
+          Windows: use **Setup** for normal installation, or **EXE** for a portable launch with in-place updates.
 
           License: [AGPL-3.0-only](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ github.ref_name }}/LICENSE.txt) · [Corresponding source](${{ github.server_url }}/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.zip)
           "@
@@ -135,7 +135,7 @@ jobs:
           if (-not $notes) {
             $notes = "## Changelog`n`nRelease notes are generated from the tagged commit history."
           }
-          $body = "$downloads`n`n$notes"
+          $body = "$downloads`n`n<!-- relay-notes:en -->`n$notes"
           $body | Set-Content -Path release-notes.md -Encoding utf8
       - uses: tauri-apps/tauri-action@v1
         env:
@@ -178,6 +178,19 @@ jobs:
             Copy-Required "*.deb" "artifacts/zenith-relay-${{ matrix.name }}.deb"
             Copy-Required "*.rpm" "artifacts/zenith-relay-${{ matrix.name }}.rpm"
           }
+      - name: Sign portable executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          $portable = "../artifacts/zenith-relay-${{ matrix.name }}.exe"
+          bunx tauri signer sign $portable
+          if (!(Test-Path "$portable.sig")) {
+            throw "Portable updater signature was not created"
+          }
       - name: Upload stable release assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -216,12 +229,19 @@ jobs:
           path: release-artifacts
       - name: Prepare updater assets
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          $releaseNotes = (gh release view "${{ github.ref_name }}" --json body --jq ".body") -join "`n"
+          if (-not $releaseNotes) {
+            throw "Release notes are empty"
+          }
           .github/tools/publish-updater-manifest.ps1 `
             -TagName "${{ github.ref_name }}" `
             -Repository "${{ github.repository }}" `
             -ArtifactsDir "release-artifacts" `
-            -OutputDir "updater-assets"
+            -OutputDir "updater-assets" `
+            -Notes $releaseNotes
           Copy-Item "LICENSE" "updater-assets/LICENSE.txt"
       - name: Upload updater assets
         shell: pwsh

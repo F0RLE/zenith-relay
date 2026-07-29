@@ -9,7 +9,9 @@ param(
   [string]$ArtifactsDir,
 
   [Parameter(Mandatory = $true)]
-  [string]$OutputDir
+  [string]$OutputDir,
+
+  [string]$Notes = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,14 +99,16 @@ Add-Platform "linux-x86_64-rpm" "zenith-relay-linux-x64" "Zenith Relay-${bundleV
 Add-Platform "windows-aarch64" "zenith-relay-windows-arm64" "Zenith Relay_${bundleVersion}_arm64_en-US.msi" "Zenith.Relay_${version}_arm64_en-US.msi"
 $platforms["windows-aarch64-msi"] = $platforms["windows-aarch64"]
 Add-Platform "windows-aarch64-nsis" "zenith-relay-windows-arm64" "Zenith Relay_${bundleVersion}_arm64-setup.exe" "Zenith.Relay_${version}_arm64-setup.exe"
+Add-Platform "windows-aarch64-portable" "zenith-relay-windows-arm64" "zenith-relay-windows-arm64.exe" "Zenith.Relay_${version}_arm64.exe"
 
 Add-Platform "windows-x86_64" "zenith-relay-windows-x64" "Zenith Relay_${bundleVersion}_x64_en-US.msi" "Zenith.Relay_${version}_x64_en-US.msi"
 $platforms["windows-x86_64-msi"] = $platforms["windows-x86_64"]
 Add-Platform "windows-x86_64-nsis" "zenith-relay-windows-x64" "Zenith Relay_${bundleVersion}_x64-setup.exe" "Zenith.Relay_${version}_x64-setup.exe"
+Add-Platform "windows-x86_64-portable" "zenith-relay-windows-x64" "zenith-relay-windows-x64.exe" "Zenith.Relay_${version}_x64.exe"
 
 $latest = [ordered]@{
   version = $version
-  notes = "Zenith Relay $version"
+  notes = $(if ($Notes.Trim()) { $Notes.Trim() } else { "Zenith Relay $version" })
   pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
   platforms = $platforms
 }

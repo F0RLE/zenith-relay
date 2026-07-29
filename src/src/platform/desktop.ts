@@ -1,4 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { getBundleType } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -12,7 +13,13 @@ export type AppUpdate = {
   version: string;
   date?: string;
   body?: string;
+  portable: boolean;
 };
+
+type PortableDownloadEvent =
+  | { event: "Started"; data: { contentLength?: number } }
+  | { event: "Progress"; data: { chunkLength: number } }
+  | { event: "Finished" };
 
 export type Platform = "windows" | "macos" | "linux";
 
@@ -57,25 +64,54 @@ export function recordPerformance(name: string, durationMs: number, context?: st
   }).catch(() => undefined);
 }
 
+async function getPortableUpdateTarget(): Promise<string | null> {
+  const bundleType = await getBundleType().catch(() => undefined);
+  if (bundleType !== null) return null;
+  return invoke<string | null>("get_portable_update_target").catch(() => null);
+}
+
 export async function checkForUpdate(): Promise<AppUpdate | null> {
-  const update = await check();
+  const portableTarget = await getPortableUpdateTarget();
+  const update = await check(portableTarget ? { target: portableTarget } : undefined);
   if (!update) return null;
   const metadata = {
     currentVersion: update.currentVersion,
     version: update.version,
     date: update.date,
     body: update.body,
+    portable: Boolean(portableTarget),
   };
   await update.close();
   return metadata;
 }
 
 export async function installUpdate(
-  expectedVersion: string,
+  updateToInstall: AppUpdate,
   onProgress?: (downloaded: number, total?: number) => void,
 ) {
+  if (updateToInstall.portable) {
+    let downloaded = 0;
+    let total: number | undefined;
+    const channel = new Channel<PortableDownloadEvent>();
+    channel.onmessage = (event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength;
+        downloaded = 0;
+        onProgress?.(downloaded, total);
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        onProgress?.(downloaded, total);
+      }
+    };
+    await invoke<void>("install_portable_update", {
+      expectedVersion: updateToInstall.version,
+      onEvent: channel,
+    });
+    return "installed" as const;
+  }
+
   const update = await check();
-  if (!update || update.version !== expectedVersion) {
+  if (!update || update.version !== updateToInstall.version) {
     await update?.close();
     return "unavailable" as const;
   }

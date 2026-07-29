@@ -241,6 +241,7 @@ pub fn run() {
             let _ = ensure_provider_on_launch(&relay_state.ready_api_backup_root());
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
+            crate::portable_update::acknowledge_startup();
             let startup_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let state = startup_handle.state::<local_pool::DesktopState>();
@@ -263,6 +264,8 @@ pub fn run() {
             get_state,
             get_platform,
             get_system_locale,
+            crate::portable_update::get_portable_update_target,
+            crate::portable_update::install_portable_update,
             get_saved_key_models,
             top_up::create_top_up_intent_and_open,
             top_up::create_saved_top_up_intent_and_open,

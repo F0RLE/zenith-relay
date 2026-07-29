@@ -133,3 +133,19 @@ behavior.
    noise.
 6. Merge reviewed work into <code>main</code>. Tag and publish only after the
    release checks and live acceptance pass.
+
+The updater changelog is read from the GitHub Release body. Keep each language
+in a marked section; the app selects the exact locale, its base language, then
+English as the fallback:
+
+~~~markdown
+<!-- relay-notes:en -->
+- English changes
+
+<!-- relay-notes:ru -->
+- Изменения на русском
+~~~
+
+Use the same marker with a new locale code when localization grows. After
+editing a published Release, rerun the <code>Publish updater manifest</code>
+job so <code>latest.json</code> receives the revised text.
