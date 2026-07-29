@@ -21,7 +21,6 @@ pub struct WakeAutomationInput {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
     account_selector: AccountSelector,
-    window_kinds: BTreeSet<QuotaWindowKind>,
     model_policy: WakeModelPolicy,
     #[serde(default = "automatic_execution")]
     execution_policy: WakeExecutionPolicy,
@@ -334,7 +333,6 @@ mod tests {
             name: "  Primary wake  ".into(),
             enabled: true,
             account_selector: AccountSelector::AllEligible,
-            window_kinds: BTreeSet::from([QuotaWindowKind::Primary]),
             model_policy,
             execution_policy: WakeExecutionPolicy::Automatic,
             jitter_seconds: 60,
@@ -344,9 +342,13 @@ mod tests {
 
     #[test]
     fn command_input_cannot_define_a_prompt_or_unsupported_schedule() {
-        let mut wake_input = input(WakeModelPolicy::Explicit(" gpt-test ".into()));
-        wake_input.window_kinds = BTreeSet::from([QuotaWindowKind::Secondary]);
-        let task = build_task("wake_test".into(), wake_input, 10, 20).unwrap();
+        let task = build_task(
+            "wake_test".into(),
+            input(WakeModelPolicy::Explicit(" gpt-test ".into())),
+            10,
+            20,
+        )
+        .unwrap();
         assert_eq!(task.name, "Primary wake");
         assert_eq!(task.trigger, WakeTrigger::QuotaFull);
         assert_eq!(task.fallback_schedule, None);
