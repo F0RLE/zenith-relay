@@ -17,7 +17,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zenith_relay_core::{normalize_image_base_model, normalize_subscription_plan_order};
+use zenith_relay_core::{
+    normalize_image_base_model, normalize_subscription_plan_order, quota::QuotaWindowKind,
+};
 
 const STATE_GATEWAY: &str = "gateway";
 const STATE_SOURCES: &str = "sources";
@@ -72,6 +74,10 @@ impl LocalPoolStore {
                 .map_err(|message| LocalPoolError::new(ErrorCode::RecoveryRequired, message))?;
         }
         let accounts = state.accounts;
+        let mut automations = state.automations;
+        for task in &mut automations.tasks {
+            task.window_kinds = [QuotaWindowKind::Primary].into();
+        }
         if accounts.len() > MAX_LOCAL_ACCOUNTS {
             return Err(LocalPoolError::new(
                 ErrorCode::RecoveryRequired,
@@ -90,7 +96,7 @@ impl LocalPoolStore {
             sources,
             accounts,
             keys: state.keys,
-            automations: state.automations,
+            automations,
             remote_target: state.remote_target,
             ownership_operation: state.ownership_operation,
         })

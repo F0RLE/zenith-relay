@@ -175,7 +175,7 @@ export function defaultWakeInput(name: string): Omit<WakeTask, "id" | "createdAt
     name,
     enabled: true,
     accountSelector: { kind: "all_eligible" },
-    windowKinds: ["primary", "secondary"],
+    windowKinds: ["primary"],
     modelPolicy: { kind: "lightest_supported" },
     executionPolicy: "automatic",
     jitterSeconds: 0,

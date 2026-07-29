@@ -294,7 +294,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       name: "Start quota countdown",
       enabled: true,
       accountSelector: { kind: "all_eligible" },
-      windowKinds: ["primary", "secondary"],
+      windowKinds: ["primary"],
       modelPolicy: { kind: "lightest_supported" },
       trigger: { kind: "quota_full" },
       executionPolicy: "automatic",

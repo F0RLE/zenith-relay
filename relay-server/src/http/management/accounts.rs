@@ -325,6 +325,7 @@ pub async fn delete_account(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ManagementError> {
+    let _wake_guard = state.wake_lock.lock().await;
     let record = find_account(&state, &id)?;
     let secret = state
         .vault
@@ -358,5 +359,9 @@ pub async fn delete_account(
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
+    state
+        .store
+        .remove_account_from_wake_tasks(&id, now_ms())
+        .map_err(store_error)?;
     Ok(StatusCode::NO_CONTENT)
 }

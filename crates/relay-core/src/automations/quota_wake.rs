@@ -362,7 +362,13 @@ impl WakeCoordinator {
         for history in &mut state.history {
             history.error_code = history.error_code.take().map(|code| safe_code(&code));
         }
-        Ok(Self { state })
+        let mut coordinator = Self { state };
+        coordinator.cancel_matching(
+            |cycle| cycle.window_kind != QuotaWindowKind::Primary,
+            0,
+            "wake_window_redundant",
+        );
+        Ok(coordinator)
     }
 
     pub fn state(&self) -> &WakeAutomationState {
@@ -412,7 +418,8 @@ impl WakeCoordinator {
         if !task.enabled
             || account.auth_mode != AccountAuthMode::OAuth
             || !task.account_selector.matches(account)
-            || !task.window_kinds.contains(&transition.window_kind)
+            || transition.window_kind != QuotaWindowKind::Primary
+            || !task.window_kinds.contains(&QuotaWindowKind::Primary)
             || transition.fingerprint.trim().is_empty()
             || !account.is_wake_eligible()
             || !policy
@@ -1269,6 +1276,34 @@ mod tests {
         assert_eq!(automatic.len(), 1);
         assert_eq!(automatic[0].task_id, "task-1");
         assert_eq!(coordinator.next_automatic_due(), None);
+        assert!(coordinator.pending().is_empty());
+    }
+
+    #[test]
+    fn only_primary_recovery_can_schedule_or_survive_restart() {
+        let mut coordinator = WakeCoordinator::new(8, 8).unwrap();
+        schedule(&mut coordinator, &task(1, 0), 110);
+        coordinator.state.cycles[0].window_kind = QuotaWindowKind::Secondary;
+
+        let restored = WakeCoordinator::from_state(coordinator.into_state()).unwrap();
+        assert!(restored.pending().is_empty());
+        assert_eq!(restored.state().history().len(), 1);
+        assert_eq!(
+            restored.state().history()[0].error_code.as_deref(),
+            Some("wake_window_redundant")
+        );
+
+        let mut secondary = transition();
+        secondary.window_kind = QuotaWindowKind::Secondary;
+        let mut policy = policy();
+        policy
+            .windows_requiring_activity
+            .insert(QuotaWindowKind::Secondary);
+        let mut coordinator = WakeCoordinator::new(8, 8).unwrap();
+        assert_eq!(
+            coordinator.evaluate(&task(1, 0), &account(), &secondary, None, &policy, 110),
+            WakeDecision::Skipped(WakeOutcome::SkippedIneligible)
+        );
         assert!(coordinator.pending().is_empty());
     }
 

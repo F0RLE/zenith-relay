@@ -208,7 +208,7 @@ fn build_task(
         name: input.name.trim().to_string(),
         enabled: input.enabled,
         account_selector: input.account_selector,
-        window_kinds: input.window_kinds,
+        window_kinds: BTreeSet::from([QuotaWindowKind::Primary]),
         model_policy: trim_model_policy(input.model_policy),
         trigger: WakeTrigger::QuotaFull,
         fallback_schedule: None,
@@ -344,16 +344,16 @@ mod tests {
 
     #[test]
     fn command_input_cannot_define_a_prompt_or_unsupported_schedule() {
-        let task = build_task(
-            "wake_test".into(),
-            input(WakeModelPolicy::Explicit(" gpt-test ".into())),
-            10,
-            20,
-        )
-        .unwrap();
+        let mut wake_input = input(WakeModelPolicy::Explicit(" gpt-test ".into()));
+        wake_input.window_kinds = BTreeSet::from([QuotaWindowKind::Secondary]);
+        let task = build_task("wake_test".into(), wake_input, 10, 20).unwrap();
         assert_eq!(task.name, "Primary wake");
         assert_eq!(task.trigger, WakeTrigger::QuotaFull);
         assert_eq!(task.fallback_schedule, None);
+        assert_eq!(
+            task.window_kinds,
+            BTreeSet::from([QuotaWindowKind::Primary])
+        );
         assert_eq!(
             task.model_policy,
             WakeModelPolicy::Explicit("gpt-test".into())

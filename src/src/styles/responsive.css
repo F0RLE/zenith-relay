@@ -53,9 +53,7 @@
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table th:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="sources"] .relay-table td:nth-child(4),
   .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(5),
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:nth-child(5),
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table th:nth-child(6),
-  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:nth-child(6) {
+  .relay-shell[data-page="connections"] .relay-page[data-view="automations"] .relay-table td:nth-child(5) {
     display: none;
   }
 }

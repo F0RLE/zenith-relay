@@ -104,7 +104,6 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await page.getByRole("tab", { name: "Automations" }).click();
   await page.getByRole("button", { name: "Edit" }).click();
   const automation = page.getByRole("dialog", { name: "Edit automation" });
-  await automation.getByLabel("Secondary").uncheck();
   await chooseOption(page, automation, "Account selection", "account_ids");
   await automation.getByLabel("Personal Plus").check();
   await chooseOption(page, automation, "Model policy", "explicit");
@@ -112,7 +111,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await automation.getByRole("button", { name: "Save" }).click();
   const automationRow = page.getByRole("row").filter({ hasText: "Start quota countdown" });
   await expect(automationRow).toContainText("Personal Plus");
-  await expect(automationRow).toContainText("Primary");
+  await expect(page.getByRole("columnheader", { name: "Quota" })).toHaveCount(0);
+  await expect(automationRow).not.toContainText("Primary");
   await expect(automationRow).not.toContainText("Secondary");
   await expect(automationRow).toContainText("gpt-5.4-mini");
   await automationRow.getByRole("button", { name: "Test" }).click();
@@ -161,6 +161,60 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_000, weight: 250, recoveryDelaySeconds: 60 } });
   expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
+});
+
+test("automation editor only saves executable local configurations", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3, codexBindings: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Automations" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Edit automation" });
+  const save = dialog.getByRole("button", { name: "Save" });
+  await dialog.getByRole("button", { name: /^Account selection:/ }).click();
+  await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
+  await page.locator('[role="option"][data-value="account_ids"]').click();
+  await expect(save).toBeDisabled();
+
+  await dialog.getByLabel("Personal Plus").check();
+  await dialog.getByLabel("Backup account").check();
+  await chooseOption(page, dialog, "Model policy", "explicit");
+  await dialog.getByRole("button", { name: /^Model:/ }).click();
+  await expect(page.locator('[role="option"][data-value="gpt-5.4-mini"]')).toHaveCount(1);
+  await expect(page.locator('[role="option"][data-value="gpt-5.4"]')).toHaveCount(0);
+  await expect(page.locator('[role="option"][data-value="o3"]')).toHaveCount(0);
+  await page.locator('[role="option"][data-value="gpt-5.4-mini"]').click();
+
+  await dialog.getByRole("radio", { name: "Manual" }).check();
+  await save.click();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "update_quota_wake_automation"));
+  expect(call?.args.input).toMatchObject({
+    accountSelector: { kind: "account_ids", values: ["account_synthetic", "account_synthetic_3"] },
+    windowKinds: ["primary"],
+    modelPolicy: { kind: "explicit", value: "gpt-5.4-mini" },
+    executionPolicy: "require_confirmation",
+  });
+});
+
+test("remote automation editor exposes only automatic execution", async ({ page }) => {
+  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Automations" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Edit automation" });
+  await expect(dialog.getByRole("radiogroup", { name: "Execution" })).toHaveCount(0);
+  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: /^Account selection:/ }).click();
+  await expect(page.locator('[role="option"][data-value="tags"]')).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const call = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { action?: Record<string, unknown>; payload?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__.findLast((item) => item.command === "execute_remote_server_action"));
+  expect(call?.args.input).toMatchObject({ action: { type: "update_wake_task", id: "wake_synthetic" }, payload: { executionPolicy: "automatic" } });
 });
 
 for (const mode of ["local", "remote"] as const) {

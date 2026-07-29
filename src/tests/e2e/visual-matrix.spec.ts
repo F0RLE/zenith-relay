@@ -1349,6 +1349,28 @@ test("automation table fits the standard window without horizontal scrolling", a
   expect(await table.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 });
 
+test("automation editor fits the compact window without hidden controls", async ({ page }) => {
+  await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
+  await page.setViewportSize({ width: 840, height: 560 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Подключения", exact: true }).click();
+  await page.getByRole("tab", { name: "Автоматизация" }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Изменить автоматизацию" });
+  await expect(dialog.getByText("Основная квота восстановлена", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: "Автоматически" })).toBeVisible();
+  await expect(dialog.getByRole("radio", { name: "Вручную" })).toBeVisible();
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    const body = element.querySelector(".relay-dialog-body");
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight
+      && element.scrollWidth <= element.clientWidth
+      && Boolean(body && body.scrollHeight <= body.clientHeight);
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/automation-dialog-ru-dark-840x560.png" });
+});
+
 test("ru compact disclosure labels stay readable", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true });
   await page.setViewportSize({ width: 840, height: 560 });
