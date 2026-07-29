@@ -2333,6 +2333,33 @@ test("background snapshots reload usage on Overview and Usage", async ({ page })
   await expect.poll(usageReads).toBeGreaterThan(usagePageReads);
 });
 
+test("open request details follow the terminal fallback result", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageFailure: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+  const dialog = page.getByRole("dialog", { name: "Request details" });
+  await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Failed");
+  await expect(dialog.locator(".detail-list > div").nth(5).locator("dd")).toHaveText("502");
+
+  await page.evaluate(() => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const invoke = internals.invoke.bind(internals);
+    internals.invoke = async (command, args, options) => {
+      const result = await invoke(command, args, options);
+      if (command !== "get_local_usage_page") return result;
+      const usage = structuredClone(result) as { events: Array<{ attempt: number; success: boolean; httpStatus: number; errorCategory: string | null; latencyMs: number }>; totals: { requests: number; successfulRequests: number } };
+      if (usage.events[0]) Object.assign(usage.events[0], { attempt: 2, success: true, httpStatus: 200, errorCategory: null, latencyMs: 16_157 });
+      usage.totals.successfulRequests = usage.totals.requests;
+      return usage;
+    };
+  });
+  await emitTauriEvent(page, "zenith-state-changed", null);
+
+  await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Success");
+  await expect(dialog.locator(".detail-list > div").nth(5).locator("dd")).toHaveText("200");
+});
+
 test("switching modes ignores a late failure from the previous mode", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
   await page.goto("/");
