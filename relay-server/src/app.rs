@@ -1,0 +1,1525 @@
+use crate::state::{
+    identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
+    SourceRecord, COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
+};
+use crate::store::configuration_revision;
+use futures_util::future::BoxFuture;
+use reqwest::{header::HeaderValue, redirect::Policy};
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::{atomic::Ordering, mpsc, Arc},
+    time::Duration,
+};
+#[cfg(test)]
+use zenith_relay_core::accounts::AccountHealthState;
+use zenith_relay_core::{
+    accounts::{
+        reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
+        AccountUsageState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
+        TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+    },
+    protocol::{
+        account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
+        GatewaySummary, KeySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot,
+        RuntimeTargetSummary, SourceSummary, UsageTotals,
+    },
+    quota::{
+        attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
+        quota_reference_value, quota_valuation_revision,
+    },
+    ApiEquivalentSummary, CandidateKind, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount, RuntimeChatGptAuth,
+    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, QUOTA_STALE_AFTER_MS,
+};
+
+const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
+const USAGE_QUEUE_CAPACITY: usize = 16_384;
+const USAGE_BATCH_SIZE: usize = 256;
+
+struct QueuedUsage {
+    event: UsageEvent,
+    observed_at_ms: u64,
+}
+
+enum UsageWriterMessage {
+    Event(Box<QueuedUsage>),
+    Shutdown,
+}
+
+pub(crate) struct UsageWriter {
+    callback: UsageCallback,
+    sender: mpsc::SyncSender<UsageWriterMessage>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl UsageWriter {
+    fn start(state: &Arc<AppState>) -> Result<Self, String> {
+        let (sender, receiver) = mpsc::sync_channel(USAGE_QUEUE_CAPACITY);
+        let weak_state = Arc::downgrade(state);
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| "usage writer requires an async runtime".to_string())?;
+        let thread = std::thread::Builder::new()
+            .name("relay-usage-writer".to_string())
+            .spawn(move || {
+                while let Ok(message) = receiver.recv() {
+                    let mut batch = Vec::with_capacity(USAGE_BATCH_SIZE);
+                    let mut stopping = false;
+                    match message {
+                        UsageWriterMessage::Event(event) => batch.push(*event),
+                        UsageWriterMessage::Shutdown => stopping = true,
+                    }
+                    for message in receiver.try_iter().take(USAGE_BATCH_SIZE - 1) {
+                        match message {
+                            UsageWriterMessage::Event(event) => batch.push(*event),
+                            UsageWriterMessage::Shutdown => {
+                                stopping = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !batch.is_empty() {
+                        let Some(state) = weak_state.upgrade() else {
+                            break;
+                        };
+                        persist_usage_batch(&state, &batch, &runtime);
+                    }
+                    if stopping {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("failed to start usage writer: {error}"))?;
+
+        let callback_sender = sender.clone();
+        let weak_state = Arc::downgrade(state);
+        let callback = Arc::new(move |event| {
+            if callback_sender
+                .try_send(UsageWriterMessage::Event(Box::new(QueuedUsage {
+                    event,
+                    observed_at_ms: now_ms(),
+                })))
+                .is_err()
+            {
+                if let Some(state) = weak_state.upgrade() {
+                    state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        Ok(Self {
+            callback,
+            sender,
+            thread,
+        })
+    }
+
+    async fn shutdown(self) -> Result<(), String> {
+        let Self {
+            callback,
+            sender,
+            thread,
+        } = self;
+        drop(callback);
+        tokio::task::spawn_blocking(move || {
+            sender
+                .send(UsageWriterMessage::Shutdown)
+                .map_err(|_| "usage writer stopped before flush".to_string())?;
+            thread
+                .join()
+                .map_err(|_| "usage writer panicked during shutdown".to_string())
+        })
+        .await
+        .map_err(|_| "usage writer shutdown task failed".to_string())?
+    }
+}
+
+impl AppState {
+    pub async fn prepare_account_tokens(
+        self: &Arc<Self>,
+        account_id: &str,
+    ) -> Result<TokenSet, String> {
+        let record = find_account(self, account_id)?;
+        let secret = self
+            .vault
+            .load(&record.secret_ref)?
+            .ok_or_else(|| "stored account credential is missing".to_string())?;
+        let credential: AccountCredential = serde_json::from_str(&secret)
+            .map_err(|_| "stored account credential is invalid".to_string())?;
+        self.token_authority
+            .register_if_absent(account_id, credential.tokens()?, record.auth_state)
+            .map_err(|error| error.to_string())?;
+        let proxy = account_proxy_config(self, &record, &credential)?;
+        let refresh = CodexRefreshClient::new_with_proxy(proxy.as_ref())?;
+        let persistence = ServerTokenPersistence {
+            state: self.clone(),
+        };
+        self.token_authority
+            .prepare_and_persist(account_id, now_ms(), 60_000, &refresh, &persistence)
+            .await
+            .map(|prepared| prepared.tokens)
+            .map_err(|error| error.to_string())
+    }
+
+    pub async fn recover_account_tokens_after_unauthorized(
+        self: &Arc<Self>,
+        account_id: &str,
+    ) -> Result<TokenSet, String> {
+        let persistence = ServerTokenPersistence {
+            state: self.clone(),
+        };
+        self.token_authority
+            .invalidate_access_and_persist(account_id, now_ms(), &persistence)
+            .await
+            .map_err(|error| error.to_string())?;
+        self.prepare_account_tokens(account_id).await
+    }
+
+    pub async fn rebuild_runtime(self: &Arc<Self>) -> Result<(), String> {
+        let source_records = self.store.sources()?;
+        let account_records = self.store.accounts()?;
+        let key_records = self
+            .store
+            .keys()?
+            .into_iter()
+            .filter(|key| key.enabled)
+            .collect::<Vec<_>>();
+        let hidden_models = self.store.hidden_models()?;
+        let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
+        let (
+            max_retry_candidates,
+            routing_strategy,
+            default_service_tier,
+            _,
+            subscription_plan_order,
+        ) = self.store.routing_policy()?;
+        if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
+            return self.replace_runtime(None);
+        }
+
+        let mut sources = Vec::new();
+        for record in source_records {
+            let Some(api_key) = self.vault.load(&record.secret_ref)? else {
+                continue;
+            };
+            sources.push(runtime_source(record, api_key));
+        }
+
+        let mut accounts = Vec::new();
+        let mut direct_refresh_accounts = HashSet::new();
+        let mut refresh_clients = HashMap::new();
+        let mut agent_identities = HashMap::new();
+        for record in account_records {
+            let Some(secret) = self.vault.load(&record.secret_ref)? else {
+                continue;
+            };
+            let credential: AccountCredential = serde_json::from_str(&secret)
+                .map_err(|_| "stored account credential is invalid".to_string())?;
+            let proxy = match account_proxy_config(self, &record, &credential) {
+                Ok(proxy) => proxy,
+                Err(_) => continue,
+            };
+            if let Some(agent) = credential.agent_identity()? {
+                agent_identities.insert(record.id.clone(), agent);
+            }
+            if credential.has_oauth() {
+                self.token_authority
+                    .register(&record.id, credential.tokens()?, record.auth_state)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if proxy.is_some() {
+                    refresh_clients.insert(
+                        record.id.clone(),
+                        CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
+                    );
+                } else {
+                    direct_refresh_accounts.insert(record.id.clone());
+                }
+            }
+            accounts.push(runtime_account(
+                record,
+                &credential,
+                proxy,
+                quota_stale_after_ms,
+            ));
+        }
+
+        if !sources
+            .iter()
+            .any(|source| source.enabled && !source.draining)
+            && !accounts
+                .iter()
+                .any(|account| account.enabled && !account.draining)
+        {
+            return self.replace_runtime(None);
+        }
+
+        let mut keys = Vec::new();
+        for record in key_records {
+            let Some(secret) = self.vault.load(&record.secret_ref)? else {
+                continue;
+            };
+            keys.push(runtime_key(record, secret));
+        }
+        if keys.is_empty() || (sources.is_empty() && accounts.is_empty()) {
+            return self.replace_runtime(None);
+        }
+
+        let refresh = Arc::new(ServerRefreshClients {
+            direct: CodexRefreshClient::new_with_proxy(None)?,
+            direct_accounts: direct_refresh_accounts,
+            clients: refresh_clients,
+        });
+        let persistence = Arc::new(ServerTokenPersistence {
+            state: self.clone(),
+        });
+        let usage = self.usage_callback()?;
+        let runtime = GatewayRuntime::from_mixed_pool(
+            sources,
+            accounts,
+            keys,
+            RuntimeChatGptAuth {
+                token_authority: self.token_authority.clone(),
+                refresh_adapter: refresh,
+                persistence_adapter: persistence,
+                refresh_skew_ms: 60_000,
+                agent_identities,
+            },
+            GatewayRuntimeOptions {
+                max_retry_candidates: usize::from(max_retry_candidates),
+                routing_strategy,
+                subscription_plan_order,
+                hidden_models,
+                default_service_tier,
+                quota_stale_after_ms,
+                image_base_model: None,
+                response_affinity_store: Some(self.store.clone()),
+                provider_storm_breaker: true,
+            },
+            usage,
+        )
+        .map_err(|error| error.to_string())?;
+        self.replace_runtime(Some(Arc::new(runtime)))
+    }
+
+    fn usage_callback(self: &Arc<Self>) -> Result<UsageCallback, String> {
+        let mut writer = self
+            .usage_writer
+            .lock()
+            .map_err(|_| "usage writer lock poisoned".to_string())?;
+        if writer.is_none() {
+            *writer = Some(UsageWriter::start(self)?);
+        }
+        Ok(writer
+            .as_ref()
+            .expect("usage writer initialized")
+            .callback
+            .clone())
+    }
+
+    pub async fn shutdown_runtime(self: &Arc<Self>) -> Result<(), String> {
+        self.replace_runtime(None)?;
+        let writer = self
+            .usage_writer
+            .lock()
+            .map_err(|_| "usage writer lock poisoned".to_string())?
+            .take();
+        if let Some(writer) = writer {
+            writer.shutdown().await?;
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<RuntimeStateSnapshot, String> {
+        let sources = self.store.sources()?;
+        let accounts = self.store.accounts()?;
+        let keys = self.store.keys()?;
+        let common_proxy_configured = self.store.common_proxy_configured()?;
+        let common_proxy_id = self.store.common_proxy_id()?;
+        let common_proxy_available = common_proxy_available(self, common_proxy_configured);
+        let account_proxy_required = self.store.account_proxy_required()?;
+        let quota_request_timeout_seconds = self.store.quota_request_timeout_seconds()?;
+        let (
+            max_retry_candidates,
+            routing_strategy,
+            default_service_tier,
+            image_base_model,
+            subscription_plan_order,
+        ) = self.store.routing_policy()?;
+        let hidden_models = self.store.hidden_models()?;
+        let model_price_overrides = self.store.model_price_overrides()?;
+        let configuration_revision = configuration_revision(&self.store.configuration_settings()?)?;
+        let equivalents = self.store.api_equivalents()?;
+        let runtime = self.runtime()?;
+        let running = self.store.gateway_enabled()? && runtime.is_some();
+        let routing_order = runtime
+            .as_ref()
+            .map(|runtime| runtime.candidate_runtime_order())
+            .unwrap_or_default();
+        let source_runtime = routing_order
+            .iter()
+            .filter(|candidate| candidate.kind == CandidateKind::ApiSource)
+            .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
+            .collect::<HashMap<_, _>>();
+        let mut warnings = Vec::new();
+        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
+            warnings.push("usage_persistence_failed".to_string());
+        }
+        let source_summaries = sources
+            .iter()
+            .map(|record| {
+                let secret_available = self.vault.load(&record.secret_ref)?.is_some();
+                if !secret_available {
+                    warnings.push(format!("source_secret_missing:{}", record.id));
+                }
+                Ok(source_summary(
+                    record,
+                    secret_available,
+                    (running && record.in_pool).then(|| {
+                        source_runtime
+                            .get(record.id.as_str())
+                            .copied()
+                            .unwrap_or(false)
+                    }),
+                    equivalents
+                        .get(&identity_hint(&record.id))
+                        .copied()
+                        .unwrap_or_default(),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut account_summaries = accounts
+            .iter()
+            .map(|record| {
+                let secret = self.vault.load(&record.secret_ref)?;
+                let secret_available = secret.is_some();
+                if !secret_available {
+                    warnings.push(format!("account_secret_missing:{}", record.id));
+                }
+                let (proxy_mode, proxy_available) = secret
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<AccountCredential>(value).ok())
+                    .map(|credential| {
+                        account_proxy_status(
+                            self,
+                            record,
+                            &credential,
+                            common_proxy_configured,
+                            common_proxy_available,
+                            account_proxy_required,
+                        )
+                    })
+                    .unwrap_or((ProxyMode::Direct, false));
+                Ok(account_summary(
+                    record,
+                    secret_available,
+                    proxy_mode,
+                    proxy_available,
+                    equivalents
+                        .get(&identity_hint(&record.id))
+                        .copied()
+                        .unwrap_or_default(),
+                    default_service_tier,
+                    QUOTA_STALE_AFTER_MS,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let economics_revision = quota_valuation_revision();
+        let plan_benchmarks = quota_plan_benchmarks(
+            accounts
+                .iter()
+                .map(|account| (account.id.as_str(), &account.economics)),
+            now_ms(),
+            economics_revision,
+        );
+        for (record, summary) in accounts.iter().zip(&mut account_summaries) {
+            attach_quota_plan_benchmarks(
+                &mut summary.economics,
+                "chatgpt",
+                record.subscription.plan_type.as_deref(),
+                &record.quota,
+                default_service_tier,
+                economics_revision,
+                &plan_benchmarks,
+            );
+        }
+        let key_summaries = keys
+            .iter()
+            .filter(|record| !record.system)
+            .map(|record| {
+                Ok(key_summary(
+                    record,
+                    self.store.key_usage_totals(&record.id)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut models = zenith_relay_core::protocol::pool_model_summaries(
+            &source_summaries,
+            &account_summaries,
+            &hidden_models,
+        );
+        for model in &mut models {
+            if let Some(price) = model_price_overrides.get(&model.id.to_ascii_lowercase()) {
+                model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
+                model.cached_input_micro_usd_per_million = Some(
+                    price
+                        .cached_input_micro_usd_per_million
+                        .unwrap_or(price.input_micro_usd_per_million),
+                );
+                model.cache_write_5m_micro_usd_per_million =
+                    price.cache_write_5m_micro_usd_per_million;
+                model.cache_write_1h_micro_usd_per_million =
+                    price.cache_write_1h_micro_usd_per_million;
+                model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
+                model.custom_price = true;
+            }
+        }
+        let visible_model_ids = models
+            .iter()
+            .filter(|model| model.enabled)
+            .map(|model| model.id.clone())
+            .collect::<Vec<_>>();
+        Ok(RuntimeStateSnapshot {
+            schema_version: SERVER_SCHEMA_VERSION,
+            configuration_revision: Some(configuration_revision),
+            runtime_target: RuntimeTargetSummary {
+                kind: "remote".to_string(),
+                connected: true,
+                origin: Some(self.config.public_base_url.origin().ascii_serialization()),
+                server_id: Some(self.capabilities.server_id.clone()),
+                version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            },
+            gateway: GatewaySummary {
+                running,
+                base_url: format!(
+                    "{}/v1",
+                    self.config.public_base_url.as_str().trim_end_matches('/')
+                ),
+                candidate_count: source_summaries
+                    .iter()
+                    .filter(|record| {
+                        record.in_pool && record.operational_status == OperationalStatus::Rotation
+                    })
+                    .count()
+                    + account_summaries
+                        .iter()
+                        .filter(|record| {
+                            record.in_pool
+                                && record.operational_status == OperationalStatus::Rotation
+                        })
+                        .count(),
+                visible_model_ids,
+                max_retry_candidates,
+                routing_strategy,
+                subscription_plan_order,
+                default_service_tier,
+                image_base_model,
+                models,
+                common_proxy_configured,
+                common_proxy_available,
+                common_proxy_id,
+                account_proxy_required,
+                quota_request_timeout_seconds,
+                chatgpt_interface_quota_reserve_basis_points: None,
+                routing_order,
+            },
+            platform: std::env::consts::OS.to_string(),
+            capabilities: self.capabilities.clone(),
+            sources: source_summaries,
+            accounts: account_summaries,
+            keys: key_summaries,
+            automations: self.store.wake_tasks()?,
+            wake_history: self.store.wake_state()?.history().iter().cloned().collect(),
+            warnings,
+        })
+    }
+}
+
+fn persist_usage_batch(
+    state: &Arc<AppState>,
+    batch: &[QueuedUsage],
+    runtime: &tokio::runtime::Handle,
+) {
+    let records = batch
+        .iter()
+        .map(|queued| (&queued.event, queued.observed_at_ms))
+        .collect::<Vec<_>>();
+    if state.store.record_usage_batch(&records).is_err() {
+        state
+            .failed_usage_writes
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+    }
+
+    let mut account_events = BTreeMap::<String, Vec<&QueuedUsage>>::new();
+    for queued in batch {
+        if let Some(account_id) = queued.event.account_id.as_ref() {
+            account_events
+                .entry(account_id.clone())
+                .or_default()
+                .push(queued);
+        }
+    }
+    let mut updated_accounts = Vec::with_capacity(account_events.len());
+    let mut natural_uses = Vec::new();
+    for (account_id, events) in account_events {
+        let Ok(Some(mut account)) = state.store.account(&account_id) else {
+            state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        let credential = state
+            .vault
+            .load(&account.secret_ref)
+            .ok()
+            .flatten()
+            .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+        let access_state = credential
+            .as_ref()
+            .map_or(AccountAccessState::Failed, |value| {
+                if value.refresh_token.is_some() {
+                    AccountAccessState::Refreshable
+                } else {
+                    AccountAccessState::AccessOnly
+                }
+            });
+        let successful_auth_state = credential.as_ref().map(|value| {
+            if value.refresh_token.is_some() {
+                AccountAuthState::Active
+            } else {
+                AccountAuthState::DegradedAccessOnly
+            }
+        });
+        let mut natural_use_at_ms = None;
+        for queued in events {
+            let event = &queued.event;
+            account
+                .economics
+                .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
+            account
+                .economics
+                .set_value_revision(quota_valuation_revision());
+            account.economics.observe_event_at(
+                event,
+                quota_reference_value(event),
+                queued.observed_at_ms,
+            );
+            if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
+                snapshot.updated_at_ms.unwrap_or_default()
+                    >= account.quota.updated_at_ms.unwrap_or_default()
+            }) {
+                account.quota = snapshot.clone();
+            }
+            let update = reduce_account_usage(
+                AccountUsageState {
+                    auth_state: account.auth_state,
+                    health: account.health,
+                    last_error_code: account.last_error_code.clone(),
+                    last_used_at_ms: account.last_used_at_ms,
+                },
+                AccountUsageObservation {
+                    success: event.success,
+                    http_status: event.http_status,
+                    error_category: event.error_category.as_deref(),
+                    affects_account: event.affects_account_state(),
+                },
+                queued.observed_at_ms,
+                (event.http_status == 401).then_some(access_state),
+                if event.success {
+                    successful_auth_state
+                } else {
+                    None
+                },
+            );
+            account.auth_state = update.state.auth_state;
+            account.health = update.state.health;
+            account.last_error_code = update.state.last_error_code;
+            account.last_used_at_ms = update.state.last_used_at_ms;
+            if update.reset_runtime_failures {
+                account.cooldowns.clear();
+                account.consecutive_failures = 0;
+            }
+            if event.success {
+                natural_use_at_ms = Some(queued.observed_at_ms);
+            }
+        }
+        updated_accounts.push(account);
+        if let Some(observed_at_ms) = natural_use_at_ms {
+            natural_uses.push((account_id, observed_at_ms));
+        }
+    }
+    if !updated_accounts.is_empty() && state.store.save_accounts(&updated_accounts).is_err() {
+        state
+            .failed_usage_writes
+            .fetch_add(updated_accounts.len() as u64, Ordering::Relaxed);
+    }
+    mark_natural_use(state.clone(), natural_uses, runtime);
+}
+
+fn mark_natural_use(
+    state: Arc<AppState>,
+    events: Vec<(String, u64)>,
+    runtime: &tokio::runtime::Handle,
+) {
+    if events.is_empty() {
+        return;
+    }
+    runtime.block_on(async move {
+        let _guard = state.wake_lock.lock().await;
+        let Ok(wake_state) = state.store.wake_state() else {
+            return;
+        };
+        let Ok(mut coordinator) =
+            zenith_relay_core::automations::WakeCoordinator::from_state(wake_state)
+        else {
+            return;
+        };
+        let changed = events
+            .into_iter()
+            .map(|(account_id, observed_at_ms)| {
+                coordinator.mark_natural_use_for_account(&account_id, observed_at_ms)
+            })
+            .sum::<usize>();
+        if changed > 0 {
+            let _ = state.store.save_wake_state(coordinator.state());
+        }
+    });
+}
+
+pub(crate) fn account_proxy_config(
+    state: &AppState,
+    record: &ServerAccountRecord,
+    credential: &AccountCredential,
+) -> Result<Option<ProxyConfig>, String> {
+    if let Some(proxy_id) = record.proxy_id.as_deref() {
+        return proxy_config_by_id(state, proxy_id).map(Some);
+    }
+    if record.bypass_common_proxy {
+        if state.store.account_proxy_required()? {
+            return Err("an account proxy is required; direct account traffic is blocked".into());
+        }
+        return Ok(None);
+    }
+    if let Some(value) = credential.proxy_url.as_deref() {
+        return ProxyConfig::parse(value)
+            .map(Some)
+            .map_err(|_| "stored account proxy URL is invalid".to_string());
+    }
+    if !state.store.common_proxy_configured()? {
+        if state.store.account_proxy_required()? {
+            return Err("an account proxy is required; direct account traffic is blocked".into());
+        }
+        return Ok(None);
+    }
+    if let Some(proxy_id) = state.store.common_proxy_id()? {
+        return proxy_config_by_id(state, &proxy_id).map(Some);
+    }
+    let value = state
+        .vault
+        .load(COMMON_PROXY_SECRET_REF)?
+        .ok_or_else(|| "common account proxy is configured but unavailable".to_string())?;
+    ProxyConfig::parse(&value)
+        .map(Some)
+        .map_err(|_| "stored common proxy URL is invalid".to_string())
+}
+
+pub(crate) async fn ensure_server_agent_identity_task(
+    state: &Arc<AppState>,
+    record: &ServerAccountRecord,
+    credential: AccountCredential,
+    expected_task_id: Option<&str>,
+) -> Result<AccountCredential, String> {
+    let agent = credential
+        .agent_identity()?
+        .ok_or_else(|| "Agent Identity credential is missing".to_string())?;
+    if agent.task_id().is_some()
+        && expected_task_id.is_none_or(|expected| agent.task_id() != Some(expected))
+    {
+        return Ok(credential);
+    }
+    let proxy = account_proxy_config(state, record, &credential)?;
+    let builder = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(30))
+        .user_agent("Zenith Relay Server");
+    let client = match proxy.as_ref() {
+        Some(proxy) => proxy.apply(builder),
+        None => builder,
+    }
+    .build()
+    .map_err(|_| "Agent Identity task client is unavailable".to_string())?;
+    let new_task_id = agent
+        .register_task(&client)
+        .await
+        .map_err(|error| format!("failed to register Agent Identity task: {error}"))?;
+    ServerTokenPersistence {
+        state: state.clone(),
+    }
+    .persist_agent_task_id(&record.id, agent.task_id(), &new_task_id)
+    .await
+    .map_err(|error| error.code)?;
+    let secret = state
+        .vault
+        .load(&record.secret_ref)?
+        .ok_or_else(|| "stored Agent Identity credential is unavailable".to_string())?;
+    let updated = serde_json::from_str(&secret)
+        .map_err(|_| "stored Agent Identity credential is invalid".to_string())?;
+    state.rebuild_runtime().await?;
+    Ok(updated)
+}
+
+pub(crate) async fn prepare_server_account_authorization(
+    state: &Arc<AppState>,
+    record: &ServerAccountRecord,
+    credential: AccountCredential,
+    expected_task_id: Option<&str>,
+) -> Result<(AccountCredential, HeaderValue), String> {
+    if credential.is_agent_identity() {
+        match ensure_server_agent_identity_task(state, record, credential.clone(), expected_task_id)
+            .await
+        {
+            Ok(credential) => {
+                let authorization = credential.authorization(now_ms())?;
+                return Ok((credential, authorization));
+            }
+            Err(error) if !credential.has_oauth() => return Err(error),
+            Err(_) => {}
+        }
+    }
+    let tokens = state.prepare_account_tokens(&record.id).await?;
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {}", tokens.access_token()))
+        .map_err(|_| "stored account access token is invalid".to_string())?;
+    authorization.set_sensitive(true);
+    Ok((credential, authorization))
+}
+
+fn proxy_config_by_id(state: &AppState, proxy_id: &str) -> Result<ProxyConfig, String> {
+    let record = state
+        .store
+        .proxy(proxy_id)?
+        .ok_or_else(|| "stored proxy reference is missing".to_string())?;
+    let value = state
+        .vault
+        .load(&record.secret_ref)?
+        .ok_or_else(|| "stored proxy secret is missing".to_string())?;
+    ProxyConfig::parse(&value).map_err(|_| "stored proxy URL is invalid".to_string())
+}
+
+fn common_proxy_available(state: &AppState, configured: bool) -> bool {
+    configured
+        && state.store.common_proxy_id().ok().flatten().map_or_else(
+            || {
+                state
+                    .vault
+                    .load(COMMON_PROXY_SECRET_REF)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|value| ProxyConfig::parse(&value).is_ok())
+            },
+            |proxy_id| proxy_config_by_id(state, &proxy_id).is_ok(),
+        )
+}
+
+fn account_proxy_status(
+    state: &AppState,
+    record: &ServerAccountRecord,
+    credential: &AccountCredential,
+    common_configured: bool,
+    common_available: bool,
+    account_proxy_required: bool,
+) -> (ProxyMode, bool) {
+    if let Some(proxy_id) = record.proxy_id.as_deref() {
+        return (
+            ProxyMode::Account,
+            proxy_config_by_id(state, proxy_id).is_ok(),
+        );
+    }
+    if record.bypass_common_proxy {
+        return (ProxyMode::Direct, !account_proxy_required);
+    }
+    if let Some(value) = credential.proxy_url.as_deref() {
+        return (ProxyMode::Account, ProxyConfig::parse(value).is_ok());
+    }
+    if common_configured {
+        return (ProxyMode::Common, common_available);
+    }
+    (ProxyMode::Direct, !account_proxy_required)
+}
+
+fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
+    RuntimeSource {
+        source: ProviderSource {
+            id: record.id,
+            name: record.name,
+            base_url: record.base_url,
+            api_key,
+            wire_api: record.wire_api,
+            models: record.models,
+        },
+        enabled: record.enabled && record.in_pool,
+        draining: record.draining,
+        priority: record.priority,
+        weight: record.weight,
+        recovery_delay_seconds: record.recovery_delay_seconds,
+        allowed_models: record.allowed_models,
+        excluded_models: record.excluded_models,
+        last_used_at_ms: None,
+    }
+}
+
+fn runtime_account(
+    record: ServerAccountRecord,
+    credential: &AccountCredential,
+    proxy: Option<ProxyConfig>,
+    quota_stale_after_ms: u64,
+) -> RuntimeChatGptAccount {
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        secret_available: true,
+        proxy_available: true,
+        auth_state: record.auth_state,
+        health: record.health,
+        subscription: &record.subscription,
+        quota: &record.quota,
+        last_error_code: record.last_error_code.as_deref(),
+        now_ms: now_ms(),
+        quota_stale_after_ms,
+    });
+    RuntimeChatGptAccount {
+        id: record.id,
+        source_id: record.source_id,
+        chatgpt_account_id: credential.chatgpt_account_id.clone(),
+        responses_url: credential.responses_url.clone(),
+        models: record.models,
+        enabled: operational.routing_eligible,
+        draining: record.draining,
+        priority: record.priority,
+        weight: record.weight,
+        allowed_models: record.allowed_models,
+        excluded_models: record.excluded_models,
+        health: operational.health,
+        quota: operational.quota,
+        quota_updated_at_ms: record.quota.updated_at_ms,
+        quota_snapshot: record.quota.clone(),
+        subscription_plan_type: record.subscription.plan_type.clone(),
+        subscription_expires_at_ms: record.subscription.active_until_ms,
+        last_used_at_ms: record.last_used_at_ms,
+        cooldowns: record.cooldowns,
+        consecutive_failures: record.consecutive_failures,
+        proxy,
+    }
+}
+
+fn runtime_key(record: GatewayKeyRecord, secret: String) -> RuntimeMixedLocalKey {
+    RuntimeMixedLocalKey {
+        key: LocalGatewayKey {
+            id: record.id,
+            secret,
+        },
+        enabled: record.enabled,
+        source_ids: record.source_ids,
+        account_ids: record.account_ids,
+        allowed_models: record.allowed_models,
+        excluded_models: record.excluded_models,
+        model_prefix: record.model_prefix,
+        wire_apis: record.wire_apis,
+    }
+}
+
+fn source_summary(
+    record: &SourceRecord,
+    secret_available: bool,
+    runtime_available: Option<bool>,
+    api_equivalent: ApiEquivalentSummary,
+) -> SourceSummary {
+    SourceSummary {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        operational_status: operational_status(
+            record.enabled,
+            false,
+            !record.draining && secret_available,
+            runtime_available,
+        ),
+        base_url: record.base_url.clone(),
+        wire_api: record.wire_api,
+        models: record.models.clone(),
+        allowed_models: record.allowed_models.clone(),
+        excluded_models: record.excluded_models.clone(),
+        priority: record.priority,
+        weight: record.weight,
+        recovery_delay_seconds: record.recovery_delay_seconds,
+        model_price_overrides: record.model_price_overrides.clone(),
+        api_equivalent,
+        secret_available,
+        last_error_code: record.last_error_code.clone(),
+    }
+}
+
+fn account_summary(
+    record: &ServerAccountRecord,
+    secret_available: bool,
+    proxy_mode: ProxyMode,
+    proxy_available: bool,
+    api_equivalent: ApiEquivalentSummary,
+    default_service_tier: DefaultServiceTier,
+    quota_stale_after_ms: u64,
+) -> AccountSummary {
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        secret_available,
+        proxy_available,
+        auth_state: record.auth_state,
+        health: record.health,
+        subscription: &record.subscription,
+        quota: &record.quota,
+        last_error_code: record.last_error_code.as_deref(),
+        now_ms: now_ms(),
+        quota_stale_after_ms,
+    });
+    AccountSummary {
+        id: record.id.clone(),
+        label: record.label.clone(),
+        identity_hint: record.identity_hint.clone(),
+        enabled: record.enabled,
+        in_pool: record.in_pool,
+        draining: record.draining,
+        operational_status: operational.status,
+        auth_state: record.auth_state,
+        health: format!("{:?}", record.health).to_ascii_lowercase(),
+        models: record.models.clone(),
+        allowed_models: record.allowed_models.clone(),
+        excluded_models: record.excluded_models.clone(),
+        priority: record.priority,
+        weight: record.weight,
+        api_equivalent,
+        economics: quota_economics_summary_for_revision(
+            &record.economics,
+            &record.quota,
+            default_service_tier,
+            now_ms(),
+            quota_stale_after_ms,
+            quota_valuation_revision(),
+        ),
+        subscription: record.subscription.clone(),
+        quota: record.quota.clone(),
+        quota_refresh_status: zenith_relay_core::protocol::quota_refresh_status(
+            record.auth_state,
+            &record.quota,
+            false,
+        ),
+        secret_available,
+        remote_location: None,
+        proxy_mode,
+        proxy_available,
+        proxy_id: record.proxy_id.clone(),
+        routing_block_reason: operational.routing_block_reason,
+        last_error_code: record.last_error_code.clone(),
+    }
+}
+
+fn key_summary(record: &GatewayKeyRecord, usage_totals: UsageTotals) -> KeySummary {
+    KeySummary {
+        id: record.id.clone(),
+        label: record.label.clone(),
+        enabled: record.enabled,
+        system: record.system,
+        source_ids: record.source_ids.clone(),
+        account_ids: record.account_ids.clone(),
+        allowed_models: record.allowed_models.clone(),
+        excluded_models: record.excluded_models.clone(),
+        model_prefix: record.model_prefix.clone(),
+        wire_apis: record.wire_apis.clone(),
+        soft_budget_micro_usd: record.soft_budget_micro_usd,
+        usage_totals,
+        created_at_ms: record.created_at_ms,
+        last_used_at_ms: record.last_used_at_ms,
+    }
+}
+
+struct ServerTokenPersistence {
+    state: Arc<AppState>,
+}
+
+impl TokenPersistenceAdapter for ServerTokenPersistence {
+    fn persist<'a>(
+        &'a self,
+        account_id: &'a str,
+        tokens: &'a TokenSet,
+    ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+        Box::pin(async move {
+            let record = find_account(&self.state, account_id).map_err(persistence_error)?;
+            let secret = self
+                .state
+                .vault
+                .load(&record.secret_ref)
+                .map_err(persistence_error)?
+                .ok_or_else(|| TokenPersistenceFailure::new("secret_missing"))?;
+            let mut credential: AccountCredential = serde_json::from_str(&secret)
+                .map_err(|_| TokenPersistenceFailure::new("secret_invalid"))?;
+            credential.access_token = tokens.access_token().to_string();
+            credential.refresh_token = tokens.refresh_token().map(str::to_string);
+            credential.id_token = tokens.id_token().map(str::to_string);
+            credential.expires_at_ms = tokens.expires_at_ms();
+            credential.issued_at_ms = tokens.issued_at_ms();
+            credential.generation = tokens.generation();
+            let encoded = serde_json::to_string(&credential)
+                .map_err(|_| TokenPersistenceFailure::new("secret_serialize"))?;
+            self.state
+                .vault
+                .save(&record.secret_ref, &encoded)
+                .map_err(persistence_error)
+        })
+    }
+
+    fn persist_auth_state<'a>(
+        &'a self,
+        account_id: &'a str,
+        auth_state: AccountAuthState,
+    ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
+        Box::pin(async move {
+            let mut record = find_account(&self.state, account_id).map_err(persistence_error)?;
+            record.auth_state = auth_state;
+            self.state
+                .store
+                .save_account(&record)
+                .map_err(persistence_error)
+        })
+    }
+
+    fn persist_agent_task_id<'a>(
+        &'a self,
+        account_id: &'a str,
+        expected_task_id: Option<&'a str>,
+        task_id: &'a str,
+    ) -> BoxFuture<'a, Result<String, TokenPersistenceFailure>> {
+        Box::pin(async move {
+            let record = find_account(&self.state, account_id).map_err(persistence_error)?;
+            let secret = self
+                .state
+                .vault
+                .load(&record.secret_ref)
+                .map_err(persistence_error)?
+                .ok_or_else(|| TokenPersistenceFailure::new("secret_missing"))?;
+            let mut credential: AccountCredential = serde_json::from_str(&secret)
+                .map_err(|_| TokenPersistenceFailure::new("secret_invalid"))?;
+            if !credential.is_agent_identity() {
+                return Err(TokenPersistenceFailure::new("not_agent_identity"));
+            }
+            if let Some(current_task_id) = credential
+                .agent_task_id
+                .as_deref()
+                .filter(|current_task_id| Some(*current_task_id) != expected_task_id)
+            {
+                return Ok(current_task_id.to_string());
+            }
+            credential.agent_task_id = Some(task_id.to_string());
+            let encoded = serde_json::to_string(&credential)
+                .map_err(|_| TokenPersistenceFailure::new("secret_serialize"))?;
+            self.state
+                .vault
+                .save(&record.secret_ref, &encoded)
+                .map_err(persistence_error)?;
+            Ok(task_id.to_string())
+        })
+    }
+}
+
+fn find_account(state: &AppState, id: &str) -> Result<ServerAccountRecord, String> {
+    state
+        .store
+        .accounts()?
+        .into_iter()
+        .find(|record| record.id == id)
+        .ok_or_else(|| "account not found".to_string())
+}
+
+fn persistence_error(error: String) -> TokenPersistenceFailure {
+    let _ = error;
+    TokenPersistenceFailure::new("persistence_failed")
+}
+
+struct CodexRefreshClient {
+    http: reqwest::Client,
+}
+
+impl CodexRefreshClient {
+    fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, String> {
+        let builder = reqwest::Client::builder()
+            .redirect(Policy::none())
+            .timeout(Duration::from_secs(20))
+            .user_agent("Zenith Relay Server");
+        let http = match proxy {
+            Some(proxy) => proxy.apply(builder),
+            None => builder,
+        }
+        .build()
+        .map_err(|error| error.to_string())?;
+        Ok(Self { http })
+    }
+}
+
+struct ServerRefreshClients {
+    direct: CodexRefreshClient,
+    direct_accounts: HashSet<String>,
+    clients: HashMap<String, CodexRefreshClient>,
+}
+
+impl TokenRefreshAdapter for ServerRefreshClients {
+    fn refresh<'a>(
+        &'a self,
+        account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            let client = match self.clients.get(account_id) {
+                Some(client) => client,
+                None if self.direct_accounts.contains(account_id) => &self.direct,
+                None => {
+                    return Err(TokenRefreshFailure::new(
+                        TokenRefreshFailureKind::Transient,
+                        "proxy_client_missing",
+                    ))
+                }
+            };
+            client.refresh(account_id, refresh_token, now_ms).await
+        })
+    }
+}
+
+impl TokenRefreshAdapter for CodexRefreshClient {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        refresh_token: &'a str,
+        now_ms: u64,
+    ) -> BoxFuture<'a, Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async move {
+            if refresh_token.is_empty()
+                || refresh_token.len() > 64 * 1024
+                || refresh_token.bytes().any(|byte| byte.is_ascii_control())
+            {
+                return Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::InvalidatedRefreshToken,
+                    "invalid_refresh_token",
+                ));
+            }
+            let response = self
+                .http
+                .post(CODEX_TOKEN_ENDPOINT)
+                .json(&serde_json::json!({
+                    "client_id": CODEX_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                }))
+                .send()
+                .await
+                .map_err(|_| {
+                    TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
+                })?;
+            let status = response.status();
+            let body = response.bytes().await.map_err(|_| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "transport")
+            })?;
+            if body.len() > MAX_TOKEN_RESPONSE_BYTES {
+                return Err(TokenRefreshFailure::new(
+                    TokenRefreshFailureKind::Transient,
+                    "response_too_large",
+                ));
+            }
+            if !status.is_success() {
+                let code = provider_error_code(&body)
+                    .unwrap_or_else(|| "token_refresh_failed".to_string());
+                let kind = token_refresh_failure_kind(&code);
+                return Err(TokenRefreshFailure::new(kind, &code));
+            }
+            let payload: TokenResponse = serde_json::from_slice(&body).map_err(|_| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+            })?;
+            let expires_at_ms = payload.expires_in.and_then(|seconds| {
+                u64::try_from(seconds)
+                    .ok()
+                    .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000)))
+            });
+            TokenRefresh::new(
+                payload.access_token,
+                payload.refresh_token,
+                payload.id_token,
+                expires_at_ms,
+            )
+            .map_err(|_| {
+                TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, "invalid_response")
+            })
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    id_token: Option<String>,
+    expires_in: Option<i64>,
+}
+
+fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
+    match code.trim().to_ascii_lowercase().as_str() {
+        "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
+        "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
+        "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
+        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
+            TokenRefreshFailureKind::InvalidatedRefreshToken
+        }
+        _ => TokenRefreshFailureKind::Transient,
+    }
+}
+
+fn provider_error_code(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let code = [
+        value
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        value.get("code").and_then(serde_json::Value::as_str),
+        value.get("error").and_then(serde_json::Value::as_str),
+        value
+            .pointer("/error/type")
+            .and_then(serde_json::Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(safe_provider_code);
+    code
+}
+
+fn safe_provider_code(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    .then(|| value.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Config,
+        store::{Store, Vault},
+    };
+    use tempfile::TempDir;
+    use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription};
+    use zenith_relay_core::{protocol::UsageQuery, CandidateQuota, WireApi};
+
+    #[tokio::test]
+    async fn usage_writer_is_reused_and_flushes_before_shutdown() {
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store.clone(), vault).unwrap();
+        let first = state.usage_callback().unwrap();
+        let second = state.usage_callback().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        first(UsageEvent {
+            request_id: "req_shutdown_flush".into(),
+            attempt: 1,
+            local_key_id: "key_test".into(),
+            source_id: "source_test".into(),
+            candidate_id: Some("source_test".into()),
+            account_id: None,
+            routing: None,
+            requested_model: Some("gpt-test".into()),
+            resolved_model: Some("gpt-test".into()),
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 10,
+            ttft_ms: Some(3),
+            generation_ms: Some(7),
+            input_tokens: Some(2),
+            cached_input_tokens: Some(1),
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: Some(3),
+            total_tokens: Some(5),
+            quota_snapshot: None,
+        });
+        state.shutdown_runtime().await.unwrap();
+
+        let usage = store.usage_page(&UsageQuery::default()).unwrap();
+        assert_eq!(usage.total, 1);
+        assert_eq!(usage.events[0].request_id, "req_shutdown_flush");
+    }
+
+    #[test]
+    fn refresh_errors_keep_distinct_reauthentication_reasons() {
+        assert_eq!(
+            token_refresh_failure_kind("invalid_grant"),
+            TokenRefreshFailureKind::InvalidGrant
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_reused"),
+            TokenRefreshFailureKind::ReusedRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_expired"),
+            TokenRefreshFailureKind::ExpiredRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("refresh_token_invalidated"),
+            TokenRefreshFailureKind::InvalidatedRefreshToken
+        );
+        assert_eq!(
+            token_refresh_failure_kind("unsupported_country_region_territory"),
+            TokenRefreshFailureKind::Transient
+        );
+    }
+
+    #[test]
+    fn provider_refresh_error_prefers_specific_rotation_code() {
+        assert_eq!(
+            provider_error_code(br#"{"error":"invalid_grant","code":"refresh_token_reused"}"#)
+                .as_deref(),
+            Some("refresh_token_reused")
+        );
+        assert_eq!(
+            provider_error_code(
+                br#"{"error":{"type":"invalid_request_error","code":"refresh_token_expired"}}"#
+            )
+            .as_deref(),
+            Some("refresh_token_expired")
+        );
+    }
+
+    #[test]
+    fn scheduler_uses_the_tightest_fresh_quota_window() {
+        let window = |kind, available_basis_points| QuotaWindow {
+            kind,
+            available_basis_points: Some(available_basis_points),
+            explicitly_full: None,
+            reset_at_ms: None,
+            window_minutes: None,
+            full_transition_fingerprint: None,
+            observed_at_ms: 1_000,
+        };
+        let quota = QuotaSnapshot {
+            primary: Some(window(QuotaWindowKind::Primary, 9_000)),
+            secondary: Some(window(QuotaWindowKind::Secondary, 2_500)),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+        assert_eq!(
+            CandidateQuota::from_snapshot(&quota, 2_000, zenith_relay_core::QUOTA_STALE_AFTER_MS,),
+            CandidateQuota::Available(2_500)
+        );
+        assert_eq!(
+            CandidateQuota::from_snapshot(
+                &quota,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS + 1_001,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            ),
+            CandidateQuota::Stale
+        );
+    }
+
+    #[test]
+    fn free_accounts_route_like_other_pool_accounts() {
+        let record = ServerAccountRecord {
+            id: "account-free".into(),
+            label: "Free".into(),
+            identity_hint: "free-account".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "codex".into(),
+            secret_ref: "account:free".into(),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Subscription {
+                plan_type: Some("free".into()),
+                ..Subscription::default()
+            },
+            quota: QuotaSnapshot::default(),
+            economics: Default::default(),
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        };
+        let credential = AccountCredential {
+            access_token: "access".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at_ms: None,
+            issued_at_ms: 1,
+            generation: 0,
+            chatgpt_account_id: "provider-account".into(),
+            responses_url: "https://example.test/responses".into(),
+            proxy_url: None,
+            agent_private_key: None,
+            agent_runtime_id: None,
+            agent_task_id: None,
+        };
+
+        assert!(
+            runtime_account(
+                record.clone(),
+                &credential,
+                None,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            )
+            .enabled
+        );
+        let summary = account_summary(
+            &record,
+            true,
+            ProxyMode::Direct,
+            true,
+            ApiEquivalentSummary::default(),
+            DefaultServiceTier::Standard,
+            zenith_relay_core::QUOTA_STALE_AFTER_MS,
+        );
+        assert_eq!(summary.operational_status, OperationalStatus::Rotation);
+        assert!(summary.enabled);
+        assert!(summary.in_pool);
+    }
+
+    #[tokio::test]
+    async fn refresh_client_never_falls_back_to_direct_for_unknown_account() {
+        let clients = ServerRefreshClients {
+            direct: CodexRefreshClient::new_with_proxy(None).unwrap(),
+            direct_accounts: HashSet::new(),
+            clients: HashMap::new(),
+        };
+        let failure = clients
+            .refresh("proxy-required", "unused-refresh-token", 1)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, "proxy_client_missing");
+    }
+}

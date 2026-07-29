@@ -1,76 +1,64 @@
-# Zenith Codex
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="Zenith Relay">
+  <h1>Zenith Relay</h1>
+  <p>Personal ChatGPT accounts and compatible API sources behind one private endpoint.</p>
+  <p>
+    <a href="docs/help/en/README.md">English documentation</a> ·
+    <a href="docs/help/ru/README.md">Русская документация</a>
+  </p>
+  <p>
+    <a href="https://github.com/F0RLE/zenith-relay/releases/latest">Download latest release</a> ·
+    <a href="LICENSE">AGPL-3.0-only</a>
+  </p>
+</div>
 
-Desktop app for connecting Codex to Zenith API.
+## Documentation
 
-## What It Does
+Choose a language first. Each overview links directly to a separate guide, so
+the Help Center and GitHub navigation do not depend on one long page.
 
-- Saves your Zenith API key.
-- Writes the Zenith connection into Codex config.
-- Launches Codex from the app.
-- Shows key balance, spending, requests, and token usage.
-- Opens the Telegram bot for balance top-ups.
+| Mode | English | Русский |
+| --- | --- | --- |
+| Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
+| This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
+| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
+| My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
 
-Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+## What Is Shipped
 
-Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+- Local-first Tauri desktop app with a React/Vite UI.
+- ChatGPT OAuth, existing-profile import, and compatible API sources.
+- Local personal pool with quota/health checks, model rules, proxies, routing,
+  response affinity, and redacted usage history.
+- Optional user-managed Relay Server with encrypted vault, SQLite state,
+  management API, scoped client keys, backup/restore, and append-only migrations.
+- Reversible ChatGPT/Codex profile attachment with automatic snapshots.
 
-## API Gateway
+Relay is a personal deployment. It is not Zenith customer billing, a public
+account marketplace, or the internal Zenith account pool.
 
-The app uses:
+## Screenshots
 
-```text
-https://api.zenithmarket.dev/v1
-```
-
-## Architecture
-
-The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands. Request handling, API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control belong in the Rust backend under `src-tauri/src`.
-
-### Platform Support
-
-Builds are automatically created for:
-- **Windows**: x64 and ARM64 (EXE portable, Setup installer, MSI)
-- **macOS**: Apple Silicon (ARM64) and Intel (x64) (DMG, .app.tar.gz)
-- **Linux**: x64 and ARM64 (AppImage, DEB, RPM)
-
-All platforms support automatic signed updates through GitHub Releases.
-
-## Updates
-
-Zenith Codex checks GitHub Releases on startup. When a new version is available, it downloads and installs signed updates silently in the background, then relaunches automatically.
-
-Updates are verified using signed artifacts from GitHub Releases. The public key is embedded in the app; releases are signed with `TAURI_SIGNING_PRIVATE_KEY` during CI builds.
+<p align="center">
+  <img src="docs/screenshots/overview.png" width="49%" alt="Overview">
+  <img src="docs/screenshots/connections.png" width="49%" alt="Connections">
+</p>
+<p align="center">
+  <img src="docs/screenshots/pool.png" width="49%" alt="Pool">
+  <img src="docs/screenshots/usage.png" width="49%" alt="Usage">
+</p>
 
 ## Development
 
-```bash
+```powershell
 cd src
 bun install
-bun run app:dev
-```
-
-Source layout:
-
-- `src` - React/Vite frontend package.
-- `src-tauri` - Rust/Tauri backend and desktop packaging.
-- `.github/tools` - local and CI build helpers.
-
-Verify before release:
-
-```bash
-cd src
 bun run verify
+bun run test:e2e
 ```
 
-Clean local frontend artifacts:
+For the desktop bundle use `bun run app:build`. Shared runtime and server
+checks are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```bash
-cd src
-bun run clean
-```
-
-Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md). Auto-update details live in [docs/UPDATES.md](docs/UPDATES.md).
-
-## License
-
-MIT
+Current implementation boundaries are in [PLANNING.md](PLANNING.md); unfinished
+acceptance work is in [ROADMAP.md](ROADMAP.md).

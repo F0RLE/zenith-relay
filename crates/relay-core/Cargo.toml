@@ -1,0 +1,28 @@
+[package]
+name = "zenith-relay-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+
+[dependencies]
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+base64 = "0.22.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+crypto_box = { version = "0.9.1", features = ["seal"] }
+ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
+futures-util = "0.3.33"
+httpdate = "1.0.3"
+hex = "0.4.3"
+multer = "3.1.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["http2", "json", "query", "rustls", "stream"] }
+reqwest-websocket = "0.6.0"
+ring = "0.17.14"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+subtle = "2.6.1"
+tokio = { version = "1.53.0", features = ["macros", "time"] }
+url = "2.5.8"
+
+[dev-dependencies]
+tokio = { version = "1.53.0", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }

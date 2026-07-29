@@ -1,0 +1,49 @@
+
+* {
+  scrollbar-color: var(--relay-scrollbar-thumb) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-width: 32px;
+  min-height: 32px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--relay-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--relay-scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+body,
+.app {
+  background: var(--relay-bg);
+  color: var(--relay-text);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+::selection {
+  background: var(--relay-accent-soft);
+  color: var(--relay-text);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+  letter-spacing: 0;
+}
