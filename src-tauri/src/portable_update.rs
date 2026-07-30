@@ -25,6 +25,7 @@ const HELPER_WAIT: Duration = Duration::from_secs(120);
 const FILE_WAIT: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Serialize)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[serde(tag = "event", content = "data")]
 pub enum DownloadEvent {
     #[serde(rename_all = "camelCase")]
@@ -84,7 +85,7 @@ pub async fn install_portable_update(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (app, expected_version, on_event);
-        return Err("portable_update_unsupported".to_string());
+        Err("portable_update_unsupported".to_string())
     }
 
     #[cfg(target_os = "windows")]
