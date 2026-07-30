@@ -28,7 +28,7 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
     <div className="overview-chart-stack">
       <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading} />
-      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint")} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale, apiTotal.unpricedTokens > 0)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading} />
+      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint", { count: new Intl.NumberFormat(locale).format(apiTotal.unpricedTokens) })} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading} />
       <OverviewChart icon={<Timer aria-hidden />} title={t("overview.responseSpeed")} hint={t("overview.responseSpeedHint")} summary={formatDuration(averageResponse, locale)} values={responseValues} windows={windows} variant="line" tone="latency" formatValue={(value) => formatDuration(value, locale)} formatAxis={(value) => formatDuration(value, locale)} loading={loading} />
       <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.generationSpeed")} hint={t("overview.generationSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading} />
     </div>
@@ -102,8 +102,8 @@ function formatDuration(value: number | null, locale: string) {
   return new Intl.NumberFormat(locale, { style: "unit", unit: value >= 1_000 ? "second" : "millisecond", unitDisplay: "short", maximumFractionDigits: 1 }).format(value >= 1_000 ? value / 1_000 : value);
 }
 
-function formatApiEquivalent(value: number | null, locale: string, partial = false) {
-  return value == null ? "—" : `≈${formatUsd(value, locale)}${partial ? "*" : ""}`;
+function formatApiEquivalent(value: number | null, locale: string) {
+  return value == null ? "—" : `≈${formatUsd(value, locale)}`;
 }
 
 function formatUsd(value: number, locale: string) {

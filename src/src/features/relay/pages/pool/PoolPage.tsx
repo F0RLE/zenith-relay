@@ -330,7 +330,7 @@ function PoolSourceStats({ source, state }: { source: SourceSummary; state?: Sou
         : t("pool.sourceStatsUnsupported");
   const spent = providerStats && stats.spentMicroUsd != null
     ? formatProviderMicroUsd(stats.spentMicroUsd, locale)
-    : `${formatApiEquivalent(source.apiEquivalent.microUsd, locale)}${source.apiEquivalent.unpricedTokens ? "*" : ""}`;
+    : formatApiEquivalent(source.apiEquivalent.microUsd, locale);
   const requests = providerStats
     ? stats.requests == null ? "—" : new Intl.NumberFormat(locale).format(stats.requests)
     : "—";

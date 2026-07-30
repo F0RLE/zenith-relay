@@ -185,7 +185,7 @@ export function UsagePage() {
         <UsageMetric icon={<Activity aria-hidden />} label={t("usage.requests")} value={<CompactNumber value={totals.requests} locale={i18n.language} />} />
         <UsageMetric icon={<CheckCircle2 aria-hidden />} label={t("common.success")} value={successRate == null ? "-" : `${successRate}%`} detail={`${formatFullNumber(totals.successfulRequests, i18n.language)} / ${formatFullNumber(totals.requests, i18n.language)}`} />
         <UsageMetric icon={<Database aria-hidden />} label={t("usage.totalTokens")} value={<CompactNumber value={totals.totalTokens} locale={i18n.language} />} detail={`${t("usage.inputShort")} ${formatCompactNumber(totals.inputTokens, i18n.language)} · ${t("usage.cachedShort")} ${totals.cachedInputSamples ? formatCompactNumber(totals.cachedInputTokens, i18n.language) : "—"} · ${t("usage.outputShort")} ${formatCompactNumber(totals.outputTokens, i18n.language)}`} title={t("usage.tokenCompositionHint")} />
-        <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.pricedTokens", { count: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} />
+        <UsageMetric icon={<CreditCard aria-hidden />} label={t("usage.apiEquivalent")} value={formatApiEquivalent(totals.apiEquivalent, i18n.language)} detail={t("usage.apiEquivalentCoverage", { priced: formatCompactNumber(totals.apiEquivalent.pricedTokens, i18n.language), unpriced: formatCompactNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} title={t("usage.apiEquivalentHint", { count: formatFullNumber(totals.apiEquivalent.unpricedTokens, i18n.language) })} />
       </div>
       <div className="usage-performance">
         <UsageMetric label={t("usage.firstResponse")} value={averageFirstResponse == null ? "-" : `${averageFirstResponse} ms`} />
@@ -495,7 +495,7 @@ function formatApiEquivalent(value: UsageTotals["apiEquivalent"], locale: string
     minimumFractionDigits: 2,
     maximumFractionDigits: 4,
   }).format(value.microUsd / 1_000_000);
-  return `≈${amount}${value.unpricedTokens ? "*" : ""}`;
+  return `≈${amount}`;
 }
 
 function AccountUsageEconomics({ account, totals }: { account: AccountSummary; totals: UsageTotals }) {

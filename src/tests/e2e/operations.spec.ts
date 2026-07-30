@@ -1885,6 +1885,17 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await expect(details).toContainText("Quota at selection63.00%");
 });
 
+test("partial API equivalents state their coverage without an asterisk", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageUnpricedTokens: 7 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+
+  const metric = page.locator(".usage-metrics > div").filter({ hasText: "API equivalent" });
+  await expect(metric).toContainText("21 priced · 7 unpriced");
+  await expect(metric).not.toContainText("*");
+  await expect(page.locator('.usage-request-table tbody td[data-column="equivalent"]')).not.toContainText("*");
+});
+
 test("OAuth member policy hides manual routing controls", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");

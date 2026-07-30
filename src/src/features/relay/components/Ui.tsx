@@ -112,9 +112,9 @@ export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
       purchase: formatMicroUsd(purchaseCost, locale),
     });
   return <dl className="account-economics-strip">
-    <div title={t("accounts.economics.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.economics.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale)}{incompleteEquivalent ? "*" : ""}</dd></div>
+    <div title={t("accounts.economics.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.economics.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale, incompleteEquivalent)}</dd></div>
     <div title={potentialTitle} data-state={economics?.estimateState ?? "collecting"}><dt>{t("accounts.economics.potential")}</dt><dd><span>{potential}</span>{potentialMeta ? <small>{potentialMeta}</small> : null}</dd></div>
-    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.economics.payback")}</dt><dd>{payback == null ? "—" : `${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}${incompleteEquivalent ? "*" : ""}`}</dd></div>
+    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.economics.payback")}</dt><dd>{payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
   </dl>;
 }
 
