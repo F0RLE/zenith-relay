@@ -81,9 +81,22 @@ has been renamed.
    apply, verify, and restore safely.
 6. Test empty pool, disabled model, removed model, unavailable candidate, and
    profile restore cases.
+7. Use Codex's root `model_catalog_json` setting and derive strict catalog
+   entries from an installed native template instead of inventing incomplete
+   JSON rows.
+8. Namespace Relay models separately and keep an exact reversible mapping for
+   upstream model ids that already contain `/`.
+9. Keep the OpenAI list response and the Codex
+   `/v1/models?client_version=...` catalog filtered by the same live registry
+   and client-key policy.
+10. Write the managed catalog atomically and invalidate `models_cache.json`
+    only after a verified catalog change. Recovery restores the previous
+    catalog and leaves native/user-managed entries untouched.
 
 This avoids a hard-coded model list and makes the source of each model clear in
-the client selector.
+the client selector. OpenCodex's MIT-licensed implementation was reviewed as a
+compatibility reference; Relay reuses the Codex-native file/endpoint contract,
+not its proxy, provider adapters, scheduler, or configuration store.
 
 ### Additional client applications
 
