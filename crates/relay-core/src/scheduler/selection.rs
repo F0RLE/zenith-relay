@@ -213,11 +213,7 @@ impl PoolScheduler {
         true
     }
 
-    pub fn upsert(&mut self, mut candidate: RuntimeCandidate) {
-        if candidate.kind == CandidateKind::OAuthAccount {
-            candidate.cooldowns.clear();
-            candidate.consecutive_failures = 0;
-        }
+    pub fn upsert(&mut self, candidate: RuntimeCandidate) {
         self.candidates.insert(candidate.id.clone(), candidate);
     }
 
@@ -878,9 +874,6 @@ impl PoolScheduler {
 
     pub fn record_failure(&mut self, candidate_id: &str) -> Option<u32> {
         let candidate = self.candidates.get_mut(candidate_id)?;
-        if candidate.kind == CandidateKind::OAuthAccount {
-            return Some(0);
-        }
         candidate.consecutive_failures = candidate.consecutive_failures.saturating_add(1);
         Some(candidate.consecutive_failures)
     }
@@ -897,9 +890,6 @@ impl PoolScheduler {
         let Some(candidate) = self.candidates.get_mut(candidate_id) else {
             return false;
         };
-        if candidate.kind == CandidateKind::OAuthAccount {
-            return false;
-        }
         let scope = if model == "*" {
             "*".to_string()
         } else {
@@ -2251,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn oauth_candidates_ignore_internal_cooldowns_and_stale_quota() {
+    fn oauth_candidates_honor_runtime_cooldowns_and_allow_stale_quota() {
         let mut scheduler = PoolScheduler::new();
         let mut account = oauth_candidate("account");
         account.quota = CandidateQuota::Stale;
@@ -2259,12 +2249,23 @@ mod tests {
         account.consecutive_failures = 7;
         scheduler.upsert(account);
 
-        assert!(!scheduler.set_cooldown("account", "gpt-5", 20_000));
-        assert_eq!(scheduler.record_failure("account"), Some(0));
-        assert!(select(&mut scheduler, &HashSet::new()).is_some());
+        assert!(scheduler.set_cooldown("account", "gpt-5", 20_000));
+        assert_eq!(scheduler.record_failure("account"), Some(8));
+        assert!(select(&mut scheduler, &HashSet::new()).is_none());
         let snapshot = scheduler.runtime_order(100).remove(0);
-        assert!(snapshot.available);
-        assert_eq!(snapshot.next_retry_at_ms, None);
+        assert!(!snapshot.available);
+        assert_eq!(snapshot.next_retry_at_ms, Some(20_000));
+        assert!(scheduler
+            .select(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                scope: &CandidateScope::default(),
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 20_001,
+            })
+            .is_some());
     }
 
     #[test]

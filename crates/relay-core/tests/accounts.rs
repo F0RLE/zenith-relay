@@ -1526,9 +1526,9 @@ async fn account_websocket_retries_usage_limit_before_output_and_early_close() {
         events[0].error_category.as_deref(),
         Some("upstream_quota_exhausted")
     );
-    assert_eq!(events[0].cooldown_scope, None);
-    assert_eq!(events[0].retry_at_ms, None);
-    assert_eq!(events[0].consecutive_failures, Some(0));
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[0].retry_at_ms.is_some());
+    assert_eq!(events[0].consecutive_failures, Some(1));
     assert_eq!(
         events[1].error_category.as_deref(),
         Some("upstream_websocket_closed")
@@ -2923,9 +2923,9 @@ async fn http_usage_limit_immediately_excludes_the_account_until_quota_refresh()
     let events = events.lock().unwrap();
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].candidate_id.as_deref(), Some("limited-account"));
-    assert_eq!(events[0].cooldown_scope, None);
-    assert_eq!(events[0].retry_at_ms, None);
-    assert_eq!(events[0].consecutive_failures, Some(0));
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[0].retry_at_ms.is_some());
+    assert_eq!(events[0].consecutive_failures, Some(1));
     assert_eq!(events[2].candidate_id.as_deref(), Some("fallback-account"));
     assert!(events[2].success);
     assert_eq!(events[2].cooldown_scope, None);
