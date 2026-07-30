@@ -12,9 +12,11 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 relay-server/target/
+relay-server/target-*/
 crates/relay-core/target/
 playwright-report/
 test-results/
+src/output/
 
 *.pdb
 *.log

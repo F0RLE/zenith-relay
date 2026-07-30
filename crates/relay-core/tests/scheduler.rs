@@ -1,0 +1,1279 @@
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderMap, Response, StatusCode, Uri};
+use axum::routing::{get, post};
+use axum::Router;
+use futures_util::stream;
+use serde_json::{json, Value};
+use std::collections::VecDeque;
+use std::io;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
+use zenith_relay_core::gateway;
+use zenith_relay_core::{
+    DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+    RuntimeLocalKey, RuntimeSource, UsageEvent, WireApi,
+};
+
+const LOCAL_KEY: &str = "p2-local-key";
+const MODEL: &str = "gpt-p2";
+
+#[derive(Clone, Debug)]
+struct ObservedRequest {
+    path: String,
+    authorization: Option<String>,
+    body: Value,
+}
+
+#[derive(Clone)]
+enum Reply {
+    Json {
+        status: StatusCode,
+        body: Value,
+        cache_control: &'static str,
+        retry_after: Option<&'static str>,
+    },
+    Stream {
+        chunks: Vec<StreamChunk>,
+        cache_control: &'static str,
+    },
+}
+
+#[derive(Clone)]
+enum StreamChunk {
+    Data(&'static str),
+    Error,
+}
+
+#[derive(Clone)]
+struct UpstreamState {
+    key: String,
+    replies: Arc<Mutex<VecDeque<Reply>>>,
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
+}
+
+struct TestServer {
+    base_url: String,
+    task: JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
+    let (source_a, state_a) = spawn_upstream("source-a-key", Vec::new()).await;
+    let (source_b, state_b) = spawn_upstream("source-b-key", Vec::new()).await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source(
+                "source-a",
+                &source_a,
+                "source-a-key",
+                &["alpha", "shared"],
+                0,
+            ),
+            source(
+                "source-b",
+                &source_b,
+                "source-b-key",
+                &["beta", "shared"],
+                0,
+            ),
+        ],
+        vec![
+            local_key("all", LOCAL_KEY, None),
+            local_key("scoped", "scoped-key", Some(vec!["source-a"])),
+            local_key("empty", "empty-key", Some(Vec::new())),
+        ],
+        3,
+    )
+    .await;
+
+    assert_eq!(
+        models(&gateway, LOCAL_KEY).await,
+        ["alpha", "beta", "shared"]
+    );
+    assert_eq!(models(&gateway, "scoped-key").await, ["alpha", "shared"]);
+    assert!(models(&gateway, "empty-key").await.is_empty());
+    assert!(state_a.requests.lock().unwrap().is_empty());
+    assert!(state_b.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn fast_for_all_forces_priority_over_client_service_tier() {
+    let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
+    let (gateway, _) = spawn_gateway_with_options(
+        vec![source("source", &upstream, "source-key", &[MODEL], 0)],
+        vec![local_key("key", LOCAL_KEY, None)],
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            default_service_tier: DefaultServiceTier::Fast,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    for tier in [
+        None,
+        Some("fast"),
+        Some("standard"),
+        Some("flex"),
+        Some("default"),
+        Some("priority"),
+    ] {
+        let mut body = json!({"model": MODEL, "input": "hello"});
+        if let Some(tier) = tier {
+            body["service_tier"] = Value::String(tier.to_string());
+        }
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let requests = state.requests.lock().unwrap();
+    let tiers = requests
+        .iter()
+        .map(|request| request.body["service_tier"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tiers,
+        [
+            Some("priority"),
+            Some("priority"),
+            Some("priority"),
+            Some("priority"),
+            Some("priority"),
+            Some("priority"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_source() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "loser", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![
+            response_reply("resp-b-1", "winner"),
+            response_reply("resp-b-2", "winner"),
+        ],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let first = request(&gateway, false).await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()[CACHE_CONTROL], "winner");
+    assert_eq!(first.json::<Value>().await.unwrap()["id"], "resp-b-1");
+    assert_eq!(
+        request(&gateway, false)
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["id"],
+        "resp-b-2"
+    );
+
+    let a = state_a.requests.lock().unwrap();
+    let b = state_b.requests.lock().unwrap();
+    assert_eq!(a.len(), 1, "5xx source should remain in cooldown");
+    assert_eq!(b.len(), 2);
+    assert_eq!(a[0].authorization.as_deref(), Some("Bearer source-a-key"));
+    assert_eq!(b[0].authorization.as_deref(), Some("Bearer source-b-key"));
+    assert!(!a[0].authorization.as_deref().unwrap().contains(LOCAL_KEY));
+    drop(a);
+    drop(b);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        (
+            events[0].attempt,
+            events[0].source_id.as_str(),
+            events[0].success
+        ),
+        (1, "source-a", false)
+    );
+    assert_eq!(
+        (
+            events[1].attempt,
+            events[1].source_id.as_str(),
+            events[1].success
+        ),
+        (2, "source-b", true)
+    );
+    assert_eq!(
+        (
+            events[2].attempt,
+            events[2].source_id.as_str(),
+            events[2].success
+        ),
+        (1, "source-b", true)
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_retry_after_cools_source_before_the_next_request() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(
+            StatusCode::TOO_MANY_REQUESTS,
+            "limited",
+            Some("60"),
+        )],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![
+            response_reply("resp-b-1", "ready"),
+            response_reply("resp-b-2", "ready"),
+        ],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(request(&gateway, false).await.status(), StatusCode::OK);
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn all_cooled_sources_keep_model_visible_and_return_local_retry_after() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "a", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let first = request(&gateway, false).await;
+    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        first.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(models(&gateway, LOCAL_KEY).await, [MODEL]);
+    let before = (
+        state_a.requests.lock().unwrap().len(),
+        state_b.requests.lock().unwrap().len(),
+    );
+
+    let second = request(&gateway, false).await;
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        second.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "all_sources_cooling_down");
+    assert_eq!(
+        before,
+        (
+            state_a.requests.lock().unwrap().len(),
+            state_b.requests.lock().unwrap().len(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn bad_request_is_terminal_and_does_not_call_the_fallback_source() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(StatusCode::BAD_REQUEST, "bad", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![response_reply("must-not-run", "fallback")],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    assert_eq!(
+        request(&gateway, false).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
+    assert_eq!(events.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![Reply::Json {
+            status: StatusCode::BAD_REQUEST,
+            body: json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "code": "server_is_overloaded",
+                    "message": "Please retry later."
+                }
+            }),
+            cache_control: "overloaded",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![response_reply("fallback-response", "fallback")],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "fallback-response"
+    );
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_overloaded")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some(MODEL));
+}
+
+#[tokio::test]
+async fn retry_budget_counts_execution_attempts_and_stops_before_third_source() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "a", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "b", None)],
+    )
+    .await;
+    let (source_c, state_c) = spawn_upstream(
+        "c-key",
+        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "c", None)],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 3),
+            source("b", &source_b, "b-key", &[MODEL], 2),
+            source("c", &source_c, "c-key", &[MODEL], 1),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        2,
+    )
+    .await;
+
+    assert_eq!(
+        request(&gateway, false).await.status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_c.requests.lock().unwrap().is_empty());
+    assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn unmapped_candidate_is_tried_without_spending_the_execution_budget() {
+    let (chat_server, chat_state) = spawn_upstream("chat-key", Vec::new()).await;
+    let (responses_server, responses_state) = spawn_upstream(
+        "responses-key",
+        vec![response_reply("responses-wins", "winner")],
+    )
+    .await;
+    let mut chat = source("chat", &chat_server, "chat-key", &[MODEL], 10);
+    chat.source.wire_api = WireApi::ChatCompletions;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            chat,
+            source("responses", &responses_server, "responses-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        1,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "hello",
+            "previous_response_id": "resp_previous"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "responses-wins"
+    );
+    assert!(chat_state.requests.lock().unwrap().is_empty());
+    assert_eq!(responses_state.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].attempt, 1);
+    assert_eq!(events[0].source_id, "responses");
+}
+
+#[tokio::test]
+async fn stream_bootstrap_falls_back_before_first_event_and_uses_only_winner_headers() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response.created\""),
+                StreamChunk::Error,
+            ],
+            cache_control: "loser",
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response."),
+                StreamChunk::Data("created\"}\n\n"),
+                StreamChunk::Data("data: [DONE]\n\n"),
+            ],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let body = response.text().await.unwrap();
+    assert_eq!(body.matches("response.created").count(), 1);
+    assert_eq!(body.matches("[DONE]").count(), 1);
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_usage_limit_keeps_the_provider_reset_before_fallback() {
+    let (source_a, _) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":120}}}\n\n",
+            )],
+            cache_control: "limited",
+        }],
+    )
+    .await;
+    let (source_b, _) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
+                StreamChunk::Data("data: [DONE]\n\n"),
+            ],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let _ = response.text().await.unwrap();
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_quota_exhausted")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[0]
+        .retry_at_ms
+        .is_some_and(|retry_at| retry_at > now_ms + 100_000));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_account() {
+    let (source_a, _) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"usage_not_included\"}}}\n\n",
+            )],
+            cache_control: "limited",
+        }],
+    )
+    .await;
+    let (source_b, _) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let _ = response.text().await.unwrap();
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].http_status, StatusCode::FORBIDDEN.as_u16());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_usage_not_included")
+    );
+    assert_eq!(events[0].cooldown_scope.as_deref(), Some("*"));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data(
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_prompt\",\"message\":\"Invalid prompt\"}}}\n\n",
+            )],
+            cache_control: "rejected",
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "must-not-run",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("invalid_request_error"), "body={body}");
+    assert!(body.contains("invalid_request"), "body={body}");
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert!(state_b.requests.lock().unwrap().is_empty());
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
+    assert!(events[0].cooldown_scope.is_none());
+}
+
+#[tokio::test]
+async fn stream_falls_back_after_prelude_before_first_output() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
+                StreamChunk::Error,
+            ],
+            cache_control: "first",
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("response.created"));
+    assert!(body.contains("[DONE]"));
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert!(events[0]
+        .error_category
+        .as_deref()
+        .is_some_and(|category| category.starts_with("upstream_transport")));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn invalid_sse_after_prelude_falls_back_before_client_output() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data("data: {\"type\":\"response.created\"}\n\n"),
+                StreamChunk::Data("data: {not-"),
+                StreamChunk::Data("json}\n\n"),
+                StreamChunk::Data("data: [DONE]\n\n"),
+            ],
+            cache_control: "first",
+        }],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "b-key",
+        vec![Reply::Stream {
+            chunks: vec![StreamChunk::Data("data: [DONE]\n\n")],
+            cache_control: "winner",
+        }],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.headers()[CACHE_CONTROL], "winner");
+    let body = response.text().await.unwrap();
+    assert!(!body.contains("response.created"));
+    assert!(!body.contains("not-json"));
+    assert!(body.contains("[DONE]"));
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(events[0].error_category.as_deref(), Some("stream_invalid"));
+    assert!(events[1].success);
+}
+
+#[tokio::test]
+async fn chat_only_source_is_visible_and_executes_through_responses_adapter() {
+    let chat = json!({
+        "id": "chat-1",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "chat-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "translated"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}
+    });
+    let (chat_server, state) = spawn_upstream(
+        "chat-key",
+        vec![
+            Reply::Json {
+                status: StatusCode::OK,
+                body: chat.clone(),
+                cache_control: "chat",
+                retry_after: None,
+            },
+            Reply::Json {
+                status: StatusCode::OK,
+                body: chat,
+                cache_control: "chat",
+                retry_after: None,
+            },
+        ],
+    )
+    .await;
+    let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
+    chat_source.source.wire_api = WireApi::ChatCompletions;
+    let (gateway, events) = spawn_gateway(
+        vec![chat_source],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    assert_eq!(models(&gateway, LOCAL_KEY).await, ["chat-model"]);
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "chat-model",
+            "input": "hello",
+            "service_tier": "priority"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["output"][0]["content"][0]["text"], "translated");
+    assert_eq!(body["usage"]["input_tokens"], 2);
+
+    let streamed = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": "chat-model", "input": "hello", "stream": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streamed.headers()[CONTENT_TYPE], "text/event-stream");
+    let streamed = streamed.text().await.unwrap();
+    assert!(streamed.contains("response.completed"));
+    assert!(streamed.contains("translated"));
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path == "/v1/chat/completions"));
+    assert!(requests
+        .iter()
+        .all(|request| request.authorization.as_deref() == Some("Bearer chat-key")));
+    assert_eq!(requests[0].body["messages"][0]["content"], "hello");
+    assert_eq!(requests[0].body["service_tier"], "priority");
+    assert_eq!(requests[1].body["stream"], false);
+    drop(requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert!(events
+        .iter()
+        .all(|event| event.wire_api == WireApi::ChatCompletions));
+}
+
+#[tokio::test]
+async fn responses_only_source_executes_through_chat_completions_adapter() {
+    let responses = json!({
+        "id": "resp-chat-1",
+        "object": "response",
+        "created_at": 456,
+        "status": "completed",
+        "model": MODEL,
+        "output": [{
+            "id": "message-1",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "from responses", "annotations": []}]
+        }],
+        "usage": {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9}
+    });
+    let (responses_server, state) = spawn_upstream(
+        "responses-key",
+        vec![
+            Reply::Json {
+                status: StatusCode::OK,
+                body: responses.clone(),
+                cache_control: "responses",
+                retry_after: None,
+            },
+            Reply::Json {
+                status: StatusCode::OK,
+                body: responses,
+                cache_control: "responses",
+                retry_after: None,
+            },
+        ],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![source(
+            "responses",
+            &responses_server,
+            "responses-key",
+            &[MODEL],
+            0,
+        )],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hello"}],
+            "service_tier": "priority"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "from responses");
+    assert_eq!(body["usage"]["prompt_tokens"], 4);
+
+    let streamed = reqwest::Client::new()
+        .post(format!("{}/v1/chat/completions", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streamed.headers()[CONTENT_TYPE], "text/event-stream");
+    let streamed = streamed.text().await.unwrap();
+    assert!(streamed.contains("chat.completion.chunk"));
+    assert!(streamed.contains("from responses"));
+    assert!(streamed.contains("[DONE]"));
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests
+        .iter()
+        .all(|request| request.path == "/v1/responses"));
+    assert!(requests
+        .iter()
+        .all(|request| { request.authorization.as_deref() == Some("Bearer responses-key") }));
+    assert_eq!(requests[0].body["input"][0]["role"], "user");
+    assert_eq!(requests[0].body["input"][0]["content"], "hello");
+    assert_eq!(requests[0].body["service_tier"], "priority");
+    assert_eq!(requests[1].body["stream"], false);
+    drop(requests);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+    assert!(events
+        .iter()
+        .all(|event| event.wire_api == WireApi::Responses));
+}
+
+#[tokio::test]
+async fn repeated_session_id_does_not_pin_requests_to_one_source() {
+    let (source_a, state_a) = spawn_upstream(
+        "a-key",
+        vec![
+            status_reply(StatusCode::TOO_MANY_REQUESTS, "a-limited", Some("0")),
+            response_reply("a-rotated", "a-ready"),
+        ],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream("b-key", vec![response_reply("b-first", "b")]).await;
+    let (gateway, _) = spawn_gateway_with_options(
+        vec![
+            source("a", &source_a, "a-key", &[MODEL], 10),
+            source("b", &source_b, "b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            routing_strategy: Default::default(),
+            subscription_plan_order: Vec::new(),
+            hidden_models: Vec::new(),
+            default_service_tier: Default::default(),
+            quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            image_base_model: None,
+            response_affinity_store: None,
+            provider_storm_breaker: false,
+        },
+    )
+    .await;
+
+    assert_eq!(
+        request_with_session(&gateway, "session-1")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["id"],
+        "b-first"
+    );
+    assert_eq!(
+        request_with_session(&gateway, "session-1")
+            .await
+            .json::<Value>()
+            .await
+            .unwrap()["id"],
+        "a-rotated"
+    );
+    assert_eq!(state_a.requests.lock().unwrap().len(), 2);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+}
+
+fn source(
+    id: &str,
+    server: &TestServer,
+    key: &str,
+    models: &[&str],
+    priority: i32,
+) -> RuntimeSource {
+    RuntimeSource {
+        source: ProviderSource {
+            id: id.to_string(),
+            name: id.to_string(),
+            base_url: format!("{}/v1", server.base_url),
+            api_key: key.to_string(),
+            wire_api: WireApi::Responses,
+            models: models.iter().map(|model| (*model).to_string()).collect(),
+        },
+        enabled: true,
+        draining: false,
+        priority,
+        weight: 1,
+        recovery_delay_seconds: 0,
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        last_used_at_ms: None,
+    }
+}
+
+fn local_key(id: &str, secret: &str, source_ids: Option<Vec<&str>>) -> RuntimeLocalKey {
+    RuntimeLocalKey {
+        key: LocalGatewayKey {
+            id: id.to_string(),
+            secret: secret.to_string(),
+        },
+        enabled: true,
+        source_ids: source_ids.map(|ids| ids.into_iter().map(str::to_string).collect()),
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        model_prefix: None,
+    }
+}
+
+async fn spawn_gateway(
+    sources: Vec<RuntimeSource>,
+    keys: Vec<RuntimeLocalKey>,
+    max_retry_candidates: usize,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    spawn_gateway_with_options(
+        sources,
+        keys,
+        GatewayRuntimeOptions {
+            max_retry_candidates,
+            routing_strategy: Default::default(),
+            subscription_plan_order: Vec::new(),
+            hidden_models: Vec::new(),
+            default_service_tier: Default::default(),
+            quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            image_base_model: None,
+            response_affinity_store: None,
+            provider_storm_breaker: false,
+        },
+    )
+    .await
+}
+
+async fn spawn_gateway_with_options(
+    sources: Vec<RuntimeSource>,
+    keys: Vec<RuntimeLocalKey>,
+    options: GatewayRuntimeOptions,
+) -> (TestServer, Arc<Mutex<Vec<UsageEvent>>>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let runtime = GatewayRuntime::from_pool(
+        sources,
+        keys,
+        options,
+        Arc::new(move |event| captured.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    (spawn(gateway::router(Arc::new(runtime))).await, events)
+}
+
+async fn spawn_upstream(key: &str, replies: Vec<Reply>) -> (TestServer, UpstreamState) {
+    let state = UpstreamState {
+        key: key.to_string(),
+        replies: Arc::new(Mutex::new(replies.into())),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let router = Router::new()
+        .route("/v1/models", get(upstream))
+        .route("/v1/responses", post(upstream))
+        .route("/v1/chat/completions", post(upstream))
+        .with_state(state.clone());
+    (spawn(router).await, state)
+}
+
+async fn spawn(app: Router) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    TestServer {
+        base_url: format!("http://{address}"),
+        task,
+    }
+}
+
+async fn upstream(
+    State(state): State<UpstreamState>,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    let parsed_body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state.requests.lock().unwrap().push(ObservedRequest {
+        path: uri.path().to_string(),
+        authorization: headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        body: parsed_body,
+    });
+    let expected = format!("Bearer {}", state.key);
+    if headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        != Some(expected.as_str())
+    {
+        return Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    let reply = state
+        .replies
+        .lock()
+        .unwrap()
+        .pop_front()
+        .unwrap_or_else(|| response_reply("default-response", "default"));
+    match reply {
+        Reply::Json {
+            status,
+            body,
+            cache_control,
+            retry_after,
+        } => {
+            let mut response = Response::builder()
+                .status(status)
+                .header(CONTENT_TYPE, "application/json")
+                .header(CACHE_CONTROL, cache_control);
+            if let Some(retry_after) = retry_after {
+                response = response.header("retry-after", retry_after);
+            }
+            response.body(Body::from(body.to_string())).unwrap()
+        }
+        Reply::Stream {
+            chunks,
+            cache_control,
+        } => {
+            let chunks = stream::unfold(VecDeque::from(chunks), |mut chunks| async move {
+                let chunk = chunks.pop_front()?;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let item = match chunk {
+                    StreamChunk::Data(data) => {
+                        Ok::<_, io::Error>(Bytes::from_static(data.as_bytes()))
+                    }
+                    StreamChunk::Error => Err(io::Error::other("synthetic stream failure")),
+                };
+                Some((item, chunks))
+            });
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .header(CACHE_CONTROL, cache_control)
+                .body(Body::from_stream(chunks))
+                .unwrap()
+        }
+    }
+}
+
+fn status_reply(
+    status: StatusCode,
+    cache_control: &'static str,
+    retry_after: Option<&'static str>,
+) -> Reply {
+    Reply::Json {
+        status,
+        body: json!({"error": {"message": status.as_str()}}),
+        cache_control,
+        retry_after,
+    }
+}
+
+fn response_reply(id: &str, cache_control: &'static str) -> Reply {
+    Reply::Json {
+        status: StatusCode::OK,
+        body: json!({
+            "id": id,
+            "object": "response",
+            "model": MODEL,
+            "output": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+        }),
+        cache_control,
+        retry_after: None,
+    }
+}
+
+async fn request(gateway: &TestServer, stream: bool) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model": MODEL, "input": "hello", "stream": stream}))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn request_with_session(gateway: &TestServer, session: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .header("x-session-id", session)
+        .json(&json!({"model": MODEL, "input": "hello"}))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn models(gateway: &TestServer, key: &str) -> Vec<String> {
+    let body: Value = reqwest::Client::new()
+        .get(format!("{}/v1/models", gateway.base_url))
+        .bearer_auth(key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str().map(str::to_string))
+        .collect()
+}

@@ -1,0 +1,131 @@
+
+input,
+textarea {
+  min-height: 36px;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 6px;
+  background: var(--relay-surface);
+  color: var(--relay-text);
+  padding: 6px 10px;
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+input[readonly] {
+  background: var(--relay-subtle);
+  color: var(--relay-secondary);
+  cursor: default;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--relay-accent);
+}
+
+input[type="checkbox"] {
+  appearance: none;
+  display: grid;
+  flex: 0 0 16px;
+  place-content: center;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 4px;
+  background: var(--relay-surface);
+  cursor: pointer;
+}
+
+input[type="checkbox"]::before {
+  width: 10px;
+  height: 8px;
+  background: #ffffff;
+  clip-path: polygon(14% 44%, 0 59%, 40% 100%, 100% 20%, 84% 6%, 39% 70%);
+  content: "";
+  transform: scale(0);
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--relay-accent-hover);
+  background: var(--relay-accent-hover);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+:root[data-theme="dark"] input[type="checkbox"]:checked::before {
+  background: var(--relay-bg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] input[type="checkbox"]:checked::before {
+    background: var(--relay-bg);
+  }
+}
+
+input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+input[type="radio"] {
+  appearance: none;
+  display: grid;
+  flex: 0 0 16px;
+  place-content: center;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 50%;
+  background: var(--relay-surface);
+  cursor: pointer;
+}
+
+input[type="radio"]::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--relay-accent-hover);
+  content: "";
+  transform: scale(0);
+}
+
+input[type="radio"]:checked {
+  border-color: var(--relay-accent-hover);
+}
+
+input[type="radio"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="radio"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 7px;
+}
+
+legend {
+  padding: 0 5px;
+  color: var(--relay-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+textarea {
+  width: 100%;
+  min-height: 150px;
+  resize: vertical;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.search-field input {
+  width: 100%;
+}

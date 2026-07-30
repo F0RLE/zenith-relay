@@ -1,0 +1,21 @@
+[Unit]
+Description=Zenith Relay personal pool server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+EnvironmentFile=/etc/zenith-relay/environment
+ExecStart=/usr/local/bin/zenith-relay-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zenith-relay
+
+[Install]
+WantedBy=multi-user.target

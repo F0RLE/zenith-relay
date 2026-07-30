@@ -1,91 +1,66 @@
-# Zenith Relay
+<div align="center">
+  <img src="src-tauri/icons/128x128.png" width="112" alt="Zenith Relay">
+  <h1>Zenith Relay</h1>
+  <p>Personal ChatGPT accounts and compatible API sources behind one private endpoint.</p>
+  <p>
+    <a href="docs/help/en/README.md">English documentation</a> ·
+    <a href="docs/help/ru/README.md">Русская документация</a>
+  </p>
+  <p>
+    <a href="https://github.com/F0RLE/zenith-relay/releases/latest">Download latest release</a> ·
+    <a href="LICENSE">AGPL-3.0-only</a>
+  </p>
+</div>
 
-Desktop app for connecting Codex to Zenith API and, in future releases,
-managing personal local AI account pools.
+## Documentation
 
-## Features
+Choose a language first. Each overview links directly to a separate guide, so
+the Help Center and GitHub navigation do not depend on one long page.
 
-- Saves your Zenith API key.
-- Writes the Zenith connection into Codex config.
-- Launches Codex from the app.
-- Shows key balance, spending, requests, and usage history.
-- Opens the Telegram bot for balance top-ups.
+| Mode | English | Русский |
+| --- | --- | --- |
+| Overview | [Read](docs/help/en/README.md) | [Открыть](docs/help/ru/README.md) |
+| This computer | [Guide](docs/help/en/this-computer.md) | [Инструкция](docs/help/ru/this-computer.md) |
+| Choose API | [Guide](docs/help/en/choose-api.md) | [Инструкция](docs/help/ru/choose-api.md) |
+| My server | [Guide](docs/help/en/my-server.md) | [Инструкция](docs/help/ru/my-server.md) |
 
-Planned:
+## What Is Shipped
 
-- Manage personal local OpenAI/Codex accounts and API keys.
-- Add editable provider sources with name, base URL, protocol mode, and API key.
-- Show quota, reset, subscription, and health state.
-- Run a local gateway for the user's own accounts.
-- Generate local API keys so Codex/OpenCode can use the local gateway.
-- Add Zenith API as one preset provider source next to custom providers and
-  personal accounts.
-- Import local `auth.json`, token JSON, and compatible personal account exports.
+- Local-first Tauri desktop app with a React/Vite UI.
+- ChatGPT OAuth, existing-profile import, and compatible API sources.
+- Local personal pool with quota/health checks, model rules, proxies, routing,
+  response affinity, and redacted usage history.
+- Optional user-managed Relay Server with encrypted vault, SQLite state,
+  management API, scoped client keys, backup/restore, and append-only migrations.
+- Reversible ChatGPT/Codex profile attachment with automatic snapshots.
+- Signed in-app updates, including in-place replacement and rollback for the
+  Windows portable EXE.
 
-Telegram bot: [@zenith_service_bot](https://t.me/zenith_service_bot)
+Relay is a personal deployment. It is not Zenith customer billing, a public
+account marketplace, or the internal Zenith account pool.
 
-Integration docs: [docs.zenithmarket.dev](https://docs.zenithmarket.dev)
+## Screenshots
 
-## API
-
-The app uses:
-
-```text
-https://api.zenithmarket.dev/v1
-```
-
-## Architecture
-
-The frontend is intentionally thin: it renders UI, keeps form state, and calls Tauri commands.
-
-Rust/Tauri owns API calls, response normalization, validation, formatting, top-up intent handling, key storage, Codex config writes, and process control.
-
-The app configures Codex to use the project API endpoint and displays API-provided account state.
-
-Future local-pool features are local-first. User-owned accounts stay on the
-user's device by default and are not uploaded into Zenith infrastructure.
-Internal Zenith backend capacity and routing remain outside this public app.
-
-Start with the [documentation map](docs/README.md). Product scope lives in
-[docs/product-direction.md](docs/product-direction.md), the active build order
-in [docs/local-pool-final-planning.md](docs/local-pool-final-planning.md), and
-the detailed future UI in
-[docs/app-ux-flow-spec.md](docs/app-ux-flow-spec.md).
-
-## Platforms
-
-GitHub Actions builds Windows, macOS, and Linux artifacts for x64 and ARM64. Releases use the Tauri updater through GitHub Releases.
+<p align="center">
+  <img src="docs/screenshots/overview.png" width="49%" alt="Overview">
+  <img src="docs/screenshots/connections.png" width="49%" alt="Connections">
+</p>
+<p align="center">
+  <img src="docs/screenshots/pool.png" width="49%" alt="Pool">
+  <img src="docs/screenshots/usage.png" width="49%" alt="Usage">
+</p>
 
 ## Development
 
-```bash
+```powershell
 cd src
 bun install
-bun run app:dev
-```
-
-Source layout:
-
-- `src` - React/Vite frontend package.
-- `src-tauri` - Rust/Tauri backend and desktop packaging.
-- `src-tauri/src/local_pool` - desktop personal-pool adapters and storage.
-- `src/src/features/relay` - target Zenith Relay frontend feature.
-- `crates/relay-core` - target shared local/server runtime crate.
-- `relay-server` - target standalone user-managed server package.
-- `.github/tools` - local and CI build helpers.
-
-The canonical future tree is documented in
-[docs/project-structure.md](docs/project-structure.md).
-
-Verify before release:
-
-```bash
-cd src
 bun run verify
+bun run test:e2e
 ```
 
-Contributor and release workflow lives in [CONTRIBUTING.md](CONTRIBUTING.md).
+For the desktop bundle use `bun run app:build`. Shared runtime and server
+checks are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## License
-
-MIT
+Current implementation boundaries are in [PLANNING.md](PLANNING.md); unfinished
+acceptance work is in [ROADMAP.md](ROADMAP.md).

@@ -1,17 +1,34 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script src="/theme-init.js"></script>
     <style>
+      html {
+        --bootstrap-bg: #f2f5f6;
+        color-scheme: light;
+      }
+
+      html[data-theme="dark"] {
+        --bootstrap-bg: #121719;
+        color-scheme: dark;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        html[data-theme="system"] {
+          --bootstrap-bg: #121719;
+          color-scheme: dark;
+        }
+      }
+
       html,
       body,
       #root {
         width: 100%;
         height: 100%;
         margin: 0;
-        background: #071018;
-        color-scheme: dark;
+        background: var(--bootstrap-bg);
       }
     </style>
     <title>Zenith Relay</title>

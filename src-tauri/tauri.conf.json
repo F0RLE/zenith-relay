@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Zenith Relay",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "identifier": "com.zenith.codex",
   "build": {
     "beforeDevCommand": "cd ../src && bun run dev",
@@ -10,17 +10,18 @@
     "frontendDist": "../src/dist"
   },
   "app": {
-    "withGlobalTauri": true,
+    "withGlobalTauri": false,
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Zenith Relay",
-        "width": 900,
-        "height": 340,
-        "minWidth": 760,
-        "minHeight": 280,
+        "width": 1160,
+        "height": 760,
+        "minWidth": 840,
+        "minHeight": 560,
         "decorations": false,
-        "backgroundColor": "#071018",
+        "backgroundColor": "#121719",
         "resizable": true,
         "center": true,
         "visible": true
@@ -34,6 +35,9 @@
     "active": true,
     "createUpdaterArtifacts": true,
     "targets": "all",
+    "copyright": "Copyright (C) 2026 FORLE",
+    "license": "AGPL-3.0-only",
+    "licenseFile": "../LICENSE",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,9 +46,14 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "wix": {
+        "upgradeCode": "e095da7a-9c85-5be9-885b-0df5ace45312"
+      },
       "nsis": {
+        "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
-        "uninstallerIcon": "icons/icon.ico"
+        "uninstallerIcon": "icons/icon.ico",
+        "installerHooks": "installer-hooks.nsh"
       }
     }
   },

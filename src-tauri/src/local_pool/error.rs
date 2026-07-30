@@ -1,11 +1,15 @@
 use serde::Serialize;
 use std::fmt::{self, Display};
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     Io,
+    Conflict,
+    GatewayUnavailable,
     InvalidState,
+    NotFound,
+    ProfileRestoreBlocked,
     RecoveryRequired,
     SecretStoreUnavailable,
     UnsupportedSchema,
