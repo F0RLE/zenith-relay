@@ -1,4 +1,5 @@
 use super::context::context_window;
+use crate::usage::api_model_price;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
@@ -66,10 +67,13 @@ pub fn codex_model_display_name(model: &str) -> String {
     }
 }
 
-/// Keep the generated Codex picker aligned with Relay's own provider groups.
+/// Keep the generated Codex picker aligned with Relay's model table.
+///
 /// Codex orders the picker by the numeric `priority` field, so the catalog
 /// builder assigns this order to every generated row rather than relying on
-/// JSON array position.
+/// JSON array position. Provider groups always keep ChatGPT/OpenAI first, and
+/// known OpenAI models use the same catalog rank as the Relay table instead
+/// of an alphabetical version order.
 pub fn compare_codex_picker_models(left: &str, right: &str) -> Ordering {
     let left_leaf = codex_model_leaf(left);
     let right_leaf = codex_model_leaf(right);
@@ -77,9 +81,19 @@ pub fn compare_codex_picker_models(left: &str, right: &str) -> Ordering {
     let right_normalized = right_leaf.to_ascii_lowercase();
     codex_picker_group_rank(&left_normalized)
         .cmp(&codex_picker_group_rank(&right_normalized))
+        .then_with(|| compare_codex_picker_models_within_group(left_leaf, right_leaf))
         .then_with(|| left_normalized.cmp(&right_normalized))
         .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()))
         .then_with(|| left.cmp(right))
+}
+
+fn compare_codex_picker_models_within_group(left: &str, right: &str) -> Ordering {
+    match (api_model_price(left), api_model_price(right)) {
+        (Some(left), Some(right)) => left.catalog_rank.cmp(&right.catalog_rank),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 /// Sort a generated catalog by the model identity Codex displays.
@@ -681,7 +695,12 @@ mod tests {
             "vendor/grok-4.5",
             "vendor/gemini-3.6-flash",
             "vendor/claude-opus-4-8",
+            "gpt-5.4-mini",
             "vendor/gpt-5.4",
+            "gpt-5.5",
+            "gpt-5.6-luna",
+            "gpt-5.6-terra",
+            "gpt-5.6-sol",
             "vendor/unknown-model",
         ];
 
@@ -690,7 +709,12 @@ mod tests {
         assert_eq!(
             models,
             [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
                 "vendor/gpt-5.4",
+                "gpt-5.4-mini",
                 "vendor/claude-opus-4-8",
                 "vendor/gemini-3.6-flash",
                 "vendor/grok-4.5",
@@ -703,9 +727,10 @@ mod tests {
     #[test]
     fn generated_catalog_sort_decodes_relay_aliases() {
         let mut models = vec![
-            json!({"slug": codex_model_alias("vendor/grok-4.5")}),
+            json!({"slug": codex_model_alias("gpt-5.4")}),
             json!({"slug": "vendor/claude-opus-4-8"}),
-            json!({"slug": codex_model_alias("vendor/gpt-5.4")}),
+            json!({"slug": codex_model_alias("gpt-5.6-terra")}),
+            json!({"slug": codex_model_alias("gpt-5.6-sol")}),
         ];
 
         sort_codex_catalog_models(&mut models);
@@ -716,9 +741,10 @@ mod tests {
                 .map(|model| model["slug"].as_str().unwrap().to_string())
                 .collect::<Vec<_>>(),
             [
-                codex_model_alias("vendor/gpt-5.4"),
+                codex_model_alias("gpt-5.6-sol"),
+                codex_model_alias("gpt-5.6-terra"),
+                codex_model_alias("gpt-5.4"),
                 "vendor/claude-opus-4-8".to_string(),
-                codex_model_alias("vendor/grok-4.5"),
             ]
         );
     }
