@@ -18,8 +18,9 @@ use std::{
 use toml_edit::{value, DocumentMut, Item, Table};
 use zenith_relay_core::{
     accounts::TokenSet, codex_catalog_entry_is_compatible, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    codex_model_is_picker_eligible, compare_codex_picker_models, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
+    routed_codex_catalog_entry, sort_codex_catalog_models, CODEX_RELAY_CATALOG_HASH,
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
@@ -32,7 +33,6 @@ const ACCOUNT_BACKUP_PREFIX: &str = "codex-account-";
 const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
 const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
-type NativeCatalog = (Vec<Value>, Option<serde_json::Map<String, Value>>);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -180,8 +180,7 @@ pub(crate) fn direct_source_model_catalog(
     source_models: &[String],
 ) -> Result<Option<String>> {
     let user_catalog_path = configured_model_catalog_path(codex_home)?;
-    let (_, template) =
-        collect_native_catalog_models(codex_home, user_catalog_path.as_deref(), None)?;
+    let template = collect_native_catalog_template(codex_home, user_catalog_path.as_deref(), None)?;
     // A catalog override is optional in Codex.  Relay should prefer a verified
     // native row when one is present, but must not make profile attachment
     // depend on a cache that it deliberately invalidates after catalog changes.
@@ -189,15 +188,17 @@ pub(crate) fn direct_source_model_catalog(
     // `model_provider` points to this selected source.  Native Codex rows are
     // useful only as a schema template here; advertising them would send their
     // requests to this source and produce a false model picker entry.
+    let mut selected_models = source_models
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
+        .collect::<Vec<_>>();
+    selected_models.sort_by(|left, right| compare_codex_picker_models(left, right));
+
     let mut models = Vec::new();
     let mut seen = HashSet::new();
-    let mut accepted = 0usize;
-    for (index, source_model) in source_models.iter().enumerate() {
-        let model = source_model.trim();
-        if !is_direct_source_model(model) || !codex_model_is_picker_eligible(model) {
-            continue;
-        }
-        accepted += 1;
+    for (index, model) in selected_models.into_iter().enumerate() {
         let normalized = model.to_ascii_lowercase();
         if !seen.insert(normalized) {
             continue;
@@ -211,7 +212,7 @@ pub(crate) fn direct_source_model_catalog(
             models.push(entry);
         }
     }
-    if accepted == 0 {
+    if models.is_empty() {
         return Ok(None);
     }
     Ok(Some(normalize_model_catalog_values(models)?))
@@ -279,11 +280,11 @@ fn direct_source_catalog_entry(
     entry
 }
 
-fn collect_native_catalog_models(
+fn collect_native_catalog_template(
     codex_home: &Path,
     user_catalog_path: Option<&str>,
     managed_catalog: Option<&[u8]>,
-) -> Result<NativeCatalog> {
+) -> Result<Option<serde_json::Map<String, Value>>> {
     let mut candidates = Vec::new();
     if let Some(path) = user_catalog_path {
         candidates.extend(read_catalog_file_models(codex_home, path)?);
@@ -341,7 +342,7 @@ fn collect_native_catalog_models(
                 .cloned()
         })
         .or(managed_template);
-    Ok((models, template))
+    Ok(template)
 }
 
 fn configured_model_catalog_path(codex_home: &Path) -> Result<Option<String>> {
@@ -405,7 +406,7 @@ fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
         ));
     }
     let mut seen = HashSet::new();
-    let models = models
+    let mut models = models
         .into_iter()
         .filter(codex_catalog_entry_is_compatible)
         .filter(|model| {
@@ -418,6 +419,8 @@ fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
             "ChatGPT model catalog has no compatible models",
         ));
     }
+    sort_codex_catalog_models(&mut models);
+    normalize_codex_catalog_priorities(&mut models);
     serde_json::to_string_pretty(&json!({ "models": models }))
         .map(|content| format!("{content}\n"))
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))
@@ -429,8 +432,8 @@ fn build_managed_model_catalog(
     current_managed_catalog: Option<&[u8]>,
     relay_catalog_json: &str,
 ) -> Result<String> {
-    let (_, template) =
-        collect_native_catalog_models(codex_home, user_catalog_path, current_managed_catalog)?;
+    let template =
+        collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
     let template = template.unwrap_or_default();
     let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
     // The managed provider is the Relay endpoint, so the catalog must contain
@@ -3312,8 +3315,15 @@ mod tests {
 
         assert_eq!(models.len(), 3);
         assert_eq!(models[0]["slug"], "gpt-5.6-sol");
-        assert_eq!(models[1]["slug"], "vendor/claude");
-        assert_eq!(models[2]["slug"], "gpt-fake");
+        assert_eq!(models[1]["slug"], "gpt-fake");
+        assert_eq!(models[2]["slug"], "vendor/claude");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["priority"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1_000, 1_001, 1_002]
+        );
         for model in &models {
             assert!(model.get("default_reasoning_level").is_none());
             assert_eq!(model["supported_reasoning_levels"], json!([]));

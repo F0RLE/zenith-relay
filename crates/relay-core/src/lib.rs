@@ -14,9 +14,10 @@ pub mod usage;
 
 pub use catalog::{
     codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, ModelRegistry, ModelRules,
-    CODEX_RELAY_CATALOG_HASH,
+    codex_model_is_picker_eligible, compare_codex_picker_models, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
+    routed_codex_catalog_entry, sort_codex_catalog_models, ModelRegistry, ModelRules,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{Error, Result};
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};

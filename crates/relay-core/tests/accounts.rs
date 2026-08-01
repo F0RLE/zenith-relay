@@ -444,7 +444,7 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 }
 
 #[tokio::test]
-async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
+async fn codex_catalog_exposes_and_forwards_confirmed_native_fast_and_parallel_tools() {
     let (upstream, state) = spawn_upstream(Vec::new()).await;
     let authority = ready_authority("relay-account", "account-access").await;
     let (gateway, _, _, _) = spawn_mixed_gateway(
@@ -476,7 +476,7 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         .any(|model| model["slug"] == codex_model_alias(MODEL)));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
-    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
 
     let response = reqwest::Client::new()
         .post(format!("{}/v1/responses", gateway.base_url))
@@ -509,7 +509,7 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
     );
     assert_eq!(requests[2].body["service_tier"], "priority");
     assert_eq!(requests[2].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[2].body["parallel_tool_calls"], false);
+    assert_eq!(requests[2].body["parallel_tool_calls"], true);
 }
 
 #[tokio::test]
@@ -642,7 +642,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[0].body["parallel_tool_calls"], false);
+    assert_eq!(requests[0].body["parallel_tool_calls"], true);
     assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 1);
     assert_eq!(requests[0].body["tools"][0]["name"], "local_tool");
     assert_eq!(requests[0].body["reasoning"]["context"], "all_turns");
@@ -1334,7 +1334,7 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["type"], "response.create");
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
-    assert_eq!(requests[0]["parallel_tool_calls"], false);
+    assert_eq!(requests[0]["parallel_tool_calls"], true);
     assert_eq!(requests[0]["service_tier"], "priority");
     assert_eq!(requests[1]["service_tier"], "priority");
     assert!(requests[0]["input"].is_array());

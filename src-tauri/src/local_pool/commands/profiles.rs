@@ -769,34 +769,28 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
-    let stopped = stop_codex_and_sync_account(&state).await?;
     let catalog = codex::direct_source_model_catalog(&profile_dir, &source.models)?;
+    if catalog.is_none() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no compatible text models",
+        )
+        .into());
+    }
+    let stopped = stop_codex_and_sync_account(&state).await?;
     let result =
         synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .and_then(|history_backup| {
-                let result = catalog
-                    .as_deref()
-                    .map(|catalog| {
-                        codex::attach_with_catalog(
-                            &profile_dir,
-                            &state.profile_backup_root(),
-                            &source.id,
-                            &source.base_url,
-                            &api_key,
-                            catalog,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        codex::attach(
-                            &profile_dir,
-                            &state.profile_backup_root(),
-                            &source.id,
-                            &source.base_url,
-                            &api_key,
-                        )
-                    })
-                    .map(|binding| ProfileActivation { binding })
-                    .map_err(Into::into);
+                let result = codex::attach_with_catalog(
+                    &profile_dir,
+                    &state.profile_backup_root(),
+                    &source.id,
+                    &source.base_url,
+                    &api_key,
+                    catalog.as_deref().expect("validated direct source catalog"),
+                )
+                .map(|binding| ProfileActivation { binding })
+                .map_err(Into::into);
                 rollback_history_on_error(&state, history_backup.as_deref(), result)
             });
     let result = restart_codex_after_failed_change(stopped, result, launch_codex_with_profile);

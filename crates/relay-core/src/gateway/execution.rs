@@ -20,8 +20,9 @@ use super::response::{
 };
 use super::streaming::{bootstrap_stream, UsageStream};
 use super::translation::{
-    completed_chat_sse, completed_sse, translate_chat_request, translate_chat_response,
-    translate_responses_request, translate_responses_response,
+    completed_chat_sse, completed_sse, replay_responses_request, responses_replay_seed,
+    translate_chat_request, translate_chat_response, translate_responses_request,
+    translate_responses_response,
 };
 use crate::protocol::ClientWireApi;
 use crate::runtime::AuthenticatedKey;
@@ -411,6 +412,30 @@ pub(super) async fn execute_client_request(
     .await
 }
 
+fn responses_request_for_chat_source(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    request: &Value,
+) -> Result<Value, AttemptFailure> {
+    let previous_response_id = request
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|response_id| !response_id.is_empty());
+    let Some(previous_response_id) = previous_response_id else {
+        return Ok(request.clone());
+    };
+    if let Some(previous) = runtime.response_replay(&key.id, Some(previous_response_id), now_ms()) {
+        return replay_responses_request(&previous, request);
+    }
+    // Do not silently reset a continuation for a stateless source.  Without
+    // the earlier response, that would discard the conversation and can
+    // detach a tool result from its call.  A stateful Responses candidate may
+    // still own this id; its existing affinity recovery path decides whether a
+    // reset is safe after that source confirms the id is gone.
+    Err(AttemptFailure::response_replay_unavailable())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_request(
     runtime: Arc<GatewayRuntime>,
@@ -492,14 +517,24 @@ async fn execute_request(
         let chat_via_responses =
             wire_api == WireApi::ChatCompletions && route.wire_api == WireApi::Responses;
         let account_route = route.account_id.is_some();
+        let mut replay_request = None;
         let request_body = if responses_via_chat {
-            match translate_responses_request(&request, &source_model, false) {
+            let replay = match responses_request_for_chat_source(&runtime, &key, &request) {
+                Ok(replay) => replay,
+                Err(failure) => {
+                    last_failure = Some(failure);
+                    continue;
+                }
+            };
+            let body = match translate_responses_request(&replay, &source_model, false) {
                 Ok(body) => body,
                 Err(failure) => {
                     last_failure = Some(failure);
                     continue;
                 }
-            }
+            };
+            replay_request = Some(replay);
+            body
         } else if chat_via_responses {
             match translate_chat_request(&request, &source_model, false) {
                 Ok(body) if account_route => {
@@ -538,7 +573,8 @@ async fn execute_request(
             }
         };
 
-        // ponytail: cross-protocol streams are buffered into one terminal SSE sequence; add delta translation when adapter TTFT matters.
+        // Cross-protocol adapters translate complete payloads, so stream
+        // requests are returned as one terminal SSE sequence.
         let upstream_stream = stream && !responses_via_chat && !chat_via_responses;
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
@@ -775,7 +811,8 @@ async fn execute_request(
                 bytes
             };
             let bytes = if responses_via_chat {
-                match translate_chat_response(&bytes) {
+                let fallback_response_id = format!("{request_id}-chat-{attempt}");
+                match translate_chat_response(&bytes, &fallback_response_id) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
                         let state =
@@ -878,6 +915,18 @@ async fn execute_request(
             );
             emit_usage(&runtime, event);
             let completed_response_id = response_id_from_bytes(&bytes);
+            if let Some(replay_request) = replay_request.as_ref() {
+                if let Ok(response) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Ok(replay) = responses_replay_seed(replay_request, &response) {
+                        runtime.remember_response_replay(
+                            &key.id,
+                            completed_response_id.as_deref(),
+                            replay,
+                            now_ms(),
+                        );
+                    }
+                }
+            }
             runtime.bind_response_affinity(
                 completed_response_id.as_deref(),
                 &route.candidate_id,

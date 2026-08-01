@@ -507,7 +507,7 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
         return Err("ChatGPT rollout file is too large".to_string());
     }
     let metadata = read_session_metadata(path)?;
-    let records = usize::from(session_metadata_needs_repair(&metadata, target));
+    let records = session_meta_replacements(&metadata, target).len();
     let mut reader = BufReader::new(file);
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -629,23 +629,6 @@ fn session_meta_id(value: &Value) -> Option<&str> {
         .get("payload")
         .and_then(|payload| payload.get("id"))
         .and_then(Value::as_str)
-}
-
-fn session_metadata_needs_repair(metadata: &SessionMetadata, target: &str) -> bool {
-    let Some(latest) = metadata.latest.as_ref() else {
-        return false;
-    };
-    if target.is_empty() || session_meta_provider(&latest.value) != Some(target) {
-        return true;
-    }
-    let Some(first) = metadata.first.as_ref() else {
-        return false;
-    };
-    first.start != latest.start
-        && session_meta_id(&first.value).is_some_and(|first_id| {
-            session_meta_id(&latest.value) == Some(first_id)
-                && session_meta_provider(&first.value) != Some(target)
-        })
 }
 
 fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> {
@@ -828,9 +811,8 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
 
 fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), String> {
     let metadata = read_session_metadata(path)?;
-    let mut replacements = session_meta_replacements(&metadata, target)?;
-    let changed = usize::from(!replacements.is_empty());
-    if changed != expected || changed != 1 {
+    let mut replacements = session_meta_replacements(&metadata, target);
+    if replacements.is_empty() || replacements.len() != expected {
         return Err("ChatGPT rollout changed during repair".to_string());
     }
     replace_file_with(path, false, move |output| {
@@ -875,14 +857,10 @@ fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), Str
     })
 }
 
-fn session_meta_replacements(
-    metadata: &SessionMetadata,
-    target: &str,
-) -> Result<Vec<SessionMeta>, String> {
-    let latest = metadata
-        .latest
-        .as_ref()
-        .ok_or_else(|| "ChatGPT rollout session metadata is malformed".to_string())?;
+fn session_meta_replacements(metadata: &SessionMetadata, target: &str) -> Vec<SessionMeta> {
+    let Some(latest) = metadata.latest.as_ref() else {
+        return Vec::new();
+    };
     let mut replacements = Vec::new();
     if session_meta_provider(&latest.value) != Some(target) {
         replacements.push(latest.clone());
@@ -897,7 +875,7 @@ fn session_meta_replacements(
     }
     replacements.sort_by_key(|item| item.start);
     replacements.dedup_by_key(|item| item.start);
-    Ok(replacements)
+    replacements
 }
 
 fn restore_manifest(manifest: &RepairManifest, directory: &Path) -> Result<usize, String> {
@@ -1143,7 +1121,7 @@ mod tests {
             .unwrap()
             .expect("account migration");
 
-        assert_eq!(applied.rollout_records_changed, 1);
+        assert_eq!(applied.rollout_records_changed, 2);
         assert_eq!(database_provider(&database), "openai");
         assert_eq!(latest_rollout_provider_from_file(&rollout), "openai");
         assert_eq!(

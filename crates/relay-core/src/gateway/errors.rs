@@ -612,6 +612,16 @@ impl AttemptFailure {
         }
     }
 
+    pub(super) fn response_replay_unavailable() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: "upstream_previous_response_not_found",
+            message: "previous response is unavailable",
+            cooldown_ms: 0,
+            cooldown_hint: RateLimitBodyHint::default(),
+        }
+    }
+
     pub(super) fn translation() -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,

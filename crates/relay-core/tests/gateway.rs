@@ -35,6 +35,11 @@ struct UpstreamState {
     release_stream: Arc<Notify>,
 }
 
+#[derive(Clone, Default)]
+struct ChatToolUpstreamState {
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
 struct TestServer {
     base_url: String,
     task: JoinHandle<()>,
@@ -397,6 +402,86 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
 }
 
 #[tokio::test]
+async fn chat_completion_source_replays_tool_call_context_for_responses_continuation() {
+    let (upstream, state) = spawn_chat_tool_upstream().await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let runtime = GatewayRuntime::new(
+        ProviderSource {
+            id: "chat-source".to_string(),
+            name: "Stateless chat source".to_string(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.to_string(),
+            wire_api: WireApi::ChatCompletions,
+            models: vec!["gpt-test".to_string()],
+        },
+        LocalGatewayKey {
+            id: "local-key-1".to_string(),
+            secret: LOCAL_KEY.to_string(),
+        },
+        Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+    )
+    .unwrap();
+    let gateway = spawn(gateway::router(Arc::new(runtime))).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "inspect",
+            "stream": false,
+            "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object"}}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+    assert_eq!(first["id"], "chatcmpl_tool_1");
+    assert_eq!(first["output"][0]["type"], "function_call");
+    assert_eq!(first["output"][0]["call_id"], "call_shell");
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": "chatcmpl_tool_1",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_shell",
+                "output": "C:/work"
+            }],
+            "stream": false
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value = second.json().await.unwrap();
+    assert_eq!(second["id"], "chatcmpl_tool_2");
+    assert_eq!(second["output"][0]["type"], "message");
+    assert_eq!(second["output"][0]["content"][0]["text"], "done");
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let continuation_messages = requests[1]["messages"].as_array().unwrap();
+    assert_eq!(continuation_messages.len(), 3);
+    assert_eq!(continuation_messages[0]["role"], "user");
+    assert_eq!(continuation_messages[1]["role"], "assistant");
+    assert_eq!(
+        continuation_messages[1]["tool_calls"][0]["id"],
+        "call_shell"
+    );
+    assert_eq!(continuation_messages[2]["role"], "tool");
+    assert_eq!(continuation_messages[2]["tool_call_id"], "call_shell");
+    assert_eq!(continuation_messages[2]["content"], "C:/work");
+    assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn truncated_prelude_stream_returns_bad_gateway_and_is_recorded_as_incomplete() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
@@ -488,6 +573,14 @@ async fn spawn_upstream() -> (TestServer, UpstreamState) {
         .route("/v1/models", get(upstream_models))
         .route("/v1/responses", post(upstream_responses))
         .layer(DefaultBodyLimit::max(MAX_CLIENT_REQUEST_BODY_BYTES))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_chat_tool_upstream() -> (TestServer, ChatToolUpstreamState) {
+    let state = ChatToolUpstreamState::default();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(chat_tool_completions))
         .with_state(state.clone());
     (spawn(app).await, state)
 }
@@ -639,6 +732,51 @@ async fn upstream_responses(
         .header(CACHE_CONTROL, "no-cache")
         .body(Body::from_stream(chunks))
         .unwrap()
+}
+
+async fn chat_tool_completions(
+    State(state): State<ChatToolUpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = serde_json::from_slice(&body).unwrap();
+    let has_tool_result = request["messages"]
+        .as_array()
+        .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
+    state.requests.lock().unwrap().push(request.clone());
+    if has_tool_result {
+        return Json(json!({
+            "id": "chatcmpl_tool_2",
+            "object": "chat.completion",
+            "model": request["model"],
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"}
+            }]
+        }))
+        .into_response();
+    }
+    Json(json!({
+        "id": "chatcmpl_tool_1",
+        "object": "chat.completion",
+        "model": request["model"],
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_shell",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": "{\"command\":\"pwd\"}"}
+                }]
+            }
+        }]
+    }))
+    .into_response()
 }
 
 fn observe(state: &UpstreamState, path: &'static str, headers: &HeaderMap) {

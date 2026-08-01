@@ -39,6 +39,12 @@ pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
+// Chat Completions sources are stateless, whereas Codex Responses continuations
+// normally refer to an earlier response id.  Keep only a small, short-lived,
+// in-memory replay window for tool loops; never persist prompts or responses.
+const RESPONSE_REPLAY_TTL_MS: u64 = 15 * 60 * 1_000;
+const MAX_RESPONSE_REPLAY_ENTRIES: usize = 16;
+const MAX_RESPONSE_REPLAY_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
@@ -210,6 +216,7 @@ pub struct GatewayRuntime {
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
     codex_model_manifests: Mutex<BTreeMap<String, CachedCodexManifest>>,
+    response_replays: Mutex<BTreeMap<String, CachedResponseReplay>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
@@ -230,6 +237,13 @@ struct PassiveQuotaState {
 struct CachedCodexManifest {
     value: Value,
     observed_at_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct CachedResponseReplay {
+    value: Value,
+    expires_at_ms: u64,
+    last_accessed_at_ms: u64,
 }
 
 pub(crate) struct CandidateLease {
@@ -706,6 +720,7 @@ impl GatewayRuntime {
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             codex_model_manifests: Mutex::new(BTreeMap::new()),
+            response_replays: Mutex::new(BTreeMap::new()),
             passive_quotas: Mutex::new(passive_quotas),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
@@ -1830,6 +1845,66 @@ impl GatewayRuntime {
         )))
     }
 
+    pub(crate) fn response_replay(
+        &self,
+        local_key_id: &str,
+        response_id: Option<&str>,
+        now_ms: u64,
+    ) -> Option<Value> {
+        let key = response_replay_key(local_key_id, response_id?)?;
+        let mut replays = self
+            .response_replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        replays.retain(|_, replay| replay.expires_at_ms > now_ms);
+        let replay = replays.get_mut(&key)?;
+        replay.last_accessed_at_ms = now_ms;
+        Some(replay.value.clone())
+    }
+
+    pub(crate) fn remember_response_replay(
+        &self,
+        local_key_id: &str,
+        response_id: Option<&str>,
+        value: Value,
+        now_ms: u64,
+    ) {
+        let Some(key) =
+            response_id.and_then(|response_id| response_replay_key(local_key_id, response_id))
+        else {
+            return;
+        };
+        let Ok(encoded) = serde_json::to_vec(&value) else {
+            return;
+        };
+        if encoded.len() > MAX_RESPONSE_REPLAY_BYTES {
+            return;
+        }
+        let mut replays = self
+            .response_replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        replays.retain(|_, replay| replay.expires_at_ms > now_ms);
+        while replays.len() >= MAX_RESPONSE_REPLAY_ENTRIES {
+            let Some(oldest) = replays
+                .iter()
+                .min_by_key(|(_, replay)| replay.last_accessed_at_ms)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            replays.remove(&oldest);
+        }
+        replays.insert(
+            key,
+            CachedResponseReplay {
+                value,
+                expires_at_ms: now_ms.saturating_add(RESPONSE_REPLAY_TTL_MS),
+                last_accessed_at_ms: now_ms,
+            },
+        );
+    }
+
     pub(crate) fn prompt_affinity_key(
         &self,
         local_key_id: &str,
@@ -2198,6 +2273,15 @@ fn parse_bearer(value: &str) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !secret.is_empty()).then_some(secret)
 }
 
+fn response_replay_key(local_key_id: &str, response_id: &str) -> Option<String> {
+    let response_id = response_id.trim();
+    (!response_id.is_empty()).then(|| {
+        hex::encode(Sha256::digest(
+            format!("response-replay\0{local_key_id}\0{response_id}").as_bytes(),
+        ))
+    })
+}
+
 fn normalized_set<'a>(values: impl IntoIterator<Item = &'a String>) -> BTreeSet<String> {
     let mut normalized = BTreeMap::new();
     for value in values {
@@ -2464,6 +2548,39 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[test]
+    fn response_replay_is_key_scoped_and_short_lived() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let replay = serde_json::json!({
+            "input": [{"role": "user", "content": "private context"}]
+        });
+
+        runtime.remember_response_replay("key-1", Some("resp-1"), replay.clone(), 100);
+
+        assert_eq!(
+            runtime.response_replay("key-1", Some("resp-1"), 101),
+            Some(replay)
+        );
+        assert_eq!(
+            runtime.response_replay("other-key", Some("resp-1"), 101),
+            None
+        );
+        assert_eq!(
+            runtime.response_replay("key-1", Some("resp-1"), 100 + RESPONSE_REPLAY_TTL_MS),
+            None
+        );
     }
 
     #[test]

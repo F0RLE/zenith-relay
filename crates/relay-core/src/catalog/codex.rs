@@ -1,9 +1,11 @@
 use super::context::context_window;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Map, Value};
+use std::cmp::Ordering;
 
 pub const CODEX_RELAY_ALIAS_PREFIX: &str = "zenith/";
 pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
+pub const CODEX_CATALOG_PRIORITY_BASE: u64 = 1_000;
 const CODEX_RELAY_FALLBACK_CONTEXT_WINDOW: u64 = 272_000;
 
 pub fn codex_model_alias(model: &str) -> String {
@@ -61,6 +63,70 @@ pub fn codex_model_display_name(model: &str) -> String {
         model.to_string()
     } else {
         output
+    }
+}
+
+/// Keep the generated Codex picker aligned with Relay's own provider groups.
+/// Codex orders the picker by the numeric `priority` field, so the catalog
+/// builder assigns this order to every generated row rather than relying on
+/// JSON array position.
+pub fn compare_codex_picker_models(left: &str, right: &str) -> Ordering {
+    let left_leaf = codex_model_leaf(left);
+    let right_leaf = codex_model_leaf(right);
+    let left_normalized = left_leaf.to_ascii_lowercase();
+    let right_normalized = right_leaf.to_ascii_lowercase();
+    codex_picker_group_rank(&left_normalized)
+        .cmp(&codex_picker_group_rank(&right_normalized))
+        .then_with(|| left_normalized.cmp(&right_normalized))
+        .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()))
+        .then_with(|| left.cmp(right))
+}
+
+/// Sort a generated catalog by the model identity Codex displays.
+///
+/// Relay-owned rows use `zenith/<base64url>` aliases while direct source rows
+/// keep their upstream slug. Decode the former before comparing so both
+/// catalog shapes use the same provider grouping and deterministic order.
+pub fn sort_codex_catalog_models(models: &mut [Value]) {
+    models.sort_by(|left, right| {
+        let left_model = codex_catalog_model_id(left);
+        let right_model = codex_catalog_model_id(right);
+        compare_codex_picker_models(&left_model, &right_model)
+    });
+}
+
+fn codex_catalog_model_id(value: &Value) -> String {
+    let slug = value
+        .get("slug")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string())
+}
+
+fn codex_model_leaf(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model).trim()
+}
+
+fn codex_picker_group_rank(model: &str) -> u8 {
+    let is_openai_reasoning =
+        model.starts_with('o') && model.as_bytes().get(1).is_some_and(u8::is_ascii_digit);
+    if model.starts_with("gpt-")
+        || model.starts_with("codex-")
+        || is_openai_reasoning
+        || model.starts_with("text-")
+    {
+        0
+    } else if model.starts_with("claude-") {
+        1
+    } else if model.starts_with("gemini-") {
+        2
+    } else if model.starts_with("grok-") {
+        3
+    } else if model.starts_with("glm-") {
+        4
+    } else {
+        5
     }
 }
 
@@ -164,6 +230,18 @@ pub fn routed_codex_catalog_entry(
         Value::String(CODEX_RELAY_CATALOG_HASH.into()),
     );
     Value::Object(entry)
+}
+
+/// Codex uses the numeric priority as the picker sort key. Keep it unique
+/// after combining native upstream rows with Relay-generated fallback rows.
+pub fn normalize_codex_catalog_priorities(models: &mut [Value]) {
+    for (index, model) in models.iter_mut().enumerate() {
+        let Some(entry) = model.as_object_mut() else {
+            continue;
+        };
+        let priority = CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
+        entry.insert("priority".into(), priority.into());
+    }
 }
 
 pub fn normalize_upstream_codex_catalog_entry(
@@ -594,6 +672,55 @@ mod tests {
         assert!(codex_model_is_picker_eligible(model));
         assert!(!codex_model_is_picker_eligible("gpt-image-2"));
         assert!(decode_codex_model_alias("zenith/not-base64!").is_none());
+    }
+
+    #[test]
+    fn generated_picker_order_matches_relay_provider_groups() {
+        let mut models = vec![
+            "vendor/glm-5.2",
+            "vendor/grok-4.5",
+            "vendor/gemini-3.6-flash",
+            "vendor/claude-opus-4-8",
+            "vendor/gpt-5.4",
+            "vendor/unknown-model",
+        ];
+
+        models.sort_by(|left, right| compare_codex_picker_models(left, right));
+
+        assert_eq!(
+            models,
+            [
+                "vendor/gpt-5.4",
+                "vendor/claude-opus-4-8",
+                "vendor/gemini-3.6-flash",
+                "vendor/grok-4.5",
+                "vendor/glm-5.2",
+                "vendor/unknown-model",
+            ]
+        );
+    }
+
+    #[test]
+    fn generated_catalog_sort_decodes_relay_aliases() {
+        let mut models = vec![
+            json!({"slug": codex_model_alias("vendor/grok-4.5")}),
+            json!({"slug": "vendor/claude-opus-4-8"}),
+            json!({"slug": codex_model_alias("vendor/gpt-5.4")}),
+        ];
+
+        sort_codex_catalog_models(&mut models);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
+            [
+                codex_model_alias("vendor/gpt-5.4"),
+                "vendor/claude-opus-4-8".to_string(),
+                codex_model_alias("vendor/grok-4.5"),
+            ]
+        );
     }
 
     #[test]

@@ -2,7 +2,10 @@ use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_
 use super::errors::{api_error, AttemptFailure};
 use super::execution::{execute_account_endpoint, execute_client_request};
 use super::now_ms;
-use crate::catalog::normalize_upstream_codex_catalog_entry;
+use crate::catalog::{
+    compare_codex_picker_models, normalize_codex_catalog_priorities,
+    normalize_upstream_codex_catalog_entry, sort_codex_catalog_models,
+};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
@@ -278,7 +281,6 @@ fn build_codex_models_response(
                 .unwrap_or(false)
             {
                 runtime.remember_codex_responses_lite_model(slug);
-                model["supports_parallel_tool_calls"] = Value::Bool(false);
             }
             if let Some(context_window) =
                 source_context_windows.get(&upstream_id.to_ascii_lowercase())
@@ -307,18 +309,22 @@ fn build_codex_models_response(
             !seen.contains(normalized) && codex_model_is_picker_eligible(model)
         })
         .collect::<Vec<_>>();
-    routed.sort_by(|left, right| left.0.cmp(&right.0));
+    routed.sort_by(|left, right| compare_codex_picker_models(&left.1 .0, &right.1 .0));
+    let fallback_priority_start =
+        crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(models.len() as u64);
     for (index, (_, (upstream_id, display_id))) in routed.into_iter().enumerate() {
         models.push(routed_codex_catalog_entry(
             template,
             &display_id,
-            1_000 + index as u64,
+            fallback_priority_start.saturating_add(index as u64),
             source_context_windows
                 .get(&upstream_id.to_ascii_lowercase())
                 .copied(),
         ));
     }
 
+    sort_codex_catalog_models(&mut models);
+    normalize_codex_catalog_priorities(&mut models);
     if models.is_empty() {
         None
     } else {
@@ -630,7 +636,6 @@ pub(super) fn normalize_account_request(
                 "context".to_string(),
                 Value::String("all_turns".to_string()),
             );
-        object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
         filter_responses_lite_tools(object);
     }
     match object.get("input") {
@@ -718,13 +723,7 @@ fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
 
 fn filter_responses_lite_tools(object: &mut Map<String, Value>) {
     if let Some(Value::Array(tools)) = object.get_mut("tools") {
-        tools.retain(responses_lite_tool_allowed);
-    }
-    if object
-        .get_mut("tool_choice")
-        .is_some_and(|choice| !responses_lite_tool_choice_allowed(choice))
-    {
-        object.remove("tool_choice");
+        tools.retain_mut(sanitize_responses_lite_tool);
     }
     if let Some(Value::Array(input)) = object.get_mut("input") {
         input.retain_mut(|item| {
@@ -743,30 +742,147 @@ fn filter_responses_lite_tools(object: &mut Map<String, Value>) {
     if let Some(Value::Object(response)) = object.get_mut("response") {
         filter_responses_lite_tools(response);
     }
+    let available_tools = responses_lite_available_tools(object);
+    if object
+        .get_mut("tool_choice")
+        .is_some_and(|choice| !responses_lite_tool_choice_allowed(choice, &available_tools))
+    {
+        object.remove("tool_choice");
+    }
+}
+
+fn sanitize_responses_lite_tool(tool: &mut Value) -> bool {
+    if !responses_lite_tool_allowed(tool) {
+        return false;
+    }
+    let Some(object) = tool.as_object_mut() else {
+        return false;
+    };
+    if !object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|tool_type| tool_type.eq_ignore_ascii_case("namespace"))
+    {
+        return true;
+    }
+    let Some(children) = object.get_mut("tools").and_then(Value::as_array_mut) else {
+        return true;
+    };
+    children.retain_mut(sanitize_responses_lite_namespace_child);
+    !children.is_empty()
+}
+
+fn sanitize_responses_lite_namespace_child(tool: &mut Value) -> bool {
+    if tool.get("type").is_none() {
+        return !responses_lite_tool_is_server_executed(tool)
+            && tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(valid_client_tool_name);
+    }
+    sanitize_responses_lite_tool(tool)
+}
+
+fn responses_lite_available_tools(object: &Map<String, Value>) -> Vec<Value> {
+    let mut tools = object
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(input) = object.get("input").and_then(Value::as_array) {
+        for item in input {
+            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            if let Some(additional) = item.get("tools").and_then(Value::as_array) {
+                tools.extend(additional.iter().cloned());
+            }
+        }
+    }
+    tools
 }
 
 fn responses_lite_tool_allowed(tool: &Value) -> bool {
-    let Some(tool_type) = tool.get("type").and_then(Value::as_str).map(str::trim) else {
+    let Some(tool_type) = tool
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
         return false;
     };
+    if responses_lite_server_tool(tool_type) || responses_lite_tool_is_server_executed(tool) {
+        return false;
+    }
     if ["function", "custom", "namespace"]
         .iter()
         .any(|allowed| tool_type.eq_ignore_ascii_case(allowed))
     {
         return true;
     }
-    tool_type.eq_ignore_ascii_case("tool_search")
-        && tool
-            .get("execution")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"))
+    if tool_type.eq_ignore_ascii_case("tool_search") {
+        // Codex has sent the deferred discovery tool both with and without an
+        // explicit execution marker.  It is always client-side unless the
+        // marker explicitly says server, so do not erase the only route to
+        // deferred tools merely because an optional field is absent.
+        return true;
+    }
+    tool.get("name")
+        .and_then(Value::as_str)
+        .is_some_and(valid_client_tool_name)
 }
 
-fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
+fn responses_lite_tool_is_server_executed(tool: &Value) -> bool {
+    tool.get("execution")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("server"))
+}
+
+fn responses_lite_server_tool(tool_type: &str) -> bool {
+    let tool_type = tool_type.trim().to_ascii_lowercase();
+    [
+        "web_search",
+        "web_search_preview",
+        "image_generation",
+        "image_gen",
+        "file_search",
+        "computer_use_preview",
+        "code_interpreter",
+        "mcp",
+    ]
+    .iter()
+    .any(|server_tool| tool_type == *server_tool)
+        || [
+            "web_search_",
+            "image_generation_",
+            "file_search_",
+            "computer_use_",
+            "code_interpreter_",
+            "mcp_",
+        ]
+        .iter()
+        .any(|prefix| tool_type.starts_with(prefix))
+}
+
+fn valid_client_tool_name(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.trim() == name
+        && name.len() <= 256
+        && !name.chars().any(char::is_control)
+}
+
+fn responses_lite_tool_choice_allowed(choice: &mut Value, available_tools: &[Value]) -> bool {
     if let Some(choice) = choice.as_str() {
-        return ["auto", "none", "required"]
-            .iter()
-            .any(|value| choice.trim().eq_ignore_ascii_case(value));
+        let choice = choice.trim();
+        return if choice.eq_ignore_ascii_case("auto") || choice.eq_ignore_ascii_case("none") {
+            true
+        } else if choice.eq_ignore_ascii_case("required") {
+            !available_tools.is_empty()
+        } else {
+            false
+        };
     }
     let Some(choice) = choice.as_object_mut() else {
         return false;
@@ -774,29 +890,149 @@ fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
     let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
         return false;
     };
-    if ["function", "custom", "namespace"]
-        .iter()
-        .any(|allowed| choice_type.eq_ignore_ascii_case(allowed))
-    {
-        return true;
+    if !choice_type.eq_ignore_ascii_case("allowed_tools") {
+        return responses_lite_tool_choice_matches_available(choice, available_tools);
     }
-    if choice_type.eq_ignore_ascii_case("tool_search") {
-        return choice
+    let mut any_allowed = false;
+    for name in ["tools", "allowed_tools"] {
+        if let Some(tools) = choice.get_mut(name).and_then(Value::as_array_mut) {
+            tools.retain(|tool| {
+                tool.as_object().is_some_and(|tool| {
+                    responses_lite_tool_choice_matches_available(tool, available_tools)
+                })
+            });
+            any_allowed |= !tools.is_empty();
+        }
+    }
+    any_allowed
+}
+
+fn responses_lite_tool_choice_matches_available(
+    choice: &serde_json::Map<String, Value>,
+    available_tools: &[Value],
+) -> bool {
+    let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
+        return false;
+    };
+    if responses_lite_server_tool(choice_type)
+        || choice
             .get("execution")
             .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"));
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("server"))
+    {
+        return false;
     }
-    if choice_type.eq_ignore_ascii_case("allowed_tools") {
-        let mut any_allowed = false;
-        for name in ["tools", "allowed_tools"] {
-            if let Some(tools) = choice.get_mut(name).and_then(Value::as_array_mut) {
-                tools.retain(responses_lite_tool_allowed);
-                any_allowed |= !tools.is_empty();
-            }
+    available_tools
+        .iter()
+        .any(|tool| responses_lite_tool_choice_matches_definition(choice, tool, None))
+}
+
+fn responses_lite_tool_choice_matches_definition(
+    choice: &serde_json::Map<String, Value>,
+    definition: &Value,
+    namespace: Option<&str>,
+) -> bool {
+    let Some(definition) = definition.as_object() else {
+        return false;
+    };
+    let Some(definition_type) = definition
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if definition_type.eq_ignore_ascii_case("namespace") {
+        let Some(definition_namespace) = definition
+            .get("name")
+            .or_else(|| definition.get("namespace"))
+            .and_then(Value::as_str)
+            .filter(|value| valid_client_tool_name(value))
+        else {
+            return false;
+        };
+        if choice
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|choice_type| choice_type.eq_ignore_ascii_case("namespace"))
+            && choice
+                .get("name")
+                .or_else(|| choice.get("namespace"))
+                .and_then(Value::as_str)
+                == Some(definition_namespace)
+        {
+            return true;
         }
-        return any_allowed;
+        return definition
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|children| {
+                children.iter().any(|child| {
+                    responses_lite_tool_choice_matches_namespace_child(
+                        choice,
+                        child,
+                        definition_namespace,
+                    )
+                })
+            });
     }
-    false
+    responses_lite_tool_choice_matches_leaf(choice, definition, namespace)
+}
+
+fn responses_lite_tool_choice_matches_namespace_child(
+    choice: &serde_json::Map<String, Value>,
+    definition: &Value,
+    namespace: &str,
+) -> bool {
+    let Some(object) = definition.as_object() else {
+        return false;
+    };
+    if object.get("type").is_none() {
+        return responses_lite_tool_choice_matches_leaf(choice, object, Some(namespace));
+    }
+    responses_lite_tool_choice_matches_definition(choice, definition, Some(namespace))
+}
+
+fn responses_lite_tool_choice_matches_leaf(
+    choice: &serde_json::Map<String, Value>,
+    definition: &serde_json::Map<String, Value>,
+    namespace: Option<&str>,
+) -> bool {
+    let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
+        return false;
+    };
+    let definition_type = definition
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("function");
+    if !choice_type.eq_ignore_ascii_case(definition_type) {
+        return false;
+    }
+    if namespace.is_some() && choice.get("namespace").and_then(Value::as_str) != namespace {
+        return false;
+    }
+    let definition_name = definition
+        .get("name")
+        .or_else(|| {
+            definition
+                .get("function")
+                .and_then(|function| function.get("name"))
+        })
+        .and_then(Value::as_str);
+    let choice_name = choice
+        .get("name")
+        .or_else(|| {
+            choice
+                .get("function")
+                .and_then(|function| function.get("name"))
+        })
+        .and_then(Value::as_str);
+    match (definition_name, choice_name) {
+        (None, None) => choice_type.eq_ignore_ascii_case("tool_search"),
+        (Some(definition_name), Some(choice_name)) => definition_name == choice_name,
+        _ => false,
+    }
 }
 
 pub(super) fn contains_tool_call_output(value: &Value) -> bool {
@@ -895,9 +1131,10 @@ mod tests {
     }
 
     #[test]
-    fn responses_lite_keeps_only_client_executed_tools() {
+    fn responses_lite_preserves_codex_client_tools_without_server_hosted_tools() {
         let mut request = json!({
             "model": "gpt-lite",
+            "parallel_tool_calls": true,
             "tools": [
                 {"type": "function", "name": "lookup"},
                 {"type": "custom", "name": "patch"},
@@ -905,16 +1142,24 @@ mod tests {
                     {"type": "function", "name": "spawn_agent"},
                     {"type": "function", "name": "wait_agent"}
                 ]},
-                {"type": "tool_search", "execution": "client"},
+                {"type": "tool_search"},
                 {"type": "tool_search", "execution": "server"},
+                {"type": "future_client_tool", "name": "future_tool"},
+                {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
                 {"type": "web_search"},
-                {"type": "image_generation"}
+                {"type": "web_search_preview_2025_03_11"},
+                {"type": "image_generation"},
+                {"type": "file_search"},
+                {"type": "mcp", "name": "hosted_mcp"}
             ],
             "tool_choice": {
                 "type": "allowed_tools",
                 "tools": [
                     {"type": "function", "name": "lookup"},
                     {"type": "namespace", "name": "collaboration"},
+                    {"type": "tool_search"},
+                    {"type": "future_client_tool", "name": "future_tool"},
+                    {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
                     {"type": "web_search"}
                 ]
             },
@@ -923,6 +1168,10 @@ mod tests {
                 {"type": "additional_tools", "tools": [
                     {"type": "custom", "name": "patch"},
                     {"type": "image_generation"}
+                ]},
+                {"type": "additional_tools", "tools": [
+                    {"type": "tool_search"},
+                    {"type": "future_client_tool", "name": "future_tool"}
                 ]},
                 {"role": "user", "content": "hello"}
             ],
@@ -944,14 +1193,27 @@ mod tests {
         };
         assert_eq!(
             types("/tools"),
-            ["function", "custom", "namespace", "tool_search"]
+            [
+                "function",
+                "custom",
+                "namespace",
+                "tool_search",
+                "future_client_tool"
+            ]
         );
-        assert_eq!(types("/tool_choice/tools"), ["function", "namespace"]);
+        assert_eq!(
+            types("/tool_choice/tools"),
+            ["function", "namespace", "tool_search", "future_client_tool"]
+        );
         assert_eq!(types("/input/0/tools"), ["custom"]);
+        assert_eq!(
+            types("/input/1/tools"),
+            ["tool_search", "future_client_tool"]
+        );
         assert_eq!(types("/response/tools"), ["function"]);
-        assert_eq!(request["input"].as_array().unwrap().len(), 2);
+        assert_eq!(request["input"].as_array().unwrap().len(), 3);
         assert!(request.pointer("/response/tool_choice").is_none());
-        assert_eq!(request["parallel_tool_calls"], false);
+        assert_eq!(request["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -965,6 +1227,60 @@ mod tests {
 
         assert_eq!(request["tools"][0]["type"], "namespace");
         assert_eq!(request["tool_choice"]["type"], "namespace");
+    }
+
+    #[test]
+    fn responses_lite_removes_choices_that_do_not_reference_remaining_client_tools() {
+        let mut required = json!({
+            "tools": [{"type": "web_search", "name": "server_only"}],
+            "tool_choice": {"type": "function", "name": "server_only"}
+        });
+        normalize_account_request(required.as_object_mut().unwrap(), true);
+        assert!(required
+            .get("tools")
+            .is_some_and(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+        assert!(required.get("tool_choice").is_none());
+
+        let mut allowed = json!({
+            "tools": [
+                {"type": "function", "name": "client"},
+                {"type": "namespace", "name": "collaboration", "tools": [
+                    {"name": "spawn_agent"},
+                    {"type": "web_search"}
+                ]},
+                {"type": "web_search", "name": "server_only"}
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "client"},
+                    {"type": "function", "name": "missing"},
+                    {"type": "function", "namespace": "collaboration", "name": "spawn_agent"},
+                    {"type": "web_search", "name": "server_only"}
+                ]
+            }
+        });
+        normalize_account_request(allowed.as_object_mut().unwrap(), true);
+
+        assert_eq!(
+            allowed["tools"][1]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["spawn_agent"]
+        );
+        assert_eq!(
+            allowed["tool_choice"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["client", "spawn_agent"]
+        );
     }
 
     #[test]
@@ -1098,6 +1414,143 @@ mod tests {
         assert!(models
             .iter()
             .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
+    }
+
+    #[test]
+    fn codex_catalog_uses_unique_priorities_and_preserves_confirmed_parallel_tools() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "vendor/glm-5.2".into(),
+                    "vendor/grok-4.5".into(),
+                    "vendor/gemini-3.6-flash".into(),
+                    "vendor/claude-opus-4-8".into(),
+                    "gpt-5.4".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [{
+            "slug": "vendor/glm-5.2",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/grok-4.5",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/gemini-3.6-flash",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/claude-opus-4-8",
+            "supported_in_api": true
+        }, {
+            "slug": "gpt-5.4",
+            "use_responses_lite": true,
+            "supports_parallel_tool_calls": true
+        }]});
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        let priorities = models
+            .iter()
+            .filter_map(|model| model["priority"].as_u64())
+            .collect::<Vec<_>>();
+        let display_names = models
+            .iter()
+            .filter_map(|model| model["display_name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(priorities, [1_000, 1_001, 1_002, 1_003, 1_004]);
+        assert_eq!(
+            display_names,
+            [
+                "GPT 5.4",
+                "Claude Opus 4.8",
+                "Gemini 3.6 Flash",
+                "Grok 4.5",
+                "GLM 5.2",
+            ]
+        );
+        assert!(models.iter().all(codex_catalog_entry_is_compatible));
+        assert_eq!(models[0]["supports_parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn mixed_upstream_and_fallback_catalog_rows_get_unique_priorities() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "gpt-5.6-sol".into(),
+                    "vendor/claude-opus".into(),
+                    "vendor/grok".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({
+            "models": [
+                {"slug": "gpt-5.6-sol", "priority": 1_000},
+            ]
+        });
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        let priorities = models
+            .iter()
+            .map(|model| model["priority"].as_u64().expect("priority"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(priorities, [1_000, 1_001, 1_002]);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["display_name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["GPT 5.6 Sol", "Claude Opus", "Grok"]
+        );
     }
 
     #[test]
