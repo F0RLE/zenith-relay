@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Page } from "../bun-playwright";
 
 export type MockOptions = {
   locale?: "en" | "ru";
@@ -284,7 +284,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       configAvailable: true,
       authAvailable: true,
     }];
-    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean };
+    type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean };
     type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
@@ -999,6 +999,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           id,
           enabled: current?.enabled ?? true,
           memberCount: modelMembers.filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
+          codexVisible: current?.enabled ?? true,
+          codexDisplayName: id.replaceAll("-", " "),
           ...price,
           customPrice: current?.customPrice ?? false,
         };

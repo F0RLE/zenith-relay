@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 async function chooseOption(page: Page, scope: Page | Locator, label: string, value: string) {
@@ -1923,6 +1923,7 @@ for (const mode of ["local", "remote"] as const) {
     expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "gpt-5.4-mini", "o3"]);
     await expect(rows.first().locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
     await expect(rows.first().locator(".model-price-value strong")).toHaveText(["$2.5", "$15", "$0.25"]);
+    await expect(rows.first().locator(".model-codex-state")).toContainText("Shown in model list");
     await expect(page.locator('.model-rules tbody tr[data-model-id="o3"]')).toContainText("Price not listed");
 
     await expect(page.locator(".model-sort-select")).toHaveCount(0);
@@ -2358,6 +2359,28 @@ test("profile switch errors remain readable and then dismiss automatically", asy
   const feedback = page.locator(".global-feedback.error");
   await expect(feedback).toContainText("The profile changed during the operation.");
   await expect(feedback).toBeHidden({ timeout: 9_000 });
+});
+
+test("global errors expose sanitized details and a copy confirmation", async ({ page }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+
+  const feedback = page.locator(".global-feedback.error");
+  const errorMenu = feedback.locator(".global-feedback-menu summary");
+  await expect(errorMenu).toBeVisible();
+  await errorMenu.click();
+  await feedback.getByRole("menuitem", { name: "Show details" }).click();
+  const details = feedback.getByRole("region", { name: "Error details" });
+  await expect(details).toContainText('"code": "profile_restore_blocked"');
+  await expect(details).toContainText('"message": "Synthetic profile conflict"');
+
+  await errorMenu.click();
+  await feedback.getByRole("menuitem", { name: "Copy error JSON" }).click();
+  await expect(feedback.locator(".global-feedback-copy-state")).toHaveText("Copied");
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('"profile_restore_blocked"');
 });
 
 test("focus refreshes runtime only after a state revision changes", async ({ page }) => {

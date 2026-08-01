@@ -28,6 +28,8 @@ const WAKE_BATCH_SIZE: usize = 2;
 const WORKER_ERROR_RETRY_MS: u64 = 60_000;
 const WAKE_VERIFICATION_DELAY_MS: u64 = 5_000;
 const WAKE_OUTPUT_TOKEN_CAP: u16 = 8;
+const SOURCE_MODEL_REFRESH_START_DELAY_SECONDS: u64 = 5;
+const SOURCE_MODEL_REFRESH_INTERVAL_SECONDS: u64 = 24 * 60 * 60;
 
 pub(crate) fn start(app: AppHandle) {
     let recovery_app = app.clone();
@@ -39,6 +41,10 @@ pub(crate) fn start(app: AppHandle) {
     let quota_app = app.clone();
     let _quota_worker = tauri::async_runtime::spawn(async move {
         quota_loop(quota_app).await;
+    });
+    let source_app = app.clone();
+    let _source_model_worker = tauri::async_runtime::spawn(async move {
+        source_model_loop(source_app).await;
     });
     let _wake_worker = tauri::async_runtime::spawn(async move {
         wake_loop(app).await;
@@ -67,6 +73,36 @@ async fn quota_loop(app: AppHandle) {
         if run_due_quota_refreshes(&app).await.is_err() {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
         }
+    }
+}
+
+async fn source_model_loop(app: AppHandle) {
+    tokio::time::sleep(Duration::from_secs(
+        SOURCE_MODEL_REFRESH_START_DELAY_SECONDS,
+    ))
+    .await;
+    loop {
+        let source_ids = {
+            let state = app.state::<DesktopState>();
+            state.store().map(|store| {
+                store
+                    .sources()
+                    .iter()
+                    .filter(|source| source.enabled)
+                    .map(|source| source.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        };
+        if let Ok(source_ids) = source_ids {
+            for source_id in source_ids {
+                let state = app.state::<DesktopState>();
+                let _ =
+                    super::commands::connections::refresh_local_source_models(&state, &source_id)
+                        .await;
+                let _ = app.emit("zenith-state-changed", ());
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(SOURCE_MODEL_REFRESH_INTERVAL_SECONDS)).await;
     }
 }
 

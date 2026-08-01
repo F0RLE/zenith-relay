@@ -54,6 +54,7 @@ pub async fn start_local_gateway(
         let runtime = runtime_from_store(&state).await?;
         let port = state.store()?.gateway().port;
         state.gateway.start(runtime, port).await?;
+        let _ = super::profiles::refresh_active_codex_catalog(&state).await;
         let enable_result = { state.store()?.set_gateway_enabled(true) };
         if let Err(error) = enable_result {
             state.gateway.stop().await;

@@ -5,6 +5,7 @@ import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 import type { AccountSummary } from "../src/features/relay/api/types";
 import { currentAccountErrorCode, formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../src/features/relay/components/Ui";
+import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
   test("account cards prefer the latest quota refresh error in every view", () => {
@@ -18,6 +19,23 @@ describe("Relay translations", () => {
     } as unknown as AccountSummary;
 
     expect(currentAccountErrorCode(account)).toBe("credential_error");
+  });
+
+  test("feedback diagnostics redact token-shaped values before they reach the UI", () => {
+    const result = sanitizeFeedbackError({
+      code: "upstream_http_502",
+      message: "Bearer live-secret api_key=sk-live-1234567890 token=abc123 Cookie: session=browser-secret; id_token=identity-secret x-api-key=provider-secret eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.signature",
+    });
+
+    expect(result.code).toBe("upstream_http_502");
+    expect(result.message).not.toContain("live-secret");
+    expect(result.message).not.toContain("sk-live-1234567890");
+    expect(result.message).not.toContain("browser-secret");
+    expect(result.message).not.toContain("identity-secret");
+    expect(result.message).not.toContain("provider-secret");
+    expect(result.message).not.toContain("eyJhbGciOiJub25lIn0");
+    expect(result.message).toContain("Bearer [redacted]");
+    expect(result.message).toContain("api_key=[redacted]");
   });
 
   test("English and Russian expose the same keys", () => {

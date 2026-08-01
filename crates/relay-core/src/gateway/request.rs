@@ -2,14 +2,18 @@ use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_
 use super::errors::{api_error, AttemptFailure};
 use super::execution::{execute_account_endpoint, execute_client_request};
 use super::now_ms;
+use crate::catalog::normalize_upstream_codex_catalog_entry;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
-use crate::runtime::{AuthenticatedKey, DefaultServiceTier, IMAGE_API_MODEL};
-use crate::{GatewayRuntime, WireApi};
+use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
+use crate::{
+    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, routed_codex_catalog_entry,
+    GatewayRuntime, WireApi,
+};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Map, Value};
@@ -29,6 +33,59 @@ const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+
+const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
+const FORWARDED_CODEX_HEADERS: &[&str] = &[
+    "openai-beta",
+    "originator",
+    "session-id",
+    "session_id",
+    "thread-id",
+    "traceparent",
+    "tracestate",
+    "user-agent",
+    "version",
+    "x-claude-code-session-id",
+    "x-client-request-id",
+    "x-codex-beta-features",
+    "x-codex-installation-id",
+    "x-codex-parent-thread-id",
+    "x-codex-turn-metadata",
+    "x-codex-turn-state",
+    "x-codex-window-id",
+    "x-oai-attestation",
+    "x-openai-memgen-request",
+    "x-openai-subagent",
+    "x-responsesapi-include-timing-metrics",
+    "x-session-id",
+];
+
+pub(super) fn forwarded_codex_headers(
+    client_headers: &HeaderMap,
+    fallback_session_id: &str,
+) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for &name in FORWARDED_CODEX_HEADERS {
+        if let Some(value) = client_headers.get(name) {
+            headers.insert(HeaderName::from_static(name), value.clone());
+        }
+    }
+    if !headers.contains_key(CLAUDE_CODE_SESSION_HEADER) {
+        let session_id = ["session_id", "x-session-id", "session-id", "thread-id"]
+            .iter()
+            .find_map(|name| client_headers.get(*name))
+            .cloned()
+            .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
+        if let Some(session_id) = session_id {
+            headers.insert(
+                HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
+                session_id,
+            );
+        }
+    }
+    headers
+}
 
 pub(super) async fn models(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -57,7 +114,7 @@ pub(super) async fn models(
             );
         }
         if let Some(catalog) =
-            codex_models_response(runtime.as_ref(), &key, &models, client_version).await
+            codex_models_response(runtime.as_ref(), &key, &protocols, &models, client_version).await
         {
             return Json(catalog).into_response();
         }
@@ -76,10 +133,14 @@ pub(super) async fn models(
 async fn codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
+    allowed_protocols: &[WireApi],
     visible_models: &[String],
     client_version: &str,
 ) -> Option<Value> {
     let now_ms = now_ms();
+    let source_context_windows = runtime
+        .codex_source_context_windows(key, allowed_protocols, now_ms)
+        .await;
     let routes = runtime.codex_models_routes(key, now_ms).await;
     let candidate_ids = routes
         .iter()
@@ -113,45 +174,82 @@ async fn codex_models_response(
             else {
                 continue;
             };
-            if let Some(catalog) = filter_codex_models_response(runtime, key, visible_models, &body)
-            {
+            if let Some(catalog) = codex_models_from_upstream(
+                runtime,
+                key,
+                visible_models,
+                &source_context_windows,
+                &body,
+            ) {
                 runtime.clear_candidate_capability_blocks(&candidate_id);
-                runtime.remember_codex_model_manifest(&candidate_id, catalog.clone(), now_ms);
+                if let Ok(upstream) = serde_json::from_slice::<Value>(&body) {
+                    runtime.remember_codex_model_manifest(&candidate_id, upstream, now_ms);
+                }
                 return Some(catalog);
             }
         }
     }
-    runtime.stale_codex_model_manifest(candidate_ids.iter().map(String::as_str))
+    let stale = runtime.stale_codex_model_manifest(candidate_ids.iter().map(String::as_str));
+    build_codex_models_response(
+        runtime,
+        key,
+        visible_models,
+        &source_context_windows,
+        stale.as_ref(),
+    )
 }
 
-fn filter_codex_models_response(
+fn codex_models_from_upstream(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
     visible_models: &[String],
+    source_context_windows: &std::collections::BTreeMap<String, u64>,
     body: &[u8],
 ) -> Option<Value> {
     let payload: Value = serde_json::from_slice(body).ok()?;
-    let models = payload.get("models")?.as_array()?;
-    if models.len() > 4_096 {
-        return None;
-    }
+    build_codex_models_response(
+        runtime,
+        key,
+        visible_models,
+        source_context_windows,
+        Some(&payload),
+    )
+}
+
+fn build_codex_models_response(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    source_context_windows: &std::collections::BTreeMap<String, u64>,
+    upstream: Option<&Value>,
+) -> Option<Value> {
+    let upstream_models = upstream
+        .and_then(|payload| payload.get("models"))
+        .and_then(Value::as_array)
+        .filter(|models| models.len() <= 4_096);
     let visible = visible_models
         .iter()
         .filter_map(|display_id| {
-            runtime
-                .resolve_model(key, display_id)
-                .map(|upstream_id| (upstream_id.to_ascii_lowercase(), display_id.clone()))
+            runtime.resolve_model(key, display_id).map(|upstream_id| {
+                (
+                    upstream_id.to_ascii_lowercase(),
+                    (upstream_id, display_id.clone()),
+                )
+            })
         })
         .collect::<HashMap<_, _>>();
     let mut seen = HashSet::new();
-    let mut models = models
-        .iter()
+    let mut models = upstream_models
+        .into_iter()
+        .flat_map(|models| models.iter())
         .filter_map(|model| {
-            let mut model = model.as_object()?.clone();
+            let model = model.as_object()?.clone();
             let slug = model.get("slug")?.as_str()?.trim();
-            if slug.is_empty()
-                || slug.len() > 256
-                || slug.chars().any(char::is_control)
+            if slug.is_empty() || slug.len() > 256 || slug.chars().any(char::is_control) {
+                return None;
+            }
+            let normalized = slug.to_ascii_lowercase();
+            if !codex_model_is_picker_eligible(slug)
                 || model.get("supported_in_api") == Some(&Value::Bool(false))
                 || model
                     .get("visibility")
@@ -160,38 +258,72 @@ fn filter_codex_models_response(
             {
                 return None;
             }
-            let normalized = slug.to_ascii_lowercase();
-            let display_id = visible.get(&normalized)?;
-            if !seen.insert(normalized) {
+            let (upstream_id, display_id) = visible.get(&normalized)?;
+            if seen.contains(&normalized) {
                 return None;
             }
+            let (upstream_id, display_id) = (upstream_id.clone(), display_id.clone());
+            let mut model = normalize_upstream_codex_catalog_entry(
+                &model,
+                &display_id,
+                1_000 + seen.len() as u64,
+                source_context_windows
+                    .get(&upstream_id.to_ascii_lowercase())
+                    .copied(),
+            )?;
+            seen.insert(normalized);
             if model
                 .get("use_responses_lite")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
                 runtime.remember_codex_responses_lite_model(slug);
-                model.insert(
-                    "supports_parallel_tool_calls".to_string(),
-                    Value::Bool(false),
-                );
+                model["supports_parallel_tool_calls"] = Value::Bool(false);
             }
-            model.insert("slug".to_string(), Value::String(display_id.clone()));
-            Some(Value::Object(model))
+            if let Some(context_window) =
+                source_context_windows.get(&upstream_id.to_ascii_lowercase())
+            {
+                model["context_window"] = (*context_window).into();
+                model["max_context_window"] = (*context_window).into();
+                model
+                    .as_object_mut()
+                    .expect("normalized catalog entry is an object")
+                    .remove("auto_compact_token_limit");
+                model["effective_context_window_percent"] = 95.into();
+            }
+            Some(model)
         })
         .collect::<Vec<_>>();
-    if let Some(display_id) = visible.get(IMAGE_API_MODEL.to_ascii_lowercase().as_str()) {
-        if seen.insert(IMAGE_API_MODEL.to_string()) {
-            models.push(json!({
-                "slug": display_id,
-                "display_name": "GPT Image 2",
-                "visibility": "list",
-                "supported_in_api": true,
-                "supports_parallel_tool_calls": false
-            }));
-        }
+
+    let template = upstream_models.and_then(|models| {
+        models
+            .iter()
+            .find(|model| codex_catalog_entry_is_compatible(model))
+            .and_then(Value::as_object)
+    });
+    let mut routed = visible
+        .into_iter()
+        .filter(|(normalized, (model, _))| {
+            !seen.contains(normalized) && codex_model_is_picker_eligible(model)
+        })
+        .collect::<Vec<_>>();
+    routed.sort_by(|left, right| left.0.cmp(&right.0));
+    for (index, (_, (upstream_id, display_id))) in routed.into_iter().enumerate() {
+        models.push(routed_codex_catalog_entry(
+            template,
+            &display_id,
+            1_000 + index as u64,
+            source_context_windows
+                .get(&upstream_id.to_ascii_lowercase())
+                .copied(),
+        ));
     }
-    (!models.is_empty()).then(|| json!({ "models": models }))
+
+    if models.is_empty() {
+        None
+    } else {
+        Some(json!({ "models": models }))
+    }
 }
 
 fn valid_codex_client_version(value: &str) -> bool {
@@ -438,12 +570,7 @@ fn resolve_visible_account_model(
     key: &AuthenticatedKey,
     requested_model: &str,
 ) -> Option<String> {
-    runtime
-        .visible_account_models(key)
-        .iter()
-        .any(|model| model.eq_ignore_ascii_case(requested_model))
-        .then(|| runtime.resolve_model(key, requested_model))
-        .flatten()
+    runtime.resolve_visible_account_model(key, requested_model)
 }
 
 pub(super) fn account_endpoint_url(
@@ -655,15 +782,15 @@ fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
     false
 }
 
-pub(super) fn contains_function_call_output(value: &Value) -> bool {
+pub(super) fn contains_tool_call_output(value: &Value) -> bool {
     match value {
-        Value::Array(items) => items.iter().any(contains_function_call_output),
+        Value::Array(items) => items.iter().any(contains_tool_call_output),
         Value::Object(object) => {
             object
                 .get("type")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| kind == "function_call_output")
-                || object.values().any(contains_function_call_output)
+                .is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output"))
+                || object.values().any(contains_tool_call_output)
         }
         _ => false,
     }
@@ -700,6 +827,34 @@ pub(super) fn request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource,
+    };
+
+    #[test]
+    fn forwarded_codex_headers_keep_session_identity_and_drop_secrets() {
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("x-session-id", HeaderValue::from_static("session-42"));
+        client_headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer local-secret"),
+        );
+        client_headers.insert("cookie", HeaderValue::from_static("session=secret"));
+        client_headers.insert(
+            "chatgpt-account-id",
+            HeaderValue::from_static("private-account"),
+        );
+
+        let forwarded = forwarded_codex_headers(&client_headers, "relay-request");
+        assert_eq!(forwarded["x-session-id"], "session-42");
+        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
+        assert!(!forwarded.contains_key(AUTHORIZATION));
+        assert!(!forwarded.contains_key("cookie"));
+        assert!(!forwarded.contains_key("chatgpt-account-id"));
+
+        let synthesized = forwarded_codex_headers(&HeaderMap::new(), "relay-request");
+        assert_eq!(synthesized[CLAUDE_CODE_SESSION_HEADER], "relay-request");
+    }
 
     #[test]
     fn standard_mode_follows_each_chat_service_tier() {
@@ -796,6 +951,21 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_detection_covers_all_client_tool_result_shapes() {
+        for output in [
+            json!({"type": "function_call_output", "call_id": "call_function"}),
+            json!({"type": "custom_tool_call_output", "call_id": "call_custom"}),
+            json!({"type": "tool_search_output", "call_id": "call_search"}),
+            json!({"type": "computer_call_output", "call_id": "call_future"}),
+        ] {
+            assert!(contains_tool_call_output(&json!({"input": [output]})));
+        }
+        assert!(!contains_tool_call_output(&json!({
+            "input": [{"type": "custom_tool_call", "call_id": "call_custom"}]
+        })));
+    }
+
+    #[test]
     fn account_requests_normalize_non_array_input() {
         for (input, expected) in [
             (
@@ -834,5 +1004,113 @@ mod tests {
         assert!(request.pointer("/input/1/encrypted_content").is_none());
         assert_eq!(request.pointer("/input/2/id").unwrap(), "rs_valid");
         assert_eq!(request.pointer("/input/3/id").unwrap(), "msg_1");
+    }
+
+    #[test]
+    fn api_sources_generate_strict_codex_models_without_hidden_or_media_rows() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "vendor/claude-opus-4-8".into(),
+                    "gpt-image-2".into(),
+                    "hidden-code".into(),
+                    "disabled-code".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions {
+                hidden_models: vec!["hidden-code".into()],
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [
+            {"slug": "gpt-image-2", "supported_in_api": true},
+            {"slug": "disabled-code", "supported_in_api": false}
+        ]});
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        for model in models {
+            assert!(codex_catalog_entry_is_compatible(model));
+        }
+        let claude = models
+            .iter()
+            .find(|model| model["slug"] == crate::codex_model_alias("vendor/claude-opus-4-8"))
+            .expect("routed Claude model");
+        assert_eq!(claude["display_name"], "Claude Opus 4.8");
+        assert_eq!(claude["supported_reasoning_levels"], json!([]));
+        assert!(models
+            .iter()
+            .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
+    }
+
+    #[test]
+    fn source_context_replaces_stale_codex_context_for_matching_models() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["gpt-5.4".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [{
+            "slug": "gpt-5.4",
+            "context_window": 128_000,
+            "max_context_window": 128_000,
+            "auto_compact_token_limit": 122_000,
+            "effective_context_window_percent": 95
+        }]});
+        let source_context_windows =
+            std::collections::BTreeMap::from([("gpt-5.4".into(), 1_000_000)]);
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &source_context_windows,
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let model = &response["models"][0];
+
+        assert_eq!(model["context_window"], 1_000_000);
+        assert_eq!(model["max_context_window"], 1_000_000);
+        assert!(model.get("auto_compact_token_limit").is_none());
     }
 }

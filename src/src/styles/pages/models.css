@@ -27,14 +27,15 @@
 }
 
 .model-rules-table {
-  min-width: 620px;
+  min-width: 820px;
   table-layout: fixed;
 }
 
-.model-rules-table col[data-column="model"] { width: 25%; }
-.model-rules-table col[data-column="price"] { width: 48%; }
-.model-rules-table col[data-column="members"] { width: 14%; }
-.model-rules-table col[data-column="actions"] { width: 13%; }
+.model-rules-table col[data-column="model"] { width: 22%; }
+.model-rules-table col[data-column="codex"] { width: 18%; }
+.model-rules-table col[data-column="price"] { width: 38%; }
+.model-rules-table col[data-column="members"] { width: 10%; }
+.model-rules-table col[data-column="actions"] { width: 12%; }
 
 .model-rules-table th,
 .model-rules-table td {
@@ -89,6 +90,52 @@
   font-weight: 650;
   text-overflow: ellipsis;
 }
+
+.model-rule-identity > strong {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-rule-identity > strong + code {
+  color: var(--relay-muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.model-codex-state {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--relay-muted);
+  text-align: left;
+}
+
+.model-codex-state > svg {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+}
+
+.model-codex-state > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.model-codex-state strong,
+.model-codex-state small {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.model-codex-state strong { font-size: 11px; line-height: 14px; }
+.model-codex-state small { font-size: 9px; line-height: 12px; }
+.model-codex-state.visible { color: var(--relay-accent-hover); }
 
 .model-rule-state {
   display: inline-flex;

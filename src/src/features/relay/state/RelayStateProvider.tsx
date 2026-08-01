@@ -4,8 +4,9 @@ import { recordPerformance, setWindowBackgroundColor } from "../../../platform/d
 import { relayCommands, type UiState } from "../api/commands";
 import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
+import { sanitizeFeedbackError, type FeedbackError } from "./feedback";
 
-type Feedback = { kind: "success" | "error"; key: string } | null;
+export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 const ROUTING_REFRESH_INTERVAL_MS = 2_000;
@@ -170,7 +171,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     let active = true;
     setLoading(true);
     refresh()
-      .catch(() => active && setFeedback({ kind: "error", key: "feedback.refreshFailed" }))
+      .catch((error) => active && setFeedback({ kind: "error", key: "feedback.refreshFailed", error: sanitizeFeedbackError(error, "refresh_failed", t("feedback.refreshFailed")) }))
       .finally(() => {
         if (!active) return;
         setLoading(false);
@@ -184,7 +185,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [refresh]);
+  }, [refresh, t]);
 
   useEffect(() => {
     if (!accountIdentitiesVisible) {
@@ -283,6 +284,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     }).then((stop) => {
       if (active) unlisten = stop;
       else stop();
+    }).catch(() => {
+      // Initial load and periodic refresh still keep the UI current if Tauri event wiring is unavailable.
     });
     return () => {
       active = false;
@@ -387,12 +390,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     } catch (error) {
       if (revision !== operationRevision.current) return false;
       const code = typeof error === "object" && error && "code" in error ? String(error.code) : "general";
-      setFeedback({ kind: "error", key: `errors.${code}` });
+      const key = i18n.exists(`errors.${code}`) ? `errors.${code}` : "errors.general";
+      setFeedback({ kind: "error", key, error: sanitizeFeedbackError(error, code, t(key)) });
       return false;
     } finally {
       if (revision === operationRevision.current) setBusy(null);
     }
-  }, [refresh]);
+  }, [i18n, refresh, t]);
 
   const launchAttachedCodex = useCallback(() => perform(
     "profile-launch",

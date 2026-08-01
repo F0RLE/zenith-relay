@@ -4,6 +4,7 @@ use crate::{
     accounts::{AccountAuthState, AccountHealthState},
     api_model_price,
     automations::{WakeHistory, WakeTask},
+    codex_model_display_name, codex_model_is_picker_eligible,
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
     ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateQuota,
     CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
@@ -73,6 +74,10 @@ pub struct ModelSummary {
     pub id: String,
     pub enabled: bool,
     pub member_count: usize,
+    #[serde(default)]
+    pub codex_visible: bool,
+    #[serde(default)]
+    pub codex_display_name: String,
     pub catalog_rank: Option<u32>,
     pub input_micro_usd_per_million: Option<u64>,
     pub cached_input_micro_usd_per_million: Option<u64>,
@@ -648,10 +653,13 @@ pub fn pool_model_summaries(
         .into_values()
         .map(|(id, members)| {
             let price = api_model_price(&id);
+            let enabled = !hidden_models
+                .iter()
+                .any(|hidden| hidden.eq_ignore_ascii_case(&id));
             ModelSummary {
-                enabled: !hidden_models
-                    .iter()
-                    .any(|hidden| hidden.eq_ignore_ascii_case(&id)),
+                enabled,
+                codex_visible: enabled && codex_model_is_picker_eligible(&id),
+                codex_display_name: codex_model_display_name(&id),
                 id,
                 member_count: members.len(),
                 catalog_rank: price.map(|price| price.catalog_rank),

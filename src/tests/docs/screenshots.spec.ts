@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock, type MockOptions } from "../e2e/tauri-mock";
 
 // Regenerates the README screenshots from the mocked desktop shell so the

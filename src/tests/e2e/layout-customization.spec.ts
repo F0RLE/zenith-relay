@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 async function columnOrder(table: Locator) {

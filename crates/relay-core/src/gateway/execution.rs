@@ -8,7 +8,7 @@ use super::errors::{
 };
 use super::now_ms;
 use super::request::{
-    account_endpoint_url, candidate_protocols, contains_function_call_output,
+    account_endpoint_url, candidate_protocols, contains_tool_call_output, forwarded_codex_headers,
     normalize_account_request, normalize_account_request_body, normalize_service_tier, request_id,
     request_service_tier, try_recover_encrypted_content, AccountEndpoint,
     CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
@@ -27,7 +27,7 @@ use crate::protocol::ClientWireApi;
 use crate::runtime::AuthenticatedKey;
 use crate::{Error, GatewayRuntime, WireApi};
 use axum::body::{Body, Bytes};
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use futures_util::{stream, StreamExt};
 use serde_json::Value;
@@ -125,24 +125,12 @@ pub(super) async fn execute_account_endpoint(
             .request_client(&route.candidate_id, false)
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json");
+            .header(ACCEPT, "application/json")
+            .headers(forwarded_codex_headers(&client_headers, &request_id));
         if endpoint == AccountEndpoint::Compact {
             if let Some(value) = responses_lite.as_ref() {
                 upstream_request =
                     upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
-            }
-        } else {
-            for name in [
-                USER_AGENT.as_str(),
-                "version",
-                "session_id",
-                "x-session-id",
-                "x-client-request-id",
-                "x-openai-actor-authorization",
-            ] {
-                if let Some(value) = client_headers.get(name) {
-                    upstream_request = upstream_request.header(name, value.clone());
-                }
             }
         }
         let upstream = runtime
@@ -381,18 +369,12 @@ pub(super) async fn execute_client_request(
         }
         None => false,
     };
-    let visible_models = runtime.visible_models(&key, candidate_protocols(wire_api), now_ms());
-    if !visible_models
-        .iter()
-        .any(|model| model.eq_ignore_ascii_case(&requested_model))
-    {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "model is not available for this local key",
-            "model_not_found",
-        );
-    }
-    let Some(resolved_model) = runtime.resolve_model(&key, &requested_model) else {
+    let Some(resolved_model) = runtime.resolve_visible_model(
+        &key,
+        &requested_model,
+        candidate_protocols(wire_api),
+        now_ms(),
+    ) else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this local key",
@@ -409,6 +391,8 @@ pub(super) async fn execute_client_request(
         });
     let response_affinity_key =
         runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
+    let request_id = request_id();
+    let forwarded_headers = forwarded_codex_headers(&headers, &request_id);
     execute_request(
         runtime,
         key,
@@ -416,7 +400,8 @@ pub(super) async fn execute_client_request(
         requested_model,
         resolved_model,
         stream,
-        request_id(),
+        request_id,
+        forwarded_headers,
         response_affinity_key,
         wire_api,
         responses_lite,
@@ -435,6 +420,7 @@ async fn execute_request(
     resolved_model: String,
     stream: bool,
     request_id: String,
+    forwarded_headers: HeaderMap,
     response_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
@@ -560,7 +546,8 @@ async fn execute_request(
         let client = runtime.request_client(&route.candidate_id, upstream_stream);
         let mut upstream_request = client
             .post(route.upstream_url.clone())
-            .header(CONTENT_TYPE, "application/json");
+            .header(CONTENT_TYPE, "application/json")
+            .headers(forwarded_headers.clone());
         if upstream_stream {
             upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
         }
@@ -1026,7 +1013,7 @@ async fn execute_request(
     if allow_previous_response_reset
         && has_previous_response_id
         && confirmed_response_missing
-        && !contains_function_call_output(&request)
+        && !contains_tool_call_output(&request)
     {
         let mut reset_request = request;
         if let Some(object) = reset_request.as_object_mut() {
@@ -1039,6 +1026,7 @@ async fn execute_request(
                 resolved_model,
                 stream,
                 request_id,
+                forwarded_headers,
                 None,
                 wire_api,
                 responses_lite,

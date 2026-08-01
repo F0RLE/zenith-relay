@@ -297,10 +297,16 @@ pub async fn test_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    let _mutation = state.setup_guard().await;
+    refresh_local_source_models(&state, &source_id).await
+}
+
+pub(crate) async fn refresh_local_source_models(
+    state: &DesktopState,
+    source_id: &str,
+) -> CommandResult<ProviderSourceRecord> {
     let source = state
         .store()?
-        .source(&source_id)
+        .source(source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     ensure_supported_wire_api(source.wire_api)?;
@@ -310,43 +316,79 @@ pub async fn test_local_source(
         id: source.id.clone(),
         name: source.name.clone(),
         base_url: source.base_url.clone(),
-        api_key,
+        api_key: api_key.clone(),
         wire_api: source.wire_api,
         models: source.models.clone(),
     };
-    ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    let models = match discover_source_models(&runtime_source).await {
-        Ok(models) => models,
-        Err(error) => {
-            let error = core_error(error);
-            let mut failed = source.clone();
-            failed.last_test_at = Some(Utc::now().to_rfc3339());
-            failed.last_test_status = Some("error".into());
-            failed.last_error = Some(error.message.clone());
-            state.store()?.upsert_source(failed)?;
-            return Err(error.into());
-        }
-    };
-    if models.is_empty() {
+    ensure_not_gateway_self_source(state, &runtime_source.base_url)?;
+    let discovery = discover_source_models(&runtime_source)
+        .await
+        .map_err(core_error);
+
+    let _mutation = state.setup_guard().await;
+    let current = state
+        .store()?
+        .source(source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    let current_api_key = secret_store::load(&current.secret_ref)?;
+    if !source_probe_matches(&source, &current)
+        || current_api_key.as_deref() != Some(api_key.as_str())
+    {
         return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "source did not expose any configured models",
+            ErrorCode::Conflict,
+            "source changed while its models were being refreshed",
         )
         .into());
     }
-    let runtime_changed = source.models != models;
-    let mut updated = source;
+
+    let models = match discovery {
+        Ok(models) if !models.is_empty() => models,
+        Ok(_) => {
+            let error = LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "source did not expose any configured models",
+            );
+            persist_source_refresh_failure(state, current, &error)?;
+            return Err(error.into());
+        }
+        Err(error) => {
+            persist_source_refresh_failure(state, current, &error)?;
+            return Err(error.into());
+        }
+    };
+    let runtime_changed = current.models != models;
+    let mut updated = current;
     updated.models = models;
     updated.last_test_at = Some(Utc::now().to_rfc3339());
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
     updated.normalize();
-    let (old_sources, old_keys) = current_records(&state)?;
+    let (old_sources, old_keys) = current_records(state)?;
     state.store()?.upsert_source(updated.clone())?;
     if runtime_changed {
-        sync_records_or_rollback(&state, old_sources, old_keys).await?;
+        sync_records_or_rollback(state, old_sources, old_keys).await?;
     }
     Ok(updated)
+}
+
+fn persist_source_refresh_failure(
+    state: &DesktopState,
+    mut source: ProviderSourceRecord,
+    error: &LocalPoolError,
+) -> CommandResult<()> {
+    source.last_test_at = Some(Utc::now().to_rfc3339());
+    source.last_test_status = Some("error".into());
+    source.last_error = Some(error.message.clone());
+    state.store()?.upsert_source(source)?;
+    Ok(())
+}
+
+fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceRecord) -> bool {
+    before.base_url == current.base_url
+        && before.secret_ref == current.secret_ref
+        && before.wire_api == current.wire_api
+        && before.models == current.models
 }
 
 #[tauri::command]
@@ -469,6 +511,30 @@ mod tests {
     use super::*;
     use crate::local_pool::models::LocalGatewayKeyRecord;
 
+    fn source_record() -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: "source".into(),
+            name: "Provider".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://provider.test/v1".into(),
+            secret_ref: "source:test".into(),
+            wire_api: WireApi::Responses,
+            models: vec!["model-a".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
+
     #[test]
     fn deleting_source_keeps_explicit_empty_scope_unavailable() {
         let mut keys = [LocalGatewayKeyRecord {
@@ -499,5 +565,16 @@ mod tests {
                 .code,
             ErrorCode::InvalidState
         ));
+    }
+
+    #[test]
+    fn source_probe_rejects_configuration_changes_but_ignores_runtime_status() {
+        let before = source_record();
+        let mut current = before.clone();
+        current.last_test_status = Some("ok".into());
+        assert!(source_probe_matches(&before, &current));
+
+        current.models.push("model-b".into());
+        assert!(!source_probe_matches(&before, &current));
     }
 }

@@ -328,7 +328,9 @@ async fn restart_or_rollback(
     };
 
     state.gateway.stop().await;
-    if let Err(error) = state.gateway.start(runtime, next_port).await {
+    let restart_error = state.gateway.start(runtime, next_port).await.err();
+    if let Some(error) = restart_error {
+        state.gateway.stop().await;
         apply_rollback(state, rollback.take().unwrap()).await?;
         let old_runtime = match runtime_from_store(state).await {
             Ok(runtime) => runtime,
@@ -349,6 +351,7 @@ async fn restart_or_rollback(
         }
         return Err(error);
     }
+    let _ = profiles::refresh_active_codex_catalog(state).await;
     Ok(())
 }
 

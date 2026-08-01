@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "../bun-playwright";
 import { emitTauriEvent, installTauriMock } from "./tauri-mock";
 
 test("quick setup covers all three runtime choices", async ({ page }) => {

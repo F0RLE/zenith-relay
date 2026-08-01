@@ -6,10 +6,10 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
-base64 = "0.22.1"
+base64 = "0.23.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 crypto_box = { version = "0.9.1", features = ["seal"] }
-ed25519-dalek = { version = "2.2.0", features = ["pkcs8"] }
+ed25519-dalek = { version = "3.0.0", features = ["pkcs8"] }
 futures-util = "0.3.33"
 httpdate = "1.0.3"
 hex = "0.4.3"

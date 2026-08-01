@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, BrainCircuit, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
@@ -601,10 +601,10 @@ function ModelsView() {
       <div className="model-rules-copy"><h2>{t("models.visible")}</h2><p>{t("models.explanation")}</p></div>
     </header>
     <div className="relay-table-wrap"><table className="relay-table model-rules-table">
-      <colgroup><col data-column="model" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
-      <thead><tr><th>{t("common.model")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
+      <colgroup><col data-column="model" /><col data-column="codex" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
+      <thead><tr><th>{t("common.model")}</th><th>{t("models.codexColumn")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
       {modelGroups.map((group) => <tbody key={group.id}>
-      <tr className="model-group-row"><th colSpan={4} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`)}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
+      <tr className="model-group-row"><th colSpan={5} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`)}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
       {group.items.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
       const hasPrice = model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
@@ -616,9 +616,11 @@ function ModelsView() {
         ...(supportsCacheWritePricing(model.id) && model.cacheWrite5mMicroUsdPerMillion != null ? [{ label: t("models.cacheWrite5mPriceLabel"), value: formatModelPrice(model.cacheWrite5mMicroUsdPerMillion, i18n.language) }] : []),
         ...(supportsCacheWritePricing(model.id) && model.cacheWrite1hMicroUsdPerMillion != null ? [{ label: t("models.cacheWrite1hPriceLabel"), value: formatModelPrice(model.cacheWrite1hMicroUsdPerMillion, i18n.language) }] : []),
       ] : [];
+      const displayName = model.codexDisplayName || model.id;
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"}>
-        <td data-column="model"><div className="model-rule-identity"><code>{model.id}</code><span className={`model-rule-state ${model.enabled ? "ready" : "disabled"}`}><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /><span>{t(model.enabled ? "models.available" : "models.disabled")}</span></span></div></td>
+        <td data-column="model"><div className="model-rule-identity"><strong title={displayName}>{displayName}</strong>{displayName !== model.id ? <code title={model.id}>{model.id}</code> : null}<span className={`model-rule-state ${model.enabled ? "ready" : "disabled"}`}><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /><span>{t(model.enabled ? "models.available" : "models.disabled")}</span></span></div></td>
+        <td data-column="codex"><div className={`model-codex-state ${model.codexVisible ? "visible" : "hidden"}`}><BrainCircuit aria-hidden /><span><strong>{t(model.codexVisible ? "models.codexVisible" : model.enabled ? "models.codexUnsupported" : "models.codexDisabled")}</strong></span></div></td>
         <td data-column="price"><div className="model-price">{hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
         <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
         <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
@@ -687,11 +689,17 @@ function formatApiEquivalent(microUsd: number, locale: string) { return `≈${ne
 function formatProviderMicroUsd(value: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000); }
 function formatModelPrice(microUsd: number, locale: string) { return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
-  if (runtime.gateway.models?.length) return [...runtime.gateway.models];
+  if (runtime.gateway.models?.length) return runtime.gateway.models.map((model) => ({
+    ...model,
+    codexVisible: model.codexVisible ?? false,
+    codexDisplayName: model.codexDisplayName || model.id,
+  }));
   return runtime.gateway.visibleModelIds.map((id) => ({
     id,
     enabled: true,
     memberCount: [...runtime.sources, ...runtime.accounts].filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
+    codexVisible: false,
+    codexDisplayName: id,
     catalogRank: null,
     inputMicroUsdPerMillion: null,
     cachedInputMicroUsdPerMillion: null,

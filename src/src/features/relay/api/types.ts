@@ -249,6 +249,8 @@ export type ModelSummary = {
   id: string;
   enabled: boolean;
   memberCount: number;
+  codexVisible: boolean;
+  codexDisplayName: string;
   catalogRank: number | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;

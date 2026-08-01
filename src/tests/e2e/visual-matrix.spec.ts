@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 const modes = ["local", "remote", "zenith"] as const;
@@ -399,8 +399,8 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await page.getByRole("button", { name: "Пул", exact: true }).click();
   await page.getByRole("tab", { name: "Правила моделей" }).click();
   const table = page.locator(".model-rules-table");
-  await expect(table.getByRole("columnheader")).toHaveCount(4);
-  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center"]);
+  await expect(table.getByRole("columnheader")).toHaveCount(5);
+  expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center"]);
   await expect(table.locator(".model-group-row").first()).toContainText("OpenAI");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();

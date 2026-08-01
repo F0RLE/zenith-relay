@@ -26,9 +26,9 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::gateway;
 use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, CODEX_MODELS_CLIENT_VERSION};
 use zenith_relay_core::{
-    CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, ProviderSource, RuntimeChatGptAccount, RuntimeChatGptAuth,
-    RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
+    codex_model_alias, CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime,
+    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
+    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -469,7 +469,11 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         .json()
         .await
         .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert!(catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["slug"] == codex_model_alias(MODEL)));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
@@ -535,7 +539,7 @@ async fn codex_catalog_uses_the_last_manifest_when_live_discovery_is_unavailable
         .json()
         .await
         .unwrap();
-    assert_eq!(live["models"][0]["slug"], MODEL);
+    assert_eq!(live["models"][0]["slug"], codex_model_alias(MODEL));
     drop(upstream);
 
     let stale: Value = client
@@ -589,7 +593,11 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
 
-    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert!(catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["slug"] == codex_model_alias(MODEL)));
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -2820,7 +2828,7 @@ async fn exhausted_account_keeps_codex_catalog_but_does_not_receive_requests() {
         .json()
         .await
         .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert_eq!(catalog["models"][0]["slug"], codex_model_alias(MODEL));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
 
     let response = request(&gateway, false).await;

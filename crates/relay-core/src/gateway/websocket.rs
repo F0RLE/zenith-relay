@@ -4,7 +4,7 @@ use super::errors::{
     rate_limit_body_hint_value, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
-use super::request::CODEX_RESPONSES_LITE_HEADER;
+use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
 use super::response::{apply_usage, emit_usage, usage_event};
 use super::streaming::has_output_delta;
 use crate::protocol::ClientWireApi;
@@ -37,30 +37,6 @@ const RESPONSES_WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_METADATA_KEY: &str =
     "ws_request_header_x_openai_internal_codex_responses_lite";
 const WEBSOCKET_PROTOCOLS: &[WireApi] = &[WireApi::Responses];
-
-const FORWARDED_HEADERS: &[&str] = &[
-    "openai-beta",
-    "originator",
-    "session-id",
-    "session_id",
-    "thread-id",
-    "traceparent",
-    "tracestate",
-    "user-agent",
-    "version",
-    "x-client-request-id",
-    "x-codex-beta-features",
-    "x-codex-installation-id",
-    "x-codex-parent-thread-id",
-    "x-codex-turn-metadata",
-    "x-codex-turn-state",
-    "x-codex-window-id",
-    "x-oai-attestation",
-    "x-openai-memgen-request",
-    "x-openai-subagent",
-    "x-responsesapi-include-timing-metrics",
-    "x-session-id",
-];
 
 pub(super) async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -188,15 +164,8 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
-        if !runtime
-            .visible_models(key, WEBSOCKET_PROTOCOLS, now_ms())
-            .iter()
-            .any(|model| model.eq_ignore_ascii_case(&requested_model))
-        {
-            return Err(GatewayFailure::model_not_found());
-        }
         let resolved_model = runtime
-            .resolve_model(key, &requested_model)
+            .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
         let responses_lite = headers.contains_key(CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
@@ -251,8 +220,8 @@ impl ClientRequest {
             .filter(|value| !value.is_empty())
     }
 
-    fn has_function_call_output(&self) -> bool {
-        super::request::contains_function_call_output(&self.value)
+    fn has_tool_call_output(&self) -> bool {
+        super::request::contains_tool_call_output(&self.value)
     }
 
     fn drop_previous_response_id(&mut self) -> bool {
@@ -352,7 +321,12 @@ async fn connect_upstream(
         let mut prepared = prepared;
         let mut refresh_fence = None;
         let upgrade = loop {
-            let headers = upstream_headers(client_headers, &prepared, request.responses_lite);
+            let headers = upstream_headers(
+                client_headers,
+                &prepared,
+                request.responses_lite,
+                &request.request_id,
+            );
             let upgrade = runtime
                 .websocket_client(&route.candidate_id)
                 .get(route.upstream_url.clone())
@@ -596,7 +570,7 @@ async fn connect_upstream(
     if allow_previous_response_reset
         && request.has_previous_response_id()
         && confirmed_response_missing
-        && !request.has_function_call_output()
+        && !request.has_tool_call_output()
     {
         let mut reset_request = request.clone();
         if reset_request.drop_previous_response_id() {
@@ -830,13 +804,9 @@ fn upstream_headers(
     client_headers: &HeaderMap,
     prepared: &crate::runtime::PreparedAuthorization,
     responses_lite: bool,
+    request_id: &str,
 ) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for &name in FORWARDED_HEADERS {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
-        }
-    }
+    let mut headers = forwarded_codex_headers(client_headers, request_id);
     headers.insert(AUTHORIZATION, prepared.authorization.clone());
     if let Some(identity) = prepared.identity.as_ref() {
         identity.insert(&mut headers);

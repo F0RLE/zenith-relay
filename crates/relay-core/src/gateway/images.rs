@@ -188,18 +188,9 @@ async fn prepare_request(
             Some(prefix) => format!("{prefix}/{IMAGE_API_MODEL}"),
             None => IMAGE_API_MODEL.to_string(),
         });
-    let visible = runtime.visible_models(key, IMAGE_PROTOCOLS, now_ms());
-    if !visible
-        .iter()
-        .any(|model| model.eq_ignore_ascii_case(&requested_model))
-    {
-        return Err(api_error(
-            StatusCode::NOT_FOUND,
-            "model is not available for this local key",
-            "model_not_found",
-        ));
-    }
-    let Some(resolved_model) = runtime.resolve_model(key, &requested_model) else {
+    let Some(resolved_model) =
+        runtime.resolve_visible_model(key, &requested_model, IMAGE_PROTOCOLS, now_ms())
+    else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this local key",

@@ -208,6 +208,7 @@ pub fn run() {
         .manage(AppState::new())
         .setup(move |app| {
             let handle = app.handle().clone();
+            platform::resolve_codex_home().map_err(std::io::Error::other)?;
             let relay_state = local_pool::initialize(&handle)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(relay_state);

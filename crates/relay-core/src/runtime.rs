@@ -2,6 +2,7 @@ use crate::accounts::{
     AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
     TokenRefreshAdapter,
 };
+use crate::catalog::source_context_windows;
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
@@ -11,12 +12,13 @@ use crate::quota::QuotaSnapshot;
 use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
-    api_model_price, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
-    CandidateQuota, CandidateScope, Error, LocalGatewayKey, ModelRegistry, ModelRules,
-    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionRequest, UsageCallback, UsageEvent, WireApi, RESPONSE_AFFINITY_TTL_MS,
+    api_model_price, decode_codex_model_alias, normalize_subscription_plan_order, CandidateHealth,
+    CandidateKind, CandidateQuota, CandidateScope, Error, LocalGatewayKey, ModelRegistry,
+    ModelRules, PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy,
+    RuntimeCandidate, Selection, SelectionRequest, UsageCallback, UsageEvent, WireApi,
+    RESPONSE_AFFINITY_TTL_MS,
 };
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,7 @@ pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
+const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
@@ -763,6 +766,43 @@ impl GatewayRuntime {
         key.model_rules.allows(model).then(|| model.to_string())
     }
 
+    pub(crate) fn resolve_visible_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Option<String> {
+        let visible = self.visible_models(key, allowed_protocols, now_ms);
+        self.resolve_from_visible(key, model, &visible)
+    }
+
+    pub(crate) fn resolve_visible_account_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Option<String> {
+        self.resolve_from_visible(key, model, &self.visible_account_models(key))
+    }
+
+    fn resolve_from_visible(
+        &self,
+        key: &AuthenticatedKey,
+        requested: &str,
+        visible: &[String],
+    ) -> Option<String> {
+        let resolve = |candidate: &str| {
+            let resolved = self.resolve_model(key, candidate)?;
+            visible
+                .iter()
+                .filter_map(|visible| self.resolve_model(key, visible))
+                .any(|visible| visible.eq_ignore_ascii_case(&resolved))
+                .then_some(resolved)
+        };
+        resolve(requested)
+            .or_else(|| decode_codex_model_alias(requested).and_then(|id| resolve(&id)))
+    }
+
     pub(crate) fn visible_models(
         &self,
         key: &AuthenticatedKey,
@@ -847,6 +887,82 @@ impl GatewayRuntime {
             .collect()
     }
 
+    pub(crate) async fn codex_source_context_windows(
+        &self,
+        key: &AuthenticatedKey,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> BTreeMap<String, u64> {
+        let routes = {
+            let scheduler = self.lock_scheduler();
+            self.sources
+                .iter()
+                .filter_map(|(source_id, source)| {
+                    let candidate = scheduler.candidate(source_id)?;
+                    source
+                        .configured_models
+                        .iter()
+                        .any(|model| {
+                            key.model_rules.allows(model)
+                                && candidate.is_catalog_visible(
+                                    model,
+                                    allowed_protocols,
+                                    &key.scope,
+                                )
+                        })
+                        .then(|| {
+                            (
+                                source_id.clone(),
+                                source.models_url.clone(),
+                                source.source_authorization(),
+                                source.configured_models.clone(),
+                            )
+                        })
+                })
+                .collect::<Vec<_>>()
+        };
+        let manifests = join_all(routes.into_iter().map(
+            |(source_id, models_url, authorization, configured_models)| async move {
+                if let Some(value) = self.fresh_codex_model_manifest(
+                    &source_id,
+                    now_ms,
+                    CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
+                ) {
+                    return Some((configured_models, value));
+                }
+                let response = self
+                    .discovery_client
+                    .get(models_url)
+                    .header(AUTHORIZATION, authorization)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await
+                    .ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let body = collect_limited(response, MAX_MODELS_BODY_BYTES)
+                    .await
+                    .ok()?;
+                let value = serde_json::from_slice::<Value>(&body).ok()?;
+                self.remember_codex_model_manifest(&source_id, value.clone(), now_ms);
+                Some((configured_models, value))
+            },
+        ))
+        .await;
+
+        let mut windows: BTreeMap<String, u64> = BTreeMap::new();
+        for (configured_models, manifest) in manifests.into_iter().flatten() {
+            for (model, context_window) in source_context_windows(&manifest, &configured_models) {
+                windows
+                    .entry(model)
+                    .and_modify(|existing| *existing = (*existing).min(context_window))
+                    .or_insert(context_window);
+            }
+        }
+        windows
+    }
+
     pub(crate) fn remember_codex_responses_lite_model(&self, model: &str) {
         self.codex_responses_lite_models
             .lock()
@@ -881,6 +997,20 @@ impl GatewayRuntime {
                     observed_at_ms,
                 },
             );
+    }
+
+    fn fresh_codex_model_manifest(
+        &self,
+        candidate_id: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<Value> {
+        self.codex_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(candidate_id)
+            .filter(|manifest| now_ms.saturating_sub(manifest.observed_at_ms) <= ttl_ms)
+            .map(|manifest| manifest.value.clone())
     }
 
     pub(crate) fn stale_codex_model_manifest<'a>(
@@ -2452,6 +2582,64 @@ mod tests {
                 .resolve_model(&authenticated, "TEAM/gpt-a")
                 .as_deref(),
             Some("gpt-a")
+        );
+    }
+
+    #[test]
+    fn codex_aliases_resolve_without_shadowing_exact_model_ids() {
+        let encoded = crate::codex_model_alias("vendor/model");
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source",
+                "upstream-secret",
+                &["vendor/model", &encoded],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .resolve_visible_model(
+                    &authenticated,
+                    &encoded,
+                    &[WireApi::Responses],
+                    current_time_ms(),
+                )
+                .as_deref(),
+            Some(encoded.as_str())
+        );
+
+        let alias = crate::codex_model_alias("vendor/model");
+        let without_collision = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source",
+                "upstream-secret",
+                &["vendor/model"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = without_collision
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        assert_eq!(
+            without_collision
+                .resolve_visible_model(
+                    &authenticated,
+                    &alias,
+                    &[WireApi::Responses],
+                    current_time_ms(),
+                )
+                .as_deref(),
+            Some("vendor/model")
         );
     }
 
