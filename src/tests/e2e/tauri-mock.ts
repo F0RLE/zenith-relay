@@ -53,6 +53,8 @@ export type MockOptions = {
   updateVersion?: string;
   updateBody?: string;
   updateDate?: string;
+  portableUpdateTargetMissing?: boolean;
+  updateCheckError?: boolean;
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
   mixedModels?: boolean;
@@ -72,7 +74,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
     localStorage.setItem("relay.theme", input.theme ?? "light");
-    localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
+    // Test fixtures seed the preference once.  A renderer reload must use the
+    // persisted WebView value just like the packaged desktop application.
+    if (localStorage.getItem("relay.profileSwitchBackupPrompt") === null) {
+      localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
+    }
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
     type MockOperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
@@ -910,7 +916,11 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "plugin:event|unlisten": eventListeners.delete(Number(args.eventId)); return null;
           case "plugin:app|bundle_type": return input.bundleType === null ? null : input.bundleType ?? "nsis";
           case "get_portable_update_target": return input.bundleType === null ? "windows-x86_64-portable" : null;
-          case "plugin:updater|check": return input.updateVersion ? { rid: 901, currentVersion: "1.1.0", version: input.updateVersion, date: input.updateDate ?? "2026-07-15T12:00:00Z", body: input.updateBody ?? "Faster routing\nImproved settings", rawJson: {} } : null;
+          case "plugin:updater|check":
+            if (input.updateCheckError || (input.portableUpdateTargetMissing && args.target === "windows-x86_64-portable")) {
+              throw new Error(input.updateCheckError ? "updater signature validation failed" : "portable update target is unavailable");
+            }
+            return input.updateVersion ? { rid: 901, currentVersion: "1.1.0", version: input.updateVersion, date: input.updateDate ?? "2026-07-15T12:00:00Z", body: input.updateBody ?? "Faster routing\nImproved settings", rawJson: {} } : null;
           case "install_portable_update":
             sendChannel(args.onEvent, { event: "Started", data: { contentLength: 100 } }, 0);
             sendChannel(args.onEvent, { event: "Progress", data: { chunkLength: 100 } }, 1);

@@ -17,6 +17,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $version = $TagName -replace "^v", ""
+if ($version -notmatch "^\d+\.\d+\.\d+$") {
+  throw "The stable updater manifest accepts only stable SemVer tags (for example v1.1.0); prereleases require a separate update channel."
+}
 $bundleVersion = $version -replace "-.*$", ""
 $baseUrl = "https://github.com/$Repository/releases/download/$TagName"
 

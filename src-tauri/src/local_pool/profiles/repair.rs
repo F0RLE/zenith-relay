@@ -2,11 +2,14 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::io::BufRead;
+
 use std::{
     collections::HashSet,
     ffi::OsString,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -87,6 +90,20 @@ struct RolloutSnapshot {
     path: String,
     hash: String,
     records: usize,
+}
+
+#[derive(Clone)]
+struct SessionMetadata {
+    first: Option<SessionMeta>,
+    latest: Option<SessionMeta>,
+}
+
+#[derive(Clone)]
+struct SessionMeta {
+    start: u64,
+    end: u64,
+    separator: Vec<u8>,
+    value: Value,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -489,20 +506,10 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
         return Err("ChatGPT rollout file is too large".to_string());
     }
+    let metadata = read_session_metadata(path)?;
+    let records = usize::from(session_metadata_needs_repair(&metadata, target));
     let mut reader = BufReader::new(file);
-    let mut first_line = Vec::new();
-    reader
-        .read_until(b'\n', &mut first_line)
-        .map_err(io_error)?;
-    if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
-        return Err("ChatGPT rollout session metadata is too large".to_string());
-    }
-    let records = usize::from(
-        rollout_provider(&first_line)
-            .is_some_and(|provider| target.is_empty() || provider.as_deref() != Some(target)),
-    );
     let mut hasher = Sha256::new();
-    hasher.update(&first_line);
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = reader.read(&mut buffer).map_err(io_error)?;
@@ -518,17 +525,127 @@ fn scan_rollout(path: &Path, target: &str) -> Result<RolloutSnapshot, String> {
     })
 }
 
+fn read_session_metadata(path: &Path) -> Result<SessionMetadata, String> {
+    let file = File::open(path).map_err(io_error)?;
+    if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
+        return Err("ChatGPT rollout file is too large".to_string());
+    }
+    let mut reader = BufReader::new(file);
+    let mut metadata = SessionMetadata {
+        first: None,
+        latest: None,
+    };
+    let mut line = Vec::new();
+    let mut line_too_large = false;
+    let mut line_start = 0_u64;
+    let mut offset = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        for byte in &buffer[..read] {
+            if !line_too_large {
+                if line.len() >= MAX_ROLLOUT_HEADER_BYTES {
+                    line.clear();
+                    line_too_large = true;
+                } else {
+                    line.push(*byte);
+                }
+            }
+            offset += 1;
+            if *byte != b'\n' {
+                continue;
+            }
+            if line_too_large {
+                if line_start == 0 {
+                    return Err("ChatGPT rollout session metadata is too large".to_string());
+                }
+            } else {
+                record_session_metadata(&mut metadata, &line, line_start, offset);
+            }
+            line.clear();
+            line_too_large = false;
+            line_start = offset;
+        }
+    }
+    if line_start < offset {
+        if line_too_large {
+            if line_start == 0 {
+                return Err("ChatGPT rollout session metadata is too large".to_string());
+            }
+        } else {
+            record_session_metadata(&mut metadata, &line, line_start, offset);
+        }
+    }
+    Ok(metadata)
+}
+
+fn record_session_metadata(metadata: &mut SessionMetadata, line: &[u8], start: u64, end: u64) {
+    let Some((value, separator)) = session_meta_value(line) else {
+        return;
+    };
+    let item = SessionMeta {
+        start,
+        end,
+        separator,
+        value,
+    };
+    if metadata.first.is_none() {
+        metadata.first = Some(item.clone());
+    }
+    metadata.latest = Some(item);
+}
+
+#[cfg(test)]
 fn rollout_provider(first_line: &[u8]) -> Option<Option<String>> {
-    let first_line = first_line.strip_suffix(b"\n").unwrap_or(first_line);
-    let first_line = first_line.strip_suffix(b"\r").unwrap_or(first_line);
-    let value: Value = serde_json::from_slice(first_line).ok()?;
-    (value.get("type").and_then(Value::as_str) == Some("session_meta")).then(|| {
-        value
-            .get("payload")
-            .and_then(|payload| payload.get("model_provider"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    })
+    session_meta_value(first_line)
+        .map(|(value, _)| session_meta_provider(&value).map(str::to_string))
+}
+
+fn session_meta_value(line: &[u8]) -> Option<(Value, Vec<u8>)> {
+    let (line, separator) = if let Some(line) = line.strip_suffix(b"\r\n") {
+        (line, b"\r\n".as_slice())
+    } else if let Some(line) = line.strip_suffix(b"\n") {
+        (line, b"\n".as_slice())
+    } else {
+        (line, b"".as_slice())
+    };
+    let value: Value = serde_json::from_slice(line).ok()?;
+    (value.get("type").and_then(Value::as_str) == Some("session_meta"))
+        .then_some((value, separator.to_vec()))
+}
+
+fn session_meta_provider(value: &Value) -> Option<&str> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("model_provider"))
+        .and_then(Value::as_str)
+}
+
+fn session_meta_id(value: &Value) -> Option<&str> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("id"))
+        .and_then(Value::as_str)
+}
+
+fn session_metadata_needs_repair(metadata: &SessionMetadata, target: &str) -> bool {
+    let Some(latest) = metadata.latest.as_ref() else {
+        return false;
+    };
+    if target.is_empty() || session_meta_provider(&latest.value) != Some(target) {
+        return true;
+    }
+    let Some(first) = metadata.first.as_ref() else {
+        return false;
+    };
+    first.start != latest.start
+        && session_meta_id(&first.value).is_some_and(|first_id| {
+            session_meta_id(&latest.value) == Some(first_id)
+                && session_meta_provider(&first.value) != Some(target)
+        })
 }
 
 fn scan_database(path: &Path, target: &str) -> Result<DatabaseSnapshot, String> {
@@ -710,56 +827,77 @@ fn apply_snapshot(snapshot: &RepairSnapshot) -> Result<(), String> {
 }
 
 fn rewrite_rollout(path: &Path, target: &str, expected: usize) -> Result<(), String> {
-    let file = File::open(path).map_err(io_error)?;
-    if file.metadata().map_err(io_error)?.len() > MAX_ROLLOUT_BYTES {
-        return Err("ChatGPT rollout file is too large".to_string());
-    }
-    let mut reader = BufReader::new(file);
-    let mut first_line = Vec::new();
-    reader
-        .read_until(b'\n', &mut first_line)
-        .map_err(io_error)?;
-    if first_line.len() > MAX_ROLLOUT_HEADER_BYTES {
-        return Err("ChatGPT rollout session metadata is too large".to_string());
-    }
-    let separator: &[u8] = if first_line.ends_with(b"\r\n") {
-        b"\r\n"
-    } else if first_line.ends_with(b"\n") {
-        b"\n"
-    } else {
-        b""
-    };
-    let line = first_line.strip_suffix(b"\n").unwrap_or(&first_line);
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    let mut value: Value = serde_json::from_slice(line)
-        .map_err(|_| "ChatGPT rollout session metadata is malformed".to_string())?;
-    let provider = value
-        .get("payload")
-        .and_then(|payload| payload.get("model_provider"))
-        .and_then(Value::as_str);
-    let changed = usize::from(
-        value.get("type").and_then(Value::as_str) == Some("session_meta")
-            && provider != Some(target),
-    );
+    let metadata = read_session_metadata(path)?;
+    let mut replacements = session_meta_replacements(&metadata, target)?;
+    let changed = usize::from(!replacements.is_empty());
     if changed != expected || changed != 1 {
         return Err("ChatGPT rollout changed during repair".to_string());
     }
-    let payload = value
-        .get_mut("payload")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "ChatGPT session metadata is invalid".to_string())?;
-    payload.insert(
-        "model_provider".to_string(),
-        Value::String(target.to_string()),
-    );
-    let updated = serde_json::to_vec(&value)
-        .map_err(|_| "ChatGPT session serialization failed".to_string())?;
     replace_file_with(path, false, move |output| {
-        output.write_all(&updated).map_err(io_error)?;
-        output.write_all(separator).map_err(io_error)?;
-        std::io::copy(&mut reader, output).map_err(io_error)?;
+        let mut input = File::open(path).map_err(io_error)?;
+        let mut position = 0_u64;
+        for replacement in &mut replacements {
+            if replacement.start < position || replacement.end < replacement.start {
+                return Err("ChatGPT rollout changed during repair".to_string());
+            }
+            let prefix_len = replacement.start - position;
+            let copied = {
+                let mut prefix = Read::by_ref(&mut input).take(prefix_len);
+                std::io::copy(&mut prefix, output).map_err(io_error)?
+            };
+            if copied != prefix_len {
+                return Err("ChatGPT rollout changed during repair".to_string());
+            }
+            let payload = replacement
+                .value
+                .get_mut("payload")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "ChatGPT session metadata is invalid".to_string())?;
+            payload.insert(
+                "model_provider".to_string(),
+                Value::String(target.to_string()),
+            );
+            let updated = serde_json::to_vec(&replacement.value)
+                .map_err(|_| "ChatGPT session serialization failed".to_string())?;
+            output.write_all(&updated).map_err(io_error)?;
+            output.write_all(&replacement.separator).map_err(io_error)?;
+            if input
+                .seek(SeekFrom::Start(replacement.end))
+                .map_err(io_error)?
+                != replacement.end
+            {
+                return Err("ChatGPT rollout changed during repair".to_string());
+            }
+            position = replacement.end;
+        }
+        std::io::copy(&mut input, output).map_err(io_error)?;
         Ok(())
     })
+}
+
+fn session_meta_replacements(
+    metadata: &SessionMetadata,
+    target: &str,
+) -> Result<Vec<SessionMeta>, String> {
+    let latest = metadata
+        .latest
+        .as_ref()
+        .ok_or_else(|| "ChatGPT rollout session metadata is malformed".to_string())?;
+    let mut replacements = Vec::new();
+    if session_meta_provider(&latest.value) != Some(target) {
+        replacements.push(latest.clone());
+    }
+    if let Some(first) = metadata.first.as_ref() {
+        let same_session = first.start != latest.start
+            && session_meta_id(&first.value)
+                .is_some_and(|first_id| session_meta_id(&latest.value) == Some(first_id));
+        if same_session && session_meta_provider(&first.value) != Some(target) {
+            replacements.push(first.clone());
+        }
+    }
+    replacements.sort_by_key(|item| item.start);
+    replacements.dedup_by_key(|item| item.start);
+    Ok(replacements)
 }
 
 fn restore_manifest(manifest: &RepairManifest, directory: &Path) -> Result<usize, String> {
@@ -988,6 +1126,37 @@ mod tests {
     }
 
     #[test]
+    fn automatic_sync_from_ready_api_to_chatgpt_repairs_the_latest_session_metadata() {
+        let (root, state, backups, profile, rollout, database) = fixture("ready-api-to-chatgpt");
+        synchronize(&state, &backups, &profile, TargetProvider::CodexLocalAccess)
+            .unwrap()
+            .expect("initial API migration");
+        let mut file = OpenOptions::new().append(true).open(&rollout).unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"thread-test\",\"model_provider\":\"codex_local_access\",\"cwd\":\"C:/latest\"}}}}"
+        )
+        .unwrap();
+        drop(file);
+
+        let applied = synchronize(&state, &backups, &profile, TargetProvider::Openai)
+            .unwrap()
+            .expect("account migration");
+
+        assert_eq!(applied.rollout_records_changed, 1);
+        assert_eq!(database_provider(&database), "openai");
+        assert_eq!(latest_rollout_provider_from_file(&rollout), "openai");
+        assert_eq!(
+            rollout_providers_from_file(&rollout),
+            vec!["openai".to_string(), "openai".to_string()]
+        );
+        assert!(fs::read_to_string(&rollout)
+            .unwrap()
+            .contains("\"cwd\":\"C:/latest\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn changed_rollout_is_rejected_before_backup_or_write() {
         let (root, state, backups, profile, rollout, database) = fixture("changed");
         let preview = preview(&state, &[profile], TargetProvider::ZenithRelayLocal, false).unwrap();
@@ -1184,6 +1353,21 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    fn rollout_providers_from_file(path: &Path) -> Vec<String> {
+        BufReader::new(File::open(path).unwrap())
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| rollout_provider(line.as_bytes()).flatten())
+            .collect()
+    }
+
+    fn latest_rollout_provider_from_file(path: &Path) -> String {
+        rollout_providers_from_file(path)
+            .into_iter()
+            .last()
+            .expect("session metadata provider")
     }
 
     fn database_provider(path: &Path) -> String {

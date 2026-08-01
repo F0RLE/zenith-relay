@@ -145,7 +145,7 @@ jobs:
         with:
           tagName: ""
           releaseDraft: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+          prerelease: ${{ startsWith(github.ref, 'refs/tags/') && contains(github.ref_name, '-') }}
       - name: Collect and verify release files
         shell: pwsh
         run: |
@@ -191,7 +191,7 @@ jobs:
           if (!(Test-Path "$portable.sig")) {
             throw "Portable updater signature was not created"
           }
-      - name: Upload stable release assets
+      - name: Upload release assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
@@ -199,11 +199,15 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME > $null 2>&1
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md
+            if ($env:GITHUB_REF_NAME.Contains("-")) {
+              gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md --prerelease
+            } else {
+              gh release create $env:GITHUB_REF_NAME --target $env:GITHUB_SHA --title "Zenith Relay $env:GITHUB_REF_NAME" --notes-file release-notes.md
+            }
           }
           Get-ChildItem "artifacts/zenith-relay-${{ matrix.name }}*" -File -ErrorAction SilentlyContinue |
             ForEach-Object { gh release upload $env:GITHUB_REF_NAME $_.FullName --clobber }
-      - name: Update stable release notes
+      - name: Update release notes
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
@@ -218,7 +222,7 @@ jobs:
   publish-updater-manifest:
     name: Publish updater manifest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     permissions:
       contents: write

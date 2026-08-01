@@ -179,13 +179,13 @@ pub(crate) fn direct_source_model_catalog(
     codex_home: &Path,
     source_models: &[String],
 ) -> Result<Option<String>> {
-    let (_, template) = collect_native_catalog_models(codex_home, None, None)?;
-    let Some(template) = template else {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT native model metadata is unavailable; launch Codex once and retry",
-        ));
-    };
+    let user_catalog_path = configured_model_catalog_path(codex_home)?;
+    let (_, template) =
+        collect_native_catalog_models(codex_home, user_catalog_path.as_deref(), None)?;
+    // A catalog override is optional in Codex.  Relay should prefer a verified
+    // native row when one is present, but must not make profile attachment
+    // depend on a cache that it deliberately invalidates after catalog changes.
+    let template = template.unwrap_or_default();
     // `model_provider` points to this selected source.  Native Codex rows are
     // useful only as a schema template here; advertising them would send their
     // requests to this source and produce a false model picker entry.
@@ -286,7 +286,7 @@ fn collect_native_catalog_models(
 ) -> Result<NativeCatalog> {
     let mut candidates = Vec::new();
     if let Some(path) = user_catalog_path {
-        candidates.extend(read_catalog_file_models(Path::new(path))?);
+        candidates.extend(read_catalog_file_models(codex_home, path)?);
     }
     candidates.extend(cached_native_catalog_models(codex_home));
     let managed_models = match managed_catalog {
@@ -320,20 +320,45 @@ fn collect_native_catalog_models(
             models.push(candidate);
         }
     }
+    let picker_template = |entry: &&Value| {
+        catalog_entry_is_picker_eligible(entry)
+            && entry.get("supported_in_api") != Some(&Value::Bool(false))
+    };
+    // Prefer an actual native entry over a namespaced user provider row.  The
+    // latter remains a useful schema fallback when it is the only catalog
+    // available, but must not override native client capabilities by default.
     let template = models
         .iter()
-        .filter(|entry| {
-            catalog_entry_is_picker_eligible(entry)
-                && entry.get("supported_in_api") != Some(&Value::Bool(false))
-        })
+        .filter(|entry| picker_template(entry))
+        .filter(|entry| model_slug(entry).is_some_and(|slug| !slug.contains('/')))
         .find_map(Value::as_object)
         .cloned()
+        .or_else(|| {
+            models
+                .iter()
+                .filter(|entry| picker_template(entry))
+                .find_map(Value::as_object)
+                .cloned()
+        })
         .or(managed_template);
     Ok((models, template))
 }
 
-fn read_catalog_file_models(path: &Path) -> Result<Vec<Value>> {
-    let content = fs::read(path).map_err(|error| io_error_at(path, error))?;
+fn configured_model_catalog_path(codex_home: &Path) -> Result<Option<String>> {
+    let config_path = codex_home.join(CONFIG_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    Ok(root_model_catalog_json(&document))
+}
+
+fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<Vec<Value>> {
+    let configured_path = Path::new(configured_path);
+    let path = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        codex_home.join(configured_path)
+    };
+    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
     read_catalog_values(&content, false)
 }
 
@@ -406,12 +431,7 @@ fn build_managed_model_catalog(
 ) -> Result<String> {
     let (_, template) =
         collect_native_catalog_models(codex_home, user_catalog_path, current_managed_catalog)?;
-    let Some(template) = template else {
-        return Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            "ChatGPT native model metadata is unavailable; launch Codex once and retry",
-        ));
-    };
+    let template = template.unwrap_or_default();
     let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
     // The managed provider is the Relay endpoint, so the catalog must contain
     // only models that its live pool exposes.  Native/user catalog rows remain
@@ -3218,6 +3238,56 @@ mod tests {
             assert!(model.get("default_reasoning_level").is_none());
             assert_eq!(model["supported_reasoning_levels"], json!([]));
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_source_catalog_resolves_the_configured_relative_template() {
+        let (root, home, _backups) = profile_dirs("direct-source-relative-template");
+        write_test_catalog_file(&home.join("native-catalog.json"), "gpt-5.6-sol");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_catalog_json = \"native-catalog.json\"\n",
+        )
+        .unwrap();
+
+        let catalog = direct_source_model_catalog(&home, &["vendor/claude-opus".into()])
+            .unwrap()
+            .expect("catalog");
+        let models = serde_json::from_str::<Value>(&catalog).unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "vendor/claude-opus");
+        assert_eq!(models[0]["supported_reasoning_levels"], json!([]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generated_catalogs_do_not_require_cached_native_metadata() {
+        let (root, home, _backups) = profile_dirs("catalog-metadata-fallback");
+
+        let direct = direct_source_model_catalog(&home, &["vendor/direct".into()])
+            .unwrap()
+            .expect("direct catalog");
+        assert_eq!(
+            serde_json::from_str::<Value>(&direct).unwrap()["models"][0]["slug"],
+            "vendor/direct"
+        );
+
+        let managed = build_managed_model_catalog(
+            &home,
+            None,
+            None,
+            r#"{"models":[{"slug":"vendor/managed"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&managed).unwrap()["models"][0]["slug"],
+            "vendor/managed"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

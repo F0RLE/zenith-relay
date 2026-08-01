@@ -122,6 +122,7 @@ pub fn routed_codex_catalog_entry(
         "supports_reasoning_summary_parameter".into(),
         Value::Bool(false),
     );
+    entry.insert("supports_reasoning_summaries".into(), Value::Bool(false));
     entry.insert(
         "include_skills_usage_instructions".into(),
         Value::Bool(false),
@@ -225,6 +226,7 @@ pub fn normalize_upstream_codex_catalog_entry(
         "supports_image_detail_original",
         "include_skills_usage_instructions",
         "supports_reasoning_summary_parameter",
+        "supports_reasoning_summaries",
     ] {
         if template.get(key).is_some_and(Value::is_boolean) {
             entry.insert(key.into(), template[key].clone());
@@ -321,6 +323,7 @@ pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
         && optional_model_messages(entry)
         && default_bool(entry, "include_skills_usage_instructions")
         && default_bool(entry, "supports_reasoning_summary_parameter")
+        && default_bool(entry, "supports_reasoning_summaries")
         && default_enum_string(
             entry,
             "default_reasoning_summary",
@@ -620,6 +623,7 @@ mod tests {
         assert_eq!(entry["web_search_tool_type"], "text");
         assert!(entry.get("use_responses_lite").is_none());
         assert!(entry.get("service_tiers").is_none());
+        assert_eq!(entry["supports_reasoning_summaries"], false);
         assert_eq!(entry["supports_parallel_tool_calls"], false);
     }
 

@@ -613,6 +613,23 @@ pub(super) fn normalize_account_request(
     object.remove("max_output_tokens");
     sanitize_unstored_reasoning_items(object);
     if responses_lite {
+        // Codex Responses Lite accepts only complete reasoning history.  Keep
+        // the client-selected effort and summary settings, but always supply
+        // the mandatory context mode before the request reaches either the
+        // HTTP or WebSocket account transport.
+        let reasoning = object
+            .entry("reasoning".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !reasoning.is_object() {
+            *reasoning = Value::Object(Map::new());
+        }
+        reasoning
+            .as_object_mut()
+            .expect("reasoning was normalized to an object")
+            .insert(
+                "context".to_string(),
+                Value::String("all_turns".to_string()),
+            );
         object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
         filter_responses_lite_tools(object);
     }
@@ -948,6 +965,23 @@ mod tests {
 
         assert_eq!(request["tools"][0]["type"], "namespace");
         assert_eq!(request["tool_choice"]["type"], "namespace");
+    }
+
+    #[test]
+    fn responses_lite_forces_all_turns_reasoning_context_without_losing_effort() {
+        let mut request = json!({
+            "reasoning": {"effort": "high", "summary": "detailed"}
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+
+        assert_eq!(request["reasoning"]["context"], "all_turns");
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["reasoning"]["summary"], "detailed");
+
+        let mut malformed = json!({"reasoning": null});
+        normalize_account_request(malformed.as_object_mut().unwrap(), true);
+        assert_eq!(malformed["reasoning"], json!({"context": "all_turns"}));
     }
 
     #[test]

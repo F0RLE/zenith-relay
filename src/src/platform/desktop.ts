@@ -70,9 +70,22 @@ async function getPortableUpdateTarget(): Promise<string | null> {
   return invoke<string | null>("get_portable_update_target").catch(() => null);
 }
 
+async function checkPortableUpdate(target: string) {
+  try {
+    return await check({ target });
+  } catch {
+    // A stale but otherwise valid manifest can predate the portable target.
+    // A generic check proves that the manifest is reachable and verified, but
+    // its installer update must never be offered to a portable executable.
+    const genericUpdate = await check();
+    await genericUpdate?.close();
+    return null;
+  }
+}
+
 export async function checkForUpdate(): Promise<AppUpdate | null> {
   const portableTarget = await getPortableUpdateTarget();
-  const update = await check(portableTarget ? { target: portableTarget } : undefined);
+  const update = portableTarget ? await checkPortableUpdate(portableTarget) : await check();
   if (!update) return null;
   const metadata = {
     currentVersion: update.currentVersion,

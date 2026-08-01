@@ -651,8 +651,15 @@ test("profile switch reminder can cancel a switch and be disabled", async ({ pag
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await page.getByRole("button", { name: "Launch in ChatGPT" }).click();
   await expect(reminder).toHaveCount(0);
+
+  await page.reload();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByLabel("Remind me about the restore point")).not.toBeChecked();
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Launch in ChatGPT" }).click();
+  await expect(reminder).toHaveCount(0);
   const launches = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "launch_codex_account").length);
-  expect(launches).toBe(2);
+  expect(launches).toBe(1);
 });
 
 test("confirmed local reset delegates protected restoration to Rust", async ({ page }) => {
@@ -2070,6 +2077,27 @@ test("portable updates replace the same executable through the verified helper p
   expect(calls.some((call) => call.command === "install_portable_update")).toBe(true);
   expect(calls.some((call) => call.command === "plugin:updater|download_and_install")).toBe(false);
   expect(calls.some((call) => call.command === "plugin:process|restart")).toBe(false);
+});
+
+test("a portable executable ignores a valid manifest without its portable target", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, bundleType: null, portableUpdateTargetMissing: true, updateVersion: "1.1.1" });
+  await page.goto("/");
+
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check").length)).toBe(2);
+  await expect(page.getByRole("button", { name: "Open update 1.1.1" })).toHaveCount(0);
+
+  const checks = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check").map((call) => call.args));
+  expect(checks).toEqual([{ target: "windows-x86_64-portable" }, {}]);
+});
+
+test("a portable updater check keeps a verification failure visible", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, bundleType: null, updateCheckError: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+
+  await expect(page.getByText("Update failed", { exact: true })).toBeVisible();
+  const checks = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "plugin:updater|check"));
+  expect(checks).toHaveLength(2);
 });
 
 test("OAuth sign-in exposes only safe recovery actions", async ({ page }) => {

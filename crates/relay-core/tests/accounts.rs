@@ -628,6 +628,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
             "model": MODEL,
             "input": "hello",
             "parallel_tool_calls": true,
+            "reasoning": {"effort": "high"},
             "tools": [
                 {"type": "function", "name": "local_tool"},
                 {"type": "web_search"},
@@ -644,6 +645,8 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     assert_eq!(requests[0].body["parallel_tool_calls"], false);
     assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 1);
     assert_eq!(requests[0].body["tools"][0]["name"], "local_tool");
+    assert_eq!(requests[0].body["reasoning"]["context"], "all_turns");
+    assert_eq!(requests[0].body["reasoning"]["effort"], "high");
 }
 
 #[tokio::test]
