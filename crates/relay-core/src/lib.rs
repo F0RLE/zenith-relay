@@ -13,19 +13,20 @@ pub mod sources;
 pub mod usage;
 
 pub use catalog::{
-    codex_catalog_entry_is_compatible, codex_model_alias, codex_model_display_name,
-    codex_model_is_picker_eligible, compare_codex_picker_models, decode_codex_model_alias,
+    canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
+    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, sort_codex_catalog_models, ModelRegistry, ModelRules,
-    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    routed_codex_catalog_entry, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
+    CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{Error, Result};
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
-    discover_source_models, normalize_image_base_model, DefaultServiceTier, GatewayRuntime,
-    GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore, RuntimeLocalKey,
-    RuntimeMixedLocalKey, RuntimeSource,
+    discover_source_models, discover_source_models_for_protocol_bindings,
+    normalize_image_base_model, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeLocalKey, RuntimeMixedLocalKey,
+    RuntimeSource,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
@@ -34,8 +35,9 @@ pub use scheduler::{
     QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
-    fetch_source_provider_stats, source_points_to_gateway, LocalGatewayKey, ProviderSource,
-    SourceProviderStats, SourceStatsProvider, WireApi,
+    fetch_source_provider_stats, normalize_source_protocol_bindings, source_points_to_gateway,
+    LocalGatewayKey, ProviderSource, SourceProtocolBinding, SourceProviderStats,
+    SourceStatsProvider, WireApi,
 };
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,

@@ -22,7 +22,7 @@ use zenith_relay_core::{
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
     },
-    ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, QUOTA_STALE_AFTER_MS,
+    ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 #[tauri::command]
@@ -75,12 +75,8 @@ pub async fn get_local_runtime_state(
         .map(|record| {
             local_source_summary(
                 record,
-                (running && record.in_pool).then(|| {
-                    source_runtime
-                        .get(record.id.as_str())
-                        .copied()
-                        .unwrap_or(false)
-                }),
+                (running && record.enabled)
+                    .then(|| source_runtime_available(&source_runtime, &record.id)),
                 equivalents
                     .sources
                     .get(&record.id)
@@ -157,7 +153,11 @@ pub async fn get_local_runtime_state(
         .collect();
     let candidate_count = source_summaries
         .iter()
-        .filter(|record| record.in_pool && record.operational_status == OperationalStatus::Rotation)
+        .filter(|record| {
+            record.in_pool
+                && record.supports_wire_api(WireApi::Responses)
+                && record.operational_status == OperationalStatus::Rotation
+        })
         .count()
         + account_summaries
             .iter()
@@ -250,6 +250,16 @@ pub async fn get_local_runtime_order(
         .unwrap_or_default())
 }
 
+fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &str) -> bool {
+    source_runtime.iter().any(|(candidate_id, available)| {
+        *available
+            && (*candidate_id == source_id
+                || candidate_id
+                    .strip_prefix(source_id)
+                    .is_some_and(|suffix| suffix.starts_with("::")))
+    })
+}
+
 fn local_source_summary(
     record: &ProviderSourceRecord,
     runtime_available: Option<bool>,
@@ -270,6 +280,7 @@ fn local_source_summary(
         ),
         base_url: record.base_url.clone(),
         wire_api: record.wire_api,
+        protocol_bindings: record.protocol_bindings.clone(),
         models: record.models.clone(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
@@ -377,7 +388,7 @@ fn local_key_summary(record: &LocalGatewayKeyRecord, managed_by_chatgpt: bool) -
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
         model_prefix: record.model_prefix.clone(),
-        wire_apis: None,
+        wire_apis: record.wire_apis.clone(),
         soft_budget_micro_usd: None,
         usage_totals: Default::default(),
         created_at_ms: timestamp_ms(&record.created_at).unwrap_or_default(),
@@ -448,5 +459,18 @@ mod parity_tests {
             local.as_object().unwrap().keys().collect::<Vec<_>>(),
             remote.as_object().unwrap().keys().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn source_runtime_status_matches_protocol_candidates() {
+        let runtime = HashMap::from([
+            ("source::messages", true),
+            ("source::responses", false),
+            ("other", true),
+        ]);
+
+        assert!(source_runtime_available(&runtime, "source"));
+        assert!(!source_runtime_available(&runtime, "missing"));
+        assert!(!source_runtime_available(&runtime, "sour"));
     }
 }

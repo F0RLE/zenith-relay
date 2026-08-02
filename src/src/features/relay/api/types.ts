@@ -102,6 +102,13 @@ export type ApiModelPriceOverride = {
   outputMicroUsdPerMillion: number;
 };
 
+export type SourceWireApi = "responses" | "chat_completions" | "messages";
+
+export type SourceProtocolBinding = {
+  wireApi: SourceWireApi;
+  modelIds: string[];
+};
+
 export type SourceSummary = {
   id: string;
   name: string;
@@ -110,7 +117,8 @@ export type SourceSummary = {
   draining: boolean;
   operationalStatus: OperationalStatus;
   baseUrl: string;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: SourceWireApi;
+  protocolBindings?: SourceProtocolBinding[];
   models: string[];
   allowedModels: string[];
   excludedModels: string[];
@@ -220,7 +228,7 @@ export type KeySummary = {
   lastUsedAtMs: number | null;
 };
 
-export type ClientWireApi = "responses" | "chat_completions" | "images";
+export type ClientWireApi = "responses" | "chat_completions" | "messages" | "images";
 
 export type ClientKeyCreateInput = {
   schemaVersion: 1;
@@ -234,6 +242,12 @@ export type ClientKeyCreateInput = {
   softBudgetMicroUsd?: number | null;
 };
 
+export type LocalGatewayKeyInput = Omit<ClientKeyCreateInput, "schemaVersion" | "softBudgetMicroUsd">;
+
+export type LocalGatewayKeyUpdateInput = LocalGatewayKeyInput & {
+  keyId: string;
+};
+
 export type ClientKeyPatch = Partial<Omit<ClientKeyCreateInput, "schemaVersion">> & {
   schemaVersion: 1;
   enabled?: boolean;
@@ -241,6 +255,11 @@ export type ClientKeyPatch = Partial<Omit<ClientKeyCreateInput, "schemaVersion">
 
 export type GeneratedClientKey = {
   schemaVersion: 1;
+  key: KeySummary;
+  secret: string;
+};
+
+export type GeneratedLocalKey = {
   key: KeySummary;
   secret: string;
 };
@@ -346,7 +365,8 @@ type ConfigurationPresetMemberRule = {
 export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
   name: string;
   baseUrl: string;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: SourceWireApi;
+  protocolBindings?: SourceProtocolBinding[];
   serviceTier?: DefaultServiceTier;
   recoveryDelaySeconds: number;
   modelPriceOverrides: Record<string, ApiModelPriceOverride>;

@@ -7,15 +7,88 @@ use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zeni
 use crate::{Error, Result};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use url::{Host, Url};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireApi {
     Responses,
     ChatCompletions,
     Messages,
+}
+
+/// Associates an upstream-native wire contract with the models that are
+/// explicitly known to work through that contract.
+///
+/// A source can expose the same model through more than one native endpoint.
+/// Relay keeps those bindings separate so it never sends an Anthropic Messages
+/// body to a Responses endpoint (or the reverse).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceProtocolBinding {
+    pub wire_api: WireApi,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+}
+
+impl SourceProtocolBinding {
+    pub fn legacy(wire_api: WireApi, models: &[String]) -> Self {
+        Self {
+            wire_api,
+            model_ids: models.to_vec(),
+        }
+    }
+}
+
+/// Normalizes source protocol bindings while keeping the source-provided
+/// model order. Old configurations with only `wire_api` transparently become
+/// one binding for every configured model.
+pub fn normalize_source_protocol_bindings(
+    bindings: Vec<SourceProtocolBinding>,
+    fallback_wire_api: WireApi,
+    models: &[String],
+) -> Result<Vec<SourceProtocolBinding>> {
+    let models = normalize_model_ids(models.iter().cloned());
+    let known_models = models
+        .iter()
+        .map(|model| model.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let bindings = if bindings.is_empty() {
+        vec![SourceProtocolBinding::legacy(fallback_wire_api, &models)]
+    } else {
+        bindings
+    };
+    let mut seen_protocols = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(bindings.len());
+
+    for binding in bindings {
+        if !seen_protocols.insert(binding.wire_api) {
+            return Err(Error::Validation(
+                "each source protocol may be configured only once".to_string(),
+            ));
+        }
+        let mut model_ids = normalize_model_ids(binding.model_ids);
+        if model_ids.is_empty() {
+            model_ids = models.clone();
+        }
+        if !known_models.is_empty()
+            && model_ids
+                .iter()
+                .any(|model| !known_models.contains(&model.to_ascii_lowercase()))
+        {
+            return Err(Error::Validation(
+                "source protocol binding references a model not exposed by the source".to_string(),
+            ));
+        }
+        normalized.push(SourceProtocolBinding {
+            wire_api: binding.wire_api,
+            model_ids,
+        });
+    }
+
+    Ok(normalized)
 }
 
 #[derive(Clone)]
@@ -163,6 +236,16 @@ fn require_value(name: &str, value: &str) -> Result<()> {
         return Err(Error::Validation(format!("{name} must not be empty")));
     }
     Ok(())
+}
+
+fn normalize_model_ids(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.to_ascii_lowercase()))
+        .collect()
 }
 
 #[cfg(test)]

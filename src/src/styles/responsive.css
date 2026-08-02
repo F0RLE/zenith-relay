@@ -62,15 +62,6 @@
   .api-provider-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
-  .api-provider-fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .api-provider-fields > :nth-child(2) {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
 }
 
 @media (max-width: 700px) {
@@ -92,16 +83,8 @@
     gap: 5px;
   }
 
-  .api-provider-endpoint {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
-  }
-
-  .api-provider-protocol-menu,
-  .api-provider-protocol-menu .relay-option-trigger {
-    width: 100%;
-    min-width: 0;
+  .source-protocol-models > .scope-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .pool-member-toolbar .pool-priority-label,
@@ -166,6 +149,41 @@
     gap: 10px;
   }
 
+  .relay-dialog.source-add-configuring .relay-dialog-body {
+    padding: 10px 16px 12px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-setup,
+  .relay-dialog.source-add-configuring .api-provider-configuration {
+    gap: 8px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-selected {
+    padding-bottom: 8px;
+  }
+
+  .relay-dialog.source-add-configuring .source-protocol-bindings {
+    gap: 6px;
+  }
+
+  .relay-dialog.source-add-configuring .source-protocol-bindings > header > p {
+    display: none;
+  }
+
+  .relay-dialog.source-add-configuring .client-protocol-grid > label {
+    min-height: 72px;
+    padding: 9px;
+  }
+
+  .relay-dialog.source-add-configuring .client-protocol-grid > label small {
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-key-field {
+    padding-top: 10px;
+  }
+
   .relay-dialog .source-form .api-provider-options button {
     min-height: 58px;
     gap: 4px;
@@ -174,11 +192,6 @@
 
   .relay-dialog .source-form .api-provider-options button small {
     display: none;
-  }
-
-  .relay-dialog .api-provider-endpoint {
-    padding-top: 7px;
-    padding-bottom: 7px;
   }
 
   .product-intro {
@@ -239,21 +252,32 @@
   .api-provider-options {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-
-  .api-provider-fields {
-    grid-template-columns: minmax(140px, 0.8fr) minmax(230px, 1.5fr) minmax(150px, 0.8fr);
-  }
-
-  .api-provider-fields > :nth-child(2) {
-    grid-column: auto;
-    grid-row: auto;
-  }
 }
 
 @media (max-width: 560px) {
   .api-provider-options,
   .relay-dialog .api-provider-options {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-add-dialog .api-provider-selected {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .source-add-dialog .api-provider-change {
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
+
+  .api-provider-key-field .relay-field-label-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+
+  .api-provider-key-field .api-key-link {
+    margin-left: auto;
   }
 
   .oauth-link-actions {
@@ -404,7 +428,8 @@
 
   .client-protocol-grid,
   .client-key-scopes,
-  .scope-grid.client-scope-grid {
+  .scope-grid.client-scope-grid,
+  .source-protocol-models > .scope-grid {
     grid-template-columns: minmax(0, 1fr);
   }
   .gateway-runtime-metrics {

@@ -520,6 +520,7 @@ fn configuration_settings_from_connection(
             name: record.name,
             base_url: record.base_url,
             wire_api: record.wire_api,
+            protocol_bindings: record.protocol_bindings,
             enabled: record.enabled,
             in_pool: record.in_pool,
             allowed_models: record.allowed_models,
@@ -675,6 +676,7 @@ fn write_configuration(
         let rule = source_rules[record.id.as_str()];
         record.enabled = rule.enabled;
         record.in_pool = rule.in_pool;
+        record.protocol_bindings = rule.protocol_bindings.clone();
         record.allowed_models = rule.allowed_models.clone();
         record.excluded_models = rule.excluded_models.clone();
         record.priority = rule.priority;

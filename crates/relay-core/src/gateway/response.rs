@@ -4,8 +4,8 @@ use super::streaming::{parse_sse_event, sse_event_end, TerminalOutcome};
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
 use crate::{Error, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::{HeaderValue, Response, StatusCode};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
 use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,11 +46,7 @@ pub(super) fn proxy_response(
     body: Body,
 ) -> Response<Body> {
     let mut response = Response::builder().status(status).body(body).unwrap();
-    for name in [CONTENT_TYPE, CACHE_CONTROL] {
-        if let Some(value) = upstream_headers.get(name.as_str()) {
-            response.headers_mut().insert(name, value.clone());
-        }
-    }
+    copy_safe_upstream_headers(response.headers_mut(), upstream_headers, true);
     response
 }
 
@@ -63,9 +59,7 @@ pub(super) fn proxy_sse_response(
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-    if let Some(value) = upstream_headers.get(CACHE_CONTROL.as_str()) {
-        response.headers_mut().insert(CACHE_CONTROL, value.clone());
-    }
+    copy_safe_upstream_headers(response.headers_mut(), upstream_headers, false);
     response
 }
 
@@ -78,10 +72,40 @@ pub(super) fn proxy_json_response(
     response
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    if let Some(value) = upstream_headers.get(CACHE_CONTROL.as_str()) {
-        response.headers_mut().insert(CACHE_CONTROL, value.clone());
-    }
+    copy_safe_upstream_headers(response.headers_mut(), upstream_headers, false);
     response
+}
+
+/// Copies only response metadata that a native client can safely use for
+/// retries and diagnostics. Credentials, cookies, transport headers, and
+/// provider server details are never reflected to the local client.
+fn copy_safe_upstream_headers(
+    target: &mut HeaderMap,
+    upstream: &reqwest::header::HeaderMap,
+    include_content_type: bool,
+) {
+    for (name, value) in upstream {
+        let name = name.as_str();
+        let allowed = (include_content_type && name == CONTENT_TYPE.as_str())
+            || matches!(
+                name,
+                "cache-control"
+                    | "retry-after"
+                    | "request-id"
+                    | "x-request-id"
+                    | "x-should-retry"
+                    | "openai-processing-ms"
+            )
+            || name.starts_with("anthropic-ratelimit-")
+            || name.starts_with("x-ratelimit-");
+        if allowed {
+            target.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes())
+                    .expect("upstream header name is valid"),
+                HeaderValue::from_bytes(value.as_bytes()).expect("upstream header value is valid"),
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -361,5 +385,36 @@ mod tests {
         assert_eq!(event.cache_write_input_tokens, Some(20));
         assert_eq!(event.output_tokens, Some(10));
         assert_eq!(event.total_tokens, Some(170));
+    }
+
+    #[test]
+    fn proxy_keeps_safe_native_retry_and_request_headers_only() {
+        let mut upstream = reqwest::header::HeaderMap::new();
+        upstream.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        upstream.insert("retry-after", HeaderValue::from_static("12"));
+        upstream.insert("request-id", HeaderValue::from_static("req_native"));
+        upstream.insert(
+            "anthropic-ratelimit-requests-reset",
+            HeaderValue::from_static("2026-08-02T00:00:00Z"),
+        );
+        upstream.insert("authorization", HeaderValue::from_static("Bearer secret"));
+        upstream.insert("set-cookie", HeaderValue::from_static("session=secret"));
+        upstream.insert("server", HeaderValue::from_static("provider-internal"));
+
+        let response = proxy_response(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            &upstream,
+            Body::empty(),
+        );
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()["retry-after"], "12");
+        assert_eq!(response.headers()["request-id"], "req_native");
+        assert_eq!(
+            response.headers()["anthropic-ratelimit-requests-reset"],
+            "2026-08-02T00:00:00Z"
+        );
+        assert!(response.headers().get("authorization").is_none());
+        assert!(response.headers().get("set-cookie").is_none());
+        assert!(response.headers().get("server").is_none());
     }
 }

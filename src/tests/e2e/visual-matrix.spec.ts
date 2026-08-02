@@ -196,17 +196,31 @@ for (const scenario of [
     })).toBe(true);
     expect(await dialog.locator(".api-provider-options button").evaluateAll((buttons) => buttons.every((button) => button.scrollWidth <= button.clientWidth))).toBe(true);
     await expect(dialog.getByRole("button", { name: "Получить API-ключ", exact: true })).toHaveCount(0);
-    await expect(dialog.getByRole("button", { name: "Сохранить", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "Сохранить", exact: true })).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
     await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-    await expect(dialog.getByRole("button", { name: /^Протокол:/ })).toHaveAttribute("data-value", "responses");
+    await expect(dialog.getByRole("checkbox", { name: /^Responses API/ })).toBeChecked();
     const getKey = dialog.getByRole("button", { name: "Получить API-ключ" });
     await expect(getKey).toBeVisible();
+    expect(await getKey.evaluate((button) => {
+      const row = button.closest<HTMLElement>(".relay-field-label-row");
+      const field = button.closest<HTMLElement>(".relay-field");
+      const label = row?.querySelector("label");
+      const input = field?.querySelector("input");
+      if (!row || !label || !input) return false;
+      const rowRect = row.getBoundingClientRect();
+      const labelRect = label.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+      const inputRect = input.getBoundingClientRect();
+      return Math.abs(labelRect.top - buttonRect.top) <= 1
+        && inputRect.top >= rowRect.bottom + 4;
+    })).toBe(true);
     expect(await getKey.evaluate((button) => button.getBoundingClientRect().bottom <= button.closest("section")!.querySelector("footer")!.getBoundingClientRect().top)).toBe(true);
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/api-openrouter-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
+    await dialog.getByRole("button", { name: "Изменить", exact: true }).click();
     await dialog.getByRole("radio", { name: /Свой API/ }).click();
     const key = dialog.getByLabel("Ключ внешнего API");
     await key.focus();
@@ -401,7 +415,8 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   const table = page.locator(".model-rules-table");
   await expect(table.getByRole("columnheader")).toHaveCount(5);
   expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center"]);
-  await expect(table.locator(".model-group-row").first()).toContainText("OpenAI");
+  await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
+  await expect(table.locator(".model-group-row").nth(1)).toContainText("Claude");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
   await expect(model).toHaveAttribute("data-enabled", "false");

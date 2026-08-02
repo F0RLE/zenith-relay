@@ -129,7 +129,11 @@ fn active_catalog_refresh_target(
             sources
                 .iter()
                 .find(|source| source.enabled && source.id == binding.credential_id)
-                .map(|source| CodexCatalogRefreshTarget::DirectSource(source.models.clone()))
+                .and_then(|source| {
+                    direct_source_response_models(source)
+                        .ok()
+                        .map(CodexCatalogRefreshTarget::DirectSource)
+                })
         })
 }
 
@@ -760,7 +764,7 @@ pub async fn launch_codex_source(
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    validate_direct_source(source.enabled, source.wire_api)?;
+    let response_models = validate_direct_source(&source)?;
     let api_key = load_direct_source_api_key(
         &source.base_url,
         &source.secret_ref,
@@ -769,7 +773,7 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
-    let catalog = codex::direct_source_model_catalog(&profile_dir, &source.models)?;
+    let catalog = codex::direct_source_model_catalog(&profile_dir, &response_models)?;
     if catalog.is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -1080,20 +1084,36 @@ fn profile_rotation_commit_state(
     }
 }
 
-fn validate_direct_source(enabled: bool, wire_api: WireApi) -> LocalResult<()> {
-    if !enabled {
+fn direct_source_response_models(source: &ProviderSourceRecord) -> LocalResult<Vec<String>> {
+    let bindings = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    let Some(binding) = bindings
+        .into_iter()
+        .find(|binding| binding.wire_api == WireApi::Responses)
+    else {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "direct ChatGPT launch requires a Responses API source",
+        ));
+    };
+    if binding.model_ids.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no Responses API models",
+        ));
+    }
+    Ok(binding.model_ids)
+}
+
+fn validate_direct_source(source: &ProviderSourceRecord) -> LocalResult<Vec<String>> {
+    if !source.enabled {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "source must be enabled before launching ChatGPT",
         ));
     }
-    if wire_api != WireApi::Responses {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "direct ChatGPT launch requires a Responses API source",
-        ));
-    }
-    Ok(())
+    direct_source_response_models(source)
 }
 
 fn load_direct_source_api_key(
@@ -1235,6 +1255,7 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
+    use zenith_relay_core::SourceProtocolBinding;
 
     fn source_record(id: &str) -> ProviderSourceRecord {
         ProviderSourceRecord {
@@ -1246,6 +1267,7 @@ mod tests {
             base_url: "https://provider.test/v1".into(),
             secret_ref: "source:test".into(),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec!["provider-model".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1288,6 +1310,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: Some(vec![zenith_relay_core::protocol::ClientWireApi::Responses]),
             created_at: "2026-08-01T00:00:00Z".into(),
             last_used_at: None,
         };
@@ -1449,10 +1472,50 @@ mod tests {
     }
 
     #[test]
-    fn direct_source_launch_requires_an_enabled_responses_source() {
-        assert!(validate_direct_source(true, WireApi::Responses).is_ok());
-        assert!(validate_direct_source(false, WireApi::Responses).is_err());
-        assert!(validate_direct_source(true, WireApi::ChatCompletions).is_err());
+    fn direct_source_launch_requires_an_enabled_responses_binding() {
+        let source = source_record("source");
+        assert_eq!(
+            validate_direct_source(&source).unwrap(),
+            vec!["provider-model".to_string()]
+        );
+
+        let mut disabled = source.clone();
+        disabled.enabled = false;
+        assert!(validate_direct_source(&disabled).is_err());
+
+        let mut messages_only = source.clone();
+        messages_only.wire_api = WireApi::Messages;
+        messages_only.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            model_ids: vec!["claude-native".to_string()],
+        }];
+        assert!(validate_direct_source(&messages_only).is_err());
+    }
+
+    #[test]
+    fn direct_source_launch_uses_only_models_bound_to_responses() {
+        let mut source = source_record("source");
+        source.wire_api = WireApi::Messages;
+        source.models = vec![
+            "claude-native".to_string(),
+            "claude-responses".to_string(),
+            "gpt-responses".to_string(),
+        ];
+        source.protocol_bindings = vec![
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                model_ids: vec!["claude-native".to_string()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                model_ids: vec!["claude-responses".to_string(), "gpt-responses".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            validate_direct_source(&source).unwrap(),
+            vec!["claude-responses".to_string(), "gpt-responses".to_string()]
+        );
     }
 
     #[test]

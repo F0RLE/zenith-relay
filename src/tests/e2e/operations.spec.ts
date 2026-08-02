@@ -34,7 +34,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "launch_codex_source"))).toBe(true);
   await page.getByRole("button", { name: "Edit" }).click();
   const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
-  await chooseOption(page, sourceDialog, "Protocol", "chat_completions");
+  await sourceDialog.getByRole("checkbox", { name: /Chat Completions/ }).check();
+  await sourceDialog.getByRole("checkbox", { name: /Responses API/ }).uncheck();
   await expect(sourceDialog.getByRole("radiogroup", { name: "API source role" })).toHaveCount(0);
   await expect(sourceDialog.locator("[data-member-model-id]")).toHaveCount(0);
   await sourceDialog.locator(".source-price-section > summary").click();
@@ -157,9 +158,53 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
       .filter((call) => ["update_local_source", "test_quota_wake_automation", "update_local_account"].includes(call.command))
       .map((call) => [call.command, call.args]));
   });
-  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_000, weight: 250, recoveryDelaySeconds: 60 } });
+  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: ["gpt-5.4", "gpt-5.4-mini"] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_000, weight: 250, recoveryDelaySeconds: 60 } });
   expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
+});
+
+test("dialogs keep editable focus and close a nested option list before the dialog", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+
+  const sourceRow = page.getByRole("row").filter({ hasText: "Example compatible API" });
+  const sourceEdit = sourceRow.getByRole("button", { name: "Edit" });
+  await sourceEdit.click();
+  const sourceDialog = page.getByRole("dialog", { name: "Edit source" });
+  const name = sourceDialog.getByRole("textbox", { name: "Name" });
+  await name.focus();
+  await page.keyboard.type("x");
+  await page.keyboard.press("Backspace");
+  await expect(name).toHaveValue("Example compatible API");
+  await expect(name).toBeFocused();
+
+  const save = sourceDialog.getByRole("button", { name: "Save" });
+  await save.focus();
+  await page.keyboard.press("Tab");
+  await expect(sourceDialog.getByRole("button", { name: "Close" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(save).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(sourceDialog).toBeHidden();
+  await expect(sourceEdit).toBeFocused();
+
+  await page.getByRole("tab", { name: "Automations" }).click();
+  const automationEdit = page.getByRole("button", { name: "Edit", exact: true });
+  await automationEdit.click();
+  const automationDialog = page.getByRole("dialog", { name: "Edit automation" });
+  const accounts = automationDialog.getByRole("button", { name: /^Accounts:/ });
+  await accounts.click();
+  const list = page.getByRole("listbox", { name: "Accounts" });
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(list).toBeHidden();
+  await expect(automationDialog).toBeVisible();
+  await expect(accounts).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(automationDialog).toBeHidden();
+  await expect(automationEdit).toBeFocused();
 });
 
 test("automation editor only saves executable local configurations", async ({ page }) => {
@@ -238,7 +283,7 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await dialog.locator(".source-price-section > summary").click();
-  await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "ClaudeModels: 1", "Google GeminiModels: 1", "xAI GrokModels: 1", "Zhipu GLMModels: 1", "OtherModels: 1"]);
+  await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "ClaudeModels: 1", "Google GeminiModels: 1", "Zhipu GLMModels: 1", "xAI GrokModels: 1", "OtherModels: 1"]);
 
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await expect(dialog.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
@@ -524,18 +569,31 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   const dialog = page.getByRole("dialog", { name: "Add source" });
   await expect(dialog.locator(".api-provider-title strong")).toHaveText(["OpenAI", "OpenRouter", "Zenith API", "Custom API"]);
   expect(await dialog.getByRole("radio").evaluateAll((items) => items.map((item) => item.getAttribute("aria-checked")))).toEqual(["false", "false", "false", "false"]);
-  await expect(dialog.getByText("Recommended", { exact: true })).toHaveCount(1);
+  await expect(dialog.getByText("Recommended", { exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "Get API key", exact: true })).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
 
+  await dialog.getByRole("radio", { name: /OpenAI/ }).click();
+  await expect(dialog.getByRole("checkbox", { name: /Responses API/ })).toBeChecked();
+  await expect(dialog.getByRole("checkbox", { name: /Chat Completions/ })).toHaveCount(1);
+  await expect(dialog.getByRole("checkbox", { name: /Messages API/ })).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-  const protocol = dialog.getByRole("button", { name: /^Protocol:/ });
-  await expect(protocol).toHaveAttribute("data-value", "responses");
-  await chooseOption(page, dialog, "Protocol", "chat_completions");
-  await expect(protocol).toHaveAttribute("data-value", "chat_completions");
-  await chooseOption(page, dialog, "Protocol", "responses");
+  const responses = dialog.getByRole("checkbox", { name: /Responses API/ });
+  const messages = dialog.getByRole("checkbox", { name: /Messages API/ });
+  await expect(responses).toBeChecked();
+  await messages.check();
+  await expect(messages).toBeChecked();
+  await messages.uncheck();
+  await expect(responses).toBeChecked();
   await dialog.getByRole("button", { name: "Get API key", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "open_api_key_page"))).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__.some((call) => (
+    call.command === "open_api_key_page"
+    && call.args.provider === "openrouter"
+  )))).toBe(true);
   const key = dialog.getByLabel("Upstream API key");
   await key.focus();
   expect(await key.evaluate((input) => {
@@ -543,6 +601,7 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
     return { inputOutline: getComputedStyle(input).outlineStyle, fieldOutline: getComputedStyle(field).outlineWidth };
   })).toEqual({ inputOutline: "none", fieldOutline: "2px" });
 
+  await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /Zenith API/ }).click();
   await dialog.getByLabel("Upstream API key").fill("znt_synthetic_ready_key");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
@@ -556,7 +615,7 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   await expect(page.locator(".direct-api-metrics")).toContainText("987,654");
   await expect(page.locator(".direct-api-models code")).toHaveText(["gpt-5.4", "gpt-5.4-mini", "o3"]);
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Zenith API", baseUrl: "https://api.zenithmarket.dev/v1", wireApi: "responses", apiKey: "znt_synthetic_ready_key" });
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Zenith API", baseUrl: "https://api.zenithmarket.dev/v1", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }], apiKey: "znt_synthetic_ready_key" });
   expect(calls.find((call) => call.command === "get_local_source_stats")?.args).toEqual({ sourceId: "source_created_1" });
   expect(calls.map((call) => call.command)).not.toContain("save_key");
   expect(calls.map((call) => call.command)).not.toContain("set_local_pool_membership");
@@ -2011,6 +2070,31 @@ for (const mode of ["local", "remote"] as const) {
   });
 }
 
+test("remote model rules preserve the server group and model order", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "remote",
+    locale: "en",
+    populated: true,
+    serverModelOrder: [
+      "gemini-3.6-flash-high",
+      "gemini-3.6-flash-medium",
+      "gemini-3.6-flash-low",
+    ],
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const rows = page.locator(".model-rules tbody tr[data-model-id]");
+  expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual([
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gemini-3.6-flash-high",
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-low",
+  ]);
+});
+
 test("local model prices can override and restore API-equivalent valuation", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 2 });
   await page.goto("/");
@@ -2878,7 +2962,7 @@ test("remote client keys expose a scoped one-time-secret lifecycle", async ({ pa
     allowedModels: ["gpt-5.4"],
     excludedModels: [],
     modelPrefix: null,
-    wireApis: ["responses", "images"],
+    wireApis: ["responses", "messages"],
     softBudgetMicroUsd: 5_250_000,
   });
   expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining([

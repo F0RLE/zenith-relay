@@ -1,4 +1,6 @@
-use self::request::{alpha_search, chat_completions, models, responses, responses_compact};
+use self::request::{
+    alpha_search, chat_completions, messages, models, responses, responses_compact,
+};
 use crate::GatewayRuntime;
 use axum::routing::{get, post};
 use axum::Router;
@@ -9,10 +11,10 @@ mod auth;
 mod errors;
 mod execution;
 mod images;
+mod messages;
 mod request;
 mod response;
 mod streaming;
-mod translation;
 mod websocket;
 
 pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
@@ -28,6 +30,7 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/v1/alpha/search", post(alpha_search))
         .route("/backend-api/codex/alpha/search", post(alpha_search))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(messages))
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .with_state(runtime)

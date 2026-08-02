@@ -17,6 +17,7 @@ use zenith_relay_core::accounts::{
 };
 use zenith_relay_core::protocol::{AccountSummary, RevealedAccountIdentity, RuntimeStateSnapshot};
 use zenith_relay_core::quota::MAX_PURCHASE_COST_MICRO_USD;
+use zenith_relay_core::WireApi;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -253,6 +254,28 @@ pub async fn set_pool_membership(
                 .ok_or_else(|| ManagementError::not_found("source_not_found", "source not found"))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if input.in_pool {
+        for source_id in &source_ids {
+            let source = sources
+                .iter()
+                .find(|record| &record.id == source_id)
+                .expect("source was validated above");
+            if !source
+                .supports_wire_api(WireApi::Responses)
+                .map_err(|message| {
+                    ManagementError::validation("source_protocol_invalid", message)
+                })?
+            {
+                return Err(ManagementError::new(
+                    StatusCode::CONFLICT,
+                    "source_pool_protocol_unsupported",
+                    "only Responses API sources can join the ChatGPT pool",
+                    "pool",
+                    false,
+                ));
+            }
+        }
+    }
     let next_accounts = account_ids
         .iter()
         .map(|id| (id.clone(), input.in_pool))

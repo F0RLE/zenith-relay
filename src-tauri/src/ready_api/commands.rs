@@ -10,7 +10,7 @@ use crate::{
     platform::{default_codex_home, platform_name, system_locale},
     tray::close_main_window,
 };
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::HashSet, time::Duration};
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_opener::OpenerExt;
 
@@ -77,6 +77,7 @@ pub(super) async fn get_saved_key_models() -> Result<Vec<String>, String> {
 pub(super) fn parse_model_ids(body: &[u8]) -> Result<Vec<String>, String> {
     let response: ModelsResponse =
         serde_json::from_slice(body).map_err(|_| "Models response is invalid.".to_string())?;
+    let mut seen = HashSet::new();
     let models = response
         .data
         .into_iter()
@@ -88,8 +89,7 @@ pub(super) fn parse_model_ids(body: &[u8]) -> Result<Vec<String>, String> {
                 && !id.chars().any(char::is_whitespace)
         })
         .take(2_048)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .filter(|id| seen.insert(id.to_ascii_lowercase()))
         .collect::<Vec<_>>();
     if models.is_empty() {
         Err("Models response contains no usable models.".to_string())

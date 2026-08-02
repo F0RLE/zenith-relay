@@ -1390,6 +1390,7 @@ mod tests {
                     base_url: "https://example.test/v1".into(),
                     secret_ref: format!("source:{id}"),
                     wire_api: WireApi::Responses,
+                    protocol_bindings: Vec::new(),
                     models: vec!["private-model".into()],
                     allowed_models: Vec::new(),
                     excluded_models: Vec::new(),

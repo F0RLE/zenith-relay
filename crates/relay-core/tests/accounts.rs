@@ -3427,6 +3427,7 @@ fn source(id: &str, server: &TestServer, key: &str, priority: i32) -> RuntimeSou
             wire_api: WireApi::Responses,
             models: vec![MODEL.to_string()],
         },
+        protocol_bindings: Vec::new(),
         enabled: true,
         draining: false,
         priority,

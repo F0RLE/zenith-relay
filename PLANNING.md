@@ -28,7 +28,7 @@ server through a management operation.
 | --- | --- |
 | React and Vite | Render typed snapshots, collect user intent, and localize the interface. |
 | Tauri host | Native lifecycle, OS credential store, OAuth return, local endpoint, and reversible profile changes. |
-| relay-core | Shared canonical account/source state, eligibility, scheduler, gateway execution, protocol translation, quota normalization, and usage math. |
+| relay-core | Shared canonical account/source state, eligibility, scheduler, native protocol-bound gateway execution, quota normalization, and usage math. |
 | relay-server | Persistent personal runtime, encrypted vault, SQLite storage, migrations, retention, backup/restore, and management API. |
 
 React never reads a secret or provider file directly. The desktop and server
@@ -69,11 +69,13 @@ health and clear a model-level transient restriction.
 
 The scheduler evaluates factual conditions for the requested model:
 
-1. the candidate is enabled and in the pool;
+1. the candidate is enabled; ordinary keys may reach enabled candidates outside
+   the managed pool, while the generated ChatGPT/Codex key restricts candidates
+   to `in_pool` membership;
 2. it is not draining and its credential and proxy are available;
 3. its account and requested model are healthy and not cooling down;
 4. the account has usable quota or the source is otherwise usable;
-5. the client key and pool model rules allow the model.
+5. the client key's source, account, model, and protocol scopes allow the model.
 
 It preserves response ownership affinity where a protocol response requires the
 same upstream account. Prompt affinity is a preference guarded by capacity and
@@ -88,10 +90,17 @@ timings and terminal errors are recorded for diagnostics.
 
 ## Models and client visibility
 
-The runtime model registry is built from connection capabilities and pool
-model rules. A model appears through the endpoint only when at least one active
-pool member can serve it and the applicable client key permits it. A model
-rule can hide a model without deleting the source capability.
+The runtime model registry is built from connection capabilities and key/model
+rules. A model appears through an endpoint only when at least one enabled
+candidate matching that key and protocol can serve it. The managed
+ChatGPT/Codex catalog is narrower: it contains only Responses-capable sources
+and ChatGPT accounts marked `in_pool`. A model rule can hide a model without
+deleting the source capability.
+
+The generic OpenAI `/v1/models` view advertises Responses and Chat Completions
+models only; Messages-only models are not inserted into that list. Native
+Messages clients use the model IDs from their explicitly configured source and
+key.
 
 The current client configuration is intentionally conservative: Relay does not
 ship a large hard-coded list of models into a profile. The next catalog phase
@@ -112,6 +121,24 @@ will be generated from the local or remote pool's live
 This keeps the model chooser understandable in Codex: a user can distinguish
 native models from models offered by the local Relay pool, while Relay never
 advertises a model that its endpoint would reject.
+
+## Client protocol boundaries
+
+Responses requests use Responses-capable sources directly, preserving native
+Codex tool calls and continuations. Chat Completions requests use only matching
+Chat Completions sources and are limited to text and image requests; Relay
+rejects tool definitions and tool-call history on that endpoint instead of
+pretending to translate them.
+
+Relay exposes three independent native client contracts: <code>/v1/responses</code>
+for Codex/OpenAI Responses clients, <code>/v1/messages</code> for Anthropic
+Messages clients, and <code>/v1/chat/completions</code> for text-and-image-only
+OpenAI-compatible clients. A source is selectable only through an explicitly
+configured matching protocol binding. The Messages route accepts a scoped
+Relay key as either Bearer authorization or <code>x-api-key</code>, sends the
+unchanged Messages body to an upstream Messages endpoint with native Anthropic
+authentication, and preserves successful JSON/SSE bodies verbatim. No request
+or tool-call body is translated between these protocols.
 
 ## Usage and economics
 
@@ -202,6 +229,9 @@ client keys, usage, and scheduler remain shared.
 ## Known limits
 
 - Only the ChatGPT account connector is shipped today.
+- The current ChatGPT/Codex profile integration supports the Responses wire API
+  only. Native Messages sources require a compatible Messages client and a
+  separately scoped key; they cannot be attached to the managed Codex profile.
 - The Computer mode stops with the desktop process.
 - A self-hosted server requires real production acceptance with live accounts,
   proxy routing, streaming, and restart/recovery before it can be claimed as

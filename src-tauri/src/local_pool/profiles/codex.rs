@@ -17,10 +17,10 @@ use std::{
 };
 use toml_edit::{value, DocumentMut, Item, Table};
 use zenith_relay_core::{
-    accounts::TokenSet, codex_catalog_entry_is_compatible, codex_model_display_name,
-    codex_model_is_picker_eligible, compare_codex_picker_models, decode_codex_model_alias,
+    accounts::TokenSet, canonicalize_model_ids, codex_catalog_entry_is_compatible,
+    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, sort_codex_catalog_models, CODEX_RELAY_CATALOG_HASH,
+    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
@@ -188,13 +188,13 @@ pub(crate) fn direct_source_model_catalog(
     // `model_provider` points to this selected source.  Native Codex rows are
     // useful only as a schema template here; advertising them would send their
     // requests to this source and produce a false model picker entry.
-    let mut selected_models = source_models
+    let selected_models = source_models
         .iter()
         .map(String::as_str)
         .map(str::trim)
         .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
         .collect::<Vec<_>>();
-    selected_models.sort_by(|left, right| compare_codex_picker_models(left, right));
+    let selected_models = canonicalize_model_ids(selected_models);
 
     let mut models = Vec::new();
     let mut seen = HashSet::new();
@@ -205,7 +205,7 @@ pub(crate) fn direct_source_model_catalog(
         }
         let entry = direct_source_catalog_entry(
             &template,
-            model,
+            &model,
             DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
         );
         if codex_catalog_entry_is_compatible(&entry) {
@@ -419,7 +419,6 @@ fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
             "ChatGPT model catalog has no compatible models",
         ));
     }
-    sort_codex_catalog_models(&mut models);
     normalize_codex_catalog_priorities(&mut models);
     serde_json::to_string_pretty(&json!({ "models": models }))
         .map(|content| format!("{content}\n"))

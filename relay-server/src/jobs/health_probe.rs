@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
-use zenith_relay_core::{discover_source_models, ProviderSource};
+use zenith_relay_core::{discover_source_models_for_protocol_bindings, ProviderSource};
 
 const INTERVAL: Duration = Duration::from_secs(300);
 
@@ -43,7 +43,8 @@ async fn run(state: &Arc<AppState>) -> Result<(), String> {
             wire_api: record.wire_api,
             models: record.models.clone(),
         };
-        match discover_source_models(&source).await {
+        match discover_source_models_for_protocol_bindings(&source, &record.protocol_bindings).await
+        {
             Ok(models) if !models.is_empty() => {
                 if record.models != models || record.last_error_code.is_some() {
                     record.models = models;

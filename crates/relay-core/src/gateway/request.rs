@@ -1,10 +1,10 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
-use super::errors::{api_error, AttemptFailure};
+use super::errors::api_error;
 use super::execution::{execute_account_endpoint, execute_client_request};
 use super::now_ms;
 use crate::catalog::{
-    compare_codex_picker_models, normalize_codex_catalog_priorities,
-    normalize_upstream_codex_catalog_entry, sort_codex_catalog_models,
+    canonicalize_model_ids, normalize_codex_catalog_priorities,
+    normalize_upstream_codex_catalog_entry,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
@@ -20,7 +20,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCo
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -38,6 +38,21 @@ const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 
 const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
+
+/// Credentials supplied by a Relay client authenticate only the local
+/// gateway. They must never be forwarded to a configured upstream source,
+/// which authenticates with its own stored credential.
+fn is_client_auth_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "x-auth-token"
+            | "x-api-token"
+    ) || name.ends_with("-api-key")
+}
 
 const FORWARDED_CODEX_HEADERS: &[&str] = &[
     "openai-beta",
@@ -90,6 +105,31 @@ pub(super) fn forwarded_codex_headers(
     headers
 }
 
+/// For native Messages routes, forward only headers that belong to the
+/// Anthropic contract. This avoids leaking Codex/OpenAI request metadata into
+/// a different upstream protocol while retaining the version and session
+/// details needed by Claude Code.
+pub(super) fn forwarded_messages_headers(client_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for (name, value) in client_headers {
+        let name = name.as_str();
+        let is_messages_metadata = name == "user-agent"
+            || name.starts_with("anthropic-")
+            || name.starts_with("x-claude-")
+            || name.starts_with("x-stainless-");
+        if is_messages_metadata && !is_client_auth_header(name) {
+            headers.append(
+                HeaderName::from_bytes(name.as_bytes()).expect("request header name is valid"),
+                value.clone(),
+            );
+        }
+    }
+    headers
+        .entry(HeaderName::from_static("anthropic-version"))
+        .or_insert_with(|| HeaderValue::from_static("2023-06-01"));
+    headers
+}
+
 pub(super) async fn models(
     State(runtime): State<Arc<GatewayRuntime>>,
     headers: HeaderMap,
@@ -101,13 +141,23 @@ pub(super) async fn models(
     let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
         return unauthorized();
     };
-    let protocols = allowed_model_protocols(&runtime, &key);
-    let models = runtime.visible_models(&key, &protocols, now_ms());
     let client_version = uri.query().and_then(|query| {
         url::form_urlencoded::parse(query.as_bytes())
             .find(|(key, _)| key == "client_version")
             .map(|(_, value)| value.into_owned())
     });
+    let protocols = match client_version.as_deref() {
+        // Codex always executes selected models through /v1/responses.  Do
+        // not publish a model there merely because it is available through a
+        // different native endpoint: doing so creates a picker entry that can
+        // never complete its first request.
+        Some(_) => allowed_codex_model_protocols(&runtime, &key),
+        // The generic OpenAI-compatible list is shared by Responses and Chat
+        // Completions clients.  Anthropic Messages has its own native
+        // discovery contract and must not be presented as an OpenAI model.
+        None => allowed_openai_model_protocols(&runtime, &key),
+    };
+    let models = runtime.visible_models(&key, &protocols, now_ms());
     if let Some(client_version) = client_version.as_deref() {
         if !valid_codex_client_version(client_version) {
             return api_error(
@@ -230,7 +280,7 @@ fn build_codex_models_response(
         .and_then(|payload| payload.get("models"))
         .and_then(Value::as_array)
         .filter(|models| models.len() <= 4_096);
-    let visible = visible_models
+    let mut visible = visible_models
         .iter()
         .filter_map(|display_id| {
             runtime.resolve_model(key, display_id).map(|upstream_id| {
@@ -240,62 +290,57 @@ fn build_codex_models_response(
                 )
             })
         })
-        .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
-    let mut models = upstream_models
+        .collect::<Vec<_>>();
+    if visible.is_empty() {
+        return None;
+    }
+    let picker_positions = canonicalize_model_ids(
+        visible
+            .iter()
+            .map(|(_, (_, display_id))| display_id.as_str()),
+    )
+    .into_iter()
+    .enumerate()
+    .map(|(position, id)| (id.to_ascii_lowercase(), position))
+    .collect::<HashMap<_, _>>();
+    visible.sort_by_key(|(_, (_, display_id))| {
+        picker_positions
+            .get(&display_id.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+
+    // Source models remain provider-agnostic in the runtime. The picker is the
+    // presentation boundary: it groups familiar model IDs while the upstream
+    // catalog only supplies capability templates for those same IDs.
+    let upstream_by_model = upstream_models
         .into_iter()
         .flat_map(|models| models.iter())
         .filter_map(|model| {
-            let model = model.as_object()?.clone();
-            let slug = model.get("slug")?.as_str()?.trim();
+            let object = model.as_object()?;
+            let slug = object.get("slug")?.as_str()?.trim();
             if slug.is_empty() || slug.len() > 256 || slug.chars().any(char::is_control) {
                 return None;
             }
             let normalized = slug.to_ascii_lowercase();
             if !codex_model_is_picker_eligible(slug)
-                || model.get("supported_in_api") == Some(&Value::Bool(false))
-                || model
+                || object.get("supported_in_api") == Some(&Value::Bool(false))
+                || object
                     .get("visibility")
                     .and_then(Value::as_str)
                     .is_some_and(|value| value.eq_ignore_ascii_case("hide"))
             {
                 return None;
             }
-            let (upstream_id, display_id) = visible.get(&normalized)?;
-            if seen.contains(&normalized) {
-                return None;
-            }
-            let (upstream_id, display_id) = (upstream_id.clone(), display_id.clone());
-            let mut model = normalize_upstream_codex_catalog_entry(
-                &model,
-                &display_id,
-                1_000 + seen.len() as u64,
-                source_context_windows
-                    .get(&upstream_id.to_ascii_lowercase())
-                    .copied(),
-            )?;
-            seen.insert(normalized);
-            if model
-                .get("use_responses_lite")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                runtime.remember_codex_responses_lite_model(slug);
-            }
-            if let Some(context_window) =
-                source_context_windows.get(&upstream_id.to_ascii_lowercase())
-            {
-                model["context_window"] = (*context_window).into();
-                model["max_context_window"] = (*context_window).into();
-                model
-                    .as_object_mut()
-                    .expect("normalized catalog entry is an object")
-                    .remove("auto_compact_token_limit");
-                model["effective_context_window_percent"] = 95.into();
-            }
-            Some(model)
+            visible
+                .iter()
+                .any(|(upstream_id, _)| upstream_id == &normalized)
+                .then_some((normalized, object.clone()))
         })
-        .collect::<Vec<_>>();
+        .fold(HashMap::new(), |mut entries, (normalized, object)| {
+            entries.entry(normalized).or_insert(object);
+            entries
+        });
 
     let template = upstream_models.and_then(|models| {
         models
@@ -303,27 +348,58 @@ fn build_codex_models_response(
             .find(|model| codex_catalog_entry_is_compatible(model))
             .and_then(Value::as_object)
     });
-    let mut routed = visible
-        .into_iter()
-        .filter(|(normalized, (model, _))| {
-            !seen.contains(normalized) && codex_model_is_picker_eligible(model)
-        })
-        .collect::<Vec<_>>();
-    routed.sort_by(|left, right| compare_codex_picker_models(&left.1 .0, &right.1 .0));
-    let fallback_priority_start =
-        crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(models.len() as u64);
-    for (index, (_, (upstream_id, display_id))) in routed.into_iter().enumerate() {
-        models.push(routed_codex_catalog_entry(
-            template,
-            &display_id,
-            fallback_priority_start.saturating_add(index as u64),
-            source_context_windows
-                .get(&upstream_id.to_ascii_lowercase())
-                .copied(),
-        ));
+    let mut models = Vec::with_capacity(visible.len());
+    for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
+        if !codex_model_is_picker_eligible(&upstream_id) {
+            continue;
+        }
+        let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
+        let Some(mut model) = upstream_by_model
+            .get(&normalized)
+            .and_then(|entry| {
+                normalize_upstream_codex_catalog_entry(
+                    entry,
+                    &display_id,
+                    priority,
+                    source_context_windows
+                        .get(&upstream_id.to_ascii_lowercase())
+                        .copied(),
+                )
+            })
+            .or_else(|| {
+                Some(routed_codex_catalog_entry(
+                    template,
+                    &display_id,
+                    priority,
+                    source_context_windows
+                        .get(&upstream_id.to_ascii_lowercase())
+                        .copied(),
+                ))
+            })
+        else {
+            continue;
+        };
+        if upstream_by_model
+            .get(&normalized)
+            .and_then(|entry| entry.get("use_responses_lite"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            runtime.remember_codex_responses_lite_model(&upstream_id);
+        }
+        if let Some(context_window) = source_context_windows.get(&upstream_id.to_ascii_lowercase())
+        {
+            model["context_window"] = (*context_window).into();
+            model["max_context_window"] = (*context_window).into();
+            model
+                .as_object_mut()
+                .expect("normalized catalog entry is an object")
+                .remove("auto_compact_token_limit");
+            model["effective_context_window_percent"] = 95.into();
+        }
+        models.push(model);
     }
 
-    sort_codex_catalog_models(&mut models);
     normalize_codex_catalog_priorities(&mut models);
     if models.is_empty() {
         None
@@ -536,6 +612,16 @@ pub(super) async fn chat_completions(
     execute_client_request(runtime, request, WireApi::ChatCompletions).await
 }
 
+pub(super) async fn messages(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    super::messages::native_messages_error_response(
+        execute_client_request(runtime, request, WireApi::Messages).await,
+    )
+    .await
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) enum AccountEndpoint {
     Compact,
@@ -595,19 +681,6 @@ pub(super) fn account_endpoint_url(
     }
     drop(segments);
     Some(responses_url)
-}
-
-pub(super) fn normalize_account_request_body(
-    body: &[u8],
-    responses_lite: bool,
-) -> Result<Vec<u8>, AttemptFailure> {
-    let mut request =
-        serde_json::from_slice::<Value>(body).map_err(|_| AttemptFailure::invalid_request())?;
-    let object = request
-        .as_object_mut()
-        .ok_or_else(AttemptFailure::invalid_request)?;
-    normalize_account_request(object, responses_lite);
-    serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())
 }
 
 pub(super) fn normalize_account_request(
@@ -1132,13 +1205,81 @@ fn tool_choice_mode_from_type(value: &str) -> ToolChoiceMode {
 
 pub(super) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
     match wire_api {
-        WireApi::Responses => &[WireApi::Responses, WireApi::ChatCompletions],
-        WireApi::ChatCompletions => &[WireApi::ChatCompletions, WireApi::Responses],
+        WireApi::Responses => &[WireApi::Responses],
+        WireApi::ChatCompletions => &[WireApi::ChatCompletions],
         WireApi::Messages => &[WireApi::Messages],
     }
 }
 
-fn allowed_model_protocols(runtime: &GatewayRuntime, key: &AuthenticatedKey) -> Vec<WireApi> {
+pub(super) fn chat_request_uses_tools(value: &Value) -> bool {
+    let Some(request) = value.as_object() else {
+        return false;
+    };
+    ["tools", "functions", "tool_choice", "parallel_tool_calls"]
+        .iter()
+        .any(|field| request.contains_key(*field))
+        || request
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| messages.iter().any(chat_message_uses_tools))
+}
+
+pub(super) fn chat_request_is_text_or_image_only(value: &Value) -> bool {
+    let Some(request) = value.as_object() else {
+        return false;
+    };
+    if request.contains_key("audio") {
+        return false;
+    }
+    if let Some(modalities) = request.get("modalities") {
+        let Some(modalities) = modalities.as_array() else {
+            return false;
+        };
+        if modalities
+            .iter()
+            .any(|modality| modality.as_str() != Some("text"))
+        {
+            return false;
+        }
+    }
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_none_or(|messages| messages.iter().all(chat_message_is_text_or_image_only))
+}
+
+fn chat_message_uses_tools(message: &Value) -> bool {
+    let Some(message) = message.as_object() else {
+        return false;
+    };
+    matches!(
+        message.get("role").and_then(Value::as_str),
+        Some("tool" | "function")
+    ) || ["tool_calls", "tool_call_id", "function_call"]
+        .iter()
+        .any(|field| message.contains_key(*field))
+}
+
+fn chat_message_is_text_or_image_only(message: &Value) -> bool {
+    let Some(message) = message.as_object() else {
+        return false;
+    };
+    match message.get("content") {
+        None | Some(Value::Null) | Some(Value::String(_)) => true,
+        Some(Value::Array(parts)) => parts.iter().all(|part| {
+            matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text" | "image_url")
+            )
+        }),
+        Some(_) => false,
+    }
+}
+
+fn allowed_openai_model_protocols(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+) -> Vec<WireApi> {
     let mut protocols = Vec::new();
     if runtime.allows_client_wire_api(key, ClientWireApi::Responses) {
         protocols.push(WireApi::Responses);
@@ -1147,6 +1288,14 @@ fn allowed_model_protocols(runtime: &GatewayRuntime, key: &AuthenticatedKey) -> 
         protocols.push(WireApi::ChatCompletions);
     }
     protocols
+}
+
+fn allowed_codex_model_protocols(runtime: &GatewayRuntime, key: &AuthenticatedKey) -> Vec<WireApi> {
+    if runtime.allows_client_wire_api(key, ClientWireApi::Responses) {
+        vec![WireApi::Responses]
+    } else {
+        Vec::new()
+    }
 }
 
 pub(super) fn request_id() -> String {
@@ -1188,6 +1337,59 @@ mod tests {
 
         let synthesized = forwarded_codex_headers(&HeaderMap::new(), "relay-request");
         assert_eq!(synthesized[CLAUDE_CODE_SESSION_HEADER], "relay-request");
+    }
+
+    #[test]
+    fn forwarded_messages_headers_keep_protocol_metadata_and_drop_client_credentials() {
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        client_headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static("fine-grained-tool"),
+        );
+        client_headers.insert(
+            CLAUDE_CODE_SESSION_HEADER,
+            HeaderValue::from_static("session-42"),
+        );
+        client_headers.insert("x-stainless-lang", HeaderValue::from_static("rust"));
+        client_headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer relay-local-secret"),
+        );
+        client_headers.insert("x-api-key", HeaderValue::from_static("relay-local-secret"));
+        client_headers.insert(
+            "anthropic-api-key",
+            HeaderValue::from_static("client-anthropic-secret"),
+        );
+        client_headers.insert(
+            "openai-api-key",
+            HeaderValue::from_static("client-openai-secret"),
+        );
+        client_headers.insert(
+            "x-goog-api-key",
+            HeaderValue::from_static("client-google-secret"),
+        );
+        client_headers.insert("cookie", HeaderValue::from_static("session=secret"));
+
+        let forwarded = forwarded_messages_headers(&client_headers);
+
+        assert_eq!(forwarded["anthropic-version"], "2023-06-01");
+        assert_eq!(forwarded["anthropic-beta"], "fine-grained-tool");
+        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
+        assert_eq!(forwarded["x-stainless-lang"], "rust");
+        for name in [
+            "authorization",
+            "x-api-key",
+            "anthropic-api-key",
+            "openai-api-key",
+            "x-goog-api-key",
+            "cookie",
+        ] {
+            assert!(
+                !forwarded.contains_key(name),
+                "{name} must not be forwarded"
+            );
+        }
     }
 
     #[test]
@@ -1601,8 +1803,8 @@ mod tests {
                 "GPT 5.4",
                 "Claude Opus 4.8",
                 "Gemini 3.6 Flash",
-                "Grok 4.5",
                 "GLM 5.2",
+                "Grok 4.5",
             ]
         );
         assert!(models.iter().all(codex_catalog_entry_is_compatible));

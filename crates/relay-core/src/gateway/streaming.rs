@@ -22,10 +22,6 @@ use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
-const SSE_PRE_OUTPUT_RETRY_GRACE: Duration = Duration::from_secs(30);
-
-// A slow provider can legitimately take longer than 30 seconds to produce its
-// first event.  Do not reject it sooner than an already-running stream.
 const SSE_FIRST_BYTE_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -41,59 +37,41 @@ pub(super) async fn bootstrap_stream(
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), AttemptFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
-    let mut buffer = Vec::new();
-    let deadline = Instant::now() + SSE_PRE_OUTPUT_RETRY_GRACE;
-    loop {
-        let next = if buffer.is_empty() {
-            match tokio::time::timeout(SSE_FIRST_BYTE_TIMEOUT, stream.next()).await {
-                Ok(next) => next,
-                Err(_) => return Err(AttemptFailure::stream("stream_first_byte_timeout")),
+    match tokio::time::timeout(SSE_FIRST_BYTE_TIMEOUT, stream.next()).await {
+        Err(_) => Err(AttemptFailure::stream("stream_first_byte_timeout")),
+        Ok(Some(Ok(chunk))) => {
+            if chunk.len() > MAX_SSE_EVENT_BYTES {
+                return Err(AttemptFailure::stream("stream_event_too_large"));
             }
-        } else {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Ok((headers, Bytes::from(buffer), stream));
-            }
-            match tokio::time::timeout(remaining, stream.next()).await {
-                Ok(next) => next,
-                Err(_) => return Ok((headers, Bytes::from(buffer), stream)),
-            }
-        };
-        match next {
-            Some(Ok(chunk)) => {
-                if buffer.len().saturating_add(chunk.len()) > MAX_SSE_EVENT_BYTES {
-                    return Err(AttemptFailure::stream("stream_event_too_large"));
+            let mut inspected = 0;
+            while let Some(end) = sse_event_end(&chunk[inspected..]) {
+                let absolute_end = inspected + end;
+                let event = parse_sse_event(&chunk[inspected..absolute_end]);
+                if event.has_data && !event.valid {
+                    return Err(AttemptFailure::stream("stream_invalid"));
                 }
-                buffer.extend_from_slice(&chunk);
-                let mut inspected = 0;
-                while let Some(end) = sse_event_end(&buffer[inspected..]) {
-                    let absolute_end = inspected + end;
-                    let event = parse_sse_event(&buffer[inspected..absolute_end]);
-                    if event.has_data && !event.valid {
-                        return Err(AttemptFailure::stream("stream_invalid"));
-                    }
-                    if event.outcome == Some(TerminalOutcome::Failure) {
-                        let category = event.error_category.unwrap_or("upstream_terminal");
-                        return Err(AttemptFailure::classified_with_hint(
-                            event
-                                .error_status
-                                .unwrap_or_else(|| upstream_failure_status(category)),
-                            category,
-                            event.cooldown_hint,
-                        ));
-                    }
-                    if event.has_output_delta || event.outcome == Some(TerminalOutcome::Success) {
-                        return Ok((headers, Bytes::from(buffer), stream));
-                    }
-                    inspected = absolute_end;
+                if event.outcome == Some(TerminalOutcome::Failure) {
+                    let category = event.error_category.unwrap_or("upstream_terminal");
+                    return Err(AttemptFailure::classified_with_hint(
+                        event
+                            .error_status
+                            .unwrap_or_else(|| upstream_failure_status(category)),
+                        category,
+                        event.cooldown_hint,
+                    ));
                 }
-                if Instant::now() >= deadline {
-                    return Ok((headers, Bytes::from(buffer), stream));
-                }
+                inspected = absolute_end;
             }
-            Some(Err(error)) => return Err(AttemptFailure::transport(&error)),
-            None => return Err(AttemptFailure::stream("stream_incomplete")),
+            // Once a source emits native bytes, forward them immediately.
+            // A Messages stream may begin with `message_start`, thinking,
+            // or `content_block_start` for `tool_use` long before a text
+            // delta exists. Buffering those frames would make a live
+            // stream look retryable and can incorrectly switch sources
+            // during one model turn.
+            Ok((headers, chunk, stream))
         }
+        Ok(Some(Err(error))) => Err(AttemptFailure::transport(&error)),
+        Ok(None) => Err(AttemptFailure::stream("stream_incomplete")),
     }
 }
 
@@ -545,10 +523,28 @@ pub(super) fn has_output_delta(value: &Value, event_type: Option<&str>) -> bool 
     {
         return true;
     }
+    if event_type == Some("response.output_item.added")
+        && value
+            .get("item")
+            .is_some_and(output_item_has_meaningful_tool_call)
+    {
+        return true;
+    }
     value
         .get("choices")
         .and_then(Value::as_array)
         .is_some_and(|choices| choices.iter().any(chat_choice_has_output_delta))
+}
+
+fn output_item_has_meaningful_tool_call(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("function_call" | "custom_tool_call" | "mcp_call" | "computer_call")
+    ) && ["call_id", "id", "name"].into_iter().any(|field| {
+        item.get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    })
 }
 
 fn chat_choice_has_output_delta(choice: &Value) -> bool {
@@ -762,6 +758,7 @@ mod tests {
         for event in [
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{\"}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"PowerShell\"}}\n\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n",
             "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
         ] {

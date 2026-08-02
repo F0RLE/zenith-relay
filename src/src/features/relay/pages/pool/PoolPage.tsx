@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
+import { effectiveSourceProtocolBindings } from "../../components/SourceProtocolBindingsEditor";
 import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { groupModels, supportsCacheWritePricing } from "../../modelGroups";
@@ -474,7 +475,8 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
           ? relayCommands.updateAccount({ accountId: member.id, ...payload })
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
-      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: sourceWeight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {} };
+      const protocolBindings = effectiveSourceProtocolBindings(member);
+      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: sourceWeight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     }, "feedback.saved");
@@ -593,8 +595,8 @@ function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [priceModel, setPriceModel] = useState<ModelSummary | null>(null);
-  const models = runtime ? modelSummaries(runtime).sort(compareModelCatalog) : [];
-  const modelGroups = groupModels(models, (model) => model.id);
+  const models = runtime ? modelSummaries(runtime) : [];
+  const modelGroups = groupModelSummariesForLauncher(models, runtime?.accounts ?? []);
   const canEditPrice = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("model_pricing"));
   const toggleModel = (model: ModelSummary) => perform(
     `model-toggle-${model.id}`,
@@ -717,18 +719,15 @@ function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["r
     customPrice: false,
   }));
 }
-function compareModelCatalog(left: ModelSummary, right: ModelSummary) {
-  return (left.catalogRank ?? Number.MAX_SAFE_INTEGER) - (right.catalogRank ?? Number.MAX_SAFE_INTEGER)
-    || compareModelPrice(left, right, -1)
-    || left.id.localeCompare(right.id);
-}
-function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1 | -1) {
-  const leftKnown = left.inputMicroUsdPerMillion != null && left.outputMicroUsdPerMillion != null;
-  const rightKnown = right.inputMicroUsdPerMillion != null && right.outputMicroUsdPerMillion != null;
-  if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
-  if (!leftKnown) return 0;
-  return direction * (left.outputMicroUsdPerMillion! - right.outputMicroUsdPerMillion!)
-    || direction * (left.inputMicroUsdPerMillion! - right.inputMicroUsdPerMillion!);
+function groupModelSummariesForLauncher(models: ModelSummary[], accounts: AccountSummary[]) {
+  const chatGptModelIds = new Set(
+    accounts.flatMap((account) => account.models.map((model) => model.toLowerCase())),
+  );
+  return groupModels(
+    models,
+    (model) => model.id,
+    (model) => chatGptModelIds.has(model.id.toLowerCase()),
+  );
 }
 function comparePoolMembers(left: Member, right: Member, order: Map<string, number>) {
   const unavailable = (member: Member) => member.operationalStatus === "unavailable" || member.operationalStatus === "disabled" ? 1 : 0;

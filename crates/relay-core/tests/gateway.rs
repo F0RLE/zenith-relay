@@ -15,7 +15,8 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
-    discover_source_models, GatewayRuntime, LocalGatewayKey, ProviderSource, UsageEvent, WireApi,
+    discover_source_models, discover_source_models_for_protocol_bindings, GatewayRuntime,
+    LocalGatewayKey, ProviderSource, SourceProtocolBinding, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "local-test-key";
@@ -27,17 +28,14 @@ const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 struct ObservedRequest {
     path: &'static str,
     authorization: Option<String>,
+    x_api_key: Option<String>,
+    anthropic_version: Option<String>,
 }
 
 #[derive(Clone, Default)]
 struct UpstreamState {
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     release_stream: Arc<Notify>,
-}
-
-#[derive(Clone, Default)]
-struct ChatToolUpstreamState {
-    requests: Arc<Mutex<Vec<Value>>>,
 }
 
 struct TestServer {
@@ -106,6 +104,35 @@ async fn models_are_discovered_with_the_source_credential() {
         requests[0].authorization.as_deref(),
         Some("Bearer upstream-test-key")
     );
+}
+
+#[tokio::test]
+async fn native_messages_model_discovery_uses_anthropic_headers() {
+    let (upstream, state) = spawn_upstream().await;
+    let models = discover_source_models_for_protocol_bindings(
+        &ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic Anthropic upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.into(),
+            wire_api: WireApi::Messages,
+            models: vec!["claude-test".into()],
+        },
+        &[SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            model_ids: vec!["claude-test".into()],
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(models, ["gpt-test", "hidden-model"]);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].path, "/v1/models");
+    assert_eq!(requests[0].authorization, None);
+    assert_eq!(requests[0].x_api_key.as_deref(), Some(SOURCE_KEY));
+    assert_eq!(requests[0].anthropic_version.as_deref(), Some("2023-06-01"));
 }
 
 #[tokio::test]
@@ -264,7 +291,7 @@ async fn oversized_non_stream_response_is_rejected_and_recorded() {
 }
 
 #[tokio::test]
-async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
+async fn first_sse_bytes_commit_the_stream_without_waiting_for_text_output() {
     let (upstream, state) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
 
@@ -278,10 +305,10 @@ async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
             .await
             .unwrap()
     });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(!response_task.is_finished());
-    state.release_stream.notify_one();
-    let response = response_task.await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(1), response_task)
+        .await
+        .expect("the first native SSE bytes should establish the stream")
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response
@@ -294,19 +321,26 @@ async fn sse_prelude_is_held_until_output_then_chunks_cross_the_gateway() {
     let mut chunks = response.bytes_stream();
     let first = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
-        .expect("first SSE chunk was buffered")
+        .expect("first native SSE chunk was not forwarded")
         .unwrap()
         .unwrap();
-    assert_eq!(
-        first,
-        "data: {\"type\":\"response.created\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
-    );
+    assert_eq!(first, "data: {\"type\":\"response.created\"}\n\n");
+    state.release_stream.notify_one();
     let second = tokio::time::timeout(Duration::from_secs(1), chunks.next())
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(second, "data: [DONE]\n\n");
+    assert_eq!(
+        second,
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"
+    );
+    let third = tokio::time::timeout(Duration::from_secs(1), chunks.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(third, "data: [DONE]\n\n");
     assert!(chunks.next().await.is_none());
 
     let requests = state.requests.lock().unwrap();
@@ -402,15 +436,14 @@ async fn failed_terminal_sse_is_not_recorded_as_success() {
 }
 
 #[tokio::test]
-async fn chat_completion_source_replays_tool_call_context_for_responses_continuation() {
-    let (upstream, state) = spawn_chat_tool_upstream().await;
+async fn responses_never_bridge_to_chat_completions_sources() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let usage_events = events.clone();
     let runtime = GatewayRuntime::new(
         ProviderSource {
             id: "chat-source".to_string(),
             name: "Stateless chat source".to_string(),
-            base_url: format!("{}/v1", upstream.base_url),
+            base_url: "http://127.0.0.1:9/v1".to_string(),
             api_key: SOURCE_KEY.to_string(),
             wire_api: WireApi::ChatCompletions,
             models: vec!["gpt-test".to_string()],
@@ -425,64 +458,23 @@ async fn chat_completion_source_replays_tool_call_context_for_responses_continua
     let gateway = spawn(gateway::router(Arc::new(runtime))).await;
     let client = reqwest::Client::new();
 
-    let first = client
+    let response = client
         .post(format!("{}/v1/responses", gateway.base_url))
         .bearer_auth(LOCAL_KEY)
         .json(&json!({
             "model": "gpt-test",
             "input": "inspect",
-            "stream": false,
             "tools": [{"type": "function", "name": "shell", "parameters": {"type": "object"}}]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    let first: Value = first.json().await.unwrap();
-    assert_eq!(first["id"], "chatcmpl_tool_1");
-    assert_eq!(first["output"][0]["type"], "function_call");
-    assert_eq!(first["output"][0]["call_id"], "call_shell");
-
-    let second = client
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model": "gpt-test",
-            "previous_response_id": "chatcmpl_tool_1",
-            "input": [{
-                "type": "function_call_output",
-                "call_id": "call_shell",
-                "output": "C:/work"
-            }],
-            "stream": false
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(second.status(), StatusCode::OK);
-    let second: Value = second.json().await.unwrap();
-    assert_eq!(second["id"], "chatcmpl_tool_2");
-    assert_eq!(second["output"][0]["type"], "message");
-    assert_eq!(second["output"][0]["content"][0]["text"], "done");
-
-    let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    let continuation_messages = requests[1]["messages"].as_array().unwrap();
-    assert_eq!(continuation_messages.len(), 3);
-    assert_eq!(continuation_messages[0]["role"], "user");
-    assert_eq!(continuation_messages[1]["role"], "assistant");
-    assert_eq!(
-        continuation_messages[1]["tool_calls"][0]["id"],
-        "call_shell"
-    );
-    assert_eq!(continuation_messages[2]["role"], "tool");
-    assert_eq!(continuation_messages[2]["tool_call_id"], "call_shell");
-    assert_eq!(continuation_messages[2]["content"], "C:/work");
-    assert_eq!(events.lock().unwrap().len(), 2);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(events.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn truncated_prelude_stream_returns_bad_gateway_and_is_recorded_as_incomplete() {
+async fn truncated_started_stream_reports_failure_in_sse_and_is_recorded_as_incomplete() {
     let (upstream, _) = spawn_upstream().await;
     let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
     let response = reqwest::Client::new()
@@ -496,9 +488,10 @@ async fn truncated_prelude_stream_returns_bad_gateway_and_is_recorded_as_incompl
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = response.text().await.unwrap();
-    assert!(!body.contains("event: response.failed"));
+    assert!(body.contains("data: {\"type\":\"response.created\"}"));
+    assert!(body.contains("event: response.failed"));
     assert!(body.contains("stream_incomplete"));
 
     let events = events.lock().unwrap();
@@ -577,14 +570,6 @@ async fn spawn_upstream() -> (TestServer, UpstreamState) {
     (spawn(app).await, state)
 }
 
-async fn spawn_chat_tool_upstream() -> (TestServer, ChatToolUpstreamState) {
-    let state = ChatToolUpstreamState::default();
-    let app = Router::new()
-        .route("/v1/chat/completions", post(chat_tool_completions))
-        .with_state(state.clone());
-    (spawn(app).await, state)
-}
-
 async fn spawn(app: Router) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -599,7 +584,7 @@ async fn spawn(app: Router) -> TestServer {
 
 async fn upstream_models(State(state): State<UpstreamState>, headers: HeaderMap) -> Response<Body> {
     observe(&state, "/v1/models", &headers);
-    if !has_source_key(&headers) {
+    if !has_source_key(&headers) && !has_messages_source_key(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({
@@ -734,56 +719,19 @@ async fn upstream_responses(
         .unwrap()
 }
 
-async fn chat_tool_completions(
-    State(state): State<ChatToolUpstreamState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response<Body> {
-    if !has_source_key(&headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let request: Value = serde_json::from_slice(&body).unwrap();
-    let has_tool_result = request["messages"]
-        .as_array()
-        .is_some_and(|messages| messages.iter().any(|message| message["role"] == "tool"));
-    state.requests.lock().unwrap().push(request.clone());
-    if has_tool_result {
-        return Json(json!({
-            "id": "chatcmpl_tool_2",
-            "object": "chat.completion",
-            "model": request["model"],
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": "done"}
-            }]
-        }))
-        .into_response();
-    }
-    Json(json!({
-        "id": "chatcmpl_tool_1",
-        "object": "chat.completion",
-        "model": request["model"],
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": null,
-                "tool_calls": [{
-                    "id": "call_shell",
-                    "type": "function",
-                    "function": {"name": "shell", "arguments": "{\"command\":\"pwd\"}"}
-                }]
-            }
-        }]
-    }))
-    .into_response()
-}
-
 fn observe(state: &UpstreamState, path: &'static str, headers: &HeaderMap) {
     state.requests.lock().unwrap().push(ObservedRequest {
         path,
         authorization: headers
             .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        x_api_key: headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
+        anthropic_version: headers
+            .get("anthropic-version")
             .and_then(|value| value.to_str().ok())
             .map(str::to_string),
     });
@@ -794,4 +742,15 @@ fn has_source_key(headers: &HeaderMap) -> bool {
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         == Some("Bearer upstream-test-key")
+}
+
+fn has_messages_source_key(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        == Some(SOURCE_KEY)
+        && headers
+            .get("anthropic-version")
+            .and_then(|value| value.to_str().ok())
+            == Some("2023-06-01")
 }

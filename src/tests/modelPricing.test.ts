@@ -10,6 +10,27 @@ describe("model pricing", () => {
     expect(groupModels(["glm-5", "gpt-5", "gemini-3", "new-provider"], (model) => model).map((group) => group.id)).toEqual(["openai", "google", "zhipu", "other"]);
   });
 
+  test("keeps native ChatGPT account models in the first dedicated group", () => {
+    const models = [
+      { id: "gpt-5.4-mini", nativeChatGpt: false },
+      { id: "claude-opus-5", nativeChatGpt: false },
+      { id: "gpt-5.6-sol", nativeChatGpt: true },
+      { id: "gpt-5.4", nativeChatGpt: true },
+    ];
+
+    expect(
+      groupModels(
+        models,
+        (model) => model.id,
+        (model) => model.nativeChatGpt,
+      ).map((group) => [group.id, group.items.map((model) => model.id)]),
+    ).toEqual([
+      ["chatgpt", ["gpt-5.6-sol", "gpt-5.4"]],
+      ["openai", ["gpt-5.4-mini"]],
+      ["anthropic", ["claude-opus-5"]],
+    ]);
+  });
+
   test("converts editable USD prices to integer micro-USD", () => {
     expect(parseEditableModelPrice("1.4")).toBe(1_400_000);
     expect(parseEditableModelPrice("1,4")).toBe(1_400_000);

@@ -832,6 +832,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         base_url: "https://api.example.test/v1".into(),
         secret_ref: "source:source_existing".into(),
         wire_api: WireApi::ChatCompletions,
+        protocol_bindings: Vec::new(),
         models: vec!["old-model".into()],
         allowed_models: vec!["gpt-*".into()],
         excluded_models: vec!["gpt-old".into()],
@@ -1040,6 +1041,7 @@ fn deleting_account_preserves_explicit_empty_key_scope() {
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
+        wire_apis: None,
         created_at: "2026-07-10T00:00:00Z".into(),
         last_used_at: None,
     }];

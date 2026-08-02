@@ -910,6 +910,7 @@ mod tests {
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
                 wire_api: WireApi::Responses,
+                protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
@@ -935,6 +936,7 @@ mod tests {
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
                 model_prefix: None,
+                wire_apis: None,
                 created_at: "2026-07-10T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -967,6 +969,7 @@ mod tests {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -990,6 +993,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         };
@@ -1023,6 +1027,7 @@ mod tests {
             base_url: "https://example.test/v1".into(),
             secret_ref: "source:source_1".into(),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1046,6 +1051,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         };

@@ -1,8 +1,6 @@
 use super::context::context_window;
-use crate::usage::api_model_price;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::{json, Map, Value};
-use std::cmp::Ordering;
 
 pub const CODEX_RELAY_ALIAS_PREFIX: &str = "zenith/";
 pub const CODEX_RELAY_CATALOG_HASH: &str = "zenith-relay";
@@ -64,83 +62,6 @@ pub fn codex_model_display_name(model: &str) -> String {
         model.to_string()
     } else {
         output
-    }
-}
-
-/// Keep the generated Codex picker aligned with Relay's model table.
-///
-/// Codex orders the picker by the numeric `priority` field, so the catalog
-/// builder assigns this order to every generated row rather than relying on
-/// JSON array position. Provider groups always keep ChatGPT/OpenAI first, and
-/// known OpenAI models use the same catalog rank as the Relay table instead
-/// of an alphabetical version order.
-pub fn compare_codex_picker_models(left: &str, right: &str) -> Ordering {
-    let left_leaf = codex_model_leaf(left);
-    let right_leaf = codex_model_leaf(right);
-    let left_normalized = left_leaf.to_ascii_lowercase();
-    let right_normalized = right_leaf.to_ascii_lowercase();
-    codex_picker_group_rank(&left_normalized)
-        .cmp(&codex_picker_group_rank(&right_normalized))
-        .then_with(|| compare_codex_picker_models_within_group(left_leaf, right_leaf))
-        .then_with(|| left_normalized.cmp(&right_normalized))
-        .then_with(|| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()))
-        .then_with(|| left.cmp(right))
-}
-
-fn compare_codex_picker_models_within_group(left: &str, right: &str) -> Ordering {
-    match (api_model_price(left), api_model_price(right)) {
-        (Some(left), Some(right)) => left.catalog_rank.cmp(&right.catalog_rank),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => Ordering::Equal,
-    }
-}
-
-/// Sort a generated catalog by the model identity Codex displays.
-///
-/// Relay-owned rows use `zenith/<base64url>` aliases while direct source rows
-/// keep their upstream slug. Decode the former before comparing so both
-/// catalog shapes use the same provider grouping and deterministic order.
-pub fn sort_codex_catalog_models(models: &mut [Value]) {
-    models.sort_by(|left, right| {
-        let left_model = codex_catalog_model_id(left);
-        let right_model = codex_catalog_model_id(right);
-        compare_codex_picker_models(&left_model, &right_model)
-    });
-}
-
-fn codex_catalog_model_id(value: &Value) -> String {
-    let slug = value
-        .get("slug")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string())
-}
-
-fn codex_model_leaf(model: &str) -> &str {
-    model.rsplit('/').next().unwrap_or(model).trim()
-}
-
-fn codex_picker_group_rank(model: &str) -> u8 {
-    let is_openai_reasoning =
-        model.starts_with('o') && model.as_bytes().get(1).is_some_and(u8::is_ascii_digit);
-    if model.starts_with("gpt-")
-        || model.starts_with("codex-")
-        || is_openai_reasoning
-        || model.starts_with("text-")
-    {
-        0
-    } else if model.starts_with("claude-") {
-        1
-    } else if model.starts_with("gemini-") {
-        2
-    } else if model.starts_with("grok-") {
-        3
-    } else if model.starts_with("glm-") {
-        4
-    } else {
-        5
     }
 }
 
@@ -690,7 +611,7 @@ mod tests {
 
     #[test]
     fn generated_picker_order_matches_relay_provider_groups() {
-        let mut models = vec![
+        let models = crate::canonicalize_model_ids([
             "vendor/glm-5.2",
             "vendor/grok-4.5",
             "vendor/gemini-3.6-flash",
@@ -702,9 +623,7 @@ mod tests {
             "gpt-5.6-terra",
             "gpt-5.6-sol",
             "vendor/unknown-model",
-        ];
-
-        models.sort_by(|left, right| compare_codex_picker_models(left, right));
+        ]);
 
         assert_eq!(
             models,
@@ -717,35 +636,19 @@ mod tests {
                 "gpt-5.4-mini",
                 "vendor/claude-opus-4-8",
                 "vendor/gemini-3.6-flash",
-                "vendor/grok-4.5",
                 "vendor/glm-5.2",
+                "vendor/grok-4.5",
                 "vendor/unknown-model",
             ]
         );
     }
 
     #[test]
-    fn generated_catalog_sort_decodes_relay_aliases() {
-        let mut models = vec![
-            json!({"slug": codex_model_alias("gpt-5.4")}),
-            json!({"slug": "vendor/claude-opus-4-8"}),
-            json!({"slug": codex_model_alias("gpt-5.6-terra")}),
-            json!({"slug": codex_model_alias("gpt-5.6-sol")}),
-        ];
-
-        sort_codex_catalog_models(&mut models);
-
+    fn catalog_aliases_do_not_change_the_model_identity() {
+        let alias = codex_model_alias("gpt-5.6-sol");
         assert_eq!(
-            models
-                .iter()
-                .map(|model| model["slug"].as_str().unwrap().to_string())
-                .collect::<Vec<_>>(),
-            [
-                codex_model_alias("gpt-5.6-sol"),
-                codex_model_alias("gpt-5.6-terra"),
-                codex_model_alias("gpt-5.4"),
-                "vendor/claude-opus-4-8".to_string(),
-            ]
+            decode_codex_model_alias(&alias).as_deref(),
+            Some("gpt-5.6-sol")
         );
     }
 

@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, HashSet};
 use tauri::State;
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models, fetch_source_provider_stats, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceProviderStats, WireApi,
+    discover_source_models_for_protocol_bindings, fetch_source_provider_stats,
+    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceProtocolBinding,
+    SourceProviderStats, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -25,6 +26,8 @@ pub struct CreateSourceInput {
     api_key: String,
     #[serde(default = "responses_wire_api")]
     wire_api: WireApi,
+    #[serde(default)]
+    protocol_bindings: Vec<SourceProtocolBinding>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -50,6 +53,8 @@ pub struct UpdateSourceInput {
     name: String,
     base_url: String,
     wire_api: WireApi,
+    #[serde(default)]
+    protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     models: Vec<String>,
     #[serde(default)]
     in_pool: Option<bool>,
@@ -73,7 +78,6 @@ pub async fn create_local_source(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
     let _mutation = state.setup_guard().await;
-    ensure_supported_wire_api(input.wire_api)?;
     let id = format!("source_{}", Uuid::new_v4().simple());
     let secret_ref = format!("source:{id}");
     let mut runtime_source = ProviderSource {
@@ -86,9 +90,10 @@ pub async fn create_local_source(
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    runtime_source.models = discover_source_models(&runtime_source)
-        .await
-        .map_err(core_error)?;
+    runtime_source.models =
+        discover_source_models_for_protocol_bindings(&runtime_source, &input.protocol_bindings)
+            .await
+            .map_err(core_error)?;
     if runtime_source.models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -106,6 +111,7 @@ pub async fn create_local_source(
         base_url: runtime_source.base_url,
         secret_ref: secret_ref.clone(),
         wire_api: runtime_source.wire_api,
+        protocol_bindings: input.protocol_bindings,
         models: runtime_source.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -119,6 +125,9 @@ pub async fn create_local_source(
         last_error: None,
     };
     record.normalize();
+    record
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(&state)?;
     secret_store::save(&secret_ref, &runtime_source.api_key)?;
     if let Err(error) = state.store()?.upsert_source(record.clone()) {
@@ -155,6 +164,7 @@ pub async fn update_local_source(
         base_url: input.base_url,
         secret_ref: current.secret_ref.clone(),
         wire_api: input.wire_api,
+        protocol_bindings: input.protocol_bindings.unwrap_or(current.protocol_bindings),
         models: input.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -173,6 +183,9 @@ pub async fn update_local_source(
         updated.in_pool = in_pool;
     }
     updated.normalize();
+    updated
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
     state.store()?.upsert_source(updated)?;
@@ -272,7 +285,6 @@ pub async fn rotate_local_source_key(
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    ensure_supported_wire_api(source.wire_api)?;
     let api_key = api_key.trim().to_string();
     ProviderSource {
         id: source.id.clone(),
@@ -309,7 +321,6 @@ pub(crate) async fn refresh_local_source_models(
         .source(source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    ensure_supported_wire_api(source.wire_api)?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     let runtime_source = ProviderSource {
@@ -321,9 +332,10 @@ pub(crate) async fn refresh_local_source_models(
         models: source.models.clone(),
     };
     ensure_not_gateway_self_source(state, &runtime_source.base_url)?;
-    let discovery = discover_source_models(&runtime_source)
-        .await
-        .map_err(core_error);
+    let discovery =
+        discover_source_models_for_protocol_bindings(&runtime_source, &source.protocol_bindings)
+            .await
+            .map_err(core_error);
 
     let _mutation = state.setup_guard().await;
     let current = state
@@ -364,6 +376,10 @@ pub(crate) async fn refresh_local_source_models(
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
     updated.normalize();
+    updated
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
+    let runtime_changed = runtime_changed || updated.protocol_bindings != source.protocol_bindings;
     let (old_sources, old_keys) = current_records(state)?;
     state.store()?.upsert_source(updated.clone())?;
     if runtime_changed {
@@ -388,6 +404,7 @@ fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceR
     before.base_url == current.base_url
         && before.secret_ref == current.secret_ref
         && before.wire_api == current.wire_api
+        && before.protocol_bindings == current.protocol_bindings
         && before.models == current.models
 }
 
@@ -409,7 +426,6 @@ pub async fn get_local_source_stats(
 }
 
 fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -> LocalResult<()> {
-    ensure_supported_wire_api(source.wire_api)?;
     if source.recovery_delay_seconds > 24 * 60 * 60 {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -419,6 +435,9 @@ fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -
     source
         .validate_price_overrides()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    source
+        .validate_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     if source.models.is_empty() {
@@ -446,16 +465,6 @@ fn ensure_not_gateway_self_source(state: &DesktopState, base_url: &str) -> Local
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "source base URL must not point back to this Relay gateway",
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_supported_wire_api(wire_api: WireApi) -> LocalResult<()> {
-    if matches!(wire_api, WireApi::Messages) {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "messages wire API is not supported by the local runtime",
         ));
     }
     Ok(())
@@ -521,6 +530,7 @@ mod tests {
             base_url: "https://provider.test/v1".into(),
             secret_ref: "source:test".into(),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec!["model-a".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -548,6 +558,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         }];
@@ -556,15 +567,17 @@ mod tests {
     }
 
     #[test]
-    fn messages_wire_api_is_rejected_at_the_desktop_boundary() {
-        assert!(ensure_supported_wire_api(WireApi::Responses).is_ok());
-        assert!(ensure_supported_wire_api(WireApi::ChatCompletions).is_ok());
-        assert!(matches!(
-            ensure_supported_wire_api(WireApi::Messages)
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidState
-        ));
+    fn messages_wire_api_is_accepted_at_the_desktop_boundary() {
+        let mut source = source_record();
+        source.wire_api = WireApi::Messages;
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            model_ids: source.models.clone(),
+        }];
+
+        source.normalize();
+        source.normalize_protocol_bindings().unwrap();
+        assert!(source.validate_protocol_bindings().is_ok());
     }
 
     #[test]

@@ -106,10 +106,29 @@ paths:
             application/json: { schema: { type: object } }
             text/event-stream: { schema: { type: string } }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/messages:
+    post:
+      operationId: messages
+      security:
+        - clientKey: []
+        - anthropicClientKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200":
+          description: Anthropic Messages JSON or SSE stream
+          content:
+            application/json: { schema: { type: object } }
+            text/event-stream: { schema: { type: string } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     managementToken: { type: http, scheme: bearer, description: Management-only token; never valid for /v1. }
     clientKey: { type: http, scheme: bearer, description: Scoped model request key; never valid for management. }
+    anthropicClientKey: { type: apiKey, in: header, name: x-api-key, description: Scoped model request key for /v1/messages. }
   responses:
     Unauthorized:
       description: Missing or invalid token

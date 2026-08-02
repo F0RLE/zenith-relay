@@ -2,7 +2,7 @@ use axum::{
     body::{to_bytes, Body},
     extract::{Request, State},
     http::{
-        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HOST},
         StatusCode,
     },
     response::{IntoResponse, Response},
@@ -50,6 +50,210 @@ async fn profile_can_be_prepared_before_the_first_account_transfer() {
     assert!(credential["secret"]
         .as_str()
         .is_some_and(|value| !value.is_empty()));
+}
+
+#[tokio::test]
+async fn scoped_native_messages_source_stays_outside_the_responses_system_pool() {
+    let root = TempDir::new().unwrap();
+    let (responses_upstream, responses_task) = spawn_upstream().await;
+    let (messages_upstream, messages_state, messages_task) = spawn_messages_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let responses_source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Responses source",
+            "baseUrl": format!("{responses_upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "models": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let responses_source_id = responses_source["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth("synthetic-management-token-value")
+            .json(&json!({
+                "sourceIds": [responses_source_id],
+                "inPool": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let messages_source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Native Messages source",
+            "baseUrl": format!("{messages_upstream}/v1"),
+            "apiKey": "messages-source-key",
+            "wireApi": "messages",
+            "protocolBindings": [{
+                "wireApi": "messages",
+                "modelIds": ["claude-native"]
+            }],
+            "models": ["claude-native"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let messages_source_id = messages_source["id"].as_str().unwrap();
+
+    let pool_error = client
+        .post(format!("{}/pool/members", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sourceIds": [messages_source_id],
+            "inPool": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pool_error.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        pool_error.json::<Value>().await.unwrap()["error"]["code"],
+        "source_pool_protocol_unsupported"
+    );
+
+    let messages_key: Value = client
+        .post(format!("{}/keys", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "schemaVersion": 1,
+            "label": "Native Messages key",
+            "sourceIds": [messages_source_id],
+            "accountIds": [],
+            "allowedModels": [],
+            "excludedModels": [],
+            "modelPrefix": null,
+            "wireApis": ["messages"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let messages_secret = messages_key["secret"].as_str().unwrap();
+    assert_eq!(messages_key["key"]["wireApis"], json!(["messages"]));
+
+    let started = client
+        .post(format!("{}/gateway/start", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+
+    let system_credential: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let system_secret = system_credential["secret"].as_str().unwrap();
+    let system_models: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(system_secret)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let system_model_ids = system_models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(system_model_ids.contains(&"gpt-test"));
+    assert!(!system_model_ids.contains(&"claude-native"));
+
+    let request = json!({
+        "model": "claude-native",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "use the tool"}],
+        "tools": [{
+            "name": "read_file",
+            "description": "Read a file",
+            "input_schema": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"]
+            }
+        }],
+        "tool_choice": {"type": "auto"}
+    });
+    let messages_response = client
+        .post(format!("{}/v1/messages", server.origin))
+        .header("x-api-key", messages_secret)
+        .header("anthropic-beta", "fine-grained-tool-streaming-2025-05-14")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(messages_response.status(), StatusCode::OK);
+    assert_eq!(
+        messages_response.json::<Value>().await.unwrap()["type"],
+        "message"
+    );
+
+    let denied = client
+        .post(format!("{}/v1/messages", server.origin))
+        .header("x-api-key", system_secret)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let denied: Value = denied.json().await.unwrap();
+    assert_eq!(denied["type"], "error");
+    assert_eq!(denied["error"]["type"], "permission_error");
+
+    let denied = client
+        .post(format!("{}/v1/responses", server.origin))
+        .bearer_auth(messages_secret)
+        .json(&json!({"model": "claude-native", "input": "wrong endpoint"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let observed = messages_state.lock().unwrap().clone();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(
+        observed[0].x_api_key.as_deref(),
+        Some("messages-source-key")
+    );
+    assert_eq!(observed[0].anthropic_version.as_deref(), Some("2023-06-01"));
+    assert_eq!(
+        observed[1].anthropic_beta.as_deref(),
+        Some("fine-grained-tool-streaming-2025-05-14")
+    );
+    assert_eq!(observed[1].body, request);
+
+    server.task.abort();
+    responses_task.abort();
+    messages_task.abort();
 }
 
 #[tokio::test]
@@ -402,6 +606,17 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .post(format!("{}/v1/responses", first.origin))
         .bearer_auth(&pool_key)
         .json(&json!({"model":"gpt-test","input":"synthetic request"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("response-test"));
+
+    let response = client
+        .post(format!("{}/v1/responses", first.origin))
+        .header(HOST, "relay.example.test")
+        .bearer_auth(&pool_key)
+        .json(&json!({"model":"gpt-test","input":"external host"}))
         .send()
         .await
         .unwrap();
@@ -1230,7 +1445,7 @@ async fn client_key_lifecycle_is_versioned_and_secrets_are_one_time() {
         .unwrap();
     assert_eq!(updated["label"], "Tablet");
     assert_eq!(updated["enabled"], false);
-    assert_eq!(updated["wireApis"], json!(["images"]));
+    assert_eq!(updated["wireApis"], json!(["chat_completions"]));
 
     let rotated = client
         .post(format!("{}/keys/{key_id}/rotate", server.origin))
@@ -2930,6 +3145,88 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
         axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{address}"), task)
+}
+
+#[derive(Clone, Debug)]
+struct NativeMessagesRequest {
+    x_api_key: Option<String>,
+    anthropic_version: Option<String>,
+    anthropic_beta: Option<String>,
+    body: Value,
+}
+
+async fn spawn_messages_upstream() -> (
+    String,
+    Arc<Mutex<Vec<NativeMessagesRequest>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let router = Router::new()
+        .route("/v1/models", get(native_messages_models))
+        .route("/v1/messages", post(native_messages_response))
+        .with_state(requests.clone());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (format!("http://{address}"), requests, task)
+}
+
+async fn native_messages_models(
+    State(requests): State<Arc<Mutex<Vec<NativeMessagesRequest>>>>,
+    request: Request,
+) -> impl IntoResponse {
+    let headers = request.headers();
+    requests.lock().unwrap().push(NativeMessagesRequest {
+        x_api_key: header_value(headers, "x-api-key"),
+        anthropic_version: header_value(headers, "anthropic-version"),
+        anthropic_beta: header_value(headers, "anthropic-beta"),
+        body: Value::Null,
+    });
+    Json(json!({"data":[{"id":"claude-native"}]}))
+}
+
+async fn native_messages_response(
+    State(requests): State<Arc<Mutex<Vec<NativeMessagesRequest>>>>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, 64 * 1024).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert!(body["tools"].is_array());
+    assert_eq!(body["tools"][0]["name"], "read_file");
+    requests.lock().unwrap().push(NativeMessagesRequest {
+        x_api_key: header_value(&parts.headers, "x-api-key"),
+        anthropic_version: header_value(&parts.headers, "anthropic-version"),
+        anthropic_beta: header_value(&parts.headers, "anthropic-beta"),
+        body,
+    });
+    (
+        StatusCode::OK,
+        Json(json!({
+            "id": "msg_native",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-native",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_native",
+                "name": "read_file",
+                "input": {"path": "README.md"}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        })),
+    )
+        .into_response()
+}
+
+fn header_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 async fn spawn_source_lifecycle_upstream(

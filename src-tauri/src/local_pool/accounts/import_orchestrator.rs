@@ -1283,6 +1283,10 @@ pub(super) fn imported_source_record(
         base_url: runtime_source.base_url,
         secret_ref,
         wire_api: runtime_source.wire_api,
+        protocol_bindings: existing
+            .as_ref()
+            .map(|source| source.protocol_bindings.clone())
+            .unwrap_or_default(),
         models: runtime_source.models,
         allowed_models: existing
             .as_ref()

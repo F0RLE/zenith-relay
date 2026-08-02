@@ -133,7 +133,11 @@ impl Capabilities {
             identity_fingerprint: identity_fingerprint.into(),
             server_managed_by_user: true,
             features,
-            supported_wire_apis: vec![WireApi::Responses, WireApi::ChatCompletions],
+            supported_wire_apis: vec![
+                WireApi::Responses,
+                WireApi::ChatCompletions,
+                WireApi::Messages,
+            ],
             supports_accounts: true,
             supports_sources: true,
             supports_quota: true,

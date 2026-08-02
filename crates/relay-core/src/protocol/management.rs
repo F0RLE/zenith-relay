@@ -8,7 +8,7 @@ use crate::{
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
     ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateQuota,
     CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
-    WireApi,
+    SourceProtocolBinding, WireApi,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -287,6 +287,8 @@ pub struct SourceSummary {
     pub operational_status: OperationalStatus,
     pub base_url: String,
     pub wire_api: WireApi,
+    #[serde(default)]
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub models: Vec<String>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
@@ -300,6 +302,36 @@ pub struct SourceSummary {
     pub api_equivalent: ApiEquivalentSummary,
     pub secret_available: bool,
     pub last_error_code: Option<String>,
+}
+
+impl SourceSummary {
+    /// Returns models available through one explicitly configured native
+    /// protocol. Legacy records without bindings retain their single
+    /// `wire_api` surface.
+    pub fn models_for_wire_api(&self, wire_api: WireApi) -> &[String] {
+        if self.protocol_bindings.is_empty() {
+            return if self.wire_api == wire_api {
+                self.models.as_slice()
+            } else {
+                &[]
+            };
+        }
+        self.protocol_bindings
+            .iter()
+            .find(|binding| binding.wire_api == wire_api)
+            .map(|binding| {
+                if binding.model_ids.is_empty() {
+                    self.models.as_slice()
+                } else {
+                    binding.model_ids.as_slice()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
+        !self.models_for_wire_api(wire_api).is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -397,6 +429,7 @@ pub const PROFILE_KEY_ROTATION_SCHEMA_VERSION: u16 = 1;
 pub enum ClientWireApi {
     Responses,
     ChatCompletions,
+    Messages,
     Images,
 }
 
@@ -508,6 +541,8 @@ pub struct SourcePresetRule {
     pub name: String,
     pub base_url: String,
     pub wire_api: WireApi,
+    #[serde(default)]
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub enabled: bool,
     pub in_pool: bool,
     pub allowed_models: Vec<String>,
@@ -621,16 +656,18 @@ pub fn pool_model_summaries(
     accounts: &[AccountSummary],
     hidden_models: &[String],
 ) -> Vec<ModelSummary> {
-    let mut models = BTreeMap::<String, (String, BTreeSet<String>)>::new();
+    let mut models = BTreeMap::<String, PoolModel>::new();
+    let mut upstream_order = 0usize;
     for source in sources.iter().filter(|source| {
         source.enabled && source.in_pool && !source.draining && source.secret_available
     }) {
         add_member_models(
             &mut models,
             &format!("source:{}", source.id),
-            &source.models,
+            source.models_for_wire_api(WireApi::Responses),
             &source.allowed_models,
             &source.excluded_models,
+            &mut upstream_order,
         );
     }
     for account in accounts.iter().filter(|account| {
@@ -646,67 +683,77 @@ pub fn pool_model_summaries(
             &account.models,
             &account.allowed_models,
             &account.excluded_models,
+            &mut upstream_order,
         );
     }
 
     let mut summaries = models
         .into_values()
-        .map(|(id, members)| {
+        .map(|model| {
+            let id = model.id.clone();
             let price = api_model_price(&id);
             let enabled = !hidden_models
                 .iter()
                 .any(|hidden| hidden.eq_ignore_ascii_case(&id));
-            ModelSummary {
-                enabled,
-                codex_visible: enabled && codex_model_is_picker_eligible(&id),
-                codex_display_name: codex_model_display_name(&id),
-                id,
-                member_count: members.len(),
-                catalog_rank: price.map(|price| price.catalog_rank),
-                input_micro_usd_per_million: price.map(|price| price.input_micro_usd_per_million),
-                cached_input_micro_usd_per_million: price
-                    .map(|price| price.cached_input_micro_usd_per_million),
-                cache_write_5m_micro_usd_per_million: price
-                    .and_then(|price| price.cache_write_5m_micro_usd_per_million),
-                cache_write_1h_micro_usd_per_million: price
-                    .and_then(|price| price.cache_write_1h_micro_usd_per_million),
-                output_micro_usd_per_million: price.map(|price| price.output_micro_usd_per_million),
-                custom_price: false,
-            }
+            (
+                model.upstream_order,
+                ModelSummary {
+                    enabled,
+                    codex_visible: enabled && codex_model_is_picker_eligible(&id),
+                    codex_display_name: codex_model_display_name(&id),
+                    id,
+                    member_count: model.members.len(),
+                    catalog_rank: price.map(|price| price.catalog_rank),
+                    input_micro_usd_per_million: price
+                        .map(|price| price.input_micro_usd_per_million),
+                    cached_input_micro_usd_per_million: price
+                        .map(|price| price.cached_input_micro_usd_per_million),
+                    cache_write_5m_micro_usd_per_million: price
+                        .and_then(|price| price.cache_write_5m_micro_usd_per_million),
+                    cache_write_1h_micro_usd_per_million: price
+                        .and_then(|price| price.cache_write_1h_micro_usd_per_million),
+                    output_micro_usd_per_million: price
+                        .map(|price| price.output_micro_usd_per_million),
+                    custom_price: false,
+                },
+            )
         })
         .collect::<Vec<_>>();
-    summaries.sort_by(|left, right| {
-        left.catalog_rank
-            .unwrap_or(u32::MAX)
-            .cmp(&right.catalog_rank.unwrap_or(u32::MAX))
-            .then_with(|| {
-                right
-                    .output_micro_usd_per_million
-                    .unwrap_or_default()
-                    .cmp(&left.output_micro_usd_per_million.unwrap_or_default())
-            })
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    summaries
+    summaries.sort_by_key(|(upstream_order, _)| *upstream_order);
+    summaries.into_iter().map(|(_, summary)| summary).collect()
+}
+
+struct PoolModel {
+    id: String,
+    members: BTreeSet<String>,
+    upstream_order: usize,
 }
 
 fn add_member_models(
-    models: &mut BTreeMap<String, (String, BTreeSet<String>)>,
+    models: &mut BTreeMap<String, PoolModel>,
     member_id: &str,
     member_models: &[String],
     allowed_models: &[String],
     excluded_models: &[String],
+    upstream_order: &mut usize,
 ) {
     let rules = ModelRules {
         allowed: allowed_models.iter().cloned().collect(),
         excluded: excluded_models.iter().cloned().collect(),
     };
-    for model in member_models.iter().filter(|model| rules.allows(model)) {
+    for model in member_models {
+        let model_order = *upstream_order;
+        *upstream_order = upstream_order.saturating_add(1);
+        if !rules.allows(model) {
+            continue;
+        }
         let key = model.to_ascii_lowercase();
-        let entry = models
-            .entry(key)
-            .or_insert_with(|| (model.clone(), BTreeSet::new()));
-        entry.1.insert(member_id.to_string());
+        let entry = models.entry(key).or_insert_with(|| PoolModel {
+            id: model.clone(),
+            members: BTreeSet::new(),
+            upstream_order: model_order,
+        });
+        entry.members.insert(member_id.to_string());
     }
 }
 
@@ -881,6 +928,7 @@ mod tests {
             operational_status: OperationalStatus::Rotation,
             base_url: "https://example.test/v1".into(),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec![
                 "gpt-old".into(),
                 "gpt-5.4-mini".into(),
@@ -905,15 +953,114 @@ mod tests {
                 .iter()
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
-            ["gpt-5.4", "gpt-5.4-mini", "gpt-future-codex"]
+            ["gpt-5.4-mini", "gpt-5.4", "gpt-future-codex"]
         );
-        assert!(models[0].enabled);
-        assert!(!models[1].enabled);
+        assert!(!models[0].enabled);
+        assert!(models[1].enabled);
         assert!(models[2].enabled);
-        assert_eq!(models[0].member_count, 1);
-        assert!(models[0].output_micro_usd_per_million.is_some());
+        assert_eq!(models[1].member_count, 1);
+        assert!(models[1].output_micro_usd_per_million.is_some());
         assert!(models[2].catalog_rank.is_none());
         assert!(models[2].output_micro_usd_per_million.is_none());
+    }
+
+    #[test]
+    fn pool_model_summaries_exclude_messages_only_source_models() {
+        let source = SourceSummary {
+            id: "source_1".into(),
+            name: "Mixed source".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    model_ids: vec!["gpt-routed".into()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    model_ids: vec!["claude-native".into()],
+                },
+            ],
+            models: vec!["gpt-routed".into(), "claude-native".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+
+        let models = pool_model_summaries(&[source], &[], &[]);
+
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-routed"]
+        );
+    }
+
+    #[test]
+    fn source_summary_preserves_legacy_and_native_protocol_model_boundaries() {
+        let legacy = SourceSummary {
+            id: "legacy".into(),
+            name: "Legacy".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            base_url: "https://example.test/v1".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-legacy".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            api_equivalent: ApiEquivalentSummary::default(),
+            secret_available: true,
+            last_error_code: None,
+        };
+        assert_eq!(
+            legacy.models_for_wire_api(WireApi::Responses),
+            ["gpt-legacy"]
+        );
+        assert!(!legacy.supports_wire_api(WireApi::Messages));
+
+        let mixed = SourceSummary {
+            protocol_bindings: vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    model_ids: vec!["gpt-native".into()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    model_ids: vec!["claude-native".into()],
+                },
+            ],
+            models: vec!["gpt-native".into(), "claude-native".into()],
+            ..legacy
+        };
+        assert_eq!(
+            mixed.models_for_wire_api(WireApi::Responses),
+            ["gpt-native"]
+        );
+        assert_eq!(
+            mixed.models_for_wire_api(WireApi::Messages),
+            ["claude-native"]
+        );
+        assert!(mixed.supports_wire_api(WireApi::Messages));
+        assert!(!mixed.supports_wire_api(WireApi::ChatCompletions));
     }
 
     #[test]

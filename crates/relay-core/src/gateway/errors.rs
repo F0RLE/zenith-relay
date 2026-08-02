@@ -19,6 +19,12 @@ const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 
+/// Marks an error body constructed by Relay itself. Native protocol handlers
+/// use this marker to normalize only local errors without rewriting an
+/// upstream provider's already-native error envelope.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LocalGatewayError;
+
 #[derive(Clone, Copy)]
 pub(super) struct AttemptFailure {
     pub(super) status: StatusCode,
@@ -612,26 +618,6 @@ impl AttemptFailure {
         }
     }
 
-    pub(super) fn response_replay_unavailable() -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            category: "upstream_previous_response_not_found",
-            message: "previous response is unavailable",
-            cooldown_ms: 0,
-            cooldown_hint: RateLimitBodyHint::default(),
-        }
-    }
-
-    pub(super) fn translation() -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            category: "upstream_translation",
-            message: "upstream response could not be translated",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
-            cooldown_hint: RateLimitBodyHint::default(),
-        }
-    }
-
     pub(super) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, body);
         Self {
@@ -1218,7 +1204,7 @@ pub(super) fn cooldown_error(retry_at_ms: u64, failure: Option<&AttemptFailure>)
 pub(super) fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
     let code = api_error_code(code);
     let error_type = api_error_type(status, code);
-    (
+    let mut response = (
         status,
         Json(json!({
             "error": {
@@ -1229,7 +1215,9 @@ pub(super) fn api_error(status: StatusCode, message: &str, code: &str) -> Respon
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(LocalGatewayError);
+    response
 }
 
 pub(super) fn api_error_type(status: StatusCode, code: &str) -> &'static str {

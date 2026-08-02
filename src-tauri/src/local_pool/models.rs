@@ -1,13 +1,14 @@
 use crate::platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    normalize_model_price_overrides, normalize_subscription_plan_order,
-    protocol::RemoteAccountLocation,
+    normalize_model_price_overrides, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order,
+    protocol::{ClientWireApi, RemoteAccountLocation},
     quota::QuotaEconomicsState,
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, SourceProtocolBinding, WireApi,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
@@ -202,6 +203,8 @@ pub struct ProviderSourceRecord {
     pub base_url: String,
     pub secret_ref: String,
     pub wire_api: WireApi,
+    #[serde(default)]
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub models: Vec<String>,
     #[serde(default)]
     pub allowed_models: Vec<String>,
@@ -241,6 +244,11 @@ pub struct LocalGatewayKeyRecord {
     pub excluded_models: Vec<String>,
     #[serde(default)]
     pub model_prefix: Option<String>,
+    /// `None` preserves a legacy unrestricted protocol scope. New keys always
+    /// persist an explicit non-empty set, so a client key cannot accidentally
+    /// expose a native endpoint the user did not choose.
+    #[serde(default)]
+    pub wire_apis: Option<Vec<ClientWireApi>>,
     pub created_at: String,
     pub last_used_at: Option<String>,
 }
@@ -385,6 +393,49 @@ impl ProviderSourceRecord {
     pub fn validate_price_overrides(&self) -> Result<(), &'static str> {
         validate_model_price_overrides(&self.model_price_overrides)
     }
+
+    /// Resolves the legacy single-protocol fields into the same shape used by
+    /// current multi-protocol records without mutating persisted legacy data.
+    pub fn effective_protocol_bindings(&self) -> Result<Vec<SourceProtocolBinding>, String> {
+        normalize_source_protocol_bindings(
+            self.protocol_bindings.clone(),
+            self.wire_api,
+            &self.models,
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    pub fn normalize_protocol_bindings(&mut self) -> Result<(), String> {
+        if self.protocol_bindings.is_empty() {
+            return Ok(());
+        }
+        let bindings = self.effective_protocol_bindings()?;
+        // Keep the legacy field coherent for older desktop builds and remote
+        // records. The selected binding order is intentional, so its first
+        // native protocol is the compatibility fallback.
+        if let Some(binding) = bindings.first() {
+            self.wire_api = binding.wire_api;
+        }
+        self.protocol_bindings = bindings;
+        Ok(())
+    }
+
+    pub fn validate_protocol_bindings(&self) -> Result<(), String> {
+        self.effective_protocol_bindings().map(drop)
+    }
+
+    pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
+        Ok(self
+            .effective_protocol_bindings()?
+            .into_iter()
+            .find(|binding| binding.wire_api == wire_api)
+            .map(|binding| binding.model_ids)
+            .unwrap_or_default())
+    }
+
+    pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
+        Ok(!self.models_for_wire_api(wire_api)?.is_empty())
+    }
 }
 
 fn validate_model_price_overrides(
@@ -405,6 +456,24 @@ impl LocalGatewayKeyRecord {
             .take()
             .map(|prefix| prefix.trim().trim_matches('/').to_string())
             .filter(|prefix| !prefix.is_empty());
+        self.wire_apis = self.wire_apis.take().map(|wire_apis| {
+            wire_apis
+                .into_iter()
+                .map(normalize_client_wire_api)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        });
+    }
+}
+
+fn normalize_client_wire_api(wire_api: ClientWireApi) -> ClientWireApi {
+    // Images are served through the Chat Completions-compatible surface. Keep
+    // old persisted values readable but never retain a misleading standalone
+    // image protocol scope.
+    match wire_api {
+        ClientWireApi::Images => ClientWireApi::ChatCompletions,
+        other => other,
     }
 }
 
@@ -503,6 +572,11 @@ mod tests {
             allowed_models: vec![" gpt-test ".into()],
             excluded_models: Vec::new(),
             model_prefix: Some(" /team/ ".into()),
+            wire_apis: Some(vec![
+                ClientWireApi::Images,
+                ClientWireApi::ChatCompletions,
+                ClientWireApi::Messages,
+            ]),
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         };
@@ -511,6 +585,13 @@ mod tests {
         assert_eq!(key.source_ids, Some(vec!["source_1".into()]));
         assert_eq!(key.account_ids, Some(vec!["account_1".into()]));
         assert_eq!(key.model_prefix.as_deref(), Some("team"));
+        assert_eq!(
+            key.wire_apis,
+            Some(vec![
+                ClientWireApi::ChatCompletions,
+                ClientWireApi::Messages
+            ])
+        );
 
         key.source_ids = Some(Vec::new());
         key.account_ids = Some(Vec::new());

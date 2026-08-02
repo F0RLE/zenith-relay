@@ -466,6 +466,12 @@ fn normalize_wire_apis(
     let values = values.map(|values| {
         values
             .into_iter()
+            // Images is a legacy scope; image requests are governed by the
+            // Chat Completions client surface, so keep one canonical value.
+            .map(|value| match value {
+                ClientWireApi::Images => ClientWireApi::ChatCompletions,
+                value => value,
+            })
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>()
