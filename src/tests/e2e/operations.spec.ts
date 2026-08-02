@@ -576,7 +576,7 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   await dialog.getByRole("radio", { name: /OpenAI/ }).click();
   await expect(dialog.getByRole("checkbox", { name: /Responses API/ })).toBeChecked();
   await expect(dialog.getByRole("checkbox", { name: /Chat Completions/ })).toHaveCount(1);
-  await expect(dialog.getByRole("checkbox", { name: /Messages API/ })).toHaveCount(0);
+  await expect(dialog.getByRole("checkbox", { name: /Messages API/ })).not.toBeChecked();
 
   await dialog.getByRole("button", { name: "Edit", exact: true }).click();
   await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
@@ -619,6 +619,39 @@ test("empty Choose API mode opens the shared source picker", async ({ page }) =>
   expect(calls.find((call) => call.command === "get_local_source_stats")?.args).toEqual({ sourceId: "source_created_1" });
   expect(calls.map((call) => call.command)).not.toContain("save_key");
   expect(calls.map((call) => call.command)).not.toContain("set_local_pool_membership");
+});
+
+test("provider presets keep explicitly selected native protocol bindings", async ({ page }) => {
+  await installTauriMock(page, { mode: "zenith", locale: "en", populated: false, readyConnected: false });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Add source", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add source" });
+
+  await dialog.getByRole("radio", { name: /OpenAI/ }).click();
+  const responses = dialog.getByRole("checkbox", { name: /Responses API/ });
+  const messages = dialog.getByRole("checkbox", { name: /Messages API/ });
+  await expect(responses).toBeChecked();
+  await expect(messages).not.toBeChecked();
+  await messages.check();
+  await expect(messages).toBeChecked();
+
+  await dialog.getByLabel("Upstream API key").fill("sk-synthetic-ready-key");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByText("OpenAI", { exact: true })).toBeVisible();
+  const calls = await page.evaluate(() => (window as unknown as {
+    __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }>;
+  }).__TAURI_TEST_INVOKES__);
+  expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({
+    name: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    wireApi: "responses",
+    protocolBindings: [
+      { wireApi: "responses", modelIds: [] },
+      { wireApi: "messages", modelIds: [] },
+    ],
+    apiKey: "sk-synthetic-ready-key",
+  });
 });
 
 test("Choose API mode manages and launches saved sources without balance controls", async ({ page }) => {

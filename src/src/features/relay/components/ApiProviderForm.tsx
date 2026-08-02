@@ -2,10 +2,7 @@ import { Cloud, ExternalLink, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SourceProtocolBinding, SourceWireApi } from "../api/types";
 import { openApiKeyPage } from "../../../platform/desktop";
-import {
-  SourceProtocolBindingsEditor,
-  sourceWireApis,
-} from "./SourceProtocolBindingsEditor";
+import { SourceProtocolBindingsEditor } from "./SourceProtocolBindingsEditor";
 import { SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
@@ -27,15 +24,6 @@ const providerDefaults: Record<ApiProviderKind, Omit<ApiProviderValue, "apiKey">
   custom: { kind: "custom", name: "", baseUrl: "", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }] },
 };
 
-const providerWireApis: Record<ApiProviderKind, readonly SourceWireApi[]> = {
-  zenith: sourceWireApis,
-  // OpenAI exposes its own Responses and Chat Completions APIs, not the
-  // Anthropic-compatible Messages API.
-  openai: ["responses", "chat_completions"],
-  openrouter: sourceWireApis,
-  custom: sourceWireApis,
-};
-
 const providerIcons = {
   zenith: Cloud,
   openai: Sparkles,
@@ -55,11 +43,7 @@ export function defaultApiProviderValue(): ApiProviderValue {
 }
 
 function providerProtocolBindings(value: ApiProviderValue) {
-  const allowedWireApis = value.kind
-    ? providerWireApis[value.kind]
-    : sourceWireApis;
   return value.protocolBindings
-    .filter((binding) => allowedWireApis.includes(binding.wireApi))
     .map((binding) => ({
       wireApi: binding.wireApi,
       modelIds: [...binding.modelIds],
@@ -150,7 +134,7 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
       </div> : null}
-      <SourceProtocolBindingsEditor models={[]} value={value.protocolBindings} onChange={setProtocolBindings} wireApis={providerWireApis[value.kind]} />
+      <SourceProtocolBindingsEditor models={[]} value={value.protocolBindings} onChange={setProtocolBindings} />
       <div className="api-provider-key-field">
         <SecretField
           label={t("sources.apiKey")}
