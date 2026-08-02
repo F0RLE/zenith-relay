@@ -2944,7 +2944,7 @@ async fn http_usage_limit_immediately_excludes_the_account_until_quota_refresh()
 }
 
 #[tokio::test]
-async fn legacy_retry_cap_does_not_stop_account_rotation_after_429() {
+async fn retry_cap_stops_account_rotation_after_429() {
     let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::TOO_MANY_REQUESTS,
         json!({"error": {"code": "rate_limit_exceeded"}}),
@@ -2978,13 +2978,59 @@ async fn legacy_retry_cap_does_not_stop_account_rotation_after_429() {
     .await;
 
     let response = request(&gateway, false).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["id"],
-        "rotated-response"
-    );
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(ready_state.requests.lock().unwrap().len(), 1);
+    assert!(ready_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retry_cap_stops_compact_account_rotation_after_429() {
+    let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": {"code": "rate_limit_exceeded"}}),
+    )])
+    .await;
+    let (ready_upstream, ready_state) =
+        spawn_upstream(vec![success_reply("rotated-response")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "limited-account", "limited-access").await;
+    register_ready(&authority, "ready-account", "ready-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![
+            account(
+                "limited-account",
+                "provider-limited",
+                &limited_upstream,
+                200,
+            ),
+            account("ready-account", "provider-ready", &ready_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            max_retry_candidates: 1,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "compact this",
+            "max_output_tokens": 16,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    assert!(ready_state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

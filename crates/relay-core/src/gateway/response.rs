@@ -2,7 +2,7 @@ use super::errors::{api_error, upstream_failure_status, AttemptFailure, RateLimi
 use super::now_ms;
 use super::streaming::{parse_sse_event, sse_event_end, TerminalOutcome};
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
-use crate::{Error, GatewayRuntime, UsageEvent};
+use crate::{Error, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderValue, Response, StatusCode};
@@ -95,6 +95,7 @@ pub(super) fn usage_event(
     http_status: u16,
     error_category: Option<String>,
     latency_ms: u64,
+    tool_use: ToolUseDiagnostics,
 ) -> UsageEvent {
     UsageEvent {
         request_id: request_id.to_string(),
@@ -112,6 +113,7 @@ pub(super) fn usage_event(
         success,
         http_status,
         error_category,
+        tool_use,
         cooldown_scope: None,
         retry_at_ms: None,
         consecutive_failures: None,
@@ -132,6 +134,7 @@ pub(super) fn populate_tokens(event: &mut UsageEvent, body: &[u8]) {
     let Ok(body) = serde_json::from_slice::<Value>(body) else {
         return;
     };
+    event.tool_use.set_terminal_response(&body);
     let Some(usage) = find_usage(&body) else {
         return;
     };

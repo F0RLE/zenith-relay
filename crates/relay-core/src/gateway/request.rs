@@ -11,7 +11,7 @@ use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
 use crate::{
     codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, routed_codex_catalog_entry,
-    GatewayRuntime, WireApi,
+    GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -1049,6 +1049,87 @@ pub(super) fn contains_tool_call_output(value: &Value) -> bool {
     }
 }
 
+pub(super) fn tool_use_diagnostics(value: &Value) -> ToolUseDiagnostics {
+    ToolUseDiagnostics {
+        client_tool_count: tool_definition_count(value),
+        tool_choice: tool_choice_mode(value),
+        ..ToolUseDiagnostics::default()
+    }
+}
+
+pub(super) fn with_forwarded_tool_diagnostics(
+    client: &ToolUseDiagnostics,
+    request_body: &[u8],
+) -> ToolUseDiagnostics {
+    let mut diagnostics = client.clone();
+    diagnostics.forwarded_tool_count = serde_json::from_slice::<Value>(request_body)
+        .ok()
+        .map_or(0, |value| tool_definition_count(&value));
+    diagnostics
+}
+
+fn tool_definition_count(value: &Value) -> u16 {
+    let mut count = 0_u16;
+    count = count.saturating_add(tool_array_count(value.get("tools")));
+    count = count.saturating_add(tool_array_count(value.get("functions")));
+    count = count.saturating_add(tool_array_count(
+        value
+            .get("response")
+            .and_then(|response| response.get("tools")),
+    ));
+    if let Some(items) = value.get("input").and_then(Value::as_array) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                count = count.saturating_add(tool_array_count(item.get("tools")));
+            }
+        }
+    }
+    count
+}
+
+fn tool_array_count(value: Option<&Value>) -> u16 {
+    value.and_then(Value::as_array).map_or(0, |tools| {
+        tools.iter().fold(0_u16, |count, tool| {
+            count.saturating_add(tool_definition_leaf_count(tool))
+        })
+    })
+}
+
+fn tool_definition_leaf_count(tool: &Value) -> u16 {
+    if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+        let nested = tool_array_count(tool.get("tools"));
+        return if nested == 0 { 1 } else { nested };
+    }
+    u16::from(tool.is_object())
+}
+
+fn tool_choice_mode(value: &Value) -> ToolChoiceMode {
+    let choice = value.get("tool_choice").or_else(|| {
+        value
+            .get("response")
+            .and_then(|response| response.get("tool_choice"))
+    });
+    match choice {
+        None => ToolChoiceMode::Unspecified,
+        Some(Value::String(value)) => tool_choice_mode_from_type(value),
+        Some(Value::Object(object)) => object
+            .get("type")
+            .and_then(Value::as_str)
+            .map_or(ToolChoiceMode::Specific, tool_choice_mode_from_type),
+        Some(_) => ToolChoiceMode::Unspecified,
+    }
+}
+
+fn tool_choice_mode_from_type(value: &str) -> ToolChoiceMode {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => ToolChoiceMode::Auto,
+        "required" | "any" => ToolChoiceMode::Required,
+        "none" => ToolChoiceMode::None,
+        "allowed_tools" => ToolChoiceMode::AllowedTools,
+        _ => ToolChoiceMode::Specific,
+    }
+}
+
 pub(super) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
     match wire_api {
         WireApi::Responses => &[WireApi::Responses, WireApi::ChatCompletions],
@@ -1128,6 +1209,38 @@ mod tests {
             DefaultServiceTier::Standard,
         );
         assert!(inherited.get("service_tier").is_none());
+    }
+
+    #[test]
+    fn tool_diagnostics_count_codex_tool_definitions_without_names() {
+        let request = json!({
+            "tools": [
+                {"type": "function", "name": "read_private_file"},
+                {"type": "namespace", "name": "collaboration", "tools": [
+                    {"type": "function", "name": "spawn_agent"},
+                    {"type": "function", "name": "wait_agent"}
+                ]}
+            ],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "custom", "name": "apply_patch"}]
+            }],
+            "response": {
+                "tools": [{"type": "function", "name": "hidden_function"}]
+            },
+            "tool_choice": {"type": "allowed_tools", "tools": []}
+        });
+
+        let diagnostics = tool_use_diagnostics(&request);
+        let forwarded =
+            with_forwarded_tool_diagnostics(&diagnostics, &serde_json::to_vec(&request).unwrap());
+
+        assert_eq!(diagnostics.client_tool_count, 5);
+        assert_eq!(diagnostics.tool_choice, ToolChoiceMode::AllowedTools);
+        assert_eq!(forwarded.forwarded_tool_count, 5);
+        assert!(!serde_json::to_string(&forwarded)
+            .unwrap()
+            .contains("read_private_file"));
     }
 
     #[test]

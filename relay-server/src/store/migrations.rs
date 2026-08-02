@@ -159,6 +159,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "030_source_priced_key_rollups",
         sql: include_str!("../../migrations/030_source_priced_key_rollups.sql"),
     },
+    Migration {
+        version: 31,
+        name: "031_tool_use_diagnostics",
+        sql: include_str!("../../migrations/031_tool_use_diagnostics.sql"),
+    },
 ];
 
 struct Migration {
@@ -537,7 +542,8 @@ mod tests {
                 (27, "027_remove_quota_refresh_interval".to_string()),
                 (28, "028_applied_service_tier".to_string()),
                 (29, "029_candidate_usage_rollups".to_string()),
-                (30, "030_source_priced_key_rollups".to_string())
+                (30, "030_source_priced_key_rollups".to_string()),
+                (31, "031_tool_use_diagnostics".to_string())
             ]
         );
         drop(store);

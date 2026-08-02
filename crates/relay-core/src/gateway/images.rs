@@ -789,6 +789,7 @@ fn image_usage_event(
         status.as_u16(),
         category,
         started.elapsed().as_millis() as u64,
+        crate::ToolUseDiagnostics::default(),
     )
 }
 

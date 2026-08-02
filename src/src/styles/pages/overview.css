@@ -526,6 +526,18 @@
   text-overflow: ellipsis;
 }
 
+.detail-list .detail-copy-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-copy-value code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .detail-list > .detail-section-heading {
   grid-template-columns: 1fr;
   min-height: 28px;

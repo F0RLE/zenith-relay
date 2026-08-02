@@ -20,7 +20,7 @@ use zenith_relay_core::{
     ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 30;
+pub const SERVER_SCHEMA_VERSION: u32 = 31;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";

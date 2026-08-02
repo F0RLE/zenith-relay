@@ -40,6 +40,7 @@ pub use sources::{
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
-    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, UsageCallback, UsageEvent,
-    UsageValue, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
+    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, TerminalOutputKind, ToolChoiceMode,
+    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

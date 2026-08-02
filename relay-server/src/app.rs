@@ -1347,6 +1347,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: zenith_relay_core::ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),

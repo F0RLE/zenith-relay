@@ -1204,6 +1204,26 @@ test("pool summary shows routing states and current errors", async ({ page }) =>
   await expect(summary.locator("div").nth(3)).toHaveText("Disabled0");
 });
 
+for (const mode of ["local", "remote"] as const) {
+  test(`${mode} pool displays the resolved model instead of a Codex routing alias`, async ({ page }) => {
+    await installTauriMock(page, {
+      mode,
+      locale: "en",
+      populated: true,
+      usageRequestedModel: "zenith/Z3B0LTUuNA",
+      usageResolvedModel: "gpt-5.4",
+    });
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+    const routing = page.locator(".pool-priority-label");
+    const member = page.locator('[data-member-label="Personal Plus"]');
+    await expect(routing.getByText("Latest model: gpt-5.4", { exact: true })).toBeVisible();
+    await expect(routing.locator("[data-latest-model]")).toHaveAttribute("data-latest-model", "gpt-5.4");
+    await expect(member.locator(".pool-member-kind-icon")).toHaveAttribute("aria-label", "Waiting for quota");
+  });
+}
+
 test("pool account avatar alone carries routing and quota refresh status", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, quotaRefreshStatus: "refreshing" });
   await page.goto("/");
@@ -1355,7 +1375,10 @@ test("pool priority follows the backend scheduler order without display heuristi
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.locator(".pool-sort-menu")).toHaveCount(0);
-  await expect(page.locator(".pool-priority-label")).toHaveText("Usage orderActive now: Pro account");
+  const priority = page.locator(".pool-priority-label");
+  await expect(priority).toContainText("Usage order");
+  await expect(priority).toContainText("Active now: Pro account");
+  await expect(priority.locator("[data-latest-model]")).toHaveText("Latest model: gpt-5.4");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-member-label", "Pro account");
   await expect(page.locator(".pool-member-card").first()).toHaveAttribute("data-current", "true");
   const names = () => page.locator(".pool-member-card").evaluateAll((items) => items.map((item) => item.getAttribute("data-member-label") ?? ""));
@@ -1367,7 +1390,10 @@ test("pool keeps the last completed route visible after its lease is released", 
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 4, usageAccountIndex: 3, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator(".pool-priority-label")).toHaveText("Usage orderLast request: Pro account");
+  const priority = page.locator(".pool-priority-label");
+  await expect(priority).toContainText("Usage order");
+  await expect(priority).toContainText("Last request: Pro account");
+  await expect(priority.locator("[data-latest-model]")).toHaveText("Latest model: gpt-5.4");
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
@@ -1428,7 +1454,10 @@ test("local pool refreshes all account quotas without an interval setting", asyn
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await expect(page.getByText("Updated: 3 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
-  await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
+  await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute(
+    "aria-label",
+    "In rotation · The latest requested model gpt-5.4 is unavailable on this member.",
+  );
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "refresh_all_local_account_quotas")).toBe(true);
@@ -1846,6 +1875,31 @@ test("usage request columns reorder, resize, and open details only from the requ
   await expect(page.locator(".usage-request-table")).toHaveAttribute("data-resized", "true");
   await page.setViewportSize({ width: 840, height: 560 });
   expect(await page.locator(".usage-request-table").evaluate((element) => element.parentElement!.scrollWidth <= element.parentElement!.clientWidth)).toBe(true);
+});
+
+test("usage details warn when forwarded tools yield a text-only response", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageToolDiagnostics: "forwarded_text_only" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Request details" });
+  await expect(dialog.getByText("Tool diagnostics", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Tools received from client", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Tools forwarded upstream", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
+  await expect(dialog.getByText(/Relay forwarded 3 tool definitions/)).toBeVisible();
+});
+
+test("usage details do not blame the upstream when tools were not forwarded", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageToolDiagnostics: "dropped_text_only" });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Usage", exact: true }).click();
+  await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
+
+  await expect(page.getByRole("dialog", { name: "Request details" }).getByText(/Relay forwarded \d+ tool definitions/)).toHaveCount(0);
 });
 
 test("local usage omits the obsolete ChatGPT routing banner", async ({ page }) => {
@@ -2483,8 +2537,9 @@ test("open request details follow the terminal fallback result", async ({ page }
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Request details" });
+  const httpStatus = dialog.locator(".detail-list > div").filter({ hasText: "HTTP status" }).locator("dd");
   await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Failed");
-  await expect(dialog.locator(".detail-list > div").nth(5).locator("dd")).toHaveText("502");
+  await expect(httpStatus).toHaveText("502");
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -2501,7 +2556,7 @@ test("open request details follow the terminal fallback result", async ({ page }
   await emitTauriEvent(page, "zenith-state-changed", null);
 
   await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Success");
-  await expect(dialog.locator(".detail-list > div").nth(5).locator("dd")).toHaveText("200");
+  await expect(httpStatus).toHaveText("200");
 });
 
 test("switching modes ignores a late failure from the previous mode", async ({ page }) => {

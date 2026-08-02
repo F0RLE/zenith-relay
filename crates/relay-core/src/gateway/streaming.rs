@@ -24,7 +24,9 @@ const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
 const SSE_PRE_OUTPUT_RETRY_GRACE: Duration = Duration::from_secs(30);
 
-const SSE_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
+// A slow provider can legitimately take longer than 30 seconds to produce its
+// first event.  Do not reject it sooner than an already-running stream.
+const SSE_FIRST_BYTE_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -172,6 +174,9 @@ impl<S> UsageStream<S> {
         if let Some(category) = category {
             event.error_category = Some(category.to_string());
         }
+        if event.success {
+            event.tool_use.finish();
+        }
         if !event.success && event.http_status < 400 {
             event.http_status = event
                 .error_category
@@ -270,6 +275,11 @@ impl<S> UsageStream<S> {
                 self.sse_pending.clear();
                 self.fail_stream("stream_invalid");
                 return;
+            }
+            if let Some(payload) = terminal.payload.as_ref() {
+                if let Some(current) = self.event.as_mut() {
+                    current.tool_use.observe_stream_payload(payload);
+                }
             }
             if terminal.has_output_delta
                 && self
@@ -397,6 +407,7 @@ pub(super) struct TerminalEvent {
     pub(super) response_id: Option<String>,
     pub(super) response: Option<Value>,
     pub(super) output_item: Option<Value>,
+    pub(super) payload: Option<Value>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -447,6 +458,7 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             response_id: None,
             response: None,
             output_item: None,
+            payload: None,
         };
     }
     let Ok(value) = serde_json::from_slice::<Value>(&data) else {
@@ -499,6 +511,7 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         response_id,
         response,
         output_item,
+        payload: Some(value),
     }
 }
 
@@ -598,6 +611,11 @@ mod tests {
         assert!(terminal.cooldown_hint.global);
     }
 
+    #[test]
+    fn first_sse_event_gets_the_same_patience_as_an_active_stream() {
+        assert_eq!(SSE_FIRST_BYTE_TIMEOUT, SSE_IDLE_TIMEOUT);
+    }
+
     #[tokio::test]
     async fn oversized_sse_event_is_recorded_as_failure() {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -621,6 +639,7 @@ mod tests {
                 success: true,
                 http_status: 200,
                 error_category: None,
+                tool_use: crate::ToolUseDiagnostics::default(),
                 cooldown_scope: None,
                 retry_at_ms: None,
                 consecutive_failures: Some(0),

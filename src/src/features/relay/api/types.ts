@@ -465,6 +465,15 @@ export type RoutingDiagnostics = {
   dispatchesBefore: number;
 };
 
+export type ToolUseDiagnostics = {
+  clientToolCount: number;
+  forwardedToolCount: number;
+  toolChoice: "unspecified" | "auto" | "required" | "none" | "allowed_tools" | "specific";
+  toolCallCount: number;
+  textOutput: boolean;
+  terminalOutput: "unknown" | "empty" | "text" | "tool_call" | "mixed";
+};
+
 export type LocalUsage = {
   id: number;
   createdAt: string;
@@ -482,6 +491,7 @@ export type LocalUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs: number | null;
   generationMs: number | null;
@@ -587,6 +597,7 @@ export type RemoteUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs?: number | null;
   generationMs?: number | null;

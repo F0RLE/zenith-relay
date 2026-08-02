@@ -4,12 +4,15 @@ use super::errors::{
     rate_limit_body_hint_value, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
-use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
+use super::request::{
+    forwarded_codex_headers, tool_use_diagnostics, with_forwarded_tool_diagnostics,
+    CODEX_RESPONSES_LITE_HEADER,
+};
 use super::response::{apply_usage, emit_usage, usage_event};
 use super::streaming::has_output_delta;
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
-use crate::{GatewayRuntime, UsageEvent, WireApi};
+use crate::{GatewayRuntime, ToolUseDiagnostics, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -206,6 +209,13 @@ impl ClientRequest {
         }
         serde_json::to_string(&value)
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
+    }
+
+    fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {
+        let client = tool_use_diagnostics(&self.value);
+        self.payload_for(route)
+            .map(|payload| with_forwarded_tool_diagnostics(&client, payload.as_bytes()))
+            .unwrap_or(client)
     }
 
     fn has_previous_response_id(&self) -> bool {
@@ -745,6 +755,7 @@ fn record_connect_failure_with_hint(
         failure.status.as_u16(),
         Some(failure.category.to_string()),
         started.elapsed().as_millis() as u64,
+        request.tool_use_for(route),
     );
     apply_failure_state(&mut event, state);
     emit_usage(runtime, event);
@@ -771,6 +782,7 @@ fn record_connect_affinity_miss(
             status.as_u16(),
             Some("response_affinity_miss".to_string()),
             started.elapsed().as_millis() as u64,
+            request.tool_use_for(route),
         ),
     );
 }
@@ -796,6 +808,7 @@ fn record_connect_rejection(
             failure.status.as_u16(),
             Some(failure.category.to_string()),
             started.elapsed().as_millis() as u64,
+            request.tool_use_for(route),
         ),
     );
 }
@@ -880,6 +893,7 @@ async fn bridge(
         StatusCode::OK.as_u16(),
         None,
         0,
+        connected.request.tool_use_for(&connected.route),
     );
     let upstream_candidate_id = connected.route.candidate_id.clone();
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
@@ -1122,6 +1136,7 @@ async fn start_next_request(
             StatusCode::OK.as_u16(),
             None,
             0,
+            request.tool_use_for(&route),
         );
         state.lease = Some(lease);
         state.in_flight = Some(InFlight {
@@ -1153,6 +1168,7 @@ async fn start_next_request(
         StatusCode::OK.as_u16(),
         None,
         0,
+        request.tool_use_for(&route),
     );
     let _ = upstream
         .send(UpstreamMessage::Close {
@@ -1246,6 +1262,7 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
     };
     let event_type = value.get("type").and_then(Value::as_str);
     if let Some(in_flight) = state.in_flight.as_mut() {
+        in_flight.event.tool_use.observe_stream_payload(&value);
         if has_output_delta(&value, event_type) && in_flight.event.ttft_ms.is_none() {
             in_flight.event.ttft_ms = Some(in_flight.started.elapsed().as_millis() as u64);
         }
@@ -1303,6 +1320,9 @@ fn finish_terminal(
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     in_flight.event.success = success;
+    if success {
+        in_flight.event.tool_use.finish();
+    }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
         terminal.status.unwrap_or(if success {

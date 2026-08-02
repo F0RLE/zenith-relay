@@ -44,7 +44,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod test_support {
     use crate::runtime::DefaultServiceTier;
-    use crate::UsageEvent;
+    use crate::{ToolUseDiagnostics, UsageEvent};
 
     pub(super) fn test_usage_event() -> UsageEvent {
         UsageEvent {
@@ -63,6 +63,7 @@ mod test_support {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),

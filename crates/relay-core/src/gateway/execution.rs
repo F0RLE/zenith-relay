@@ -10,8 +10,9 @@ use super::now_ms;
 use super::request::{
     account_endpoint_url, candidate_protocols, contains_tool_call_output, forwarded_codex_headers,
     normalize_account_request, normalize_account_request_body, normalize_service_tier, request_id,
-    request_service_tier, try_recover_encrypted_content, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_json_response, proxy_response,
@@ -51,6 +52,7 @@ pub(super) async fn execute_account_endpoint(
 ) -> Response<Body> {
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
+    let client_tool_use = tool_use_diagnostics(&request);
     let prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -64,14 +66,12 @@ pub(super) async fn execute_account_endpoint(
     let mut tried = account_only_exclusions.clone();
     let mut attempt = 0_u16;
     let mut owner_recovery_confirmed = false;
-    let mut exhaust_pool = false;
     let mut encrypted_content_recovered = false;
     let mut last_failure = None;
 
-    while exhaust_pool
-        || usize::from(attempt)
-            < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-                + usize::from(encrypted_content_recovered)
+    while usize::from(attempt)
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
         let Some((selected, lease)) = runtime.select_and_reserve(
             &key,
@@ -119,6 +119,7 @@ pub(super) async fn execute_account_endpoint(
                 )
             }
         };
+        let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
@@ -162,6 +163,7 @@ pub(super) async fn execute_account_endpoint(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -170,7 +172,6 @@ pub(super) async fn execute_account_endpoint(
             }
         };
         let status = upstream.status();
-        exhaust_pool |= status == StatusCode::TOO_MANY_REQUESTS;
         let response_headers = upstream.headers().clone();
         let bytes = match crate::runtime::collect_limited(upstream, endpoint.response_limit()).await
         {
@@ -194,6 +195,7 @@ pub(super) async fn execute_account_endpoint(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -213,6 +215,7 @@ pub(super) async fn execute_account_endpoint(
                 status.as_u16(),
                 Some(failure.category.to_string()),
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             if failure.category == "upstream_encrypted_content_invalid"
                 && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
@@ -266,6 +269,7 @@ pub(super) async fn execute_account_endpoint(
             status.as_u16(),
             None,
             started.elapsed().as_millis() as u64,
+            tool_use,
         );
         populate_tokens(&mut event, &bytes);
         let recovered = runtime.record_success_with_metrics(
@@ -453,11 +457,11 @@ async fn execute_request(
     attempt_offset: u16,
 ) -> Response<Body> {
     let service_tier = request_service_tier(&request);
+    let client_tool_use = tool_use_diagnostics(&request);
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
-    let mut exhaust_pool = false;
     let mut confirmed_response_missing = false;
     let mut encrypted_content_recovered = false;
     let mut last_failure = None;
@@ -471,10 +475,9 @@ async fn execute_request(
         request.get("prompt_cache_key").and_then(Value::as_str),
     );
 
-    while exhaust_pool
-        || attempts_this_run
-            < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-                + usize::from(encrypted_content_recovered)
+    while attempts_this_run
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
         let selected = runtime.select_and_reserve(
             &key,
@@ -572,6 +575,7 @@ async fn execute_request(
                 }
             }
         };
+        let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
         // Cross-protocol adapters translate complete payloads, so stream
         // requests are returned as one terminal SSE sequence.
@@ -620,6 +624,7 @@ async fn execute_request(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -629,7 +634,6 @@ async fn execute_request(
         };
 
         let status = upstream.status();
-        exhaust_pool |= status == StatusCode::TOO_MANY_REQUESTS;
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
             let mut event = usage_event(
@@ -642,6 +646,7 @@ async fn execute_request(
                 status.as_u16(),
                 None,
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             let bytes = match crate::runtime::collect_limited(
                 upstream,
@@ -751,6 +756,7 @@ async fn execute_request(
                             "upstream_body".to_string()
                         }),
                         started.elapsed().as_millis() as u64,
+                        tool_use.clone(),
                     );
                     apply_failure_state(&mut event, state);
                     emit_usage(&runtime, event);
@@ -762,7 +768,6 @@ async fn execute_request(
                 match completed_account_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        exhaust_pool |= failure.status == StatusCode::TOO_MANY_REQUESTS;
                         let state =
                             failure_category_requires_cooldown(failure.category).then(|| {
                                 apply_attempt_failure_cooldown(
@@ -784,6 +789,7 @@ async fn execute_request(
                             failure.status.as_u16(),
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
+                            tool_use.clone(),
                         );
                         if failure.category == "upstream_encrypted_content_invalid"
                             && try_recover_encrypted_content(
@@ -836,6 +842,7 @@ async fn execute_request(
                             failure.status.as_u16(),
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
+                            tool_use.clone(),
                         );
                         if let Some(state) = state {
                             apply_failure_state(&mut event, state);
@@ -873,6 +880,7 @@ async fn execute_request(
                             failure.status.as_u16(),
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
+                            tool_use.clone(),
                         );
                         if let Some(state) = state {
                             apply_failure_state(&mut event, state);
@@ -898,6 +906,7 @@ async fn execute_request(
                 status.as_u16(),
                 None,
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             populate_tokens(&mut event, &bytes);
             let recovered = runtime.record_success_with_metrics(
@@ -1010,6 +1019,7 @@ async fn execute_request(
                         status.as_u16(),
                         None,
                         0,
+                        tool_use.clone(),
                     ),
                     started,
                     completion,
@@ -1017,7 +1027,6 @@ async fn execute_request(
                 return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
             Err(failure) => {
-                exhaust_pool |= failure.status == StatusCode::TOO_MANY_REQUESTS;
                 let state = failure_category_requires_cooldown(failure.category).then(|| {
                     apply_attempt_failure_cooldown(
                         &runtime,
@@ -1038,6 +1047,7 @@ async fn execute_request(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 if failure.category == "upstream_encrypted_content_invalid"
                     && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
