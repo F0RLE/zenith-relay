@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { ClientKeyCreateInput, ClientWireApi, GeneratedClientKey, GeneratedLocalKey, KeySummary, LocalGatewayKeyInput, RuntimeSnapshot } from "../../api/types";
 import { relayCommands } from "../../api/commands";
 import { ActionMenu, ActionMenuItem, Button, Dialog, IconButton, StatusIcon, copyText } from "../../components/Ui";
-import { effectiveSourceProtocolBindings } from "../../components/SourceProtocolBindingsEditor";
+import { effectiveSourceProtocolBindings } from "../../sourceProtocolBindings";
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 

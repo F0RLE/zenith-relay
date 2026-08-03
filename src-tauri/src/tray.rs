@@ -1,10 +1,13 @@
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, State, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
 };
 
 use crate::local_pool::{commands::gateway, DesktopState};
@@ -14,6 +17,7 @@ const TRAY_ID: &str = "zenith-relay";
 
 pub struct AppState {
     allow_exit: Mutex<bool>,
+    opening_main_window: AtomicBool,
 }
 
 struct TrayUi {
@@ -26,6 +30,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             allow_exit: Mutex::new(false),
+            opening_main_window: AtomicBool::new(false),
         }
     }
 
@@ -40,6 +45,16 @@ impl AppState {
             .lock()
             .map(|allow_exit| !*allow_exit)
             .unwrap_or(true)
+    }
+
+    fn try_start_main_window_open(&self) -> bool {
+        self.opening_main_window
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn finish_main_window_open(&self) {
+        self.opening_main_window.store(false, Ordering::Release);
     }
 }
 
@@ -179,30 +194,64 @@ fn tooltip_text(running: bool) -> String {
 }
 
 pub fn show_main_window(app: &AppHandle) {
-    let window = if let Some(window) = app.get_webview_window("main") {
-        window
-    } else {
-        let Some(config) = app
-            .config()
-            .app
-            .windows
-            .iter()
-            .find(|window| window.label == "main")
-        else {
-            return;
-        };
-        match WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build()) {
-            Ok(window) => window,
-            Err(_) => return,
-        }
+    if let Some(window) = app.get_webview_window("main") {
+        reveal_main_window(&window);
+        return;
+    }
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
     };
+    if !state.try_start_main_window_open() {
+        return;
+    }
+
+    // WebView2 window creation from a synchronous tray or single-instance
+    // handler can deadlock on Windows. Run the creation after that handler
+    // returns and coalesce repeated clicks while it is in flight.
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let window = app
+            .get_webview_window("main")
+            .map(Ok)
+            .unwrap_or_else(|| create_main_window(&app));
+        if let Ok(window) = window {
+            reveal_main_window(&window);
+        }
+        if let Some(state) = app.try_state::<AppState>() {
+            state.finish_main_window_open();
+        }
+    });
+}
+
+fn reveal_main_window(window: &WebviewWindow<tauri::Wry>) {
+    let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
 }
 
+/// Creates the primary webview with the persistent data directory used by the
+/// initial application window. The native app, tray, and local gateway remain
+/// alive when this window is later destroyed.
+pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri::Wry>> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
+    let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
+    WebviewWindowBuilder::from_config(app, config)?
+        .data_directory(webview_data)
+        .build()
+}
+
+/// Releases the WebView renderer while preserving the native process, tray,
+/// managed state, and local gateway. Opening Relay from the tray recreates it.
 pub fn close_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
+        let _ = window.destroy();
     }
 }
 
@@ -214,5 +263,15 @@ mod tests {
     fn tray_status_counts_only_running_pool_members() {
         assert!(status_text(true, 3).ends_with('3'));
         assert!(!status_text(false, 3).contains('3'));
+    }
+
+    #[test]
+    fn main_window_opening_is_single_flight() {
+        let state = AppState::new();
+
+        assert!(state.try_start_main_window_open());
+        assert!(!state.try_start_main_window_open());
+        state.finish_main_window_open();
+        assert!(state.try_start_main_window_open());
     }
 }

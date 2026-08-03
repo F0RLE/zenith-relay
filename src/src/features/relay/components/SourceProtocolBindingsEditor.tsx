@@ -2,182 +2,22 @@ import { Braces, MessageSquareText, Route, Sparkles } from "lucide-react";
 import { type CSSProperties, useId } from "react";
 import { useTranslation } from "react-i18next";
 import type {
-  MessagesReasoningMode,
   SourceAdapter,
   SourceProtocolBinding,
-  SourceSummary,
   SourceWireApi,
 } from "../api/types";
-
-export const sourceWireApis: SourceWireApi[] = [
-  "responses",
-  "messages",
-  "chat_completions",
-];
+import {
+  normalizedAdapter,
+  normalizedBindings,
+  normalizedModelIds,
+  sourceWireApis,
+} from "../sourceProtocolBindings";
 
 const protocolPresentation = {
   responses: { icon: Sparkles, endpoint: "/responses" },
   messages: { icon: MessageSquareText, endpoint: "/messages" },
   chat_completions: { icon: Braces, endpoint: "/chat/completions" },
 } as const;
-
-function isSourceWireApi(value: string): value is SourceWireApi {
-  return sourceWireApis.includes(value as SourceWireApi);
-}
-
-const supportedMessagesReasoningModes: readonly MessagesReasoningMode[] = [
-  "disabled",
-  "budget",
-  "adaptive",
-];
-
-function normalizedAdapter(binding: SourceProtocolBinding): SourceAdapter {
-  return binding.adapter === "responses_to_messages" && binding.wireApi === "responses"
-    ? binding.adapter
-    : "native";
-}
-
-function normalizedReasoningMode(
-  binding: SourceProtocolBinding,
-  adapter = normalizedAdapter(binding),
-): MessagesReasoningMode {
-  return adapter === "responses_to_messages"
-    && supportedMessagesReasoningModes.includes(binding.reasoningMode ?? "disabled")
-    ? binding.reasoningMode ?? "disabled"
-    : "disabled";
-}
-
-function normalizedModelIds(modelIds: string[], availableModels: string[]) {
-  const knownModels = new Map(
-    availableModels.map((model) => [model.toLowerCase(), model] as const),
-  );
-  const seen = new Set<string>();
-  return modelIds.flatMap((model) => {
-    const normalized = model.trim().toLowerCase();
-    const known = knownModels.get(normalized);
-    if (!known || seen.has(normalized)) return [];
-    seen.add(normalized);
-    return [known];
-  });
-}
-
-function normalizedBindings(bindings: SourceProtocolBinding[], availableModels: string[]) {
-  const seen = new Set<string>();
-  return bindings.flatMap((binding) => {
-    const adapter = normalizedAdapter(binding);
-    const routeKey = `${binding.wireApi}:${adapter}`;
-    if (!isSourceWireApi(binding.wireApi) || seen.has(routeKey)) return [];
-    seen.add(routeKey);
-    const modelIds = binding.modelIds.length
-      ? normalizedModelIds(binding.modelIds, availableModels)
-      : [];
-    return [{
-      wireApi: binding.wireApi,
-      modelIds,
-      adapter,
-      reasoningMode: normalizedReasoningMode(binding, adapter),
-    }];
-  });
-}
-
-/**
- * Legacy source records keep a single `wireApi`. Treat them as one virtual
- * binding in the UI so an edit never has to guess a protocol from a provider
- * name or silently widen the source's surface.
- */
-export function effectiveSourceProtocolBindings(
-  source: Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">,
-): SourceProtocolBinding[] {
-  const configured = source.protocolBindings?.length
-    ? normalizedBindings(source.protocolBindings, source.models)
-    : [];
-  return configured.length
-    ? configured
-    : [{ wireApi: source.wireApi, modelIds: [...source.models] }];
-}
-
-export function sourceSupportsWireApi(
-  source: Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">,
-  wireApi: SourceWireApi,
-) {
-  return effectiveSourceProtocolBindings(source).some(
-    (binding) => binding.wireApi === wireApi && binding.modelIds.length > 0,
-  );
-}
-
-/**
- * A direct ChatGPT profile bypasses Relay entirely. It can use a real
- * Responses endpoint, but it cannot execute a Relay-owned bridge.
- */
-export function sourceSupportsNativeResponses(
-  source: Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">,
-) {
-  return effectiveSourceProtocolBindings(source).some(
-    (binding) =>
-      binding.wireApi === "responses"
-      && normalizedAdapter(binding) === "native"
-      && binding.modelIds.length > 0,
-  );
-}
-
-export function SourceProtocolBindingsSummary({
-  source,
-}: {
-  source: Pick<SourceSummary, "wireApi" | "protocolBindings" | "models">;
-}) {
-  const { t } = useTranslation();
-  const hasRoute = effectiveSourceProtocolBindings(source).some(
-    (binding) => binding.modelIds.length > 0,
-  );
-  return (
-    <span className="source-protocol-summary">
-      {t(hasRoute ? "sources.routingSummary" : "sources.routingPending")}
-    </span>
-  );
-}
-
-/**
- * The route table is Relay configuration, not a normal setup choice. Keep the
- * declared capabilities visible only when an operator needs to verify an
- * unusual source, while the default flow remains "connect source, pick model".
- */
-export function SourceProtocolRoutingDisclosure({
-  models,
-  value,
-  onChange,
-  wireApis = sourceWireApis,
-}: {
-  models: string[];
-  value: SourceProtocolBinding[];
-  onChange: (value: SourceProtocolBinding[]) => void;
-  wireApis?: readonly SourceWireApi[];
-}) {
-  const { t } = useTranslation();
-  const titleId = useId();
-  return (
-    <section className="source-routing-disclosure" aria-labelledby={titleId}>
-      <div className="source-routing-overview">
-        <span className="source-routing-icon" aria-hidden="true"><Route /></span>
-        <span>
-          <strong id={titleId}>{t("sources.routingTitle")}</strong>
-          <small>{t("sources.modelRoutingHint")}</small>
-        </span>
-      </div>
-      <details className="source-routing-details">
-        <summary>
-          <span>{t("sources.routingAdvanced")}</span>
-          <small>{t("sources.routingAdvancedHint")}</small>
-        </summary>
-        <SourceProtocolBindingsEditor
-          models={models}
-          value={value}
-          onChange={onChange}
-          wireApis={wireApis}
-        />
-      </details>
-    </section>
-  );
-}
 
 export function SourceProtocolBindingsEditor({
   models,
@@ -326,49 +166,49 @@ export function SourceProtocolBindingsEditor({
         <p>{t("sources.protocolsHint")}</p>
       </header>
       <div className="source-route-matrix" style={matrixStyle}>
-          <div className="source-route-matrix-heading">
-            <span>{t("sources.modelColumn")}</span>
-            <div className="source-route-format-headings">
-              {wireApis.map((wireApi) => {
-                const selected = hasNativeProtocol(wireApi);
-                const { icon: Icon, endpoint } = protocolPresentation[wireApi];
-                return (
-                  <label
-                    key={wireApi}
-                    className={`source-route-format-heading ${selected ? "selected" : ""}`}
-                    data-wire-api={wireApi}
-                    title={`POST ${endpoint}`}
-                  >
-                    <span className="source-route-format-icon" aria-hidden="true"><Icon /></span>
-                    <span>
-                      <strong>{t(`sources.protocolCards.${wireApi}.title`)}</strong>
-                      <small>{t(`sources.protocolCards.${wireApi}.hint`)}</small>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={selected}
-                      aria-label={t("sources.protocolAvailableControl", {
-                        protocol: t(`sources.protocolCards.${wireApi}.title`),
-                      })}
-                      onChange={(event) => setNativeProtocol(wireApi, event.target.checked)}
-                    />
-                  </label>
-                );
-              })}
-              {showsBridgeColumn
-                ? <div className="source-route-bridge-heading">
-                  <span className="source-route-format-icon" aria-hidden="true"><Route /></span>
+        <div className="source-route-matrix-heading">
+          <span>{t("sources.modelColumn")}</span>
+          <div className="source-route-format-headings">
+            {wireApis.map((wireApi) => {
+              const selected = hasNativeProtocol(wireApi);
+              const { icon: Icon, endpoint } = protocolPresentation[wireApi];
+              return (
+                <label
+                  key={wireApi}
+                  className={`source-route-format-heading ${selected ? "selected" : ""}`}
+                  data-wire-api={wireApi}
+                  title={`POST ${endpoint}`}
+                >
+                  <span className="source-route-format-icon" aria-hidden="true"><Icon /></span>
                   <span>
-                    <strong>{t("sources.bridgeColumnTitle")}</strong>
-                    <small>{t("sources.bridgeColumnHint")}</small>
+                    <strong>{t(`sources.protocolCards.${wireApi}.title`)}</strong>
+                    <small>{t(`sources.protocolCards.${wireApi}.hint`)}</small>
                   </span>
-                </div>
-                : null}
-            </div>
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    aria-label={t("sources.protocolAvailableControl", {
+                      protocol: t(`sources.protocolCards.${wireApi}.title`),
+                    })}
+                    onChange={(event) => setNativeProtocol(wireApi, event.target.checked)}
+                  />
+                </label>
+              );
+            })}
+            {showsBridgeColumn
+              ? <div className="source-route-bridge-heading">
+                <span className="source-route-format-icon" aria-hidden="true"><Route /></span>
+                <span>
+                  <strong>{t("sources.bridgeColumnTitle")}</strong>
+                  <small>{t("sources.bridgeColumnHint")}</small>
+                </span>
+              </div>
+              : null}
           </div>
-          {models.length
-            ? <div className="source-route-model-list">
-              {models.map((model) => {
+        </div>
+        {models.length
+          ? <div className="source-route-model-list">
+            {models.map((model) => {
               const bridgeChecked = modelIsSelected(bridgeBinding, model);
               const directResponsesChecked = modelIsSelected(nativeResponsesBinding, model);
               const bridgeIsLastAvailableRoute = bridgeChecked
@@ -462,9 +302,9 @@ export function SourceProtocolBindingsEditor({
                   </div>
                 </div>
               );
-              })}
-            </div>
-            : null}
+            })}
+          </div>
+          : null}
       </div>
       {showsBridgeColumn
         ? <p className="source-route-bridge-note">{t("sources.bridgeHint")}</p>

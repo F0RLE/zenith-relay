@@ -2,7 +2,7 @@ import { Cloud, ExternalLink, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SourceProtocolBinding, SourceWireApi } from "../api/types";
 import { openApiKeyPage } from "../../../platform/desktop";
-import { SourceProtocolRoutingDisclosure } from "./SourceProtocolBindingsEditor";
+import { SourceProtocolRoutingDisclosure } from "./SourceProtocolRoutingDisclosure";
 import { SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";

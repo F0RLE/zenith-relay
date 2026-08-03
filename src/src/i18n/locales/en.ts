@@ -924,6 +924,7 @@ const relayEn = {
     priorityEmpty: "No route available",
     latestModel: "Latest model: {{model}}",
     latestModelUnknown: "No request has selected a model yet",
+    readyModels: "Available now via {{member}}: {{models}}",
     memberStatus: {
       rotation: "In rotation",
       quotaWait: "Waiting for quota",

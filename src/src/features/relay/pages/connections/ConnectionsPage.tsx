@@ -5,7 +5,15 @@ import { useTranslation } from "react-i18next";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
 import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
-import { effectiveSourceProtocolBindings, SourceProtocolBindingsSummary, SourceProtocolRoutingDisclosure, sourceSupportsNativeResponses, sourceSupportsWireApi } from "../../components/SourceProtocolBindingsEditor";
+import {
+  SourceProtocolBindingsSummary,
+  SourceProtocolRoutingDisclosure,
+} from "../../components/SourceProtocolRoutingDisclosure";
+import {
+  effectiveSourceProtocolBindings,
+  sourceSupportsNativeResponses,
+  sourceSupportsWireApi,
+} from "../../sourceProtocolBindings";
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import {
   Button,

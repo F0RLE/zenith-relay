@@ -13,6 +13,7 @@ export type MockOptions = {
   staleAccountError?: boolean;
   accountCooldown?: boolean;
   usageAccountIndex?: number;
+  usagePresent?: boolean;
   usageActive?: boolean;
   usageFailure?: boolean;
   usageUnpricedTokens?: number;
@@ -80,6 +81,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
   await page.addInitScript((input) => {
     const locale = input.locale ?? "en";
     const populated = input.populated ?? true;
+    const usagePresent = populated && input.usagePresent !== false;
     const dayMs = 24 * 60 * 60_000;
     localStorage.setItem("relay.onboarding", input.onboarding === false ? "0" : "1");
     localStorage.setItem("relay.mode", input.mode ?? "local");
@@ -296,7 +298,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       modelPrefix: null,
       wireApis: ["responses"] as Array<"responses" | "chat_completions" | "messages" | "images">,
       createdAtMs: Date.now() - 86_400_000,
-      lastUsedAtMs: Date.now() - 60_000,
+      lastUsedAtMs: usagePresent ? Date.now() - 60_000 : null,
     };
     const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
@@ -388,8 +390,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         candidateId: item.id,
         kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
         available: false,
-        inFlight: input.usageActive === false ? 0 : item.id === usageAccount.id ? 1 : 0,
-        lastUsedAtMs: item.id === usageAccount.id ? Date.now() - 1_000 : null,
+        inFlight: usagePresent && input.usageActive !== false && item.id === usageAccount.id ? 1 : 0,
+        lastUsedAtMs: usagePresent && item.id === usageAccount.id ? Date.now() - 1_000 : null,
         nextRetryAtMs: input.accountCooldown && item.id === account.id ? Date.now() + 30 * 60_000 : null,
         halfOpen: false,
         dispatches: index,
@@ -500,8 +502,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       textOutput: true,
       terminalOutput: "text",
     } : undefined;
-    let localUsage = populated ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
-    let remoteUsage = populated ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
+    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
+    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const visibleOutputTokens = Math.max(0, (item.outputTokens ?? 0) - (item.reasoningTokens ?? 0));
@@ -1102,8 +1104,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             candidateId: member.id,
             kind: "baseUrl" in member ? "api_source" as const : "oauth_account" as const,
             available: member.operationalStatus === "rotation",
-            inFlight: previous?.inFlight ?? (input.usageActive === false ? 0 : member.id === usageAccount.id ? 1 : 0),
-            lastUsedAtMs: previous?.lastUsedAtMs ?? (member.id === usageAccount.id ? Date.now() - 1_000 : null),
+            inFlight: previous?.inFlight ?? (usagePresent && input.usageActive !== false && member.id === usageAccount.id ? 1 : 0),
+            lastUsedAtMs: previous?.lastUsedAtMs ?? (usagePresent && member.id === usageAccount.id ? Date.now() - 1_000 : null),
             nextRetryAtMs: previous?.nextRetryAtMs ?? (input.accountCooldown && member.id === account.id ? Date.now() + 30 * 60_000 : null),
             halfOpen: previous?.halfOpen ?? false,
             dispatches: previous?.dispatches ?? index,

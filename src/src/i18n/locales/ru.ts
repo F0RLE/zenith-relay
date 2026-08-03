@@ -924,6 +924,7 @@ const relayRu = {
     priorityEmpty: "Нет доступного маршрута",
     latestModel: "Последняя модель: {{model}}",
     latestModelUnknown: "Ни один запрос ещё не выбрал модель",
+    readyModels: "Доступно сейчас через {{member}}: {{models}}",
     memberStatus: {
       rotation: "В ротации",
       quotaWait: "Ожидает квоту",

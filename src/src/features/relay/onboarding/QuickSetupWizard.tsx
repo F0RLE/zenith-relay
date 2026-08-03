@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
-import { sourceSupportsNativeResponses } from "../components/SourceProtocolBindingsEditor";
+import { sourceSupportsNativeResponses } from "../sourceProtocolBindings";
 import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
