@@ -517,6 +517,8 @@ mod tests {
                 wire_api: WireApi::Messages,
                 protocol_bindings: vec![zenith_relay_core::SourceProtocolBinding {
                     wire_api: WireApi::Messages,
+                    adapter: zenith_relay_core::SourceAdapter::Native,
+                    reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
                     model_ids: vec!["claude-native".into()],
                 }],
                 models: vec!["claude-native".into()],

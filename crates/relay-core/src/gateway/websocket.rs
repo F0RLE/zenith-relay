@@ -310,6 +310,11 @@ async fn connect_upstream(
         if route.wire_api != WireApi::Responses {
             continue;
         }
+        if !route.adapter.is_passthrough() {
+            drop(lease);
+            last_failure = Some(GatewayFailure::adapter_unsupported());
+            continue;
+        }
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
@@ -1576,6 +1581,16 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message,
+            cooldown_ms: 0,
+            retry_at_ms: None,
+        }
+    }
+
+    fn adapter_unsupported() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: "adapter_websocket_not_supported",
+            message: "the selected source adapter does not support Responses WebSocket transport",
             cooldown_ms: 0,
             retry_at_ms: None,
         }

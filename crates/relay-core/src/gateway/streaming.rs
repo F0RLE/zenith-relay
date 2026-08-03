@@ -7,15 +7,15 @@ use super::response::{
     CompletionCallback,
 };
 use crate::runtime::DefaultServiceTier;
-use crate::{GatewayRuntime, UsageEvent, WireApi};
+use crate::{GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, UsageEvent, WireApi};
 use axum::body::Bytes;
 use axum::http::StatusCode;
-use futures_util::{Stream, StreamExt};
+use futures_util::{stream, Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::time::{sleep, Instant as TokioInstant, Sleep};
@@ -75,6 +75,69 @@ pub(super) async fn bootstrap_stream(
     }
 }
 
+struct MessagesBridgeStreamState {
+    inner: UpstreamStream,
+    bridge: MessagesStreamBridge,
+    pending: VecDeque<Bytes>,
+    finished: bool,
+    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
+}
+
+/// Translates a native Messages SSE stream into the client-facing Responses
+/// SSE contract. The completed bridge response is published before the
+/// `response.completed` frame is yielded so the usage callback can persist the
+/// continuation without exposing native content outside the local bridge.
+pub(super) fn bridge_messages_stream(
+    first: Bytes,
+    remaining: UpstreamStream,
+    bridge: MessagesStreamBridge,
+    completed: Arc<Mutex<Option<MessagesBridgeResponse>>>,
+) -> impl Stream<Item = Result<Bytes, reqwest::Error>> + Send {
+    let inner = stream::once(async move { Ok::<Bytes, reqwest::Error>(first) }).chain(remaining);
+    stream::unfold(
+        MessagesBridgeStreamState {
+            inner: Box::pin(inner),
+            bridge,
+            pending: VecDeque::new(),
+            finished: false,
+            completed,
+        },
+        |mut state| async move {
+            loop {
+                if let Some(bytes) = state.pending.pop_front() {
+                    return Some((Ok(bytes), state));
+                }
+                if state.finished {
+                    return None;
+                }
+
+                match state.inner.next().await {
+                    Some(Ok(bytes)) => {
+                        state.bridge.push(&bytes);
+                    }
+                    Some(Err(_)) | None => {
+                        state.bridge.finish();
+                        state.finished = true;
+                    }
+                }
+
+                while let Some(bytes) = state.bridge.pop_output() {
+                    state.pending.push_back(Bytes::from(bytes));
+                }
+                if let Some(response) = state.bridge.completed().cloned() {
+                    *state
+                        .completed
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+                }
+                if state.bridge.is_terminal() {
+                    state.finished = true;
+                }
+            }
+        },
+    )
+}
+
 pub(super) struct UsageStream<S> {
     pub(super) inner: Pin<Box<S>>,
     pub(super) runtime: Option<Arc<GatewayRuntime>>,
@@ -82,6 +145,8 @@ pub(super) struct UsageStream<S> {
     pub(super) completion: CompletionCallback,
     pub(super) event: Option<UsageEvent>,
     pub(super) response_id: Option<String>,
+    pub(super) native_response: Option<Arc<Mutex<Option<Value>>>>,
+    pub(super) native_output_items: Vec<Value>,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) started: Instant,
     pub(super) sse_pending: Vec<u8>,
@@ -107,6 +172,8 @@ impl<S> UsageStream<S> {
             completion,
             event: Some(event),
             response_id: None,
+            native_response: None,
+            native_output_items: Vec::new(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
@@ -123,6 +190,7 @@ impl<S> UsageStream<S> {
         event: UsageEvent,
         started: Instant,
         completion: CompletionCallback,
+        native_response: Option<Arc<Mutex<Option<Value>>>>,
     ) -> Self {
         let callback = runtime.usage.clone();
         Self {
@@ -132,6 +200,8 @@ impl<S> UsageStream<S> {
             completion,
             event: Some(event),
             response_id: None,
+            native_response,
+            native_output_items: Vec::new(),
             cooldown_hint: RateLimitBodyHint::default(),
             started,
             sse_pending: Vec::new(),
@@ -282,8 +352,37 @@ impl<S> UsageStream<S> {
             if terminal.response_id.is_some() {
                 self.response_id = terminal.response_id;
             }
+            if let Some(output_item) = terminal.output_item {
+                self.native_output_items.push(output_item);
+            }
             match terminal.outcome {
                 Some(TerminalOutcome::Success) => {
+                    if let Some(shared) = self.native_response.as_ref() {
+                        let mut response = terminal.response.unwrap_or_else(|| {
+                            json!({
+                                "id": self.response_id,
+                                "output": self.native_output_items,
+                            })
+                        });
+                        if let Some(object) = response.as_object_mut() {
+                            object
+                                .entry("id")
+                                .or_insert_with(|| json!(self.response_id));
+                            let output_is_empty = object
+                                .get("output")
+                                .and_then(Value::as_array)
+                                .is_none_or(Vec::is_empty);
+                            if output_is_empty {
+                                object.insert(
+                                    "output".to_string(),
+                                    Value::Array(self.native_output_items.clone()),
+                                );
+                            }
+                        }
+                        *shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
+                    }
                     self.finish(None, None);
                     self.terminated = true;
                     return;
@@ -697,6 +796,34 @@ mod tests {
         assert_eq!(stream.next().await.unwrap().unwrap(), second);
         assert_eq!(stream.next().await.unwrap().unwrap(), completed);
         assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_responses_stream_capture_keeps_completed_tool_output_for_http_replay() {
+        let captured = Arc::new(Mutex::new(None));
+        let mut stream = UsageStream::new(
+            futures_util::stream::empty::<std::result::Result<Bytes, Infallible>>(),
+            Arc::new(|_| {}),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        stream.native_response = Some(captured.clone());
+        stream.ingest_sse(
+            b"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_stream_01\",\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}\n\n",
+        );
+        stream.ingest_sse(
+            b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_stream_01\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        );
+
+        let response = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("completed native stream is captured");
+        assert_eq!(response["id"], "resp_stream_01");
+        assert_eq!(response["output"][0]["type"], "function_call");
+        assert_eq!(response["output"][0]["call_id"], "call_stream_01");
     }
 
     #[tokio::test]

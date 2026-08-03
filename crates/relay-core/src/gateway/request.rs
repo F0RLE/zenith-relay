@@ -105,6 +105,20 @@ pub(super) fn forwarded_codex_headers(
     headers
 }
 
+/// A Responses-to-Messages bridge receives a Codex/Responses client request,
+/// not a native Anthropic client request. Carry only the metadata that has a
+/// defined Messages-side meaning; forwarding OpenAI/Codex headers would leak
+/// private client state into an unrelated upstream contract.
+pub(super) fn forwarded_bridge_messages_headers(client_headers: &HeaderMap) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    for name in ["user-agent", CLAUDE_CODE_SESSION_HEADER] {
+        if let Some(value) = client_headers.get(name) {
+            headers.insert(HeaderName::from_static(name), value.clone());
+        }
+    }
+    headers
+}
+
 /// For native Messages routes, forward only headers that belong to the
 /// Anthropic contract. This avoids leaking Codex/OpenAI request metadata into
 /// a different upstream protocol while retaining the version and session
@@ -1388,6 +1402,42 @@ mod tests {
             assert!(
                 !forwarded.contains_key(name),
                 "{name} must not be forwarded"
+            );
+        }
+    }
+
+    #[test]
+    fn bridged_messages_headers_do_not_forward_codex_metadata() {
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("user-agent", HeaderValue::from_static("codex-test"));
+        client_headers.insert(
+            CLAUDE_CODE_SESSION_HEADER,
+            HeaderValue::from_static("session-42"),
+        );
+        client_headers.insert(
+            "x-oai-attestation",
+            HeaderValue::from_static("private-attestation"),
+        );
+        client_headers.insert(
+            "x-openai-memgen-request",
+            HeaderValue::from_static("private-memgen"),
+        );
+        client_headers.insert("openai-beta", HeaderValue::from_static("responses=v1"));
+        client_headers.insert("anthropic-beta", HeaderValue::from_static("tools"));
+
+        let forwarded = forwarded_bridge_messages_headers(&client_headers);
+
+        assert_eq!(forwarded["user-agent"], "codex-test");
+        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
+        for name in [
+            "x-oai-attestation",
+            "x-openai-memgen-request",
+            "openai-beta",
+            "anthropic-beta",
+        ] {
+            assert!(
+                !forwarded.contains_key(name),
+                "{name} must not cross the Responses-to-Messages boundary"
             );
         }
     }

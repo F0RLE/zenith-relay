@@ -200,7 +200,7 @@ for (const scenario of [
     await page.screenshot({ path: `output/playwright/api-picker-ru-${scenario.theme}-${scenario.viewport.width}x${scenario.viewport.height}.png` });
 
     await dialog.getByRole("radio", { name: /OpenRouter/ }).click();
-    await expect(dialog.getByRole("checkbox", { name: /^Responses API/ })).toBeChecked();
+    await expect(dialog.locator(".source-route-format-heading.selected input")).toBeChecked();
     const getKey = dialog.getByRole("button", { name: "Получить API-ключ" });
     await expect(getKey).toBeVisible();
     expect(await getKey.evaluate((button) => {

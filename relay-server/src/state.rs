@@ -9,7 +9,7 @@ use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 use zenith_relay_core::{
@@ -64,16 +64,25 @@ pub struct SourceRecord {
 
 impl SourceRecord {
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        Ok(normalize_source_protocol_bindings(
+        let bindings = normalize_source_protocol_bindings(
             self.protocol_bindings.clone(),
             self.wire_api,
             &self.models,
         )
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|binding| binding.wire_api == wire_api)
-        .map(|binding| binding.model_ids)
-        .unwrap_or_default())
+        .map_err(|error| error.to_string())?;
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| binding.wire_api == wire_api)
+        {
+            for model in binding.model_ids {
+                if seen.insert(model.to_ascii_lowercase()) {
+                    models.push(model);
+                }
+            }
+        }
+        Ok(models)
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {

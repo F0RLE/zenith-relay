@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue, type ApiProviderValue } from "../components/ApiProviderForm";
+import { sourceSupportsNativeResponses } from "../components/SourceProtocolBindingsEditor";
 import { Button, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
@@ -123,7 +124,12 @@ export function QuickSetupWizard() {
       if (!ok) return;
     }
     if (step === 3 && client === "codex" && mode === "zenith") {
-      const sourceId = apiSourceId ?? runtime?.sources.find((source) => source.enabled && source.secretAvailable && source.wireApi === "responses")?.id;
+      const sourceId = apiSourceId ?? runtime?.sources.find(
+        (source) =>
+          source.enabled
+          && source.secretAvailable
+          && sourceSupportsNativeResponses(source),
+      )?.id;
       if (!sourceId) return;
       const ok = await activateCodexProfile("onboarding-client", () => relayCommands.launchCodexSource(sourceId));
       if (!ok) return;

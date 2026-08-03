@@ -14,8 +14,9 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use zenith_relay_core::gateway;
 use zenith_relay_core::{
-    DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
-    RuntimeLocalKey, RuntimeSource, SourceProtocolBinding, UsageEvent, WireApi,
+    DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey,
+    MessagesReasoningMode, ProviderSource, RuntimeLocalKey, RuntimeSource, SourceAdapter,
+    SourceProtocolBinding, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p2-local-key";
@@ -1167,10 +1168,14 @@ async fn protocol_bindings_route_each_model_only_through_its_native_endpoint() {
     mixed.protocol_bindings = vec![
         SourceProtocolBinding {
             wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             model_ids: vec!["gpt-5.4".into(), "shared-model".into()],
         },
         SourceProtocolBinding {
             wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             model_ids: vec!["gpt-5.4-mini".into(), "shared-model".into()],
         },
     ];

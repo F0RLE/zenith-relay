@@ -1,7 +1,7 @@
 use super::{restart_or_rollback, runtime_from_store, sync_gateway_or_rollback};
 use crate::local_pool::{
     accounts::proxy::COMMON_PROXY_SECRET_REF,
-    error::{CommandError, ErrorCode, LocalPoolError},
+    error::{CommandError, ErrorCode, ErrorDiagnostics, LocalPoolError},
     models::LocalPoolSnapshot,
     state::DesktopState,
     store::secret_store,
@@ -346,6 +346,12 @@ fn status_error(stage: &str, status: StatusCode) -> CommandError {
         ErrorCode::GatewayUnavailable,
         format!("{stage} failed with HTTP {}", status.as_u16()),
     )
+    .with_diagnostic(ErrorDiagnostics {
+        reason: Some(stage.to_string()),
+        status: Some(status.as_u16()),
+        retryable: Some(status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS),
+        ..ErrorDiagnostics::default()
+    })
     .into()
 }
 

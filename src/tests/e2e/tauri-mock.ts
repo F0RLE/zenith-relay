@@ -62,6 +62,12 @@ export type MockOptions = {
   profileSwitchBackupPrompt?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
+  sourceProtocolBindings?: Array<{
+    wireApi: "responses" | "messages" | "chat_completions";
+    adapter: "native" | "responses_to_messages";
+    reasoningMode: "disabled" | "budget" | "adaptive";
+    modelIds: string[];
+  }>;
 };
 
 export async function emitTauriEvent(page: Page, event: string, payload: unknown) {
@@ -113,7 +119,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       operationalStatus: "rotation" as MockOperationalStatus,
       baseUrl: "https://api.zenithmarket.dev/v1",
       wireApi: "responses" as const,
-      protocolBindings: [{ wireApi: "responses" as const, modelIds: [...sourceModels] }],
+      protocolBindings: input.sourceProtocolBindings ?? [{
+        wireApi: "responses" as const,
+        adapter: "native" as const,
+        reasoningMode: "disabled" as const,
+        modelIds: [...sourceModels],
+      }],
       models: sourceModels,
       allowedModels: [],
       excludedModels: [],
@@ -426,15 +437,35 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         ? requestedModels
         : ["gpt-5.4", "gpt-5.4-mini", "o3"];
       const requestedBindings = Array.isArray(payload.protocolBindings)
-        ? payload.protocolBindings as Array<{ wireApi?: string; modelIds?: string[] }>
+        ? payload.protocolBindings as Array<{
+          wireApi?: string;
+          adapter?: string;
+          reasoningMode?: string;
+          modelIds?: string[];
+        }>
         : [];
       const wireApi = String(payload.wireApi ?? requestedBindings[0]?.wireApi ?? source.wireApi);
       const protocolBindings = requestedBindings.length
         ? requestedBindings.map((binding) => ({
           wireApi: String(binding.wireApi ?? wireApi),
-          modelIds: binding.modelIds?.length ? [...binding.modelIds] : [...models],
+          adapter: binding.adapter === "responses_to_messages" && String(binding.wireApi ?? wireApi) === "responses"
+            ? "responses_to_messages"
+            : "native",
+          reasoningMode: binding.reasoningMode === "budget" || binding.reasoningMode === "adaptive"
+            ? binding.reasoningMode
+            : "disabled",
+          modelIds: binding.modelIds?.length
+            ? [...binding.modelIds]
+            : requestedBindings.length === 1
+              ? [...models]
+              : [],
         }))
-        : [{ wireApi, modelIds: [...models] }];
+        : [{
+          wireApi,
+          adapter: "native",
+          reasoningMode: "disabled",
+          modelIds: [...models],
+        }];
       return {
         ...structuredClone(source),
         id,
@@ -484,7 +515,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         return totals;
       }, { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } });
     }
-    let readyKey = input.readyConnected === false ? "" : "znt_synthetic_ready_key";
+    let readyKey = input.readyConnected === false ? "" : "test_zenith_source_key";
     let readyActive = Boolean(readyKey) && (input.readyActive ?? true);
     const invocations: Array<{ command: string; args: Record<string, unknown> }> = [];
     const callbacks = new Map<number, (...args: unknown[]) => unknown>();

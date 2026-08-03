@@ -38,6 +38,35 @@ describe("Relay translations", () => {
     expect(result.message).toContain("api_key=[redacted]");
   });
 
+  test("feedback diagnostics keep only bounded routing context", () => {
+    const result = sanitizeFeedbackError({
+      code: "gateway_unavailable",
+      message: "provider failed",
+      diagnostic: {
+        reason: "upstream",
+        model: "claude-opus-5",
+        source: "source_anthropic",
+        route: "/v1/messages",
+        requestId: "req_123",
+        status: 429,
+        retryable: true,
+      },
+      prompt: "must never be copied",
+    });
+
+    expect(result).toMatchObject({
+      code: "gateway_unavailable",
+      reason: "upstream",
+      model: "claude-opus-5",
+      source: "source_anthropic",
+      route: "/v1/messages",
+      requestId: "req_123",
+      status: 429,
+      retryable: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("must never be copied");
+  });
+
   test("English and Russian expose the same keys", () => {
     expect(flatten(en)).toEqual(flatten(ru));
   });

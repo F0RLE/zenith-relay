@@ -61,7 +61,7 @@ type AccountWindowEconomics = NonNullable<NonNullable<AccountSummary["economics"
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
+  const { mode, runtime, runtimeRevision, usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -107,7 +107,7 @@ export function UsagePage() {
         .finally(() => active && setUsageLoading(false));
     }, 200);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [mode, runtimeRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
+  }, [mode, runtimeRevision, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
   useEffect(() => {
     setPage(1);

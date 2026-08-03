@@ -12,6 +12,7 @@ type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
 export default function AnalyticsPanel({ range, setRange, windows, analytics, loading, error }: { range: Range; setRange: (range: Range) => void; windows: WindowBucket[]; analytics: Analytics | null; loading: boolean; error: boolean }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
+  const hasAnalytics = analytics !== null;
   const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(() => emptyTotals());
   const tokenValues = buckets.map((totals) => totals.totalTokens || null);
   const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
@@ -23,14 +24,14 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
   const apiTotal = totals.apiEquivalent;
   const rangeTabs = [{ id: "today", label: t("overview.ranges.today") }, { id: "week", label: t("overview.ranges.week") }, { id: "month", label: t("overview.ranges.month") }];
 
-  return <section className={`overview-analytics ${loading ? "loading" : ""}`} aria-busy={loading}>
+  return <section className={`overview-analytics ${loading ? "loading" : ""} ${hasAnalytics ? "has-data" : ""}`} aria-busy={loading}>
     <header className="overview-analytics-header"><div><h2>{t("overview.analytics")}</h2><p>{t("overview.analyticsHint")}</p></div><Tabs value={range} onChange={(value) => setRange(value as Range)} label={t("overview.period")} items={rangeTabs} /></header>
     {error ? <p className="overview-analytics-message error-text" role="alert">{t("overview.analyticsUnavailable")}</p> : null}
     <div className="overview-chart-stack">
-      <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading} />
-      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint", { count: new Intl.NumberFormat(locale).format(apiTotal.unpricedTokens) })} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading} />
-      <OverviewChart icon={<Timer aria-hidden />} title={t("overview.responseSpeed")} hint={t("overview.responseSpeedHint")} summary={formatDuration(averageResponse, locale)} values={responseValues} windows={windows} variant="line" tone="latency" formatValue={(value) => formatDuration(value, locale)} formatAxis={(value) => formatDuration(value, locale)} loading={loading} />
-      <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.generationSpeed")} hint={t("overview.generationSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading} />
+      <OverviewChart icon={<Activity aria-hidden />} title={t("overview.tokenUsage")} hint={t("overview.tokenUsageHint")} summary={formatCompactNumber(totals.totalTokens, locale)} values={tokenValues} windows={windows} variant="bars" tone="tokens" formatValue={(value) => t("overview.tokenValue", { value: formatFullNumber(value, locale) })} formatAxis={(value) => formatCompactNumber(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<CreditCard aria-hidden />} title={t("usage.apiEquivalent")} hint={t("overview.apiEquivalentHint", { count: new Intl.NumberFormat(locale).format(apiTotal.unpricedTokens) })} summary={formatApiEquivalent(apiTotal.pricedTokens ? apiTotal.microUsd / 1_000_000 : null, locale)} values={apiValues} windows={windows} variant="bars" tone="cost" formatValue={(value) => formatApiEquivalent(value, locale)} formatAxis={(value) => formatUsd(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Timer aria-hidden />} title={t("overview.responseSpeed")} hint={t("overview.responseSpeedHint")} summary={formatDuration(averageResponse, locale)} values={responseValues} windows={windows} variant="line" tone="latency" formatValue={(value) => formatDuration(value, locale)} formatAxis={(value) => formatDuration(value, locale)} loading={loading && !hasAnalytics} />
+      <OverviewChart icon={<Gauge aria-hidden />} title={t("overview.generationSpeed")} hint={t("overview.generationSpeedHint")} summary={formatTokenSpeed(averageSpeed, locale, t("usage.tokensPerSecondUnit"))} values={speedValues} windows={windows} variant="line" tone="speed" formatValue={(value) => formatTokenSpeed(value, locale, t("usage.tokensPerSecondUnit"))} formatAxis={(value) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value)} loading={loading && !hasAnalytics} />
     </div>
   </section>;
 }

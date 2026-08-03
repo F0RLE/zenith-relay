@@ -2,7 +2,7 @@ import { Cloud, ExternalLink, Route, Settings2, Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { SourceProtocolBinding, SourceWireApi } from "../api/types";
 import { openApiKeyPage } from "../../../platform/desktop";
-import { SourceProtocolBindingsEditor } from "./SourceProtocolBindingsEditor";
+import { SourceProtocolRoutingDisclosure } from "./SourceProtocolBindingsEditor";
 import { SecretField } from "./Ui";
 
 export type ApiProviderKind = "zenith" | "openai" | "openrouter" | "custom";
@@ -15,13 +15,39 @@ export type ApiProviderValue = {
   apiKey: string;
 };
 
+type ApiProviderDefinition = Omit<ApiProviderValue, "apiKey">;
+
 const providerOrder: ApiProviderKind[] = ["openai", "openrouter", "zenith", "custom"];
 
-const providerDefaults: Record<ApiProviderKind, Omit<ApiProviderValue, "apiKey">> = {
-  zenith: { kind: "zenith", name: "Zenith API", baseUrl: "https://api.zenithmarket.dev/v1", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }] },
-  openai: { kind: "openai", name: "OpenAI", baseUrl: "https://api.openai.com/v1", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }] },
-  openrouter: { kind: "openrouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }] },
-  custom: { kind: "custom", name: "", baseUrl: "", wireApi: "responses", protocolBindings: [{ wireApi: "responses", modelIds: [] }] },
+const providerDefaults: Record<ApiProviderKind, ApiProviderDefinition> = {
+  zenith: {
+    kind: "zenith",
+    name: "Zenith API",
+    baseUrl: "https://api.zenithmarket.dev/v1",
+    wireApi: "responses",
+    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
+  },
+  openai: {
+    kind: "openai",
+    name: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    wireApi: "responses",
+    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
+  },
+  openrouter: {
+    kind: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    wireApi: "responses",
+    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
+  },
+  custom: {
+    kind: "custom",
+    name: "",
+    baseUrl: "",
+    wireApi: "responses",
+    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
+  },
 };
 
 const providerIcons = {
@@ -37,7 +63,7 @@ export function defaultApiProviderValue(): ApiProviderValue {
     name: "",
     baseUrl: "",
     wireApi: "responses",
-    protocolBindings: [{ wireApi: "responses", modelIds: [] }],
+    protocolBindings: [{ wireApi: "responses", adapter: "native", reasoningMode: "disabled", modelIds: [] }],
     apiKey: "",
   };
 }
@@ -47,6 +73,8 @@ function providerProtocolBindings(value: ApiProviderValue) {
     .map((binding) => ({
       wireApi: binding.wireApi,
       modelIds: [...binding.modelIds],
+      adapter: binding.adapter ?? "native",
+      reasoningMode: binding.reasoningMode ?? "disabled",
     }));
 }
 
@@ -84,6 +112,8 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
     protocolBindings: providerDefaults[kind].protocolBindings.map((binding) => ({
       wireApi: binding.wireApi,
       modelIds: [...binding.modelIds],
+      adapter: binding.adapter ?? "native",
+      reasoningMode: binding.reasoningMode ?? "disabled",
     })),
     apiKey: value.apiKey,
   });
@@ -93,11 +123,13 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
     // have already entered. The key is still never rendered in the selector.
     apiKey: value.apiKey,
   });
-  const setProtocolBindings = (protocolBindings: SourceProtocolBinding[]) => onChange({
-    ...value,
-    protocolBindings,
-    wireApi: protocolBindings[0]?.wireApi ?? value.wireApi,
-  });
+  const setProtocolBindings = (protocolBindings: SourceProtocolBinding[]) => {
+    onChange({
+      ...value,
+      protocolBindings,
+      wireApi: protocolBindings[0]?.wireApi ?? value.wireApi,
+    });
+  };
   const selectedProvider = value.kind ? providerDefaults[value.kind] : null;
   const SelectedProviderIcon = value.kind ? providerIcons[value.kind] : null;
 
@@ -134,7 +166,11 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
       </div> : null}
-      <SourceProtocolBindingsEditor models={[]} value={value.protocolBindings} onChange={setProtocolBindings} />
+      <SourceProtocolRoutingDisclosure
+        models={[]}
+        value={value.protocolBindings}
+        onChange={setProtocolBindings}
+      />
       <div className="api-provider-key-field">
         <SecretField
           label={t("sources.apiKey")}

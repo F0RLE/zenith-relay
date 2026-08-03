@@ -53,6 +53,134 @@ async fn profile_can_be_prepared_before_the_first_account_transfer() {
 }
 
 #[tokio::test]
+async fn source_creation_persists_only_models_confirmed_by_each_protocol() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_mixed_protocol_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let source = reqwest::Client::new()
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Mixed native source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "protocolBindings": [
+                {"wireApi": "responses", "modelIds": []},
+                {"wireApi": "messages", "modelIds": []}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(source.status(), StatusCode::CREATED);
+    let source: Value = source.json().await.unwrap();
+    assert_eq!(source["wireApi"], "responses");
+    assert_eq!(source["models"], json!(["gpt-native", "claude-native"]));
+    assert_eq!(
+        source["protocolBindings"],
+        json!([
+            {
+                "wireApi": "responses",
+                "adapter": "native",
+                "reasoningMode": "disabled",
+                "modelIds": ["gpt-native"]
+            },
+            {
+                "wireApi": "messages",
+                "adapter": "native",
+                "reasoningMode": "disabled",
+                "modelIds": ["claude-native"]
+            }
+        ])
+    );
+
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn source_creation_preserves_native_and_bridged_responses_routes() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_mixed_protocol_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+
+    let source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "name": "Mixed Responses source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "protocolBindings": [
+                {
+                    "wireApi": "responses",
+                    "adapter": "native",
+                    "reasoningMode": "disabled",
+                    "modelIds": []
+                },
+                {
+                    "wireApi": "responses",
+                    "adapter": "responses_to_messages",
+                    "reasoningMode": "adaptive",
+                    "modelIds": []
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let source_id = source["id"].as_str().unwrap();
+
+    assert_eq!(source["wireApi"], "responses");
+    assert_eq!(source["models"], json!(["gpt-native", "claude-native"]));
+    assert_eq!(
+        source["protocolBindings"],
+        json!([
+            {
+                "wireApi": "responses",
+                "adapter": "native",
+                "reasoningMode": "disabled",
+                "modelIds": ["gpt-native"]
+            },
+            {
+                "wireApi": "responses",
+                "adapter": "responses_to_messages",
+                "reasoningMode": "adaptive",
+                "modelIds": ["claude-native"]
+            }
+        ])
+    );
+
+    let membership = client
+        .post(format!("{}/pool/members", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"sourceIds": [source_id], "inPool": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(membership.status(), StatusCode::OK);
+
+    let stored = server.state.store.sources().unwrap();
+    assert!(stored[0]
+        .supports_wire_api(zenith_relay_core::WireApi::Responses)
+        .unwrap());
+    assert_eq!(
+        serde_json::to_value(&stored[0].protocol_bindings).unwrap(),
+        source["protocolBindings"]
+    );
+
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn scoped_native_messages_source_stays_outside_the_responses_system_pool() {
     let root = TempDir::new().unwrap();
     let (responses_upstream, responses_task) = spawn_upstream().await;
@@ -3145,6 +3273,41 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
         axum::serve(listener, router).await.unwrap();
     });
     (format!("http://{address}"), task)
+}
+
+async fn spawn_mixed_protocol_upstream() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new().route("/v1/models", get(mixed_protocol_models));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (format!("http://{address}"), task)
+}
+
+async fn mixed_protocol_models(request: Request) -> impl IntoResponse {
+    if request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        == Some("Bearer synthetic-upstream-api-key")
+    {
+        return Json(json!({"data":[{"id":"gpt-native"}]})).into_response();
+    }
+    if request
+        .headers()
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok())
+        == Some("synthetic-upstream-api-key")
+        && request
+            .headers()
+            .get("anthropic-version")
+            .and_then(|value| value.to_str().ok())
+            == Some("2023-06-01")
+    {
+        return Json(json!({"data":[{"id":"claude-native"}]})).into_response();
+    }
+    StatusCode::UNAUTHORIZED.into_response()
 }
 
 #[derive(Clone, Debug)]

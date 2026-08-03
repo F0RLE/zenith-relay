@@ -283,6 +283,7 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
       className={`relay-icon-button ${className}`.trim()}
       aria-label={label}
       aria-describedby={tooltip.describedBy}
+      title={props.disabled ? title ?? label : undefined}
       {...props}
       onMouseEnter={(event) => { tooltip.show(); onMouseEnter?.(event); }}
       onMouseLeave={(event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}

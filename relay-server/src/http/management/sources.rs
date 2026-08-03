@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
-    discover_source_models_for_protocol_bindings, fetch_source_provider_stats,
+    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
     normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -66,7 +66,9 @@ pub async fn create_source(
     let secret_ref = format!("source:{id}");
     let mut record = source_record(id, secret_ref.clone(), input)?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    record.models = discover_models(&record, &api_key).await?;
+    let discovery = discover_models(&record, &api_key).await?;
+    record.models = discovery.models;
+    record.protocol_bindings = discovery.protocol_bindings;
     normalize_record_protocol_bindings(&mut record)?;
     state
         .vault
@@ -248,14 +250,16 @@ pub async fn test_source(
             ManagementError::not_found("source_secret_missing", "source secret missing")
         })?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    record.models = match discover_models(&record, &api_key).await {
-        Ok(models) => models,
+    let discovery = match discover_models(&record, &api_key).await {
+        Ok(discovery) => discovery,
         Err(error) => {
             record.last_error_code = Some(error.code.clone());
             state.store.save_source(&record).map_err(store_error)?;
             return Err(error);
         }
     };
+    record.models = discovery.models;
+    record.protocol_bindings = discovery.protocol_bindings;
     normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
     state.store.save_source(&record).map_err(store_error)?;
@@ -383,7 +387,7 @@ fn normalize_source_prices(
 async fn discover_models(
     record: &SourceRecord,
     api_key: &str,
-) -> Result<Vec<String>, ManagementError> {
+) -> Result<SourceDiscovery, ManagementError> {
     let source = ProviderSource {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -392,24 +396,25 @@ async fn discover_models(
         wire_api: record.wire_api,
         models: record.models.clone(),
     };
-    let models = discover_source_models_for_protocol_bindings(&source, &record.protocol_bindings)
-        .await
-        .map_err(|_| {
-            ManagementError::new(
-                StatusCode::BAD_GATEWAY,
-                "source_test_failed",
-                "source model discovery failed",
-                "upstream",
-                true,
-            )
-        })?;
-    if models.is_empty() {
+    let discovery =
+        discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
+            .await
+            .map_err(|_| {
+                ManagementError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "source_test_failed",
+                    "source model discovery failed",
+                    "upstream",
+                    true,
+                )
+            })?;
+    if discovery.models.is_empty() {
         return Err(ManagementError::validation(
             "source_models_empty",
             "source did not expose any models",
         ));
     }
-    Ok(models)
+    Ok(discovery)
 }
 
 fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementError> {

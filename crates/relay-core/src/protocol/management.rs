@@ -305,28 +305,39 @@ pub struct SourceSummary {
 }
 
 impl SourceSummary {
-    /// Returns models available through one explicitly configured native
-    /// protocol. Legacy records without bindings retain their single
-    /// `wire_api` surface.
-    pub fn models_for_wire_api(&self, wire_api: WireApi) -> &[String] {
+    /// Returns all models available through a client protocol. A source may
+    /// expose more than one connector route for the same client protocol,
+    /// such as native Responses and a Responses-to-Messages bridge.
+    ///
+    /// Legacy records without bindings retain their single `wire_api` surface.
+    pub fn models_for_wire_api(&self, wire_api: WireApi) -> Vec<String> {
         if self.protocol_bindings.is_empty() {
             return if self.wire_api == wire_api {
-                self.models.as_slice()
+                self.models.clone()
             } else {
-                &[]
+                Vec::new()
             };
         }
-        self.protocol_bindings
+        let expand_empty_models = self.protocol_bindings.len() == 1;
+        let mut seen = std::collections::HashSet::new();
+        let mut models = Vec::new();
+        for binding in self
+            .protocol_bindings
             .iter()
-            .find(|binding| binding.wire_api == wire_api)
-            .map(|binding| {
-                if binding.model_ids.is_empty() {
-                    self.models.as_slice()
-                } else {
-                    binding.model_ids.as_slice()
+            .filter(|binding| binding.wire_api == wire_api)
+        {
+            let binding_models = if binding.model_ids.is_empty() && expand_empty_models {
+                self.models.as_slice()
+            } else {
+                binding.model_ids.as_slice()
+            };
+            for model in binding_models {
+                if seen.insert(model.to_ascii_lowercase()) {
+                    models.push(model.clone());
                 }
-            })
-            .unwrap_or_default()
+            }
+        }
+        models
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> bool {
@@ -661,10 +672,11 @@ pub fn pool_model_summaries(
     for source in sources.iter().filter(|source| {
         source.enabled && source.in_pool && !source.draining && source.secret_available
     }) {
+        let response_models = source.models_for_wire_api(WireApi::Responses);
         add_member_models(
             &mut models,
             &format!("source:{}", source.id),
-            source.models_for_wire_api(WireApi::Responses),
+            &response_models,
             &source.allowed_models,
             &source.excluded_models,
             &mut upstream_order,
@@ -916,6 +928,7 @@ pub struct ErrorEnvelope {
 mod tests {
     use super::*;
     use crate::quota::{QuotaWindow, QuotaWindowKind};
+    use crate::{MessagesReasoningMode, SourceAdapter};
 
     #[test]
     fn model_summaries_apply_member_rules_hidden_state_and_catalog_order() {
@@ -978,10 +991,14 @@ mod tests {
             protocol_bindings: vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["gpt-routed".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["claude-native".into()],
                 },
             ],
@@ -1041,19 +1058,33 @@ mod tests {
             protocol_bindings: vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["gpt-native".into()],
                 },
                 SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::ResponsesToMessages,
+                    reasoning_mode: MessagesReasoningMode::Adaptive,
+                    model_ids: vec!["claude-bridged".into()],
+                },
+                SourceProtocolBinding {
                     wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["claude-native".into()],
                 },
             ],
-            models: vec!["gpt-native".into(), "claude-native".into()],
+            models: vec![
+                "gpt-native".into(),
+                "claude-bridged".into(),
+                "claude-native".into(),
+            ],
             ..legacy
         };
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Responses),
-            ["gpt-native"]
+            ["gpt-native", "claude-bridged"]
         );
         assert_eq!(
             mixed.models_for_wire_api(WireApi::Messages),
@@ -1061,6 +1092,28 @@ mod tests {
         );
         assert!(mixed.supports_wire_api(WireApi::Messages));
         assert!(!mixed.supports_wire_api(WireApi::ChatCompletions));
+
+        let unconfirmed = SourceSummary {
+            protocol_bindings: vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["gpt-native".into()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: Vec::new(),
+                },
+            ],
+            ..mixed
+        };
+        assert!(unconfirmed
+            .models_for_wire_api(WireApi::Messages)
+            .is_empty());
+        assert!(!unconfirmed.supports_wire_api(WireApi::Messages));
     }
 
     #[test]

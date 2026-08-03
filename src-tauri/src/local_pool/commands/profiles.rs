@@ -31,7 +31,7 @@ use url::Url;
 use zenith_relay_core::{
     protocol::{Feature, ProfileKeyRotation},
     providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
-    CandidateQuota, WireApi, QUOTA_STALE_AFTER_MS,
+    CandidateQuota, SourceAdapter, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
@@ -1088,13 +1088,12 @@ fn direct_source_response_models(source: &ProviderSourceRecord) -> LocalResult<V
     let bindings = source
         .effective_protocol_bindings()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    let Some(binding) = bindings
-        .into_iter()
-        .find(|binding| binding.wire_api == WireApi::Responses)
-    else {
+    let Some(binding) = bindings.into_iter().find(|binding| {
+        binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
+    }) else {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "direct ChatGPT launch requires a Responses API source",
+            "direct ChatGPT launch requires a native Responses API source",
         ));
     };
     if binding.model_ids.is_empty() {
@@ -1255,7 +1254,7 @@ mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
-    use zenith_relay_core::SourceProtocolBinding;
+    use zenith_relay_core::{MessagesReasoningMode, SourceProtocolBinding};
 
     fn source_record(id: &str) -> ProviderSourceRecord {
         ProviderSourceRecord {
@@ -1487,9 +1486,21 @@ mod tests {
         messages_only.wire_api = WireApi::Messages;
         messages_only.protocol_bindings = vec![SourceProtocolBinding {
             wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             model_ids: vec!["claude-native".to_string()],
         }];
         assert!(validate_direct_source(&messages_only).is_err());
+
+        let mut bridged_only = source.clone();
+        bridged_only.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["claude-bridge".to_string()],
+        }];
+        bridged_only.models = vec!["claude-bridge".to_string()];
+        assert!(validate_direct_source(&bridged_only).is_err());
     }
 
     #[test]
@@ -1504,10 +1515,14 @@ mod tests {
         source.protocol_bindings = vec![
             SourceProtocolBinding {
                 wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
                 model_ids: vec!["claude-native".to_string()],
             },
             SourceProtocolBinding {
                 wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
                 model_ids: vec!["claude-responses".to_string(), "gpt-responses".to_string()],
             },
         ];

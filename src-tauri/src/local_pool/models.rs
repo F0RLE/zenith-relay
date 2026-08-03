@@ -410,12 +410,10 @@ impl ProviderSourceRecord {
             return Ok(());
         }
         let bindings = self.effective_protocol_bindings()?;
-        // Keep the legacy field coherent for older desktop builds and remote
-        // records. The selected binding order is intentional, so its first
-        // native protocol is the compatibility fallback.
-        if let Some(binding) = bindings.first() {
-            self.wire_api = binding.wire_api;
-        }
+        // `wire_api` is a compatibility default for legacy readers. Do not
+        // derive it from route order: an explicit mixed source is defined by
+        // `protocol_bindings`, and discovery is free to return routes in any
+        // stable upstream order.
         self.protocol_bindings = bindings;
         Ok(())
     }
@@ -425,12 +423,20 @@ impl ProviderSourceRecord {
     }
 
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        Ok(self
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+        for binding in self
             .effective_protocol_bindings()?
             .into_iter()
-            .find(|binding| binding.wire_api == wire_api)
-            .map(|binding| binding.model_ids)
-            .unwrap_or_default())
+            .filter(|binding| binding.wire_api == wire_api)
+        {
+            for model in binding.model_ids {
+                if seen.insert(model.to_ascii_lowercase()) {
+                    models.push(model);
+                }
+            }
+        }
+        Ok(models)
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {

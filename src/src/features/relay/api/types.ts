@@ -104,9 +104,19 @@ export type ApiModelPriceOverride = {
 
 export type SourceWireApi = "responses" | "chat_completions" | "messages";
 
+export type SourceAdapter = "native" | "responses_to_messages";
+
+export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
+
 export type SourceProtocolBinding = {
   wireApi: SourceWireApi;
   modelIds: string[];
+  /**
+   * Older Relay records do not have adapter metadata. The editor and runtime
+   * treat an omitted value as the native passthrough.
+   */
+  adapter?: SourceAdapter;
+  reasoningMode?: MessagesReasoningMode;
 };
 
 export type SourceSummary = {

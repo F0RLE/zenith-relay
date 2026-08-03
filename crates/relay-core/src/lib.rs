@@ -20,13 +20,19 @@ pub use catalog::{
     CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{Error, Result};
+pub use protocol::{
+    bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError, AdapterResult,
+    MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore,
+    MessagesReasoningMode, MessagesStreamBridge, NativeResponsesReplayState,
+    NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter,
+};
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
-    discover_source_models, discover_source_models_for_protocol_bindings,
-    normalize_image_base_model, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
-    ResponseAffinityBinding, ResponseAffinityStore, RuntimeLocalKey, RuntimeMixedLocalKey,
-    RuntimeSource,
+    discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, normalize_image_base_model, DefaultServiceTier,
+    GatewayRuntime, GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore,
+    RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource, SourceDiscovery,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
@@ -36,8 +42,8 @@ pub use scheduler::{
 };
 pub use sources::{
     fetch_source_provider_stats, normalize_source_protocol_bindings, source_points_to_gateway,
-    LocalGatewayKey, ProviderSource, SourceProtocolBinding, SourceProviderStats,
-    SourceStatsProvider, WireApi,
+    LocalGatewayKey, ProviderSource, SourceConnector, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
 };
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,

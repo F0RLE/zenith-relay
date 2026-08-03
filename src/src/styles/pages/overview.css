@@ -491,6 +491,11 @@
 
 .overview-analytics.loading .overview-chart-canvas {
   opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+.overview-analytics.loading.has-data .overview-chart-canvas {
+  opacity: 0.78;
 }
 
 .relay-page h2,

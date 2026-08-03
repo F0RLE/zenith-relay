@@ -1,6 +1,6 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-07-29.
+Last reviewed: 2026-08-03.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
@@ -70,6 +70,29 @@ The refactor is complete when a behavior has one owner, not when every file
 has been renamed.
 
 ## P3 - Dynamic model catalogs and client integrations
+
+### Provider-neutral source adapters
+
+The source catalog must remain provider-neutral. A source contributes model
+capabilities and an explicit client/upstream binding; the scheduler does not
+branch on vendor names.
+
+1. Keep native passthrough as the default and require an explicit adapter for
+   every protocol conversion.
+2. Keep the Responses-to-Messages bridge limited to JSON-schema function tools,
+   direct custom text tools, native `tool_use`/`tool_result` continuations,
+   and translated JSON/SSE. Do not claim hosted, namespace, or dynamic
+   discovery tools until an exact adapter path exists.
+3. Keep bridge continuation state bounded and volatile, and never send a tool
+   result without the prior native assistant turn.
+4. Do not advertise reasoning, opaque hosted tools, or WebSocket support unless
+   the selected binding and tests prove those capabilities.
+5. Add contract coverage for normal responses, malformed upstream payloads,
+   streaming text and tool arguments, reasoning modes, rate/error paths, and
+   native passthrough regression.
+6. Before release, run a real `codex.exe` acceptance matrix for every claimed
+   source family: initial tool call, actual local tool execution, follow-up
+   `function_call_output`, streaming, and a fresh turn after restart.
 
 ### Pool-backed model catalog for Codex
 

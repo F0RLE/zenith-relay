@@ -11,10 +11,12 @@ use std::collections::{BTreeMap, HashSet};
 use tauri::State;
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models_for_protocol_bindings, fetch_source_provider_stats,
+    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
     source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceProtocolBinding,
     SourceProviderStats, WireApi,
 };
+#[cfg(test)]
+use zenith_relay_core::{MessagesReasoningMode, SourceAdapter};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -90,10 +92,11 @@ pub async fn create_local_source(
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    runtime_source.models =
-        discover_source_models_for_protocol_bindings(&runtime_source, &input.protocol_bindings)
+    let discovery =
+        discover_source_models_and_protocol_bindings(&runtime_source, &input.protocol_bindings)
             .await
             .map_err(core_error)?;
+    runtime_source.models = discovery.models;
     if runtime_source.models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -111,7 +114,7 @@ pub async fn create_local_source(
         base_url: runtime_source.base_url,
         secret_ref: secret_ref.clone(),
         wire_api: runtime_source.wire_api,
-        protocol_bindings: input.protocol_bindings,
+        protocol_bindings: discovery.protocol_bindings,
         models: runtime_source.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -333,7 +336,7 @@ pub(crate) async fn refresh_local_source_models(
     };
     ensure_not_gateway_self_source(state, &runtime_source.base_url)?;
     let discovery =
-        discover_source_models_for_protocol_bindings(&runtime_source, &source.protocol_bindings)
+        discover_source_models_and_protocol_bindings(&runtime_source, &source.protocol_bindings)
             .await
             .map_err(core_error);
 
@@ -354,8 +357,8 @@ pub(crate) async fn refresh_local_source_models(
         .into());
     }
 
-    let models = match discovery {
-        Ok(models) if !models.is_empty() => models,
+    let discovery = match discovery {
+        Ok(discovery) if !discovery.models.is_empty() => discovery,
         Ok(_) => {
             let error = LocalPoolError::new(
                 ErrorCode::InvalidState,
@@ -369,9 +372,11 @@ pub(crate) async fn refresh_local_source_models(
             return Err(error.into());
         }
     };
-    let runtime_changed = current.models != models;
+    let runtime_changed = current.models != discovery.models
+        || current.protocol_bindings != discovery.protocol_bindings;
     let mut updated = current;
-    updated.models = models;
+    updated.models = discovery.models;
+    updated.protocol_bindings = discovery.protocol_bindings;
     updated.last_test_at = Some(Utc::now().to_rfc3339());
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
@@ -379,7 +384,6 @@ pub(crate) async fn refresh_local_source_models(
     updated
         .normalize_protocol_bindings()
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
-    let runtime_changed = runtime_changed || updated.protocol_bindings != source.protocol_bindings;
     let (old_sources, old_keys) = current_records(state)?;
     state.store()?.upsert_source(updated.clone())?;
     if runtime_changed {
@@ -572,12 +576,40 @@ mod tests {
         source.wire_api = WireApi::Messages;
         source.protocol_bindings = vec![SourceProtocolBinding {
             wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             model_ids: source.models.clone(),
         }];
 
         source.normalize();
         source.normalize_protocol_bindings().unwrap();
         assert!(source.validate_protocol_bindings().is_ok());
+    }
+
+    #[test]
+    fn mixed_binding_normalization_keeps_the_legacy_protocol_default_stable() {
+        let mut source = source_record();
+        source.protocol_bindings = vec![
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-native".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["gpt-native".into()],
+            },
+        ];
+        source.models = vec!["claude-native".into(), "gpt-native".into()];
+
+        source.normalize_protocol_bindings().unwrap();
+
+        assert_eq!(source.wire_api, WireApi::Responses);
+        assert!(source.supports_wire_api(WireApi::Responses).unwrap());
+        assert!(source.supports_wire_api(WireApi::Messages).unwrap());
     }
 
     #[test]

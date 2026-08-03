@@ -1,6 +1,6 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-07-29.
+Last reviewed: 2026-08-03.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
@@ -28,7 +28,7 @@ server through a management operation.
 | --- | --- |
 | React and Vite | Render typed snapshots, collect user intent, and localize the interface. |
 | Tauri host | Native lifecycle, OS credential store, OAuth return, local endpoint, and reversible profile changes. |
-| relay-core | Shared canonical account/source state, eligibility, scheduler, native protocol-bound gateway execution, quota normalization, and usage math. |
+| relay-core | Shared canonical account/source state, eligibility, scheduler, source-adapter gateway execution, quota normalization, and usage math. |
 | relay-server | Persistent personal runtime, encrypted vault, SQLite storage, migrations, retention, backup/restore, and management API. |
 
 React never reads a secret or provider file directly. The desktop and server
@@ -92,9 +92,10 @@ timings and terminal errors are recorded for diagnostics.
 
 The runtime model registry is built from connection capabilities and key/model
 rules. A model appears through an endpoint only when at least one enabled
-candidate matching that key and protocol can serve it. The managed
-ChatGPT/Codex catalog is narrower: it contains only Responses-capable sources
-and ChatGPT accounts marked `in_pool`. A model rule can hide a model without
+candidate matching that key and client protocol can serve it. The managed
+ChatGPT/Codex catalog is narrower: it contains Responses-capable candidates,
+including explicitly verified `Responses -> Messages` bridge bindings, and
+ChatGPT accounts marked `in_pool`. A model rule can hide a model without
 deleting the source capability.
 
 The generic OpenAI `/v1/models` view advertises Responses and Chat Completions
@@ -124,21 +125,42 @@ advertises a model that its endpoint would reject.
 
 ## Client protocol boundaries
 
-Responses requests use Responses-capable sources directly, preserving native
-Codex tool calls and continuations. Chat Completions requests use only matching
-Chat Completions sources and are limited to text and image requests; Relay
-rejects tool definitions and tool-call history on that endpoint instead of
-pretending to translate them.
+Relay separates the client-facing wire contract from the upstream wire contract.
+Every source binding records the client protocol, the adapter, the optional
+bridge reasoning mode, and the models assigned to that route. `Native` is a
+passthrough: the client and upstream contracts must match. The current bridge
+is deliberately explicit: a client-facing <code>/v1/responses</code> binding
+with `ResponsesToMessages` sends a translated Anthropic Messages request to
+<code>/v1/messages</code>, using the source key as <code>x-api-key</code> and
+the Anthropic version header.
 
-Relay exposes three independent native client contracts: <code>/v1/responses</code>
-for Codex/OpenAI Responses clients, <code>/v1/messages</code> for Anthropic
-Messages clients, and <code>/v1/chat/completions</code> for text-and-image-only
-OpenAI-compatible clients. A source is selectable only through an explicitly
-configured matching protocol binding. The Messages route accepts a scoped
-Relay key as either Bearer authorization or <code>x-api-key</code>, sends the
-unchanged Messages body to an upstream Messages endpoint with native Anthropic
-authentication, and preserves successful JSON/SSE bodies verbatim. No request
-or tool-call body is translated between these protocols.
+The Responses-to-Messages bridge supports JSON-schema function tools and direct
+custom text tools, `tool_use`/`tool_result` continuations, ordinary JSON
+responses, and translated Messages SSE including streamed tool arguments. A
+custom tool is represented upstream as a function with one raw-text `input`
+field, then returns to the client as `custom_tool_call` and accepts only its
+direct string `custom_tool_call_output`; the original tool host remains the
+validator and executor. It stores the native assistant turn only in a bounded
+volatile local continuation store keyed by local client key, bridge response
+id, and candidate. A missing or mismatched continuation is rejected instead
+of sending a context-free tool result. Provider-hosted, namespace, and
+dynamic-discovery tools are rejected rather than converted into text. Budget
+and adaptive reasoning are opt-in binding capabilities; `Native` bindings
+cannot declare a bridge reasoning mode.
+
+Relay exposes three client contracts: <code>/v1/responses</code> for
+Codex/OpenAI Responses clients, <code>/v1/messages</code> for native Messages
+clients, and <code>/v1/chat/completions</code> for text-and-image-only
+OpenAI-compatible clients. Source discovery reads the source's model catalog
+with the authentication required by each binding and applies the explicit
+model assignment to that route. A <code>/models</code> response alone does not
+prove that a provider accepts a completion on every protocol; when one source
+has multiple routes, the binding assignment is the capability declaration and
+must be verified against the provider's documentation or a safe operator test.
+The native Messages route preserves successful JSON/SSE bodies verbatim. Chat
+Completions rejects tool definitions and tool-call history instead of
+pretending to translate them. Responses WebSocket remains native-only until a
+separate bidirectional bridge is designed and tested.
 
 ## Usage and economics
 
@@ -229,9 +251,19 @@ client keys, usage, and scheduler remain shared.
 ## Known limits
 
 - Only the ChatGPT account connector is shipped today.
-- The current ChatGPT/Codex profile integration supports the Responses wire API
-  only. Native Messages sources require a compatible Messages client and a
-  separately scoped key; they cannot be attached to the managed Codex profile.
+- The current ChatGPT/Codex profile integration uses the Responses client
+  contract. Native Messages sources require a compatible Messages client and a
+  separately scoped key; a source must opt into the explicit
+  Responses-to-Messages bridge to make a Messages model visible to Codex.
+- The bridge currently accepts JSON-schema function tools and direct custom
+  text tools only. Hosted, namespace, dynamic-discovery, structured custom
+  result, native encrypted reasoning, and Responses WebSocket capabilities are
+  not claimed through the bridge.
+- Bridge continuation state is volatile and bounded. Restarting Relay or
+  evicting an entry requires the client to start a fresh turn.
+- No live acceptance claim has been made for Claude, GLM, Grok, or any other
+  provider until a real `codex.exe` tool-use run proves both the emitted
+  function call and the follow-up tool result.
 - The Computer mode stops with the desktop process.
 - A self-hosted server requires real production acceptance with live accounts,
   proxy routing, streaming, and restart/recovery before it can be claimed as

@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import { defaultWakeInput, relayCommands } from "../../api/commands";
 import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
-import { effectiveSourceProtocolBindings, SourceProtocolBindingsEditor, SourceProtocolBindingsSummary, sourceSupportsWireApi } from "../../components/SourceProtocolBindingsEditor";
+import { effectiveSourceProtocolBindings, SourceProtocolBindingsSummary, SourceProtocolRoutingDisclosure, sourceSupportsNativeResponses, sourceSupportsWireApi } from "../../components/SourceProtocolBindingsEditor";
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import {
   Button,
@@ -238,14 +238,15 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   return (
     <div className="relay-table-wrap relay-compact-content">
       <table className="relay-table source-table">
-        <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.protocol")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
+        <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.route")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
           const supportsResponses = sourceSupportsWireApi(source, "responses");
-          const launchDisabled = !localSource || !supportsResponses || !source.enabled || !source.secretAvailable || launchBusy;
+          const supportsNativeResponses = sourceSupportsNativeResponses(source);
+          const launchDisabled = !localSource || !supportsNativeResponses || !source.enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
             ? t("sources.launchLocalOnly")
-            : !supportsResponses
+            : !supportsNativeResponses
               ? t("sources.launchResponsesOnly")
               : !source.enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
@@ -1061,7 +1062,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   const footer = canShowSave
     ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={(!source && !apiProviderReady(provider)) || (Boolean(source) && !protocolBindings.length) || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>
     : <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>;
-  return <Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><SourceProtocolBindingsEditor models={source.models} value={protocolBindings} onChange={setProtocolBindings} /><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} /></> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
+  return <Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><SourceProtocolRoutingDisclosure models={source.models} value={protocolBindings} onChange={setProtocolBindings} /><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} /></> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
 }
 
 function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Promise<void> }) {

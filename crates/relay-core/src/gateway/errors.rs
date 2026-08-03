@@ -802,6 +802,25 @@ pub(super) fn previous_response_not_found(payload: &[u8]) -> bool {
         .is_some_and(|value| previous_response_not_found_value(&value))
 }
 
+pub(super) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return false;
+    };
+    let text = serde_json::to_string(&value)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    text.contains("previous_response_id") && text.contains("websocket")
+}
+
+/// Strict Responses endpoints use a separate `fc_` namespace for
+/// `function_call.id`; the matching `call_id` is unchanged. This is only a
+/// recovery signal — the request repair itself still verifies that it has a
+/// call-prefixed function item before retrying.
+pub(super) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input") && text.contains("expected an id that begins with 'fc'")
+}
+
 pub(super) fn previous_response_not_found_value(value: &Value) -> bool {
     [value.pointer("/error/code"), value.pointer("/error/type")]
         .into_iter()
@@ -1310,6 +1329,32 @@ mod tests {
             true,
             true,
             false,
+        ));
+    }
+
+    #[test]
+    fn websocket_only_previous_response_errors_are_detected_without_matching_other_errors() {
+        assert!(previous_response_requires_websocket(
+            br#"{"error":{"message":"previous_response_id is only supported on Responses WebSocket v2"}}"#,
+        ));
+        assert!(!previous_response_requires_websocket(
+            br#"{"error":{"message":"previous response with id resp_123 not found"}}"#,
+        ));
+        assert!(!previous_response_requires_websocket(
+            br#"{"error":{"message":"WebSocket transport is unavailable"}}"#,
+        ));
+    }
+
+    #[test]
+    fn strict_responses_function_item_id_error_is_detected_without_matching_call_id_errors() {
+        assert!(responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Invalid 'input[7].id': 'call_abc'. Expected an ID that begins with 'fc'."}}"#,
+        ));
+        assert!(!responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Invalid call_id for function_call_output"}}"#,
+        ));
+        assert!(!responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Expected an ID that begins with 'fc'."}}"#,
         ));
     }
 

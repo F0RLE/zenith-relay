@@ -9,15 +9,15 @@ use crate::providers::chatgpt::{
     CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
-use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
     api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
     normalize_subscription_plan_order, CandidateHealth, CandidateKind, CandidateQuota,
-    CandidateScope, Error, LocalGatewayKey, ModelRegistry, ModelRules, PoolScheduler,
-    ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
-    SelectionRequest, SourceProtocolBinding, UsageCallback, UsageEvent, WireApi,
-    RESPONSE_AFFINITY_TTL_MS,
+    CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules,
+    NativeResponsesReplayState, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
+    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest,
+    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
+    UsageEvent, WireApi, RESPONSE_AFFINITY_TTL_MS,
 };
 use futures_util::{future::join_all, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
@@ -41,23 +41,24 @@ const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
 
-fn source_candidate_id(source_id: &str, wire_api: WireApi, binding_count: usize) -> String {
+fn source_candidate_id(
+    source_id: &str,
+    binding: &SourceProtocolBinding,
+    binding_count: usize,
+) -> String {
     if binding_count == 1 {
         return source_id.to_string();
     }
-    let suffix = match wire_api {
-        WireApi::Responses => "responses",
-        WireApi::ChatCompletions => "chat_completions",
-        WireApi::Messages => "messages",
-    };
+    let suffix = binding.adapter.route_suffix(binding.wire_api);
     format!("{source_id}::{suffix}")
 }
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
     pub source: ProviderSource,
-    /// Native upstream contracts, scoped to models verified for that
-    /// contract. An empty list preserves the legacy source-wide `wire_api`.
+    /// Client-facing contracts and explicit adapters, scoped to models
+    /// verified for each route. An empty list preserves the legacy source-wide
+    /// `wire_api`.
     pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub enabled: bool,
     pub draining: bool,
@@ -222,7 +223,7 @@ pub struct GatewayRuntime {
     pub(crate) bounded_client: reqwest::Client,
     websocket_client: reqwest::Client,
     discovery_client: reqwest::Client,
-    sources: BTreeMap<String, SourceExecutor>,
+    sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
     source_recovery_delays_ms: BTreeMap<String, u64>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
@@ -232,6 +233,8 @@ pub struct GatewayRuntime {
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
     codex_model_manifests: Mutex<BTreeMap<String, CachedCodexManifest>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
+    messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
+    native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
     default_service_tier_fast: AtomicBool,
@@ -320,17 +323,6 @@ pub(crate) struct AuthenticatedKey {
     client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
-pub(crate) struct SourceExecutor {
-    pub(crate) id: String,
-    pub(crate) responses_url: Url,
-    pub(crate) chat_completions_url: Url,
-    pub(crate) messages_url: Url,
-    models_url: Url,
-    bearer_authorization: HeaderValue,
-    messages_api_key: HeaderValue,
-    protocol_bindings: Vec<SourceProtocolBinding>,
-}
-
 struct ChatGptAccountExecutor {
     id: String,
     source_id: String,
@@ -356,8 +348,11 @@ pub(crate) struct ExecutorRoute {
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
     pub(crate) wire_api: WireApi,
+    pub(crate) adapter: SourceAdapter,
+    pub(crate) reasoning_mode: MessagesReasoningMode,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
+    pub(crate) upstream_headers: HeaderMap,
     pub(crate) source_model: String,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
@@ -366,7 +361,10 @@ pub(crate) struct ExecutorRoute {
 #[derive(Clone, Debug)]
 struct SourceCandidateBinding {
     source_id: String,
+    binding_key: SourceProtocolBindingKey,
     wire_api: WireApi,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
 }
 
 pub(crate) struct PreparedAuthorization {
@@ -499,15 +497,14 @@ impl GatewayRuntime {
                 &source.source.models,
             )?;
             let source_id = source.source.id.clone();
-            let executor = SourceExecutor::new(&source.source, &bindings)?;
+            let connector = SourceConnector::new(&source.source, &bindings)?;
             let rules = model_rules(source.allowed_models, source.excluded_models);
             for binding in &bindings {
                 let models = normalized_set(binding.model_ids.iter());
                 if models.is_empty() {
                     continue;
                 }
-                let candidate_id =
-                    source_candidate_id(&source_id, binding.wire_api, bindings.len());
+                let candidate_id = source_candidate_id(&source_id, binding, bindings.len());
                 if source_candidate_bindings.contains_key(&candidate_id) {
                     return Err(Error::Validation(
                         "source protocol candidate ids must be unique".to_string(),
@@ -546,11 +543,14 @@ impl GatewayRuntime {
                     candidate_id,
                     SourceCandidateBinding {
                         source_id: source_id.clone(),
+                        binding_key: binding.key(),
                         wire_api: binding.wire_api,
+                        adapter: binding.adapter,
+                        reasoning_mode: binding.reasoning_mode,
                     },
                 );
             }
-            source_executors.insert(source_id, executor);
+            source_executors.insert(source_id, connector);
         }
 
         let mut account_executors = BTreeMap::new();
@@ -775,6 +775,8 @@ impl GatewayRuntime {
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             codex_model_manifests: Mutex::new(BTreeMap::new()),
             passive_quotas: Mutex::new(passive_quotas),
+            messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
+            native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
             default_service_tier_fast: AtomicBool::new(
@@ -970,7 +972,7 @@ impl GatewayRuntime {
     ) -> BTreeMap<String, u64> {
         let routes = {
             let scheduler = self.lock_scheduler();
-            let mut visible_models_by_source = BTreeMap::<String, BTreeSet<String>>::new();
+            let mut routes = Vec::new();
             for (candidate_id, binding) in &self.source_candidate_bindings {
                 if binding.wire_api != WireApi::Responses {
                     continue;
@@ -981,70 +983,67 @@ impl GatewayRuntime {
                 let Some(source) = self.sources.get(&binding.source_id) else {
                     continue;
                 };
-                let Some(models) = source.models_for(binding.wire_api) else {
+                let Some(models) = source.models_for(binding.binding_key) else {
                     continue;
                 };
-                let visible = visible_models_by_source
-                    .entry(binding.source_id.clone())
-                    .or_default();
+                let mut configured_models = BTreeSet::new();
                 for model in models {
                     if key.model_rules.allows(model)
                         && candidate.is_catalog_visible(model, allowed_protocols, &key.scope)
                     {
-                        visible.insert(model.clone());
+                        configured_models.insert(model.clone());
                     }
                 }
-            }
-            visible_models_by_source
-                .into_iter()
-                .filter_map(|(source_id, configured_models)| {
-                    let source = self.sources.get(&source_id)?;
-                    (!configured_models.is_empty()).then(|| {
-                        (
-                            source_id,
-                            source.models_url.clone(),
-                            source.authorization(WireApi::Responses),
-                            configured_models,
-                        )
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        let manifests =
-            join_all(routes.into_iter().map(
-                |(
-                    source_id,
-                    models_url,
-                    (authorization_name, authorization),
+                if configured_models.is_empty() {
+                    continue;
+                }
+                let Some(source_binding) = source.binding_for(binding.binding_key) else {
+                    continue;
+                };
+                routes.push((
+                    candidate_id.clone(),
+                    source.models_url.clone(),
+                    source.authorization_for_binding(source_binding),
+                    source.protocol_headers_for_binding(source_binding),
                     configured_models,
-                )| async move {
-                    if let Some(value) = self.fresh_codex_model_manifest(
-                        &source_id,
-                        now_ms,
-                        CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
-                    ) {
-                        return Some((configured_models, value));
-                    }
-                    let response = self
-                        .discovery_client
-                        .get(models_url)
-                        .header(authorization_name, authorization)
-                        .timeout(Duration::from_secs(10))
-                        .send()
-                        .await
-                        .ok()?;
-                    if !response.status().is_success() {
-                        return None;
-                    }
-                    let body = collect_limited(response, MAX_MODELS_BODY_BYTES)
-                        .await
-                        .ok()?;
-                    let value = serde_json::from_slice::<Value>(&body).ok()?;
-                    self.remember_codex_model_manifest(&source_id, value.clone(), now_ms);
-                    Some((configured_models, value))
-                },
-            ))
-            .await;
+                ));
+            }
+            routes
+        };
+        let manifests = join_all(routes.into_iter().map(
+            |(
+                candidate_id,
+                models_url,
+                (authorization_name, authorization),
+                protocol_headers,
+                configured_models,
+            )| async move {
+                if let Some(value) = self.fresh_codex_model_manifest(
+                    &candidate_id,
+                    now_ms,
+                    CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
+                ) {
+                    return Some((configured_models, value));
+                }
+                let request = self
+                    .discovery_client
+                    .get(models_url)
+                    .headers(protocol_headers)
+                    .header(authorization_name, authorization)
+                    .timeout(Duration::from_secs(10));
+                let response = request.send().await.ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let body = collect_limited(response, MAX_MODELS_BODY_BYTES)
+                    .await
+                    .ok()?;
+                let value = serde_json::from_slice::<Value>(&body).ok()?;
+                self.remember_codex_model_manifest(&candidate_id, value.clone(), now_ms);
+                Some((configured_models, value))
+            },
+        ))
+        .await;
 
         let mut windows: BTreeMap<String, u64> = BTreeMap::new();
         for (configured_models, manifest) in manifests.into_iter().flatten() {
@@ -1401,14 +1400,18 @@ impl GatewayRuntime {
     pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             let source = self.sources.get(&binding.source_id)?;
-            let source_model = source.canonical_model_for(binding.wire_api, model)?;
+            let source_binding = source.binding_for(binding.binding_key)?;
+            let source_model = source.canonical_model_for(binding.binding_key, model)?;
             return Some(ExecutorRoute {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
                 wire_api: binding.wire_api,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(binding.wire_api)?.clone(),
+                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,
                 routing: None,
@@ -1421,8 +1424,11 @@ impl GatewayRuntime {
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
+            upstream_headers: HeaderMap::new(),
             source_model,
             half_open_probe: false,
             routing: None,
@@ -1431,18 +1437,22 @@ impl GatewayRuntime {
 
     pub(crate) fn image_executor_route(&self, candidate_id: &str) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
-            if binding.wire_api == WireApi::Messages {
+            if !binding.adapter.is_passthrough() {
                 return None;
             }
             let source = self.sources.get(&binding.source_id)?;
-            let source_model = source.canonical_model_for(binding.wire_api, IMAGE_API_MODEL)?;
+            let source_binding = source.binding_for(binding.binding_key)?;
+            let source_model = source.canonical_model_for(binding.binding_key, IMAGE_API_MODEL)?;
             return Some(ExecutorRoute {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
                 wire_api: binding.wire_api,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(binding.wire_api)?.clone(),
+                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,
                 routing: None,
@@ -1454,8 +1464,11 @@ impl GatewayRuntime {
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
+            upstream_headers: HeaderMap::new(),
             source_model: account.image_main_model.clone()?,
             half_open_probe: false,
             routing: None,
@@ -1472,7 +1485,10 @@ impl GatewayRuntime {
                 .sources
                 .get(&binding.source_id)
                 .ok_or(ExecutorPrepareError::Authentication)?;
-            let (header_name, authorization) = source.authorization(binding.wire_api);
+            let source_binding = source
+                .binding_for(binding.binding_key)
+                .ok_or(ExecutorPrepareError::Authentication)?;
+            let (header_name, authorization) = source.authorization_for_binding(source_binding);
             return Ok(PreparedAuthorization {
                 header_name,
                 authorization,
@@ -1928,6 +1944,65 @@ impl GatewayRuntime {
         }
     }
 
+    pub(crate) fn load_messages_bridge_state(
+        &self,
+        local_key_id: &str,
+        response_id: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> crate::AdapterResult<crate::MessagesBridgeState> {
+        self.messages_bridge_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(local_key_id, response_id, candidate_id, now_ms)
+    }
+
+    pub(crate) fn save_messages_bridge_response(
+        &self,
+        local_key_id: &str,
+        candidate_id: &str,
+        response: &crate::MessagesBridgeResponse,
+        now_ms: u64,
+    ) {
+        self.messages_bridge_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                local_key_id,
+                &response.response_id,
+                candidate_id,
+                response.continuation.clone(),
+                now_ms,
+            );
+    }
+
+    pub(crate) fn load_native_responses_replay(
+        &self,
+        local_key_id: &str,
+        response_id: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> Option<NativeResponsesReplayState> {
+        self.native_responses_replay_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(local_key_id, response_id, candidate_id, now_ms)
+    }
+
+    pub(crate) fn save_native_responses_replay(
+        &self,
+        local_key_id: &str,
+        candidate_id: &str,
+        response_id: &str,
+        state: NativeResponsesReplayState,
+        now_ms: u64,
+    ) {
+        self.native_responses_replay_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(local_key_id, response_id, candidate_id, state, now_ms);
+    }
+
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
         let response_id = response_id?.trim();
         if response_id.is_empty() {
@@ -2190,83 +2265,6 @@ fn runtime_now_ms() -> u64 {
         })
 }
 
-impl SourceExecutor {
-    fn new(source: &ProviderSource, bindings: &[SourceProtocolBinding]) -> Result<Self> {
-        let base_url = normalized_base_url(&source.base_url)?;
-        let mut bearer_authorization = HeaderValue::from_str(&format!("Bearer {}", source.api_key))
-            .map_err(|_| {
-                Error::Validation("source API key contains invalid header characters".to_string())
-            })?;
-        bearer_authorization.set_sensitive(true);
-        let mut messages_api_key = HeaderValue::from_str(&source.api_key).map_err(|_| {
-            Error::Validation("source API key contains invalid header characters".to_string())
-        })?;
-        messages_api_key.set_sensitive(true);
-        Ok(Self {
-            id: source.id.clone(),
-            responses_url: base_url
-                .join("responses")
-                .map_err(|_| Error::Validation("source responses URL is invalid".to_string()))?,
-            chat_completions_url: base_url.join("chat/completions").map_err(|_| {
-                Error::Validation("source chat completions URL is invalid".to_string())
-            })?,
-            messages_url: base_url
-                .join("messages")
-                .map_err(|_| Error::Validation("source messages URL is invalid".to_string()))?,
-            models_url: base_url
-                .join("models")
-                .map_err(|_| Error::Validation("source models URL is invalid".to_string()))?,
-            bearer_authorization,
-            messages_api_key,
-            protocol_bindings: bindings.to_vec(),
-        })
-    }
-
-    pub(crate) fn authorization(&self, wire_api: WireApi) -> (HeaderName, HeaderValue) {
-        match wire_api {
-            WireApi::Messages => (
-                HeaderName::from_static("x-api-key"),
-                self.messages_api_key.clone(),
-            ),
-            WireApi::Responses | WireApi::ChatCompletions => {
-                (AUTHORIZATION, self.bearer_authorization.clone())
-            }
-        }
-    }
-
-    pub(crate) fn endpoint(&self, wire_api: WireApi) -> Option<&Url> {
-        self.binding_for(wire_api)
-            .is_some()
-            .then_some(match wire_api {
-                WireApi::Responses => &self.responses_url,
-                WireApi::ChatCompletions => &self.chat_completions_url,
-                WireApi::Messages => &self.messages_url,
-            })
-    }
-
-    pub(crate) fn canonical_model_for(&self, wire_api: WireApi, model: &str) -> Option<String> {
-        self.models_for(wire_api)?
-            .iter()
-            .find(|candidate| candidate.eq_ignore_ascii_case(model))
-            .cloned()
-    }
-
-    fn binding_for(&self, wire_api: WireApi) -> Option<&SourceProtocolBinding> {
-        self.protocol_bindings
-            .iter()
-            .find(|binding| binding.wire_api == wire_api)
-    }
-
-    fn models_for(&self, wire_api: WireApi) -> Option<&[String]> {
-        self.binding_for(wire_api)
-            .map(|binding| binding.model_ids.as_slice())
-    }
-
-    fn protocol_bindings(&self) -> &[SourceProtocolBinding] {
-        &self.protocol_bindings
-    }
-}
-
 impl ChatGptAccountExecutor {
     fn canonical_model(&self, model: &str) -> Option<String> {
         self.configured_models
@@ -2291,32 +2289,49 @@ impl fmt::Debug for GatewayRuntime {
     }
 }
 
-impl fmt::Debug for SourceExecutor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SourceExecutor")
-            .field("id", &self.id)
-            .field("responses_url", &self.responses_url)
-            .field("chat_completions_url", &self.chat_completions_url)
-            .field("messages_url", &self.messages_url)
-            .field("authorization", &"[redacted]")
-            .field("protocol_bindings", &self.protocol_bindings)
-            .finish()
-    }
-}
-
 pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
     discover_source_models_for_protocol_bindings(source, &[]).await
 }
 
-/// Discovers a source catalog using only its explicitly configured native
-/// protocols.  An OpenAI-compatible source receives Bearer authorization;
-/// an Anthropic-native source receives `x-api-key` plus
-/// `anthropic-version`.  No request body or response format is adapted.
+/// Discovers a source catalog using each explicitly configured binding.
+/// Authentication and the discovery endpoint follow the binding's upstream
+/// protocol. No request body or response format is adapted during discovery.
 pub async fn discover_source_models_for_protocol_bindings(
     source: &ProviderSource,
     protocol_bindings: &[SourceProtocolBinding],
 ) -> Result<Vec<String>> {
+    discover_source_models_and_protocol_bindings(source, protocol_bindings)
+        .await
+        .map(|discovery| discovery.models)
+}
+
+/// The result of binding-aware model discovery.
+///
+/// `models` is the de-duplicated union in upstream response order. Each
+/// `protocol_bindings` entry contains the models advertised for that binding
+/// after its explicit allow-list is applied. A failed or empty binding is
+/// omitted. A successful `/models` response is catalog evidence, not a
+/// completion capability probe; operators must assign a model only to routes
+/// the upstream documents or has safely verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceDiscovery {
+    pub models: Vec<String>,
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
+}
+
+/// Discovers models independently for every configured binding.
+///
+/// Providers sometimes expose different model catalogs (and even different
+/// credentials) on their Responses, Chat Completions, and Messages endpoints.
+/// Discovery must therefore never reuse the first successful response for the
+/// remaining bindings. A configured non-empty `model_ids` list is a strict
+/// allow-list for that binding; an empty list means use the catalog returned
+/// under that binding's authentication. The function succeeds when at least
+/// one binding has a non-empty catalog.
+pub async fn discover_source_models_and_protocol_bindings(
+    source: &ProviderSource,
+    protocol_bindings: &[SourceProtocolBinding],
+) -> Result<SourceDiscovery> {
     source.validate()?;
     let bindings = normalize_source_protocol_bindings(
         protocol_bindings.to_vec(),
@@ -2328,23 +2343,46 @@ pub async fn discover_source_models_for_protocol_bindings(
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    discover_with(&client, &SourceExecutor::new(source, &bindings)?, &bindings).await
+    discover_protocol_bindings_with(
+        &client,
+        &SourceConnector::new(source, &bindings)?,
+        &bindings,
+        protocol_bindings,
+    )
+    .await
 }
 
 async fn discover_with(
     client: &reqwest::Client,
-    source: &SourceExecutor,
+    source: &SourceConnector,
     bindings: &[SourceProtocolBinding],
 ) -> Result<Vec<String>> {
+    // GatewayRuntime only retains normalized bindings, so it cannot tell a
+    // legacy expanded model list from an explicit per-protocol allow-list.
+    // Keep this compatibility helper broad; management paths use the public
+    // discovery API above and retain that distinction.
+    discover_protocol_bindings_with(client, source, bindings, &[])
+        .await
+        .map(|discovery| discovery.models)
+}
+
+async fn discover_protocol_bindings_with(
+    client: &reqwest::Client,
+    source: &SourceConnector,
+    bindings: &[SourceProtocolBinding],
+    configured_bindings: &[SourceProtocolBinding],
+) -> Result<SourceDiscovery> {
     let mut last_error = None;
+    let mut discovered_models = Vec::new();
+    let mut discovered_model_keys = HashSet::new();
+    let mut discovered_bindings = Vec::new();
+
     for binding in bindings {
-        let (authorization_name, authorization) = source.authorization(binding.wire_api);
-        let mut request = client
+        let (authorization_name, authorization) = source.authorization_for_binding(binding);
+        let request = client
             .get(source.models_url.clone())
+            .headers(source.protocol_headers_for_binding(binding))
             .header(authorization_name, authorization);
-        if binding.wire_api == WireApi::Messages {
-            request = request.header("anthropic-version", "2023-06-01");
-        }
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) => {
@@ -2381,16 +2419,63 @@ async fn discover_with(
             continue;
         };
         let mut seen = HashSet::new();
-        return Ok(data
+        let upstream_models = data
             .iter()
             .filter_map(|model| model.get("id").and_then(Value::as_str))
             .filter(|model| seen.insert(model.to_ascii_lowercase()))
             .map(str::to_string)
-            .collect());
+            .collect::<Vec<_>>();
+
+        // An explicitly supplied model list is scoped to this protocol. The
+        // normalized legacy binding may contain source.models after expansion,
+        // so use the original configured binding to distinguish an allow-list
+        // from the legacy "discover everything" form.
+        let explicit_models = configured_bindings
+            .iter()
+            .find(|configured| configured.key() == binding.key())
+            .and_then(|configured| {
+                let models = configured
+                    .model_ids
+                    .iter()
+                    .map(|model| model.trim().to_ascii_lowercase())
+                    .filter(|model| !model.is_empty())
+                    .collect::<HashSet<_>>();
+                (!models.is_empty()).then_some(models)
+            });
+        let models = upstream_models
+            .into_iter()
+            .filter(|model| {
+                explicit_models
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))
+            })
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            continue;
+        }
+
+        for model in &models {
+            if discovered_model_keys.insert(model.to_ascii_lowercase()) {
+                discovered_models.push(model.clone());
+            }
+        }
+        discovered_bindings.push(SourceProtocolBinding {
+            wire_api: binding.wire_api,
+            adapter: binding.adapter,
+            reasoning_mode: binding.reasoning_mode,
+            model_ids: models,
+        });
     }
-    Err(last_error.unwrap_or(Error::InvalidUpstreamResponse(
-        "source has no configured protocol bindings",
-    )))
+
+    if discovered_bindings.is_empty() {
+        return Err(last_error.unwrap_or(Error::InvalidUpstreamResponse(
+            "source did not expose any confirmed models",
+        )));
+    }
+    Ok(SourceDiscovery {
+        models: discovered_models,
+        protocol_bindings: discovered_bindings,
+    })
 }
 
 pub(crate) async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -2687,7 +2772,7 @@ mod tests {
     }
 
     #[test]
-    fn source_executor_preserves_normalized_binding_and_model_order() {
+    fn source_connector_preserves_normalized_binding_and_model_order() {
         let source = source(
             "source-1",
             "upstream-secret",
@@ -2702,10 +2787,14 @@ mod tests {
             vec![
                 SourceProtocolBinding {
                     wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
                 },
                 SourceProtocolBinding {
                     wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
                     model_ids: vec!["gpt-5.6-sol".into(), "gpt-5.4-mini".into()],
                 },
             ],
@@ -2714,16 +2803,20 @@ mod tests {
         )
         .unwrap();
 
-        let executor = SourceExecutor::new(&source, &bindings).unwrap();
+        let connector = SourceConnector::new(&source, &bindings).unwrap();
 
-        assert_eq!(executor.protocol_bindings(), bindings.as_slice());
+        assert_eq!(connector.protocol_bindings(), bindings.as_slice());
         assert_eq!(
-            executor
-                .canonical_model_for(WireApi::Responses, "GPT-5.4-MINI")
+            connector
+                .canonical_model_for(bindings[1].key(), "GPT-5.4-MINI")
                 .as_deref(),
             Some("gpt-5.4-mini")
         );
-        assert!(executor.endpoint(WireApi::ChatCompletions).is_none());
+        assert!(connector
+            .protocol_bindings()
+            .iter()
+            .find(|binding| binding.wire_api == WireApi::ChatCompletions)
+            .is_none());
     }
 
     #[test]
