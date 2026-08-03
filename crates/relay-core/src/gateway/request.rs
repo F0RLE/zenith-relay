@@ -1,3 +1,9 @@
+mod headers;
+
+pub(super) use headers::{
+    forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
+};
+
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::errors::api_error;
 use super::execution::{execute_account_endpoint, execute_client_request};
@@ -16,7 +22,7 @@ use crate::{
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Map, Value};
@@ -36,113 +42,6 @@ const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
-
-const CLAUDE_CODE_SESSION_HEADER: &str = "x-claude-code-session-id";
-
-/// Credentials supplied by a Relay client authenticate only the local
-/// gateway. They must never be forwarded to a configured upstream source,
-/// which authenticates with its own stored credential.
-fn is_client_auth_header(name: &str) -> bool {
-    matches!(
-        name,
-        "authorization"
-            | "proxy-authorization"
-            | "cookie"
-            | "set-cookie"
-            | "x-auth-token"
-            | "x-api-token"
-    ) || name.ends_with("-api-key")
-}
-
-const FORWARDED_CODEX_HEADERS: &[&str] = &[
-    "openai-beta",
-    "originator",
-    "session-id",
-    "session_id",
-    "thread-id",
-    "traceparent",
-    "tracestate",
-    "user-agent",
-    "version",
-    "x-claude-code-session-id",
-    "x-client-request-id",
-    "x-codex-beta-features",
-    "x-codex-installation-id",
-    "x-codex-parent-thread-id",
-    "x-codex-turn-metadata",
-    "x-codex-turn-state",
-    "x-codex-window-id",
-    "x-oai-attestation",
-    "x-openai-memgen-request",
-    "x-openai-subagent",
-    "x-responsesapi-include-timing-metrics",
-    "x-session-id",
-];
-
-pub(super) fn forwarded_codex_headers(
-    client_headers: &HeaderMap,
-    fallback_session_id: &str,
-) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for &name in FORWARDED_CODEX_HEADERS {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
-        }
-    }
-    if !headers.contains_key(CLAUDE_CODE_SESSION_HEADER) {
-        let session_id = ["session_id", "x-session-id", "session-id", "thread-id"]
-            .iter()
-            .find_map(|name| client_headers.get(*name))
-            .cloned()
-            .or_else(|| HeaderValue::from_str(fallback_session_id).ok());
-        if let Some(session_id) = session_id {
-            headers.insert(
-                HeaderName::from_static(CLAUDE_CODE_SESSION_HEADER),
-                session_id,
-            );
-        }
-    }
-    headers
-}
-
-/// A Responses-to-Messages bridge receives a Codex/Responses client request,
-/// not a native Anthropic client request. Carry only the metadata that has a
-/// defined Messages-side meaning; forwarding OpenAI/Codex headers would leak
-/// private client state into an unrelated upstream contract.
-pub(super) fn forwarded_bridge_messages_headers(client_headers: &HeaderMap) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for name in ["user-agent", CLAUDE_CODE_SESSION_HEADER] {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
-        }
-    }
-    headers
-}
-
-/// For native Messages routes, forward only headers that belong to the
-/// Anthropic contract. This avoids leaking Codex/OpenAI request metadata into
-/// a different upstream protocol while retaining the version and session
-/// details needed by Claude Code.
-pub(super) fn forwarded_messages_headers(client_headers: &HeaderMap) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for (name, value) in client_headers {
-        let name = name.as_str();
-        let is_messages_metadata = name == "user-agent"
-            || name.starts_with("anthropic-")
-            || name.starts_with("x-claude-")
-            || name.starts_with("x-stainless-");
-        if is_messages_metadata && !is_client_auth_header(name) {
-            headers.append(
-                HeaderName::from_bytes(name.as_bytes()).expect("request header name is valid"),
-                value.clone(),
-            );
-        }
-    }
-    headers
-        .entry(HeaderName::from_static("anthropic-version"))
-        .or_insert_with(|| HeaderValue::from_static("2023-06-01"));
-    headers
-}
 
 pub(super) async fn models(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -1327,120 +1226,6 @@ mod tests {
     use crate::{
         GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource,
     };
-
-    #[test]
-    fn forwarded_codex_headers_keep_session_identity_and_drop_secrets() {
-        let mut client_headers = HeaderMap::new();
-        client_headers.insert("x-session-id", HeaderValue::from_static("session-42"));
-        client_headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer local-secret"),
-        );
-        client_headers.insert("cookie", HeaderValue::from_static("session=secret"));
-        client_headers.insert(
-            "chatgpt-account-id",
-            HeaderValue::from_static("private-account"),
-        );
-
-        let forwarded = forwarded_codex_headers(&client_headers, "relay-request");
-        assert_eq!(forwarded["x-session-id"], "session-42");
-        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
-        assert!(!forwarded.contains_key(AUTHORIZATION));
-        assert!(!forwarded.contains_key("cookie"));
-        assert!(!forwarded.contains_key("chatgpt-account-id"));
-
-        let synthesized = forwarded_codex_headers(&HeaderMap::new(), "relay-request");
-        assert_eq!(synthesized[CLAUDE_CODE_SESSION_HEADER], "relay-request");
-    }
-
-    #[test]
-    fn forwarded_messages_headers_keep_protocol_metadata_and_drop_client_credentials() {
-        let mut client_headers = HeaderMap::new();
-        client_headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        client_headers.insert(
-            "anthropic-beta",
-            HeaderValue::from_static("fine-grained-tool"),
-        );
-        client_headers.insert(
-            CLAUDE_CODE_SESSION_HEADER,
-            HeaderValue::from_static("session-42"),
-        );
-        client_headers.insert("x-stainless-lang", HeaderValue::from_static("rust"));
-        client_headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer relay-local-secret"),
-        );
-        client_headers.insert("x-api-key", HeaderValue::from_static("relay-local-secret"));
-        client_headers.insert(
-            "anthropic-api-key",
-            HeaderValue::from_static("client-anthropic-secret"),
-        );
-        client_headers.insert(
-            "openai-api-key",
-            HeaderValue::from_static("client-openai-secret"),
-        );
-        client_headers.insert(
-            "x-goog-api-key",
-            HeaderValue::from_static("client-google-secret"),
-        );
-        client_headers.insert("cookie", HeaderValue::from_static("session=secret"));
-
-        let forwarded = forwarded_messages_headers(&client_headers);
-
-        assert_eq!(forwarded["anthropic-version"], "2023-06-01");
-        assert_eq!(forwarded["anthropic-beta"], "fine-grained-tool");
-        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
-        assert_eq!(forwarded["x-stainless-lang"], "rust");
-        for name in [
-            "authorization",
-            "x-api-key",
-            "anthropic-api-key",
-            "openai-api-key",
-            "x-goog-api-key",
-            "cookie",
-        ] {
-            assert!(
-                !forwarded.contains_key(name),
-                "{name} must not be forwarded"
-            );
-        }
-    }
-
-    #[test]
-    fn bridged_messages_headers_do_not_forward_codex_metadata() {
-        let mut client_headers = HeaderMap::new();
-        client_headers.insert("user-agent", HeaderValue::from_static("codex-test"));
-        client_headers.insert(
-            CLAUDE_CODE_SESSION_HEADER,
-            HeaderValue::from_static("session-42"),
-        );
-        client_headers.insert(
-            "x-oai-attestation",
-            HeaderValue::from_static("private-attestation"),
-        );
-        client_headers.insert(
-            "x-openai-memgen-request",
-            HeaderValue::from_static("private-memgen"),
-        );
-        client_headers.insert("openai-beta", HeaderValue::from_static("responses=v1"));
-        client_headers.insert("anthropic-beta", HeaderValue::from_static("tools"));
-
-        let forwarded = forwarded_bridge_messages_headers(&client_headers);
-
-        assert_eq!(forwarded["user-agent"], "codex-test");
-        assert_eq!(forwarded[CLAUDE_CODE_SESSION_HEADER], "session-42");
-        for name in [
-            "x-oai-attestation",
-            "x-openai-memgen-request",
-            "openai-beta",
-            "anthropic-beta",
-        ] {
-            assert!(
-                !forwarded.contains_key(name),
-                "{name} must not cross the Responses-to-Messages boundary"
-            );
-        }
-    }
 
     #[test]
     fn standard_mode_follows_each_chat_service_tier() {
