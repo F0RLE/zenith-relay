@@ -35,6 +35,12 @@ React never reads a secret or provider file directly. The desktop and server
 both consume the shared runtime model rather than maintaining separate routing
 rules.
 
+When the primary desktop window is closed, the Tauri host destroys its WebView
+instead of hiding it. The tray icon, local gateway, account state, and native
+background runtime remain alive; opening Relay from the tray creates a fresh
+WebView. Windows retains ownership of working-set reclamation and pagefile
+placement, so Relay does not force live process pages to disk.
+
 ## Connections, quotas, and routing
 
 ### Connections

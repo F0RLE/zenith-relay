@@ -13,6 +13,8 @@ use tauri::{
 use crate::local_pool::{commands::gateway, DesktopState};
 use crate::platform::ui_text;
 
+pub(crate) const MAIN_WINDOW_LABEL: &str = "main";
+
 const TRAY_ID: &str = "zenith-relay";
 
 pub struct AppState {
@@ -194,7 +196,7 @@ fn tooltip_text(running: bool) -> String {
 }
 
 pub fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         reveal_main_window(&window);
         return;
     }
@@ -212,7 +214,7 @@ pub fn show_main_window(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let window = app
-            .get_webview_window("main")
+            .get_webview_window(MAIN_WINDOW_LABEL)
             .map(Ok)
             .unwrap_or_else(|| create_main_window(&app));
         if let Ok(window) = window {
@@ -239,7 +241,7 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
         .app
         .windows
         .iter()
-        .find(|window| window.label == "main")
+        .find(|window| window.label == MAIN_WINDOW_LABEL)
         .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
     let webview_data = crate::platform::webview_data_dir(app).map_err(std::io::Error::other)?;
     WebviewWindowBuilder::from_config(app, config)?
@@ -250,9 +252,13 @@ pub fn create_main_window(app: &AppHandle) -> tauri::Result<WebviewWindow<tauri:
 /// Releases the WebView renderer while preserving the native process, tray,
 /// managed state, and local gateway. Opening Relay from the tray recreates it.
 pub fn close_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.destroy();
     }
+}
+
+pub(crate) fn is_main_window_label(label: &str) -> bool {
+    label == MAIN_WINDOW_LABEL
 }
 
 #[cfg(test)]
@@ -273,5 +279,20 @@ mod tests {
         assert!(!state.try_start_main_window_open());
         state.finish_main_window_open();
         assert!(state.try_start_main_window_open());
+    }
+
+    #[test]
+    fn main_window_lifecycle_does_not_match_auxiliary_windows() {
+        assert!(is_main_window_label(MAIN_WINDOW_LABEL));
+        assert!(!is_main_window_label("oauth"));
+    }
+
+    #[test]
+    fn runtime_stays_alive_until_the_user_explicitly_quits() {
+        let state = AppState::new();
+
+        assert!(state.should_prevent_exit());
+        state.request_exit();
+        assert!(!state.should_prevent_exit());
     }
 }

@@ -243,6 +243,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if !crate::tray::is_main_window_label(window.label()) {
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 close_main_window(window.app_handle());
