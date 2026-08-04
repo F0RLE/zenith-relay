@@ -150,7 +150,6 @@ impl ClientRequest {
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
-        super::request::normalize_service_tier(object, runtime.default_service_tier());
         if object
             .get("type")
             .and_then(Value::as_str)

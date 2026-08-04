@@ -3229,7 +3229,7 @@ mod tests {
             r#"{"fetched_at":"2026-07-30T00:00:00Z","etag":"v1","models":[{"slug":"cached"}]}"#;
         fs::write(&cache_path, fresh_cache).unwrap();
         let secrets = MemorySecrets::default();
-        let catalog = r#"{"models":[{"slug":"vendor/claude-opus-4-8","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low","description":"Low"},{"effort":"high","description":"High"},{"effort":"ultra","description":"Ultra"}],"supports_parallel_tool_calls":true}]}"#;
+        let catalog = r#"{"models":[{"slug":"vendor/claude-opus-4-8","service_tiers":[{"id":"priority","name":"Fast","description":"Fast tier"}],"additional_speed_tiers":["fast"],"default_service_tier":"priority","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low","description":"Low"},{"effort":"high","description":"High"},{"effort":"ultra","description":"Ultra"}],"supports_reasoning_summary_parameter":true,"supports_reasoning_summaries":true,"default_reasoning_summary":"detailed","supports_parallel_tool_calls":true}]}"#;
 
         attach_with_catalog_for_test(
             &home,
@@ -3258,6 +3258,12 @@ mod tests {
             models[0]["supported_reasoning_levels"][2]["effort"],
             "ultra"
         );
+        assert_eq!(models[0]["service_tiers"][0]["id"], "priority");
+        assert_eq!(models[0]["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(models[0]["default_service_tier"], "priority");
+        assert_eq!(models[0]["supports_reasoning_summary_parameter"], true);
+        assert_eq!(models[0]["supports_reasoning_summaries"], true);
+        assert_eq!(models[0]["default_reasoning_summary"], "detailed");
         assert_eq!(models[0]["supports_parallel_tool_calls"], true);
         assert!(!cache_path.exists());
 

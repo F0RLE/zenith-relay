@@ -1,29 +1,13 @@
 use crate::runtime::DefaultServiceTier;
 use serde_json::{json, Map, Value};
 
-pub(in crate::gateway) fn normalize_service_tier(
-    object: &mut Map<String, Value>,
-    default_service_tier: DefaultServiceTier,
-) {
-    if default_service_tier == DefaultServiceTier::Fast {
-        object.insert(
-            "service_tier".to_string(),
-            Value::String("priority".to_string()),
-        );
-    } else if let Some(Value::String(value)) = object.get_mut("service_tier") {
-        match value.to_ascii_lowercase().as_str() {
-            "fast" => *value = "priority".to_string(),
-            "standard" => *value = "default".to_string(),
-            _ => {}
-        }
-    }
-}
-
 pub(in crate::gateway) fn request_service_tier(request: &Value) -> DefaultServiceTier {
     if request
         .get("service_tier")
         .and_then(Value::as_str)
-        .is_some_and(|tier| tier.eq_ignore_ascii_case("priority"))
+        .is_some_and(|tier| {
+            tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast")
+        })
     {
         DefaultServiceTier::Fast
     } else {

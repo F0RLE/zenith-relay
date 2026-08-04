@@ -13,15 +13,12 @@ pub(super) use headers::{
     forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
 };
 pub(super) use normalization::{
-    normalize_account_request, normalize_service_tier, request_service_tier,
-    try_recover_encrypted_content,
+    normalize_account_request, request_service_tier, try_recover_encrypted_content,
 };
 
 use super::execution::execute_client_request;
 #[cfg(test)]
 use crate::codex_catalog_entry_is_compatible;
-#[cfg(test)]
-use crate::runtime::DefaultServiceTier;
 use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
@@ -250,29 +247,9 @@ pub(super) fn request_id() -> String {
 mod tests {
     use super::*;
     use crate::{
-        GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey, RuntimeSource,
+        DefaultServiceTier, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+        RuntimeLocalKey, RuntimeSource,
     };
-
-    #[test]
-    fn standard_mode_follows_each_chat_service_tier() {
-        let mut standard = json!({"service_tier": "standard"});
-        normalize_service_tier(
-            standard.as_object_mut().unwrap(),
-            DefaultServiceTier::Standard,
-        );
-        assert_eq!(standard["service_tier"], "default");
-
-        let mut fast = json!({"service_tier": "fast"});
-        normalize_service_tier(fast.as_object_mut().unwrap(), DefaultServiceTier::Standard);
-        assert_eq!(fast["service_tier"], "priority");
-
-        let mut inherited = json!({});
-        normalize_service_tier(
-            inherited.as_object_mut().unwrap(),
-            DefaultServiceTier::Standard,
-        );
-        assert!(inherited.get("service_tier").is_none());
-    }
 
     #[test]
     fn tool_diagnostics_count_codex_tool_definitions_without_names() {
@@ -304,6 +281,26 @@ mod tests {
         assert!(!serde_json::to_string(&forwarded)
             .unwrap()
             .contains("read_private_file"));
+    }
+
+    #[test]
+    fn service_tier_metrics_classify_legacy_fast_without_rewriting_the_request() {
+        assert_eq!(
+            request_service_tier(&json!({"service_tier": "priority"})),
+            DefaultServiceTier::Fast
+        );
+        assert_eq!(
+            request_service_tier(&json!({"service_tier": "fast"})),
+            DefaultServiceTier::Fast
+        );
+        for tier in [None, Some("standard"), Some("default"), Some("flex")] {
+            let request = tier.map_or_else(|| json!({}), |tier| json!({"service_tier": tier}));
+            assert_eq!(
+                request_service_tier(&request),
+                DefaultServiceTier::Standard,
+                "{tier:?} must remain a non-fast client tier"
+            );
+        }
     }
 
     #[test]
@@ -593,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_catalog_uses_unique_priorities_and_preserves_confirmed_parallel_tools() {
+    fn codex_catalog_uses_unique_priorities_and_keeps_unconfirmed_capabilities_disabled() {
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(ProviderSource {
                 id: "source".into(),
@@ -669,7 +666,10 @@ mod tests {
             ]
         );
         assert!(models.iter().all(codex_catalog_entry_is_compatible));
-        assert_eq!(models[0]["supports_parallel_tool_calls"], true);
+        // A generic Responses source can reuse an OpenAI-looking model ID
+        // without supporting Codex's native tool contract. Only account
+        // manifests are authoritative for this capability.
+        assert_eq!(models[0]["supports_parallel_tool_calls"], false);
     }
 
     #[test]

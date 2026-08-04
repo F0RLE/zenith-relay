@@ -12,10 +12,10 @@ use super::now_ms;
 use super::request::{
     account_endpoint_url, candidate_protocols, chat_request_is_text_or_image_only,
     chat_request_uses_tools, contains_tool_call_output, forwarded_bridge_messages_headers,
-    forwarded_codex_headers, forwarded_messages_headers, normalize_account_request,
-    normalize_service_tier, request_id, request_service_tier, tool_use_diagnostics,
-    try_recover_encrypted_content, with_forwarded_tool_diagnostics, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    forwarded_codex_headers, forwarded_messages_headers, normalize_account_request, request_id,
+    request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_json_response, proxy_response,
@@ -360,7 +360,7 @@ pub(super) async fn execute_client_request(
         }
     };
 
-    let mut request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match serde_json::from_slice(&body) {
         Ok(Value::Object(request)) => Value::Object(request),
         _ => {
             return api_error(
@@ -370,12 +370,6 @@ pub(super) async fn execute_client_request(
             )
         }
     };
-    if wire_api != WireApi::Messages {
-        let Some(object) = request.as_object_mut() else {
-            unreachable!("request object was validated before normalization")
-        };
-        normalize_service_tier(object, runtime.default_service_tier());
-    }
     if wire_api == WireApi::ChatCompletions && chat_request_uses_tools(&request) {
         return api_error(
             StatusCode::BAD_REQUEST,

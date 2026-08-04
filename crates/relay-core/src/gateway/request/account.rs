@@ -1,7 +1,7 @@
 use super::super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::super::errors::api_error;
 use super::super::execution::execute_account_endpoint;
-use super::normalization::{normalize_account_request, normalize_service_tier};
+use super::normalization::normalize_account_request;
 use super::{
     CODEX_RESPONSES_LITE_HEADER, MAX_ALPHA_SEARCH_RESPONSE_BYTES, MAX_CLIENT_REQUEST_BODY_BYTES,
     MAX_CLIENT_REQUEST_BODY_ERROR,
@@ -42,7 +42,6 @@ pub(in crate::gateway) async fn responses_compact(
             "invalid_request",
         );
     }
-    normalize_service_tier(&mut request, runtime.default_service_tier());
     let Some(requested_model) = request
         .get("model")
         .and_then(Value::as_str)

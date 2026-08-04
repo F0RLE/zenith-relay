@@ -26,9 +26,9 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::gateway;
 use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, CODEX_MODELS_CLIENT_VERSION};
 use zenith_relay_core::{
-    codex_model_alias, CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime,
-    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
-    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
+    CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    LocalGatewayKey, ProviderSource, RuntimeChatGptAccount, RuntimeChatGptAuth,
+    RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -63,6 +63,7 @@ struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     delay: Duration,
+    model_catalog: Value,
 }
 
 #[derive(Clone, Default)]
@@ -444,7 +445,7 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 }
 
 #[tokio::test]
-async fn codex_catalog_exposes_and_forwards_confirmed_native_fast_and_parallel_tools() {
+async fn codex_catalog_exposes_and_forwards_confirmed_native_tiers_reasoning_and_parallel_tools() {
     let (upstream, state) = spawn_upstream(Vec::new()).await;
     let authority = ready_authority("relay-account", "account-access").await;
     let (gateway, _, _, _) = spawn_mixed_gateway(
@@ -473,27 +474,66 @@ async fn codex_catalog_exposes_and_forwards_confirmed_native_fast_and_parallel_t
         .as_array()
         .unwrap()
         .iter()
-        .any(|model| model["slug"] == codex_model_alias(MODEL)));
+        .any(|model| model["slug"] == MODEL));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "Low"},
+            {"effort": "high", "description": "High"},
+            {"effort": "xhigh", "description": "Extra high"}
+        ])
+    );
+    assert_eq!(
+        catalog["models"][0]["supports_reasoning_summary_parameter"],
+        true
+    );
+    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
+    assert_eq!(
+        catalog["models"][0]["default_reasoning_summary"],
+        "detailed"
+    );
 
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
+    // The pool may classify a tier for quota telemetry, but must never
+    // translate a ChatGPT/Codex client's native service-tier selection.
+    // `fast` remains here as a legacy client value that must also pass through
+    // unchanged; the current native values must remain unchanged as well.
+    let client_tiers = [
+        None,
+        Some("standard"),
+        Some("default"),
+        Some("flex"),
+        Some("priority"),
+        Some("fast"),
+    ];
+    for service_tier in client_tiers {
+        let mut body = json!({
             "model": MODEL,
             "input": "hello",
-            "service_tier": "priority",
-            "parallel_tool_calls": true
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+            "parallel_tool_calls": true,
+            "reasoning": {
+                "effort": "xhigh",
+                "summary": "detailed"
+            }
+        });
+        if let Some(service_tier) = service_tier {
+            body["service_tier"] = Value::String(service_tier.to_string());
+        }
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2 + client_tiers.len());
     assert_eq!(
         requests[0].authorization.as_deref(),
         Some("Bearer account-access")
@@ -507,9 +547,185 @@ async fn codex_catalog_exposes_and_forwards_confirmed_native_fast_and_parallel_t
         requests[1].body["client_version"],
         CODEX_MODELS_CLIENT_VERSION
     );
-    assert_eq!(requests[2].body["service_tier"], "priority");
-    assert_eq!(requests[2].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[2].body["parallel_tool_calls"], true);
+    for (request, expected_tier) in requests[2..].iter().zip(client_tiers) {
+        assert_eq!(
+            request.body.get("service_tier").and_then(Value::as_str),
+            expected_tier
+        );
+        assert_eq!(request.responses_lite.as_deref(), Some("true"));
+        assert_eq!(request.body["parallel_tool_calls"], true);
+        assert_eq!(request.body["reasoning"]["effort"], "xhigh");
+        assert_eq!(request.body["reasoning"]["summary"], "detailed");
+        assert_eq!(request.body["reasoning"]["context"], "all_turns");
+    }
+}
+
+#[tokio::test]
+async fn pool_catalog_combines_native_metadata_from_each_available_account() {
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), default_upstream_model_catalog()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(model["default_reasoning_level"], "high");
+    assert_eq!(model["supported_reasoning_levels"][2]["effort"], "xhigh");
+    assert_eq!(model["service_tiers"][0]["id"], "priority");
+    assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_catalogs() {
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), default_upstream_model_catalog()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let url = format!(
+        "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+        gateway.base_url
+    );
+    let client = reqwest::Client::new();
+    let live: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(live["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], true);
+
+    drop(second_upstream);
+
+    let recovered: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(recovered, live);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
+    let (source_upstream, source_state) = spawn_upstream(Vec::new()).await;
+    let (account_upstream, account_state) = spawn_upstream(Vec::new()).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "generic-source",
+            &source_upstream,
+            "source-key",
+            100,
+        )],
+        vec![account(
+            "relay-account",
+            "provider-account",
+            &account_upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(model["default_reasoning_level"], "high");
+    assert_eq!(model["supported_reasoning_levels"][2]["effort"], "xhigh");
+    assert_eq!(model["service_tiers"][0]["id"], "priority");
+    assert_eq!(model["use_responses_lite"], true);
+    assert_eq!(model["supports_reasoning_summaries"], true);
+
+    let source_requests_before = source_state.requests.lock().unwrap().len();
+    let account_requests_before = account_state.requests.lock().unwrap().len();
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        source_state.requests.lock().unwrap().len(),
+        source_requests_before
+    );
+    assert_eq!(
+        account_state.requests.lock().unwrap().len(),
+        account_requests_before + 1
+    );
 }
 
 #[tokio::test]
@@ -539,7 +755,7 @@ async fn codex_catalog_uses_the_last_manifest_when_live_discovery_is_unavailable
         .json()
         .await
         .unwrap();
-    assert_eq!(live["models"][0]["slug"], codex_model_alias(MODEL));
+    assert_eq!(live["models"][0]["slug"], MODEL);
     drop(upstream);
 
     let stale: Value = client
@@ -597,7 +813,7 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|model| model["slug"] == codex_model_alias(MODEL)));
+        .any(|model| model["slug"] == MODEL));
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -1290,6 +1506,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
         });
         if index == 1 {
             request["service_tier"] = Value::String("flex".to_string());
+            request["reasoning"] = json!({
+                "effort": "high",
+                "summary": "detailed",
+                "context": "previous_turn"
+            });
         }
         socket
             .send(ClientWsMessage::Text(request.to_string()))
@@ -1335,8 +1556,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
     assert_eq!(requests[0]["parallel_tool_calls"], true);
-    assert_eq!(requests[0]["service_tier"], "priority");
-    assert_eq!(requests[1]["service_tier"], "priority");
+    assert!(requests[0].get("service_tier").is_none());
+    assert_eq!(requests[1]["service_tier"], "flex");
+    assert_eq!(requests[1]["reasoning"]["effort"], "high");
+    assert_eq!(requests[1]["reasoning"]["summary"], "detailed");
+    assert_eq!(requests[1]["reasoning"]["context"], "all_turns");
     assert!(requests[0]["input"].is_array());
     drop(requests);
 
@@ -2831,7 +3055,7 @@ async fn exhausted_account_keeps_codex_catalog_but_does_not_receive_requests() {
         .json()
         .await
         .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], codex_model_alias(MODEL));
+    assert_eq!(catalog["models"][0]["slug"], MODEL);
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
 
     let response = request(&gateway, false).await;
@@ -3603,10 +3827,18 @@ async fn spawn_mixed_gateway_with_agent_identities_and_options(
 }
 
 async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
+    spawn_upstream_with_catalog(replies, default_upstream_model_catalog()).await
+}
+
+async fn spawn_upstream_with_catalog(
+    replies: Vec<Reply>,
+    model_catalog: Value,
+) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         replies: Arc::new(Mutex::new(replies.into())),
         requests: Arc::new(Mutex::new(Vec::new())),
         delay: Duration::ZERO,
+        model_catalog,
     };
     let app = Router::new()
         .route("/v1/models", get(upstream_models))
@@ -3637,6 +3869,7 @@ async fn spawn_websocket_upstream_with_behavior(
 async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         delay,
+        model_catalog: default_upstream_model_catalog(),
         ..UpstreamState::default()
     };
     let app = Router::new()
@@ -3978,25 +4211,36 @@ async fn upstream_models(
     } else {
         StatusCode::BAD_REQUEST
     };
-    (
-        status,
-        Json(json!({
-            "models": [{
-                "slug": MODEL,
-                "display_name": "GPT P3",
-                "visibility": "list",
-                "supported_in_api": true,
-                "service_tiers": [{
-                    "id": "priority",
-                    "name": "Fast",
-                    "description": "Synthetic fast tier"
-                }],
-                "additional_speed_tiers": ["fast"],
-                "use_responses_lite": true,
-                "supports_parallel_tool_calls": true
-            }]
-        })),
-    )
+    (status, Json(state.model_catalog.clone()))
+}
+
+fn default_upstream_model_catalog() -> Value {
+    json!({
+        "models": [{
+            "slug": MODEL,
+            "display_name": "GPT P3",
+            "visibility": "list",
+            "supported_in_api": true,
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "Synthetic fast tier"
+            }],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+            "use_responses_lite": true,
+            "supports_parallel_tool_calls": true,
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "xhigh", "description": "Extra high"}
+            ],
+            "supports_reasoning_summary_parameter": true,
+            "supports_reasoning_summaries": true,
+            "default_reasoning_summary": "detailed"
+        }]
+    })
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {

@@ -222,7 +222,8 @@ pub type AdapterResult<T> = std::result::Result<T, AdapterError>;
 /// Anthropic always represents a tool invocation as an object, so a direct
 /// custom tool uses the internal `input` string field until it is translated
 /// back at the client boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(super) enum ResponsesToolKind {
     Function,
     Custom,
@@ -234,7 +235,7 @@ pub(super) enum ResponsesToolKind {
 /// while Messages requires one flat, globally unique tool name. The bridge
 /// therefore records both identities and never asks the client to execute an
 /// opaque generated upstream name.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(super) struct ClientToolTarget {
     pub(super) kind: ResponsesToolKind,
     pub(super) name: String,
@@ -283,7 +284,7 @@ pub(super) struct TranslatedTools {
 /// Volatile continuation state for a Responses-to-Messages bridge. It is
 /// intentionally local-only and is never serialized into diagnostics or usage
 /// records because it contains the user's conversation content.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MessagesBridgeState {
     pub(super) model: String,
     pub(super) system: Option<Value>,
@@ -369,7 +370,7 @@ impl MessagesBridgeState {
 /// HTTP request can replay the conversation without pretending that the
 /// upstream response id is portable across transports. This is deliberately
 /// separate from `ResponsesToMessages`: no protocol conversion happens here.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NativeResponsesReplayState {
     pub(super) model: String,
     request: Value,

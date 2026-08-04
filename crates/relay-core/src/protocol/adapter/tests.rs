@@ -960,3 +960,57 @@ fn native_responses_replay_store_is_route_scoped_bounded_and_expiring() {
         .get("key-a", "resp_store_02", "route-a", 112)
         .is_none());
 }
+
+#[test]
+fn continuation_stores_bound_entry_and_total_retained_bytes() {
+    let mut oversized_state =
+        MessagesBridgeState::new("claude-test", MessagesReasoningMode::Disabled);
+    oversized_state.messages.push(json!({
+        "role": "user",
+        "content": [{"type": "text", "text": "x".repeat(1_024)}],
+    }));
+    let mut bridge_store = MessagesBridgeStore::with_limits(4, 60_000, 256, 1_024);
+    bridge_store.insert("key-a", "resp_oversized", "route-a", oversized_state, 100);
+    assert_eq!(
+        bridge_store
+            .get("key-a", "resp_oversized", "route-a", 100)
+            .expect_err("an oversized continuation is not retained")
+            .code(),
+        "adapter_continuation_missing"
+    );
+
+    let state = |text: &str| {
+        let mut state = MessagesBridgeState::new("claude-test", MessagesReasoningMode::Disabled);
+        state.messages.push(json!({
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }));
+        state
+    };
+    let mut total_bound_store = MessagesBridgeStore::with_limits(4, 60_000, 2_048, 1_000);
+    total_bound_store.insert("key-a", "resp_old", "route-a", state(&"a".repeat(512)), 100);
+    total_bound_store.insert("key-a", "resp_new", "route-a", state(&"b".repeat(512)), 101);
+    assert_eq!(
+        total_bound_store
+            .get("key-a", "resp_old", "route-a", 101)
+            .expect_err("the oldest state is evicted at the total byte limit")
+            .code(),
+        "adapter_continuation_missing"
+    );
+    assert!(total_bound_store
+        .get("key-a", "resp_new", "route-a", 101)
+        .is_ok());
+
+    let initial = json!({"model": "alias", "input": "x".repeat(1_024)});
+    let (_, replay) = NativeResponsesReplayState::from_response(
+        &initial,
+        "gpt-test",
+        &json!({"id": "resp_large_replay", "output": []}),
+    )
+    .expect("a completed native response is replayable");
+    let mut replay_store = NativeResponsesReplayStore::with_limits(4, 60_000, 256, 1_024);
+    replay_store.insert("key-a", "resp_large_replay", "route-a", replay, 100);
+    assert!(replay_store
+        .get("key-a", "resp_large_replay", "route-a", 100)
+        .is_none());
+}

@@ -300,6 +300,52 @@ pub fn normalize_upstream_codex_catalog_entry(
     codex_catalog_entry_is_compatible(&value).then_some(value)
 }
 
+/// Preserve the upstream Codex identity for a confirmed ChatGPT account model.
+///
+/// Provider-routed rows intentionally use `codex_model_alias` and the
+/// conservative `routed_codex_catalog_entry` path.  A native OAuth model is
+/// different: Codex uses the bare upstream slug to select its native
+/// Responses contract, so replacing it with a Relay alias would hide the
+/// account's native reasoning and service-tier controls.
+pub fn normalize_native_codex_catalog_entry(
+    template: &Map<String, Value>,
+    model: &str,
+    priority: u64,
+    advertised_context_window: Option<u64>,
+) -> Option<Value> {
+    let mut entry = routed_codex_catalog_entry(
+        None,
+        model,
+        priority,
+        advertised_context_window
+            .or_else(|| template.get("context_window").and_then(context_window)),
+    )
+    .as_object()
+    .cloned()?;
+    // Start from a known-compatible native-shaped row so partial manifests
+    // cannot make the whole pool catalog row disappear, then overlay every
+    // upstream field to retain native capabilities verbatim.
+    entry.extend(
+        template
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone())),
+    );
+    let context_window =
+        advertised_context_window.or_else(|| entry.get("context_window").and_then(context_window));
+    entry.insert("slug".into(), Value::String(model.to_string()));
+    entry.insert(
+        "priority".into(),
+        Value::Number(priority.min(i32::MAX as u64).into()),
+    );
+    if let Some(context_window) = context_window {
+        entry.insert("context_window".into(), context_window.into());
+        entry
+            .entry("max_context_window")
+            .or_insert_with(|| context_window.into());
+    }
+    codex_catalog_entry_is_compatible(&Value::Object(entry.clone())).then_some(Value::Object(entry))
+}
+
 pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
     let Some(entry) = value.as_object() else {
         return false;
@@ -681,6 +727,54 @@ mod tests {
         assert!(entry.get("service_tiers").is_none());
         assert_eq!(entry["supports_reasoning_summaries"], false);
         assert_eq!(entry["supports_parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn native_models_keep_bare_slug_and_upstream_capabilities() {
+        let template = json!({
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6 Sol",
+            "base_instructions": "native Codex instructions",
+            "shell_type": "default",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 10,
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [{"effort": "low", "description": "Low"}],
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "Native fast tier"
+            }],
+            "default_service_tier": "priority",
+            "additional_speed_tiers": ["priority"],
+            "supports_reasoning_summary_parameter": true,
+            "supports_reasoning_summaries": true,
+            "default_reasoning_summary": "detailed",
+            "support_verbosity": true,
+            "default_verbosity": "medium",
+            "supports_parallel_tool_calls": true,
+            "supports_image_detail_original": true,
+            "supports_search_tool": true,
+            "use_responses_lite": true,
+            "input_modalities": ["text"],
+            "experimental_supported_tools": [],
+            "apply_patch_tool_type": "freeform",
+            "truncation_policy": {"mode": "tokens", "limit": 10000},
+        });
+        let entry = normalize_native_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "gpt-5.6-sol",
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(entry["slug"], "gpt-5.6-sol");
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["service_tiers"][0]["id"], "priority");
+        assert_eq!(entry["supports_parallel_tool_calls"], true);
+        assert_eq!(entry["use_responses_lite"], true);
     }
 
     #[test]

@@ -112,7 +112,7 @@ async fn models_union_respects_each_local_key_scope_without_upstream_calls() {
 }
 
 #[tokio::test]
-async fn public_models_preserve_the_first_source_response_order() {
+async fn public_models_follow_the_canonical_model_family_order() {
     let (upstream, _) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway(
         vec![source(
@@ -141,22 +141,22 @@ async fn public_models_preserve_the_first_source_response_order() {
     assert_eq!(
         models(&gateway, LOCAL_KEY).await,
         [
-            "private-second",
-            "vendor/grok-4.5",
-            "vendor/glm-4.7",
-            "vendor/gemini-3.6-flash-low",
-            "vendor/claude-haiku-4-5",
-            "gpt-image-2",
-            "gpt-5.4-mini",
             "gpt-5.6-sol",
+            "gpt-5.4-mini",
+            "gpt-image-2",
+            "vendor/claude-haiku-4-5",
+            "vendor/gemini-3.6-flash-low",
             "vendor/glm-5.2",
+            "vendor/glm-4.7",
+            "vendor/grok-4.5",
+            "private-second",
             "private-first",
         ]
     );
 }
 
 #[tokio::test]
-async fn fast_for_all_forces_priority_over_client_service_tier() {
+async fn pool_does_not_mutate_client_service_tier() {
     let (upstream, state) = spawn_upstream("source-key", Vec::new()).await;
     let (gateway, _) = spawn_gateway_with_options(
         vec![source("source", &upstream, "source-key", &[MODEL], 0)],
@@ -199,11 +199,11 @@ async fn fast_for_all_forces_priority_over_client_service_tier() {
     assert_eq!(
         tiers,
         [
-            Some("priority"),
-            Some("priority"),
-            Some("priority"),
-            Some("priority"),
-            Some("priority"),
+            None,
+            Some("fast"),
+            Some("standard"),
+            Some("flex"),
+            Some("default"),
             Some("priority"),
         ]
     );

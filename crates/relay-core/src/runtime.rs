@@ -887,10 +887,14 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Vec<String> {
         let scheduler = self.lock_scheduler();
-        self.registry
+        let models = self
+            .registry
             .visible_models(&scheduler, &key.scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| key.model_rules.allows(model))
+            .collect::<Vec<_>>();
+        crate::canonicalize_model_ids(models)
+            .into_iter()
             .map(|model| match key.model_prefix.as_deref() {
                 Some(prefix) => format!("{prefix}/{model}"),
                 None => model,
@@ -1057,11 +1061,16 @@ impl GatewayRuntime {
         windows
     }
 
-    pub(crate) fn remember_codex_responses_lite_model(&self, model: &str) {
-        self.codex_responses_lite_models
+    pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
+        let mut models = self
+            .codex_responses_lite_models
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(model.to_ascii_lowercase());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if enabled {
+            models.insert(model.to_ascii_lowercase());
+        } else {
+            models.remove(&model.to_ascii_lowercase());
+        }
     }
 
     pub(crate) fn codex_model_uses_responses_lite(&self, model: &str) -> bool {
@@ -1107,10 +1116,10 @@ impl GatewayRuntime {
             .map(|manifest| manifest.value.clone())
     }
 
-    pub(crate) fn stale_codex_model_manifest<'a>(
+    pub(crate) fn stale_codex_model_manifests<'a>(
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Option<Value> {
+    ) -> Vec<Value> {
         let manifests = self
             .codex_model_manifests
             .lock()
@@ -1118,8 +1127,8 @@ impl GatewayRuntime {
         candidate_ids
             .into_iter()
             .filter_map(|candidate_id| manifests.get(candidate_id))
-            .max_by_key(|manifest| manifest.observed_at_ms)
             .map(|manifest| manifest.value.clone())
+            .collect()
     }
 
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
@@ -1141,6 +1150,34 @@ impl GatewayRuntime {
             }
         }
         models.into_iter().collect()
+    }
+
+    /// A bare Codex model keeps native metadata whenever a configured
+    /// ChatGPT account can serve it.  Generic sources may expose the same
+    /// upstream-looking id, but they must not downgrade the native account
+    /// entry in the pool catalog.
+    ///
+    /// This deliberately checks configured routes rather than current health:
+    /// a temporary catalogue-discovery failure must not erase native
+    /// capabilities from a saved ChatGPT manifest.
+    pub(crate) fn codex_model_has_chatgpt_account(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        let Some(model) = self.resolve_model(key, model) else {
+            return false;
+        };
+        let scheduler = self.lock_scheduler();
+        self.chatgpt_accounts.values().any(|account| {
+            account
+                .configured_models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&model))
+                && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                    candidate.is_configured(&model, &[WireApi::Responses], &key.scope)
+                })
+        })
     }
 
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
@@ -1936,6 +1973,7 @@ impl GatewayRuntime {
             .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
         if self.default_service_tier_fast.load(Ordering::Relaxed) {
             DefaultServiceTier::Fast

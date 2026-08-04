@@ -60,7 +60,24 @@ impl ModelRegistry {
     ) -> Vec<String> {
         let mut visible = Vec::new();
         let mut seen = HashSet::new();
-        for registered in &self.candidates {
+        // Native ChatGPT account candidates own bare model ids.  Sources are
+        // still registered after them, but an upstream-looking provider id
+        // must not shadow the native entry (or make the picker lose its
+        // native reasoning/service-tier metadata).
+        let mut ordered = self
+            .candidates
+            .iter()
+            .filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_some_and(|candidate| candidate.kind == crate::CandidateKind::OAuthAccount)
+            })
+            .chain(self.candidates.iter().filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_none_or(|candidate| candidate.kind != crate::CandidateKind::OAuthAccount)
+            }));
+        for registered in &mut ordered {
             let Some(candidate) = scheduler.candidate(&registered.id) else {
                 continue;
             };
@@ -251,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_model_ids_keep_first_spelling_without_source_identity() {
+    fn native_account_model_ids_take_precedence_over_provider_spelling() {
         let mut scheduler = PoolScheduler::new();
         let mut source = candidate("source", "source-a");
         source.models = ["GPT-5.4".to_string()].into();
@@ -272,7 +289,7 @@ mod tests {
                 &[WireApi::Responses],
                 0,
             ),
-            ["GPT-5.4"]
+            ["gpt-5.4"]
         );
     }
 }

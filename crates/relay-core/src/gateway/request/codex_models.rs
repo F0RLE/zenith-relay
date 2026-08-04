@@ -3,7 +3,7 @@ use super::super::errors::api_error;
 use super::super::now_ms;
 use crate::catalog::{
     canonicalize_model_ids, normalize_codex_catalog_priorities,
-    normalize_upstream_codex_catalog_entry,
+    normalize_native_codex_catalog_entry,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,7 +99,10 @@ async fn codex_models_response(
     } else {
         vec![client_version, CODEX_MODELS_CLIENT_VERSION]
     };
+    let mut live_manifests = Vec::new();
+    let mut live_candidate_ids = HashSet::new();
     for (candidate_id, mut url) in routes {
+        let mut candidate_manifest = None;
         for client_version in &client_versions {
             url.query_pairs_mut()
                 .clear()
@@ -122,48 +125,42 @@ async fn codex_models_response(
             else {
                 continue;
             };
-            if let Some(catalog) = codex_models_from_upstream(
-                runtime,
-                key,
-                visible_models,
-                &source_context_windows,
-                &body,
-            ) {
-                runtime.clear_candidate_capability_blocks(&candidate_id);
-                if let Ok(upstream) = serde_json::from_slice::<Value>(&body) {
-                    runtime.remember_codex_model_manifest(&candidate_id, upstream, now_ms);
-                }
-                return Some(catalog);
+            let Ok(upstream) = serde_json::from_slice::<Value>(&body) else {
+                continue;
+            };
+            if upstream_codex_models(&upstream).is_none() {
+                continue;
             }
+            runtime.clear_candidate_capability_blocks(&candidate_id);
+            runtime.remember_codex_model_manifest(&candidate_id, upstream.clone(), now_ms);
+            candidate_manifest = Some(upstream);
+            break;
+        }
+        if let Some(manifest) = candidate_manifest {
+            live_candidate_ids.insert(candidate_id);
+            live_manifests.push(manifest);
         }
     }
-    let stale = runtime.stale_codex_model_manifest(candidate_ids.iter().map(String::as_str));
-    build_codex_models_response(
+    // A successful manifest supersedes its own cache. If a different account
+    // route is only temporarily unreachable, retain that account's last
+    // confirmed native metadata after the live rows so it cannot disappear
+    // from the Codex picker during a transient discovery failure.
+    let stale = runtime.stale_codex_model_manifests(
+        candidate_ids
+            .iter()
+            .filter(|candidate_id| !live_candidate_ids.contains(candidate_id.as_str()))
+            .map(String::as_str),
+    );
+    build_codex_models_response_from_manifests(
         runtime,
         key,
         visible_models,
         &source_context_windows,
-        stale.as_ref(),
+        live_manifests.iter().chain(stale.iter()),
     )
 }
 
-fn codex_models_from_upstream(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    visible_models: &[String],
-    source_context_windows: &BTreeMap<String, u64>,
-    body: &[u8],
-) -> Option<Value> {
-    let payload: Value = serde_json::from_slice(body).ok()?;
-    build_codex_models_response(
-        runtime,
-        key,
-        visible_models,
-        source_context_windows,
-        Some(&payload),
-    )
-}
-
+#[cfg(test)]
 pub(in crate::gateway) fn build_codex_models_response(
     runtime: &GatewayRuntime,
     key: &AuthenticatedKey,
@@ -171,10 +168,27 @@ pub(in crate::gateway) fn build_codex_models_response(
     source_context_windows: &BTreeMap<String, u64>,
     upstream: Option<&Value>,
 ) -> Option<Value> {
-    let upstream_models = upstream
-        .and_then(|payload| payload.get("models"))
-        .and_then(Value::as_array)
-        .filter(|models| models.len() <= 4_096);
+    build_codex_models_response_from_manifests(
+        runtime,
+        key,
+        visible_models,
+        source_context_windows,
+        upstream,
+    )
+}
+
+fn build_codex_models_response_from_manifests<'a>(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    source_context_windows: &BTreeMap<String, u64>,
+    upstreams: impl IntoIterator<Item = &'a Value>,
+) -> Option<Value> {
+    let upstream_models = upstreams
+        .into_iter()
+        .filter_map(upstream_codex_models)
+        .flat_map(|models| models.iter())
+        .collect::<Vec<_>>();
     let mut visible = visible_models
         .iter()
         .filter_map(|display_id| {
@@ -209,8 +223,8 @@ pub(in crate::gateway) fn build_codex_models_response(
     // presentation boundary: it groups familiar model IDs while the upstream
     // catalog only supplies capability templates for those same IDs.
     let upstream_by_model = upstream_models
-        .into_iter()
-        .flat_map(|models| models.iter())
+        .iter()
+        .copied()
         .filter_map(|model| {
             let object = model.as_object()?;
             let slug = object.get("slug")?.as_str()?.trim();
@@ -237,51 +251,58 @@ pub(in crate::gateway) fn build_codex_models_response(
             entries
         });
 
-    let template = upstream_models.and_then(|models| {
-        models
-            .iter()
-            .find(|model| codex_catalog_entry_is_compatible(model))
-            .and_then(Value::as_object)
-    });
+    let template = upstream_models
+        .iter()
+        .copied()
+        .find(|model| codex_catalog_entry_is_compatible(model))
+        .and_then(Value::as_object);
     let mut models = Vec::with_capacity(visible.len());
     for (index, (normalized, (upstream_id, display_id))) in visible.into_iter().enumerate() {
         if !codex_model_is_picker_eligible(&upstream_id) {
             continue;
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
-        let Some(mut model) = upstream_by_model
-            .get(&normalized)
-            .and_then(|entry| {
-                normalize_upstream_codex_catalog_entry(
-                    entry,
-                    &display_id,
-                    priority,
-                    source_context_windows
-                        .get(&upstream_id.to_ascii_lowercase())
-                        .copied(),
-                )
-            })
-            .or_else(|| {
-                Some(routed_codex_catalog_entry(
-                    template,
-                    &display_id,
-                    priority,
-                    source_context_windows
-                        .get(&upstream_id.to_ascii_lowercase())
-                        .copied(),
-                ))
-            })
-        else {
-            continue;
+        let native_account_model = runtime.codex_model_has_chatgpt_account(key, &upstream_id);
+        let mut model = if native_account_model {
+            upstream_by_model
+                .get(&normalized)
+                .and_then(|entry| {
+                    normalize_native_codex_catalog_entry(
+                        entry,
+                        &display_id,
+                        priority,
+                        source_context_windows
+                            .get(&upstream_id.to_ascii_lowercase())
+                            .copied(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    routed_codex_catalog_entry(
+                        template,
+                        &display_id,
+                        priority,
+                        source_context_windows
+                            .get(&upstream_id.to_ascii_lowercase())
+                            .copied(),
+                    )
+                })
+        } else {
+            routed_codex_catalog_entry(
+                template,
+                &display_id,
+                priority,
+                source_context_windows
+                    .get(&upstream_id.to_ascii_lowercase())
+                    .copied(),
+            )
         };
-        if upstream_by_model
-            .get(&normalized)
-            .and_then(|entry| entry.get("use_responses_lite"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            runtime.remember_codex_responses_lite_model(&upstream_id);
-        }
+        let uses_responses_lite = native_account_model
+            && upstream_by_model
+                .get(&normalized)
+                .and_then(|entry| entry.get("use_responses_lite"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        runtime.set_codex_model_uses_responses_lite(&upstream_id, uses_responses_lite);
         if let Some(context_window) = source_context_windows.get(&upstream_id.to_ascii_lowercase())
         {
             model["context_window"] = (*context_window).into();
@@ -301,6 +322,13 @@ pub(in crate::gateway) fn build_codex_models_response(
     } else {
         Some(json!({ "models": models }))
     }
+}
+
+fn upstream_codex_models(payload: &Value) -> Option<&Vec<Value>> {
+    payload
+        .get("models")
+        .and_then(Value::as_array)
+        .filter(|models| models.len() <= 4_096)
 }
 
 fn valid_codex_client_version(value: &str) -> bool {
