@@ -33,6 +33,7 @@ use zenith_relay_core::{
 
 const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
+const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -445,12 +446,17 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 }
 
 #[tokio::test]
-async fn codex_catalog_exposes_and_forwards_confirmed_native_tiers_reasoning_and_parallel_tools() {
-    let (upstream, state) = spawn_upstream(Vec::new()).await;
+async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in_pool() {
+    let mut upstream_catalog = default_upstream_model_catalog();
+    upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
+    upstream_catalog["models"][0]["display_name"] = Value::String("GPT-5.6 Terra".to_string());
+    let (upstream, state) = spawn_upstream_with_catalog(Vec::new(), upstream_catalog).await;
     let authority = ready_authority("relay-account", "account-access").await;
+    let mut official_account = account("relay-account", "provider-account", &upstream, 10);
+    official_account.models = vec![OFFICIAL_CODEX_MODEL.to_string()];
     let (gateway, _, _, _) = spawn_mixed_gateway(
         Vec::new(),
-        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![official_account],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
@@ -474,7 +480,7 @@ async fn codex_catalog_exposes_and_forwards_confirmed_native_tiers_reasoning_and
         .as_array()
         .unwrap()
         .iter()
-        .any(|model| model["slug"] == MODEL));
+        .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
     assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
@@ -511,7 +517,7 @@ async fn codex_catalog_exposes_and_forwards_confirmed_native_tiers_reasoning_and
     ];
     for service_tier in client_tiers {
         let mut body = json!({
-            "model": MODEL,
+            "model": OFFICIAL_CODEX_MODEL,
             "input": "hello",
             "parallel_tool_calls": true,
             "reasoning": {
@@ -548,6 +554,7 @@ async fn codex_catalog_exposes_and_forwards_confirmed_native_tiers_reasoning_and
         CODEX_MODELS_CLIENT_VERSION
     );
     for (request, expected_tier) in requests[2..].iter().zip(client_tiers) {
+        assert_eq!(request.body["model"], OFFICIAL_CODEX_MODEL);
         assert_eq!(
             request.body.get("service_tier").and_then(Value::as_str),
             expected_tier

@@ -304,6 +304,26 @@ mod tests {
     }
 
     #[test]
+    fn native_account_reasoning_and_speed_selections_are_opaque() {
+        let mut request = json!({
+            "model": "gpt-5.6-terra",
+            "service_tier": "flex",
+            "reasoning": {
+                "effort": "ultra",
+                "summary": "detailed",
+                "context": "client_selected"
+            }
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), false);
+
+        assert_eq!(request["service_tier"], "flex");
+        assert_eq!(request["reasoning"]["effort"], "ultra");
+        assert_eq!(request["reasoning"]["summary"], "detailed");
+        assert_eq!(request["reasoning"]["context"], "client_selected");
+    }
+
+    #[test]
     fn responses_lite_preserves_codex_client_tools_without_server_hosted_tools() {
         let mut request = json!({
             "model": "gpt-lite",

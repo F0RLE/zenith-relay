@@ -19,6 +19,10 @@ pub(in crate::gateway) fn normalize_account_request(
     object: &mut Map<String, Value>,
     responses_lite: bool,
 ) {
+    // Native account settings are opaque client selections. In particular,
+    // never translate or filter `service_tier`, `reasoning.effort`, or
+    // `reasoning.summary` according to Relay pool policy. Responses Lite is
+    // the sole exception: its upstream contract requires `context=all_turns`.
     object.insert("store".to_string(), Value::Bool(false));
     object.insert("stream".to_string(), Value::Bool(true));
     object.remove("max_output_tokens");
