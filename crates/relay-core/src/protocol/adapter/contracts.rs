@@ -136,14 +136,11 @@ impl MessagesReasoningMode {
     /// Responses routes do not use this list: they preserve a provider's
     /// confirmed effort value verbatim.
     pub(crate) fn supports_effort(self, effort: &str) -> bool {
+        let effort = effort.trim().to_ascii_lowercase();
         match self {
             Self::Disabled => false,
-            Self::Budget => matches!(
-                effort,
-                "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
-            ),
-            Self::Adaptive => matches!(
-                effort,
+            Self::Budget | Self::Adaptive => matches!(
+                effort.as_str(),
                 "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
             ),
         }

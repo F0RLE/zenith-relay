@@ -967,15 +967,15 @@ fn apply_reasoning(
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("effort"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|effort| !effort.is_empty() && *effort != "none");
+        .map(|effort| effort.trim().to_ascii_lowercase())
+        .filter(|effort| !effort.is_empty() && effort != "none");
     let Some(effort) = effort else {
         return Ok(());
     };
     match mode {
         MessagesReasoningMode::Disabled => Err(AdapterError::reasoning_unsupported()),
         MessagesReasoningMode::Budget => {
-            let budget_tokens = match effort {
+            let budget_tokens = match effort.as_str() {
                 "minimal" => 1_024,
                 "low" => 4_096,
                 "high" => 16_384,
@@ -1000,10 +1000,10 @@ fn apply_reasoning(
             Ok(())
         }
         MessagesReasoningMode::Adaptive => {
-            let effort = match effort {
+            let effort = match effort.as_str() {
                 "minimal" => "low",
                 "ultra" => "max",
-                "low" | "medium" | "high" | "xhigh" | "max" => effort,
+                "low" | "medium" | "high" | "xhigh" | "max" => effort.as_str(),
                 _ => return Err(AdapterError::reasoning_unsupported()),
             };
             body.insert("thinking".to_string(), json!({"type": "adaptive"}));

@@ -385,9 +385,11 @@ fn messages_bridge_rejects_tool_result_for_an_unknown_call() {
 }
 
 #[test]
-fn messages_bridge_maps_reasoning_only_when_binding_supports_it() {
+fn messages_bridge_maps_case_insensitive_reasoning_only_when_binding_supports_it() {
     let mut with_reasoning = request(Value::String("think".to_string()));
-    with_reasoning["reasoning"] = json!({"effort": "high"});
+    with_reasoning["reasoning"] = json!({"effort": "High"});
+    assert!(MessagesReasoningMode::Adaptive.supports_effort("HIGH"));
+    assert!(MessagesReasoningMode::Budget.supports_effort("High"));
     let adaptive = prepare_responses_to_messages(
         &with_reasoning,
         "claude-test",
@@ -399,6 +401,16 @@ fn messages_bridge_maps_reasoning_only_when_binding_supports_it() {
     assert_eq!(adaptive.upstream_body()["thinking"]["type"], "adaptive");
     assert_eq!(adaptive.upstream_body()["output_config"]["effort"], "high");
     assert!(adaptive.upstream_body().get("temperature").is_none());
+
+    let budget = prepare_responses_to_messages(
+        &with_reasoning,
+        "claude-test",
+        false,
+        MessagesReasoningMode::Budget,
+        None,
+    )
+    .unwrap();
+    assert_eq!(budget.upstream_body()["thinking"]["budget_tokens"], 16_384);
 
     let error = prepare_responses_to_messages(
         &with_reasoning,
