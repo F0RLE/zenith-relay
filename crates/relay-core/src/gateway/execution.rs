@@ -5,6 +5,7 @@ use super::errors::{
     failure_category_is_request_terminal, failure_category_requires_cooldown,
     failure_requires_independent_source_endpoint, previous_response_not_found,
     previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure,
     TRANSIENT_COOLDOWN_MS,
@@ -526,6 +527,7 @@ async fn execute_request(
     while attempts_this_run
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
             + usize::from(encrypted_content_recovered)
+            + usize::from(native_replay_attempted)
     {
         let selected = runtime
             .select_and_reserve(
@@ -765,7 +767,10 @@ async fn execute_request(
                 && adapter_is_passthrough
                 && has_previous_response_id
                 && !native_replay_attempted
-                && previous_response_requires_websocket(&bytes)
+                && (previous_response_requires_websocket(&bytes)
+                    || (status == StatusCode::BAD_REQUEST
+                        && contains_tool_call_output(&request)
+                        && responses_function_call_output_has_invalid_call_id(&bytes)))
             {
                 let previous_response_id = request
                     .get("previous_response_id")

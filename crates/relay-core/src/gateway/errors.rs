@@ -826,6 +826,22 @@ pub(super) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
     text.contains("previous_response_id") && text.contains("websocket")
 }
 
+pub(super) fn responses_function_call_output_has_invalid_call_id(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return false;
+    };
+    let text = upstream_error_text(&value);
+    text_has_any(
+        &text,
+        &[
+            "invalid call_id for function_call_output",
+            "invalid call id for function_call_output",
+            "invalid_call_id_for_function_call_output",
+            "invalid_function_call_output_call_id",
+        ],
+    )
+}
+
 /// Strict Responses endpoints use a separate `fc_` namespace for
 /// `function_call.id`; the matching `call_id` is unchanged. This is only a
 /// recovery signal — the request repair itself still verifies that it has a
@@ -1366,6 +1382,22 @@ mod tests {
         ));
         assert!(!previous_response_requires_websocket(
             br#"{"error":{"message":"WebSocket transport is unavailable"}}"#,
+        ));
+    }
+
+    #[test]
+    fn invalid_function_call_output_call_ids_are_detected_without_matching_generic_errors() {
+        assert!(responses_function_call_output_has_invalid_call_id(
+            br#"{"error":{"message":"Invalid call_id for function_call_output"}}"#,
+        ));
+        assert!(responses_function_call_output_has_invalid_call_id(
+            br#"{"error":{"code":"invalid_function_call_output_call_id"}}"#,
+        ));
+        assert!(!responses_function_call_output_has_invalid_call_id(
+            br#"{"error":{"message":"Invalid call_id"}}"#,
+        ));
+        assert!(!responses_function_call_output_has_invalid_call_id(
+            br#"Invalid call_id for function_call_output"#,
         ));
     }
 
