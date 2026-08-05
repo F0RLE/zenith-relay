@@ -120,7 +120,12 @@ Relay snapshots the previous profile catalog, auth, and provider configuration
 before attaching. User-managed catalog rows are used only as a validated schema
 template while Relay is attached; they are not presented as pool routes. Native
 ChatGPT catalog rows keep their original reasoning, service-tier, context, and
-other capabilities; API-source metadata is applied only to routed rows. A
+other capabilities, including their original image-input declaration or its
+absence. Relay-managed routed rows advertise text and image input by default so
+an incomplete provider catalog cannot make Codex reject an attachment before
+the request reaches the selected model. This is a client-side admission policy,
+not a claim that every upstream model understands images; the upstream remains
+the final authority. API-source metadata is applied only to routed rows. A
 refresh changes the managed catalog only after validation, invalidates Codex's
 model cache only after the new catalog is written, and restores the previous
 profile state when the managed files are still unchanged.

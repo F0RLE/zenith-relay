@@ -20,8 +20,7 @@ use zenith_relay_core::{
     accounts::TokenSet, canonicalize_model_ids, codex_catalog_entry_is_compatible,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
-    source_model_declares_image_input, CODEX_RELAY_CATALOG_HASH,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
@@ -286,20 +285,7 @@ fn direct_source_catalog_entry(
 ) -> Value {
     let mut entry = source_entry
         .and_then(|source_entry| {
-            let mut source_entry = source_entry.clone();
-            if source_entry.get("input_modalities").is_none() {
-                if let Some(supports_image) = source_model_declares_image_input(&source_entry) {
-                    source_entry.insert(
-                        "input_modalities".into(),
-                        if supports_image {
-                            json!(["text", "image"])
-                        } else {
-                            json!(["text"])
-                        },
-                    );
-                }
-            }
-            normalize_upstream_codex_catalog_entry(&source_entry, model, priority, None)
+            normalize_upstream_codex_catalog_entry(source_entry, model, priority, None)
         })
         .unwrap_or_else(|| routed_codex_catalog_entry(Some(template), model, priority, None));
     entry["slug"] = Value::String(model.to_string());
@@ -3407,7 +3393,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_source_catalog_preserves_explicit_native_image_capability() {
+    fn direct_source_catalog_allows_images_for_every_routed_model() {
         let (root, home, _backups) = profile_dirs("direct-source-image-capability");
         let manifest = json!({
             "data": [
@@ -3435,7 +3421,7 @@ mod tests {
         assert_eq!(models[0]["slug"], "provider/vision");
         assert_eq!(models[0]["input_modalities"], json!(["text", "image"]));
         assert_eq!(models[1]["slug"], "provider/text");
-        assert_eq!(models[1]["input_modalities"], json!(["text"]));
+        assert_eq!(models[1]["input_modalities"], json!(["text", "image"]));
         fs::remove_dir_all(root).unwrap();
     }
 

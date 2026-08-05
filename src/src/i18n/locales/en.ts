@@ -943,8 +943,6 @@ const relayEn = {
     recoveryProbe: "Recovery check",
     retryAt: "Retry after {{time}}",
     priorityEmpty: "No route available",
-    latestModel: "Latest model: {{model}}",
-    latestModelUnknown: "No request has selected a model yet",
     readyModels: "Available now via {{member}}: {{models}}",
     memberStatus: {
       rotation: "In rotation",
@@ -952,7 +950,6 @@ const relayEn = {
       unavailable: "Unavailable",
       disabled: "Disabled",
     },
-    latestModelUnsupported: "The latest requested model {{model}} is unavailable on this member.",
     codexInterface: "ChatGPT interface",
     codexInterfaceHint: "This account is applied only to the ChatGPT interface. Requests are still distributed across the available pool.",
     refreshQuotas: "Refresh quotas",

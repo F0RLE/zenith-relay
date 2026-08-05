@@ -6,10 +6,12 @@ This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
 verification evidence exists, not when its UI is present.
 
-## P0 - Prove the personal pool in production
+## P0 - Prove the personal pool in production (deferred)
 
-The immediate priority is live acceptance of the local and user-managed server
-paths. Mocked UI, unit tests, and a local build are necessary but insufficient.
+Deferred at the user's request until real accounts are available and the user
+explicitly resumes this work. Do not perform live account operations in the
+meantime. Mocked UI, unit tests, and a local build remain necessary but cannot
+replace the following acceptance gates.
 
 ### Local pool acceptance
 
@@ -43,12 +45,16 @@ Instrumentation exists for native startup, vault, SQLite, window creation,
 first frame, interactive state, snapshots, and mode switch. Use it to collect
 cold and warm baselines before changing architecture.
 
-1. Measure cold startup, warm startup, mode switch, and opening Connections,
-   Pool, and Usage with a representative account set.
-2. Verify that Usage is loaded only by Overview and Usage, not every page.
-3. Keep API-equivalent cached until usage or pricing changes.
-4. Skip identical full snapshots when the state revision has not changed.
-5. Turn any measured regression into a small reproducible check before
+The 2026-08-05 representative-data cold baseline measured native startup at
+35.52 ms, window creation at 409.47 ms, first frame at 76.00 ms, interactive
+state at 200.07 ms, Pool opening at 12.22 ms, and a full snapshot at 46.57 ms.
+Pool no longer reads Usage and has a local/remote browser regression test.
+
+1. Measure warm startup, mode switch, and opening Connections and Usage with a
+   representative account set.
+2. Keep API-equivalent cached until usage or pricing changes.
+3. Skip identical full snapshots when the state revision has not changed.
+4. Turn any measured regression into a small reproducible check before
    optimizing it.
 
 The goal is a responsive application, not speculative caching or background
@@ -104,10 +110,14 @@ safe reversible configuration path. Each integration must use the shared pool
 endpoint and existing client-key model policy; it must not fork routing or
 secret storage.
 
-## P4 - Additional subscription account connectors
+## P4 - Additional subscription account connectors (deferred)
 
 Potential examples include Kiro and Antigravity. Each is a separate
 compatibility project, not a switch in the existing ChatGPT connector.
+
+This work is deferred until the user explicitly requests a connector and can
+provide a permitted live account for acceptance. Do not implement speculative
+account adapters before then.
 
 Before implementation, confirm the provider's permitted authentication and
 automation model, then design a connector that supplies canonical credentials,
@@ -116,6 +126,9 @@ Only after live provider tests may the connector enter the pool UI. Never
 pretend that a provider's quota or models are equivalent to ChatGPT's.
 
 ## P5 - Server scale only when a personal deployment outgrows one instance
+
+This phase is demand-gated. Leave the current single-instance architecture in
+place until a real personal deployment demonstrates the need to resume it.
 
 1. Define a multi-replica deployment contract and a shared durable state
    boundary.

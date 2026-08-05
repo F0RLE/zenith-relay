@@ -93,11 +93,10 @@ function formatConfigurationValue(value: unknown) {
 
 function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeRevision, perform, busy, codexPoolOauthSelection, localUsage, remoteUsage, loadLocalUsage, loadRemoteUsage, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
+  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
-  const canReadUsage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -107,23 +106,11 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
   const sourceStatsGeneration = useRef(0);
-  useEffect(() => {
-    if (!runtime || mode === "zenith" || !canReadUsage) return;
-    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
-    void load({ page: 1, pageSize: 1 }).catch(() => undefined);
-  }, [canReadUsage, loadLocalUsage, loadRemoteUsage, mode, runtime, runtimeRevision]);
   const poolMembers: Member[] = [
     ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
     ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const })),
   ];
   const runtimeOrder = runtime?.gateway.routingOrder ?? [];
-  const latestUsage = (mode === "local" ? localUsage : remoteUsage).reduce<(typeof localUsage)[number] | (typeof remoteUsage)[number] | null>(
-    (latest, event) => latest == null || event.id > latest.id ? event : latest,
-    null,
-  );
-  // Codex may send a Relay-managed alias here.  The resolved model is the
-  // actual upstream model that routing evaluated against member capabilities.
-  const latestPoolModel = latestUsage?.resolvedModel ?? latestUsage?.requestedModel ?? null;
   const runtimeByMember = new Map(runtimeOrder.map((candidate) => [candidate.candidateId, candidate]));
   const orderByMember = routingOrderPositions(runtimeOrder);
   const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
@@ -250,7 +237,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : latestPoolModel ? <small className="pool-latest-model" data-latest-model={latestPoolModel}>{t("pool.latestModel", { model: latestPoolModel })}</small> : currentRouteMember && readyRouteModels.length ? <small className="pool-latest-model" data-ready-route={currentRouteMember.id} data-ready-models={readyRouteModels.join(",")}>{t("pool.readyModels", { member: memberName(currentRouteMember), models: readyRouteModels.join(", ") })}</small> : null}</span></div>
+        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : currentRouteMember && readyRouteModels.length ? <small className="pool-ready-models" data-ready-route={currentRouteMember.id} data-ready-models={readyRouteModels.join(",")}>{t("pool.readyModels", { member: memberName(currentRouteMember), models: readyRouteModels.join(", ") })}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
@@ -274,9 +261,8 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(member.id);
-        const unsupportedLatestModel = latestPoolModel != null && !memberSupportsModel(member, latestPoolModel);
         const statusKey = member.operationalStatus;
-        const statusTone = unsupportedLatestModel && statusKey === "rotation" ? "warning" : operationalStatusTone(statusKey);
+        const statusTone = operationalStatusTone(statusKey);
         const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
         const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
@@ -297,8 +283,6 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
           ? t("pool.recoveryProbe")
           : member.kind === "source" && runtimeState?.nextRetryAtMs
             ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
-            : unsupportedLatestModel
-              ? t("pool.latestModelUnsupported", { model: latestPoolModel })
             : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;

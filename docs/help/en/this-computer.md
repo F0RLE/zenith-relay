@@ -31,6 +31,10 @@ An account outside the pool is still monitored but cannot receive traffic. An
 account in the pool is routed only while its session, requested model, and
 quota are available. A **Free** plan is not excluded automatically.
 
+Relay lets routed models receive image attachments without guessing support
+from their names. The selected model makes the final decision; native ChatGPT
+model capabilities remain unchanged.
+
 ## Before you start
 
 - Zenith Relay and ChatGPT are installed on the same computer.
