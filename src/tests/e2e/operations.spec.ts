@@ -1778,7 +1778,7 @@ test("pool keeps the last completed route visible after its lease is released", 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Usage order");
   await expect(priority).toContainText("Last request: Pro account");
-  await expect(priority.locator('[data-ready-route="account_synthetic_4"]')).toContainText("Available now via Pro account");
+  await expect(priority.locator('[data-ready-route="account_synthetic_4"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini,o3");
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
