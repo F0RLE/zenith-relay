@@ -139,6 +139,76 @@ pub(crate) fn source_context_windows(
         .collect()
 }
 
+/// Reads an explicit image-input declaration from a generic source model
+/// manifest. Missing metadata is intentionally not treated as support.
+pub(crate) fn source_image_input_capabilities(
+    manifest: &Value,
+    configured_models: &BTreeSet<String>,
+) -> BTreeMap<String, bool> {
+    manifest
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| {
+            let object = model.as_object()?;
+            let id = object.get("id")?.as_str()?.trim();
+            if !configured_models
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(id))
+            {
+                return None;
+            }
+            Some((
+                id.to_ascii_lowercase(),
+                source_model_declares_image_input(object).unwrap_or(false),
+            ))
+        })
+        .collect()
+}
+
+pub fn source_model_declares_image_input(model: &Map<String, Value>) -> Option<bool> {
+    for key in [
+        "input_modalities",
+        "inputModalities",
+        "input_types",
+        "inputTypes",
+    ] {
+        if let Some(value) = model.get(key) {
+            return Some(array_contains_image(value));
+        }
+    }
+    for key in [
+        "supports_vision",
+        "supportsVision",
+        "supports_images",
+        "supportsImages",
+        "image_input",
+        "imageInput",
+    ] {
+        if let Some(value) = model.get(key).and_then(Value::as_bool) {
+            return Some(value);
+        }
+    }
+    model
+        .get("capabilities")
+        .and_then(Value::as_object)
+        .and_then(source_model_declares_image_input)
+}
+
+fn array_contains_image(value: &Value) -> bool {
+    value.as_array().is_some_and(|values| {
+        values.iter().any(|value| {
+            value.as_str().is_some_and(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "image" | "image_url" | "vision"
+                )
+            })
+        })
+    })
+}
+
 /// Reads optional, provider-declared reasoning capabilities from OpenAI-style
 /// `data` model rows. The source API remains provider-neutral: it may expose
 /// Relay's canonical `capabilities.reasoning` object, a nested `reasoning`
@@ -445,6 +515,30 @@ mod tests {
                 ("claude-fable-5".into(), 1_000_000),
                 ("gemini-3.5-flash".into(), 1_048_576),
                 ("grok-4.5".into(), 500_000),
+            ])
+        );
+    }
+
+    #[test]
+    fn reads_explicit_image_input_capabilities_without_inferring_from_model_names() {
+        let configured = ["provider/vision", "provider/text", "provider/unknown"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let manifest = json!({
+            "data": [
+                {"id": "provider/vision", "input_modalities": ["text", "image"]},
+                {"id": "provider/text", "supports_vision": false},
+                {"id": "provider/unknown"}
+            ]
+        });
+
+        assert_eq!(
+            source_image_input_capabilities(&manifest, &configured),
+            BTreeMap::from([
+                ("provider/text".into(), false),
+                ("provider/unknown".into(), false),
+                ("provider/vision".into(), true),
             ])
         );
     }

@@ -19,7 +19,7 @@ use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -156,6 +156,7 @@ async fn codex_models_response(
         key,
         visible_models,
         &source_metadata.context_windows,
+        &source_metadata.image_models,
         &source_metadata.reasoning_catalog_templates,
         live_manifests.iter().chain(stale.iter()),
     )
@@ -175,6 +176,7 @@ pub(in crate::gateway) fn build_codex_models_response(
         visible_models,
         source_context_windows,
         &Default::default(),
+        &Default::default(),
         upstream,
     )
 }
@@ -193,6 +195,28 @@ pub(in crate::gateway) fn build_codex_models_response_with_source_reasoning(
         key,
         visible_models,
         source_context_windows,
+        &Default::default(),
+        source_reasoning_templates,
+        upstream,
+    )
+}
+
+#[cfg(test)]
+pub(in crate::gateway) fn build_codex_models_response_with_source_capabilities(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    source_context_windows: &BTreeMap<String, u64>,
+    source_image_models: &BTreeSet<String>,
+    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
+    upstream: Option<&Value>,
+) -> Option<Value> {
+    build_codex_models_response_from_manifests(
+        runtime,
+        key,
+        visible_models,
+        source_context_windows,
+        source_image_models,
         source_reasoning_templates,
         upstream,
     )
@@ -203,6 +227,7 @@ fn build_codex_models_response_from_manifests<'a>(
     key: &AuthenticatedKey,
     visible_models: &[String],
     source_context_windows: &BTreeMap<String, u64>,
+    source_image_models: &BTreeSet<String>,
     source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstreams: impl IntoIterator<Item = &'a Value>,
 ) -> Option<Value> {
@@ -285,28 +310,17 @@ fn build_codex_models_response_from_manifests<'a>(
         }
         let priority = crate::CODEX_CATALOG_PRIORITY_BASE.saturating_add(index as u64);
         let native_account_model = runtime.codex_model_has_chatgpt_account(key, &upstream_id);
+        let source_context_window = source_context_windows
+            .get(&upstream_id.to_ascii_lowercase())
+            .copied();
         let mut model = if native_account_model {
             upstream_by_model
                 .get(&normalized)
                 .and_then(|entry| {
-                    normalize_native_codex_catalog_entry(
-                        entry,
-                        &display_id,
-                        priority,
-                        source_context_windows
-                            .get(&upstream_id.to_ascii_lowercase())
-                            .copied(),
-                    )
+                    normalize_native_codex_catalog_entry(entry, &display_id, priority, None)
                 })
                 .unwrap_or_else(|| {
-                    routed_codex_catalog_entry(
-                        template,
-                        &display_id,
-                        priority,
-                        source_context_windows
-                            .get(&upstream_id.to_ascii_lowercase())
-                            .copied(),
-                    )
+                    routed_codex_catalog_entry(template, &display_id, priority, None)
                 })
         } else {
             source_reasoning_templates
@@ -316,9 +330,7 @@ fn build_codex_models_response_from_manifests<'a>(
                         capabilities,
                         &display_id,
                         priority,
-                        source_context_windows
-                            .get(&upstream_id.to_ascii_lowercase())
-                            .copied(),
+                        source_context_window,
                     )
                 })
                 .unwrap_or_else(|| {
@@ -326,9 +338,7 @@ fn build_codex_models_response_from_manifests<'a>(
                         template,
                         &display_id,
                         priority,
-                        source_context_windows
-                            .get(&upstream_id.to_ascii_lowercase())
-                            .copied(),
+                        source_context_window,
                     )
                 })
         };
@@ -339,15 +349,19 @@ fn build_codex_models_response_from_manifests<'a>(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
         runtime.set_codex_model_uses_responses_lite(&upstream_id, uses_responses_lite);
-        if let Some(context_window) = source_context_windows.get(&upstream_id.to_ascii_lowercase())
-        {
-            model["context_window"] = (*context_window).into();
-            model["max_context_window"] = (*context_window).into();
-            model
-                .as_object_mut()
-                .expect("normalized catalog entry is an object")
-                .remove("auto_compact_token_limit");
-            model["effective_context_window_percent"] = 95.into();
+        if !native_account_model {
+            if let Some(context_window) = source_context_window {
+                model["context_window"] = context_window.into();
+                model["max_context_window"] = context_window.into();
+                model
+                    .as_object_mut()
+                    .expect("normalized catalog entry is an object")
+                    .remove("auto_compact_token_limit");
+                model["effective_context_window_percent"] = 95.into();
+            }
+            if source_image_models.contains(&normalized) {
+                model["input_modalities"] = json!(["text", "image"]);
+            }
         }
         models.push(model);
     }

@@ -4,7 +4,8 @@ use crate::accounts::{
 };
 use crate::catalog::{
     apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
-    source_context_windows, source_reasoning_capabilities, SourceReasoningCapabilities,
+    source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
+    SourceReasoningCapabilities,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
@@ -48,6 +49,7 @@ const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
 pub(crate) struct CodexSourceModelMetadata {
     pub context_windows: BTreeMap<String, u64>,
     pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
+    pub image_models: BTreeSet<String>,
 }
 
 fn source_candidate_id(
@@ -1166,10 +1168,15 @@ impl GatewayRuntime {
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model =
             BTreeMap::<String, Vec<Option<SourceReasoningCapabilities>>>::new();
+        let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for (configured_models, adapter, reasoning_mode, manifest) in manifests {
             let reasoning = manifest
                 .as_ref()
                 .map(|manifest| source_reasoning_capabilities(manifest, &configured_models))
+                .unwrap_or_default();
+            let declared_image_support = manifest
+                .as_ref()
+                .map(|manifest| source_image_input_capabilities(manifest, &configured_models))
                 .unwrap_or_default();
             if let Some(manifest) = manifest.as_ref() {
                 for (model, context_window) in source_context_windows(manifest, &configured_models)
@@ -1183,6 +1190,15 @@ impl GatewayRuntime {
             }
             for model in &configured_models {
                 let model_key = model.to_ascii_lowercase();
+                let supports_image = matches!(adapter, SourceAdapter::ResponsesToMessages)
+                    || declared_image_support
+                        .get(&model_key)
+                        .copied()
+                        .unwrap_or(false);
+                image_support_by_model
+                    .entry(model_key.clone())
+                    .or_default()
+                    .push(supports_image);
                 let capabilities = apply_manual_reasoning_capability_overrides(
                     model,
                     reasoning.get(&model_key).cloned(),
@@ -1206,6 +1222,11 @@ impl GatewayRuntime {
             metadata
                 .reasoning_catalog_templates
                 .insert(model, capabilities.codex_catalog_template());
+        }
+        for (model, route_support) in image_support_by_model {
+            if route_support.iter().all(|supports_image| *supports_image) {
+                metadata.image_models.insert(model);
+            }
         }
         metadata
     }
@@ -3196,6 +3217,63 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[tokio::test]
+    async fn codex_source_metadata_marks_bridge_images_but_requires_native_declaration() {
+        let mut bridged = RuntimeSource::unrestricted(source(
+            "source-bridge",
+            "bridge-secret",
+            &["vendor/claude-fable-5"],
+        ));
+        bridged.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["vendor/claude-fable-5".into()],
+        }];
+        let mut native = RuntimeSource::unrestricted(source(
+            "source-native",
+            "native-secret",
+            &["provider/text-only"],
+        ));
+        native.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["provider/text-only".into()],
+        }];
+        let runtime = GatewayRuntime::from_pool(
+            vec![bridged, native],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-bridge",
+            serde_json::json!({"data": [{"id": "vendor/claude-fable-5"}]}),
+            now_ms,
+        );
+        runtime.remember_source_model_manifest(
+            "source-native",
+            serde_json::json!({
+                "data": [{"id": "provider/text-only", "input_modalities": ["text"]}]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert!(metadata.image_models.contains("vendor/claude-fable-5"));
+        assert!(!metadata.image_models.contains("provider/text-only"));
     }
 
     #[test]

@@ -109,9 +109,86 @@ async fn fetch_codex_model_catalog(base_url: &str, secret: &str) -> Result<Strin
         .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "model catalog failed").into())
 }
 
+async fn fetch_direct_source_model_manifest(
+    base_url: &str,
+    secret: &str,
+) -> Result<serde_json::Value, CommandError> {
+    let mut base = Url::parse(base_url).map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "source API address is invalid")
+    })?;
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    let url = base.join("models").map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "source model address is invalid")
+    })?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "source model request could not be initialized",
+            )
+        })?;
+    let response = client
+        .get(url)
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "source model catalog is unavailable",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "source model catalog request was rejected",
+        )
+        .into());
+    }
+    let body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                match error {
+                    LimitedBodyError::TooLarge => "source model catalog is too large",
+                    LimitedBodyError::Transport => "source model catalog could not be read",
+                },
+            )
+        })?;
+    let manifest: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "source returned an invalid model catalog",
+        )
+    })?;
+    let has_models = manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| !models.is_empty());
+    let has_data = manifest
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|models| !models.is_empty());
+    if !has_models && !has_data {
+        return Err(LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "source returned no usable model metadata",
+        )
+        .into());
+    }
+    Ok(manifest)
+}
+
 enum CodexCatalogRefreshTarget {
     LocalGateway(String),
-    DirectSource(Vec<String>),
+    DirectSource(Box<ProviderSourceRecord>),
 }
 
 fn active_catalog_refresh_target(
@@ -132,7 +209,7 @@ fn active_catalog_refresh_target(
                 .and_then(|source| {
                     direct_source_response_models(source)
                         .ok()
-                        .map(CodexCatalogRefreshTarget::DirectSource)
+                        .map(|_| CodexCatalogRefreshTarget::DirectSource(Box::new(source.clone())))
                 })
         })
 }
@@ -176,8 +253,24 @@ pub(super) async fn refresh_active_codex_catalog(state: &DesktopState) -> LocalR
                 .await
                 .map_err(|error| LocalPoolError::new(error.code, error.message))?
         }
-        CodexCatalogRefreshTarget::DirectSource(models) => {
-            let Some(catalog) = codex::direct_source_model_catalog(&profile_dir, &models)? else {
+        CodexCatalogRefreshTarget::DirectSource(source) => {
+            let models = direct_source_response_models(source.as_ref())?;
+            let api_key = load_direct_source_api_key(
+                &source.base_url,
+                &source.secret_ref,
+                secret_store::load,
+                load_api_key_for_launch,
+                secret_store::save,
+            )?;
+            let manifest = fetch_direct_source_model_manifest(&source.base_url, &api_key)
+                .await
+                .ok();
+            let Some(catalog) = codex::direct_source_model_catalog_with_manifest(
+                &profile_dir,
+                &models,
+                manifest.as_ref(),
+            )?
+            else {
                 return Ok(());
             };
             catalog
@@ -773,7 +866,14 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
-    let catalog = codex::direct_source_model_catalog(&profile_dir, &response_models)?;
+    let manifest = fetch_direct_source_model_manifest(&source.base_url, &api_key)
+        .await
+        .ok();
+    let catalog = codex::direct_source_model_catalog_with_manifest(
+        &profile_dir,
+        &response_models,
+        manifest.as_ref(),
+    )?;
     if catalog.is_none() {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
@@ -1294,8 +1394,8 @@ mod tests {
 
         assert!(matches!(
             active_catalog_refresh_target(&binding, &[], std::slice::from_ref(&source)),
-            Some(CodexCatalogRefreshTarget::DirectSource(models))
-                if models == vec!["provider-model".to_string()]
+            Some(CodexCatalogRefreshTarget::DirectSource(candidate))
+                if candidate.id == source.id
         ));
 
         let system_key = LocalGatewayKeyRecord {

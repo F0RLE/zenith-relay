@@ -117,11 +117,13 @@ encoded reversibly when Codex needs a Relay route, including ids that already
 contain <code>/</code>.
 
 Relay snapshots the previous profile catalog, auth, and provider configuration
-before attaching. Native and user-managed catalog rows are used only as a
-validated schema template while Relay is attached; they are not presented as
-pool routes. A refresh changes the managed catalog only after validation,
-invalidates Codex's model cache only after the new catalog is written, and
-restores the previous profile state when the managed files are still unchanged.
+before attaching. User-managed catalog rows are used only as a validated schema
+template while Relay is attached; they are not presented as pool routes. Native
+ChatGPT catalog rows keep their original reasoning, service-tier, context, and
+other capabilities; API-source metadata is applied only to routed rows. A
+refresh changes the managed catalog only after validation, invalidates Codex's
+model cache only after the new catalog is written, and restores the previous
+profile state when the managed files are still unchanged.
 
 ## Client protocol boundaries
 
@@ -134,19 +136,21 @@ with `ResponsesToMessages` sends a translated Anthropic Messages request to
 <code>/v1/messages</code>, using the source key as <code>x-api-key</code> and
 the Anthropic version header.
 
-The Responses-to-Messages bridge supports JSON-schema function tools and direct
-custom text tools, `tool_use`/`tool_result` continuations, ordinary JSON
-responses, and translated Messages SSE including streamed tool arguments. A
-custom tool is represented upstream as a function with one raw-text `input`
-field, then returns to the client as `custom_tool_call` and accepts only its
-direct string `custom_tool_call_output`; the original tool host remains the
-validator and executor. It stores the native assistant turn only in a bounded
-volatile local continuation store keyed by local client key, bridge response
-id, and candidate. A missing or mismatched continuation is rejected instead
-of sending a context-free tool result. Provider-hosted, namespace, and
-dynamic-discovery tools are rejected rather than converted into text. Budget
-and adaptive reasoning are opt-in binding capabilities; `Native` bindings
-cannot declare a bridge reasoning mode.
+The Responses-to-Messages bridge supports JSON-schema function tools, direct
+custom text tools, user image input, image blocks in function output,
+`tool_use`/`tool_result` continuations, ordinary JSON responses, and translated
+Messages SSE including streamed tool arguments. Images are accepted only as
+validated base64 data URIs for GIF, JPEG, PNG, or WebP. A custom tool is
+represented upstream as a function with one raw-text `input` field, then
+returns to the client as `custom_tool_call` and accepts only its direct string
+`custom_tool_call_output`; the original tool host remains the validator and
+executor. It stores the native assistant turn only in a bounded volatile local
+continuation store keyed by local client key, bridge response id, and candidate.
+A missing or mismatched continuation is rejected instead of sending a
+context-free tool result. Provider-hosted, namespace, and dynamic-discovery
+tools are rejected rather than converted into text. Budget and adaptive
+reasoning are opt-in binding capabilities; `Native` bindings cannot declare a
+bridge reasoning mode.
 
 Relay exposes three client contracts: <code>/v1/responses</code> for
 Codex/OpenAI Responses clients, <code>/v1/messages</code> for native Messages
@@ -264,10 +268,10 @@ client keys, usage, and scheduler remain shared.
   contract. Native Messages sources require a compatible Messages client and a
   separately scoped key; a source must opt into the explicit
   Responses-to-Messages bridge to make a Messages model visible to Codex.
-- The bridge currently accepts JSON-schema function tools and direct custom
-  text tools only. Hosted, namespace, dynamic-discovery, structured custom
-  result, native encrypted reasoning, and Responses WebSocket capabilities are
-  not claimed through the bridge.
+- The bridge does not claim hosted, namespace, dynamic-discovery, structured
+  custom result, native encrypted reasoning, or Responses WebSocket
+  capabilities. Image support is limited to the validated data-URI formats
+  described above.
 - Bridge continuation state is volatile and bounded. Restarting Relay or
   evicting an entry requires the client to start a fresh turn.
 - No live acceptance claim has been made for Claude, GLM, Grok, or any other

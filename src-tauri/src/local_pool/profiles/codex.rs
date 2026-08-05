@@ -19,8 +19,9 @@ use toml_edit::{value, DocumentMut, Item, Table};
 use zenith_relay_core::{
     accounts::TokenSet, canonicalize_model_ids, codex_catalog_entry_is_compatible,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
+    source_model_declares_image_input, CODEX_RELAY_CATALOG_HASH,
 };
 
 const PROVIDER_ID: &str = "zenith_relay_local";
@@ -175,9 +176,18 @@ pub fn attach_with_catalog(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn direct_source_model_catalog(
     codex_home: &Path,
     source_models: &[String],
+) -> Result<Option<String>> {
+    direct_source_model_catalog_with_manifest(codex_home, source_models, None)
+}
+
+pub(crate) fn direct_source_model_catalog_with_manifest(
+    codex_home: &Path,
+    source_models: &[String],
+    source_manifest: Option<&Value>,
 ) -> Result<Option<String>> {
     let user_catalog_path = configured_model_catalog_path(codex_home)?;
     let template = collect_native_catalog_template(codex_home, user_catalog_path.as_deref(), None)?;
@@ -205,6 +215,7 @@ pub(crate) fn direct_source_model_catalog(
         }
         let entry = direct_source_catalog_entry(
             &template,
+            source_manifest.and_then(|manifest| source_catalog_entry(manifest, &model)),
             &model,
             DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
         );
@@ -269,15 +280,65 @@ fn catalog_entry_is_picker_eligible(entry: &Value) -> bool {
 
 fn direct_source_catalog_entry(
     template: &serde_json::Map<String, Value>,
+    source_entry: Option<&serde_json::Map<String, Value>>,
     model: &str,
     priority: u64,
 ) -> Value {
-    let mut entry = routed_codex_catalog_entry(Some(template), model, priority, None);
+    let mut entry = source_entry
+        .and_then(|source_entry| {
+            let mut source_entry = source_entry.clone();
+            if source_entry.get("input_modalities").is_none() {
+                if let Some(supports_image) = source_model_declares_image_input(&source_entry) {
+                    source_entry.insert(
+                        "input_modalities".into(),
+                        if supports_image {
+                            json!(["text", "image"])
+                        } else {
+                            json!(["text"])
+                        },
+                    );
+                }
+            }
+            normalize_upstream_codex_catalog_entry(&source_entry, model, priority, None)
+        })
+        .unwrap_or_else(|| routed_codex_catalog_entry(Some(template), model, priority, None));
     entry["slug"] = Value::String(model.to_string());
     entry["display_name"] = Value::String(codex_model_display_name(model));
     entry["description"] = Value::String("Available through this API connection.".into());
     entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
     entry
+}
+
+fn source_catalog_entry<'a>(
+    manifest: &'a Value,
+    model: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
+    manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .find(|entry| {
+            entry
+                .get("slug")
+                .and_then(Value::as_str)
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
+        })
+        .or_else(|| {
+            manifest
+                .get("data")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_object)
+                .find(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id.eq_ignore_ascii_case(model))
+                })
+        })
 }
 
 fn collect_native_catalog_template(
@@ -474,7 +535,16 @@ fn build_managed_model_catalog(
         let mut entry = relay_model
             .as_object()
             .and_then(|upstream| {
-                normalize_upstream_codex_catalog_entry(upstream, &model, priority, context_window)
+                if slug.to_ascii_lowercase().starts_with("zenith/") {
+                    normalize_upstream_codex_catalog_entry(
+                        upstream,
+                        &model,
+                        priority,
+                        context_window,
+                    )
+                } else {
+                    normalize_native_codex_catalog_entry(upstream, &model, priority, context_window)
+                }
             })
             .unwrap_or_else(|| {
                 routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
@@ -3337,6 +3407,39 @@ mod tests {
     }
 
     #[test]
+    fn direct_source_catalog_preserves_explicit_native_image_capability() {
+        let (root, home, _backups) = profile_dirs("direct-source-image-capability");
+        let manifest = json!({
+            "data": [
+                {
+                    "id": "provider/vision",
+                    "input_modalities": ["text", "image"]
+                },
+                {
+                    "id": "provider/text",
+                    "input_modalities": ["text"]
+                }
+            ]
+        });
+
+        let catalog = direct_source_model_catalog_with_manifest(
+            &home,
+            &["provider/vision".into(), "provider/text".into()],
+            Some(&manifest),
+        )
+        .unwrap()
+        .expect("catalog");
+        let parsed_catalog = serde_json::from_str::<Value>(&catalog).unwrap();
+        let models = parsed_catalog["models"].as_array().unwrap();
+
+        assert_eq!(models[0]["slug"], "provider/vision");
+        assert_eq!(models[0]["input_modalities"], json!(["text", "image"]));
+        assert_eq!(models[1]["slug"], "provider/text");
+        assert_eq!(models[1]["input_modalities"], json!(["text"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn direct_source_catalog_resolves_the_configured_relative_template() {
         let (root, home, _backups) = profile_dirs("direct-source-relative-template");
         write_test_catalog_file(&home.join("native-catalog.json"), "gpt-5.6-sol");
@@ -3357,6 +3460,50 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0]["slug"], "vendor/claude-opus");
         assert_eq!(models[0]["supported_reasoning_levels"], json!([]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_catalog_preserves_native_model_settings() {
+        let (root, home, _backups) = profile_dirs("managed-native-settings");
+        let mut native = routed_codex_catalog_entry(None, "gpt-native", 1, None);
+        native["slug"] = Value::String("gpt-native".into());
+        native["input_modalities"] = json!(["text", "image"]);
+        native["default_reasoning_level"] = Value::String("ultra".into());
+        native["supported_reasoning_levels"] = json!([
+            {"effort": "low", "description": "Low"},
+            {"effort": "ultra", "description": "Ultra"}
+        ]);
+        native["service_tiers"] = json!([{
+            "id": "priority",
+            "name": "Fast",
+            "description": "Native fast tier"
+        }]);
+        native["default_service_tier"] = Value::String("priority".into());
+        native["context_window"] = 128_000.into();
+        native["max_context_window"] = 120_000.into();
+        native["auto_compact_token_limit"] = 110_000.into();
+        native["native_setting"] = Value::String("keep-me".into());
+        let catalog = serde_json::to_string(&json!({"models": [native]})).unwrap();
+
+        let managed = build_managed_model_catalog(&home, None, None, &catalog).unwrap();
+        let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
+
+        assert_eq!(model["input_modalities"], json!(["text", "image"]));
+        assert_eq!(model["default_reasoning_level"], "ultra");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "Low"},
+                {"effort": "ultra", "description": "Ultra"}
+            ])
+        );
+        assert_eq!(model["service_tiers"][0]["id"], "priority");
+        assert_eq!(model["default_service_tier"], "priority");
+        assert_eq!(model["context_window"], 128_000);
+        assert_eq!(model["max_context_window"], 120_000);
+        assert_eq!(model["auto_compact_token_limit"], 110_000);
+        assert_eq!(model["native_setting"], "keep-me");
         fs::remove_dir_all(root).unwrap();
     }
 

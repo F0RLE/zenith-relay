@@ -10,9 +10,11 @@ pub use codex::{
     normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
     routed_codex_catalog_entry, CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
+pub use context::source_model_declares_image_input;
 pub(crate) use context::{
     apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
-    source_context_windows, source_reasoning_capabilities, SourceReasoningCapabilities,
+    source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
+    SourceReasoningCapabilities,
 };
 pub use order::canonicalize_model_ids;
 pub(crate) use order::normalize_model_ids;

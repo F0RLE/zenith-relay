@@ -9,7 +9,8 @@ pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, 
 pub(super) use codex_models::models;
 #[cfg(test)]
 use codex_models::{
-    build_codex_models_response, build_codex_models_response_with_source_reasoning,
+    build_codex_models_response, build_codex_models_response_with_source_capabilities,
+    build_codex_models_response_with_source_reasoning,
 };
 pub(super) use headers::{
     forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
@@ -680,6 +681,49 @@ mod tests {
         assert_eq!(model["supports_reasoning_summaries"], true);
         assert_eq!(model["default_reasoning_summary"], "detailed");
         assert!(codex_catalog_entry_is_compatible(model));
+    }
+
+    #[test]
+    fn api_source_image_capability_is_published_to_codex() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["vendor/claude-fable-5".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let image_models = std::collections::BTreeSet::from(["vendor/claude-fable-5".to_string()]);
+
+        let response = build_codex_models_response_with_source_capabilities(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            &image_models,
+            &Default::default(),
+            None,
+        )
+        .expect("coding model catalog");
+
+        assert_eq!(
+            response["models"][0]["input_modalities"],
+            json!(["text", "image"])
+        );
+        assert!(codex_catalog_entry_is_compatible(&response["models"][0]));
     }
 
     #[test]
