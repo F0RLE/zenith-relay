@@ -1497,6 +1497,81 @@
   color: var(--relay-secondary);
 }
 
+.setup-current-profile-status {
+  width: min(100%, 520px);
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  align-items: center;
+  gap: 14px;
+  margin: 0 auto;
+  padding: 14px 16px;
+  border: 1px solid var(--relay-border);
+  border-radius: 8px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow-soft);
+  text-align: left;
+}
+
+.setup-current-profile-status.failed {
+  border-color: color-mix(in srgb, var(--relay-danger) 52%, var(--relay-border));
+}
+
+.setup-current-profile-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--relay-accent) 48%, var(--relay-border));
+  border-radius: 50%;
+  background: var(--relay-accent-soft);
+  color: var(--relay-accent-hover);
+}
+
+.setup-current-profile-status.failed .setup-current-profile-mark {
+  border-color: color-mix(in srgb, var(--relay-danger) 48%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-danger) 10%, var(--relay-surface));
+  color: var(--relay-danger);
+}
+
+.setup-current-profile-mark svg {
+  width: 20px;
+  height: 20px;
+}
+
+.setup-current-profile-copy {
+  min-width: 0;
+}
+
+.setup-current-profile-copy strong,
+.setup-current-profile-copy small {
+  display: block;
+}
+
+.setup-current-profile-copy strong {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.setup-current-profile-copy small {
+  margin-top: 3px;
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.setup-current-profile-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-left: 54px;
+}
+
+.setup-current-profile-actions .relay-button {
+  min-height: 32px;
+}
+
 code,
 pre,
 input[type="url"],

@@ -351,6 +351,10 @@
     text-align: left;
   }
 
+  .setup-current-profile-actions {
+    padding-left: 0;
+  }
+
   .api-provider-key-field .relay-field-label-row {
     align-items: flex-start;
     flex-wrap: wrap;

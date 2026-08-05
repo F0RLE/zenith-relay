@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useState } from "react";
-import { ArrowLeft, Check, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload, UserRoundCheck, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { ArrowLeft, Check, CircleAlert, Cloud, ExternalLink, Languages, Laptop, Loader2, LogIn, Server, SkipForward, Upload, UserRoundCheck, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../api/commands";
 import type { ImportSession, RelayMode } from "../api/types";
@@ -10,6 +10,13 @@ import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
 
 const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ImportDialog }));
+const CURRENT_PROFILE_CONTINUE_SECONDS = 3;
+
+type CurrentProfileImportState =
+  | { kind: "idle" }
+  | { kind: "importing" }
+  | { kind: "complete"; importedCount: number }
+  | { kind: "failed"; phase: "import" | "runtime"; importedCount?: number };
 
 export function QuickSetupWizard() {
   const { t } = useTranslation();
@@ -27,7 +34,11 @@ export function QuickSetupWizard() {
   const [showImport, setShowImport] = useState(false);
   const [importSession, setImportSession] = useState<ImportSession | null>(null);
   const [currentProfileAvailable, setCurrentProfileAvailable] = useState(false);
+  const [currentProfileImport, setCurrentProfileImport] = useState<CurrentProfileImportState>({ kind: "idle" });
+  const [currentProfileCountdown, setCurrentProfileCountdown] = useState(CURRENT_PROFILE_CONTINUE_SECONDS);
   const [oauthPending, setOauthPending] = useState(false);
+  const currentProfileImportRun = useRef(0);
+  const currentProfileImportSession = useRef<string | null>(null);
 
   useEffect(() => {
     if (step !== 2) return;
@@ -49,10 +60,62 @@ export function QuickSetupWizard() {
     return () => { disposed = true; };
   }, [mode, step]);
 
+  useEffect(() => {
+    if (step === 2 && mode === "local") return;
+    currentProfileImportRun.current += 1;
+    const sessionId = currentProfileImportSession.current;
+    currentProfileImportSession.current = null;
+    if (sessionId) void relayCommands.cancelImport(sessionId).catch(() => undefined);
+    setCurrentProfileImport({ kind: "idle" });
+    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+  }, [mode, step]);
+
+  useEffect(() => () => {
+    currentProfileImportRun.current += 1;
+    const sessionId = currentProfileImportSession.current;
+    currentProfileImportSession.current = null;
+    if (sessionId) void relayCommands.cancelImport(sessionId).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (currentProfileImport.kind !== "complete" || step !== 2 || mode !== "local") return;
+    if (currentProfileCountdown <= 0) {
+      setStep(3);
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      setCurrentProfileCountdown((seconds) => seconds - 1);
+    }, 1_000);
+    return () => window.clearTimeout(timeout);
+  }, [currentProfileCountdown, currentProfileImport.kind, mode, step]);
+
   const selectMode = (value: RelayMode) => {
     setMode(value);
     setConnectionReady(false);
     setApiSourceId(null);
+  };
+
+  const prepareLocalRuntime = async () => {
+    const snapshot = await relayCommands.localState();
+    if (!snapshot.gateway.running) await relayCommands.startGateway();
+  };
+
+  const cancelCurrentProfileImport = async () => {
+    const sessionId = currentProfileImportSession.current;
+    currentProfileImportSession.current = null;
+    if (sessionId) await relayCommands.cancelImport(sessionId).catch(() => undefined);
+  };
+
+  const completeCurrentProfileSetup = async (run: number, importedCount: number) => {
+    const ready = await perform("onboarding-current-profile-runtime", prepareLocalRuntime);
+    if (run !== currentProfileImportRun.current) return;
+    if (!ready) {
+      setCurrentProfileImport({ kind: "failed", phase: "runtime", importedCount });
+      return;
+    }
+    setConnectionReady(true);
+    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileImport({ kind: "complete", importedCount });
   };
 
   const openFileImport = () => {
@@ -61,16 +124,58 @@ export function QuickSetupWizard() {
   };
 
   const openCurrentProfileImport = async () => {
-    const result: { current: ImportSession | null } = { current: null };
+    const run = ++currentProfileImportRun.current;
+    const result: {
+      current: ImportSession | null;
+      confirmation: Awaited<ReturnType<typeof relayCommands.confirmImport>> | null;
+    } = { current: null, confirmation: null };
+    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileImport({ kind: "importing" });
     const ok = await perform("onboarding-current-profile", async () => {
       result.current = await relayCommands.previewCurrentCodexImport();
+      if (run !== currentProfileImportRun.current) {
+        await relayCommands.cancelImport(result.current.sessionId).catch(() => undefined);
+        return;
+      }
+      currentProfileImportSession.current = result.current.sessionId;
+      const selectedItemIds = result.current.preview.rows
+        .filter((row) => row.selectable && row.defaultSelected)
+        .map((row) => row.itemId);
+      if (!selectedItemIds.length) throw new Error("current_profile_import_has_no_selectable_items");
+      result.confirmation = await relayCommands.confirmImport(result.current.sessionId, selectedItemIds, true);
     });
-    if (!ok || !result.current) {
-      if (result.current) await relayCommands.cancelImport(result.current.sessionId).catch(() => undefined);
+    if (run !== currentProfileImportRun.current) return;
+    if (!ok || !result.current || !result.confirmation) {
+      await cancelCurrentProfileImport();
+      if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
       return;
     }
-    setImportSession(result.current);
-    setShowImport(true);
+    const importedCount = result.confirmation.results.filter((item) => item.status === "succeeded").length;
+    if (!importedCount || result.confirmation.results.some((item) => item.status === "failed")) {
+      await cancelCurrentProfileImport();
+      if (run === currentProfileImportRun.current) setCurrentProfileImport({ kind: "failed", phase: "import" });
+      return;
+    }
+    currentProfileImportSession.current = null;
+    await completeCurrentProfileSetup(run, importedCount);
+  };
+
+  const retryCurrentProfileImport = () => {
+    if (currentProfileImport.kind === "failed" && currentProfileImport.phase === "runtime") {
+      const run = ++currentProfileImportRun.current;
+      setCurrentProfileImport({ kind: "importing" });
+      void completeCurrentProfileSetup(run, currentProfileImport.importedCount ?? 1);
+      return;
+    }
+    void openCurrentProfileImport();
+  };
+
+  const resetCurrentProfileImport = () => {
+    currentProfileImportRun.current += 1;
+    void cancelCurrentProfileImport();
+    setConnectionReady(false);
+    setCurrentProfileCountdown(CURRENT_PROFILE_CONTINUE_SECONDS);
+    setCurrentProfileImport({ kind: "idle" });
   };
 
   const closeImport = () => {
@@ -92,13 +197,8 @@ export function QuickSetupWizard() {
   const insecureRemote = serverUrl.trim().toLowerCase().startsWith("http://");
   const remoteReady = connectionReady || Boolean(serverUrl && serverToken && (!insecureRemote || allowInsecureRemote));
   const canContinue = step === 2
-    ? mode === "local" ? !oauthPending : mode === "remote" ? remoteReady : connectionReady || apiProviderReady(provider)
+    ? mode === "local" ? !oauthPending && currentProfileImport.kind === "idle" : mode === "remote" ? remoteReady : connectionReady || apiProviderReady(provider)
     : true;
-
-  const prepareLocalRuntime = async () => {
-    const snapshot = await relayCommands.localState();
-    if (!snapshot.gateway.running) await relayCommands.startGateway();
-  };
 
   const next = async () => {
     if (step === 2 && mode === "remote" && !connectionReady) {
@@ -144,7 +244,7 @@ export function QuickSetupWizard() {
     <ol className="setup-progress" aria-label={t("onboarding.progress")}>{[1, 2, 3, 4].map((value) => <li key={value} className={value <= step ? "active" : ""}><span>{value < step ? <Check aria-hidden /> : value}</span>{t(`onboarding.steps.${value}`)}</li>)}</ol>
     <section className="setup-body">
       {step === 1 ? <div className="setup-step setup-mode-step"><div className="setup-heading"><h1>{t("onboarding.modeQuestion")}</h1><p>{t("onboarding.modeHint")}</p></div><div className="mode-options">{(["local", "zenith", "remote"] as RelayMode[]).map((value) => { const Icon = value === "local" ? Laptop : value === "remote" ? Server : Cloud; return <button key={value} type="button" className={mode === value ? "selected" : ""} onClick={() => selectMode(value)}><Icon aria-hidden /><span><strong>{t(`modes.${value}`)}</strong><small>{t(`onboarding.modeDescriptions.${value}`)}</small></span><i>{mode === value ? <Check aria-hidden /> : null}</i></button>; })}</div></div> : null}
-      {step === 2 ? <div className="setup-step"><ConnectionStep mode={mode} provider={provider} onProviderChange={(value) => { setProvider(value); setConnectionReady(false); }} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} currentProfileAvailable={currentProfileAvailable} onConnected={() => setConnectionReady(true)} onOAuthPendingChange={setOauthPending} onImport={openFileImport} onImportCurrent={() => void openCurrentProfileImport()} />{mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}</div> : null}
+      {step === 2 ? <div className="setup-step"><ConnectionStep mode={mode} provider={provider} onProviderChange={(value) => { setProvider(value); setConnectionReady(false); }} serverUrl={serverUrl} setServerUrl={(value) => { setServerUrl(value); setConnectionReady(false); }} serverToken={serverToken} setServerToken={(value) => { setServerToken(value); setConnectionReady(false); }} currentProfileAvailable={currentProfileAvailable} currentProfileImport={currentProfileImport} currentProfileCountdown={currentProfileCountdown} onConnected={() => setConnectionReady(true)} onOAuthPendingChange={setOauthPending} onImport={openFileImport} onImportCurrent={() => void openCurrentProfileImport()} onRetryCurrent={retryCurrentProfileImport} onUseAnotherConnection={resetCurrentProfileImport} />{mode === "remote" && insecureRemote ? <label className="check-line"><input type="checkbox" checked={allowInsecureRemote} onChange={(event) => setAllowInsecureRemote(event.target.checked)} /><span>{t("onboarding.allowInsecureRemote")}</span></label> : null}</div> : null}
       {step === 3 ? <div className="setup-step"><div className="setup-heading"><h1>{t("onboarding.clientQuestion")}</h1><p>{t("onboarding.clientHint")}</p></div><div className="client-options">{["codex", "other", "later"].map((value) => <button type="button" key={value} className={client === value ? "selected" : ""} onClick={() => setClient(value)}><span>{t(`clients.${value}`)}</span><i>{client === value ? <Check aria-hidden /> : null}</i></button>)}</div></div> : null}
       {step === 4 ? <div className="setup-ready"><div className="setup-ready-mark"><Check aria-hidden /></div><h1>{t("onboarding.readyTitle")}</h1><p>{t("onboarding.readyHint", { mode: t(`modes.${mode}`), client: t(`clients.${client}`) })}</p></div> : null}
     </section>
@@ -153,7 +253,7 @@ export function QuickSetupWizard() {
   </main>;
 }
 
-function ConnectionStep({ mode, provider, onProviderChange, serverUrl, setServerUrl, serverToken, setServerToken, currentProfileAvailable, onConnected, onOAuthPendingChange, onImport, onImportCurrent }: { mode: RelayMode; provider: ApiProviderValue; onProviderChange: (value: ApiProviderValue) => void; serverUrl: string; setServerUrl: (value: string) => void; serverToken: string; setServerToken: (value: string) => void; currentProfileAvailable: boolean; onConnected: () => void; onOAuthPendingChange: (pending: boolean) => void; onImport: () => void; onImportCurrent: () => void }) {
+function ConnectionStep({ mode, provider, onProviderChange, serverUrl, setServerUrl, serverToken, setServerToken, currentProfileAvailable, currentProfileImport, currentProfileCountdown, onConnected, onOAuthPendingChange, onImport, onImportCurrent, onRetryCurrent, onUseAnotherConnection }: { mode: RelayMode; provider: ApiProviderValue; onProviderChange: (value: ApiProviderValue) => void; serverUrl: string; setServerUrl: (value: string) => void; serverToken: string; setServerToken: (value: string) => void; currentProfileAvailable: boolean; currentProfileImport: CurrentProfileImportState; currentProfileCountdown: number; onConnected: () => void; onOAuthPendingChange: (pending: boolean) => void; onImport: () => void; onImportCurrent: () => void; onRetryCurrent: () => void; onUseAnotherConnection: () => void }) {
   const { t } = useTranslation();
   const { busy, perform } = useRelayState();
   const oauth = useOAuthSignIn(async (result) => {
@@ -174,13 +274,13 @@ function ConnectionStep({ mode, provider, onProviderChange, serverUrl, setServer
 
   const flow = oauth.flow;
   const flowFailed = flow && (flow.status === "callback_rejected" || flow.status === "expired" || flow.status === "failed");
-  const importingCurrent = busy === "onboarding-current-profile";
+  const importingCurrent = currentProfileImport.kind === "importing";
   return <>
     <div className={`setup-heading${flow ? " compact" : ""}`}>
       <h1>{t("onboarding.connectionLocal")}</h1>
       {!flow ? <p>{t(currentProfileAvailable ? "onboarding.oauthHint" : "onboarding.oauthHintNoProfile")}</p> : null}
     </div>
-    {flow ? <section className="setup-oauth-pending" aria-live="polite">
+    {currentProfileImport.kind !== "idle" ? <CurrentProfileImportStatus state={currentProfileImport} countdown={currentProfileCountdown} onRetry={onRetryCurrent} onUseAnotherConnection={onUseAnotherConnection} /> : flow ? <section className="setup-oauth-pending" aria-live="polite">
       <div className="setup-oauth-pending-mark"><Loader2 className="spin" aria-hidden /></div>
       <div className="setup-oauth-pending-copy">
         <strong>{t(flow.status === "callback_received" || busy === "oauth-complete" ? "accounts.completingSignIn" : "onboarding.signInWaiting")}</strong>
@@ -196,6 +296,22 @@ function ConnectionStep({ mode, provider, onProviderChange, serverUrl, setServer
       <button type="button" disabled={importingCurrent} onClick={onImport}><Upload aria-hidden /><span><strong>{t("accounts.import")}</strong><small>{t("onboarding.importDescription")}</small></span></button>
     </div>}
   </>;
+}
+
+function CurrentProfileImportStatus({ state, countdown, onRetry, onUseAnotherConnection }: { state: Exclude<CurrentProfileImportState, { kind: "idle" }>; countdown: number; onRetry: () => void; onUseAnotherConnection: () => void }) {
+  const { t } = useTranslation();
+  const failed = state.kind === "failed";
+  const complete = state.kind === "complete";
+  return <section className={`setup-current-profile-status ${state.kind}${failed ? " failed" : ""}`} role={failed ? "alert" : "status"} aria-live="polite">
+    <div className="setup-current-profile-mark">
+      {state.kind === "importing" ? <Loader2 className="spin" aria-hidden /> : failed ? <CircleAlert aria-hidden /> : <Check aria-hidden />}
+    </div>
+    <div className="setup-current-profile-copy">
+      <strong>{t(state.kind === "importing" ? "onboarding.currentProfileImporting" : failed ? state.phase === "runtime" ? "onboarding.currentProfileSetupFailed" : "onboarding.currentProfileImportFailed" : "onboarding.currentProfileImported")}</strong>
+      {complete ? <small>{t("onboarding.currentProfileContinue", { seconds: countdown })}</small> : null}
+    </div>
+    {failed ? <div className="setup-current-profile-actions"><Button variant="secondary" onClick={onRetry}>{t("common.retry")}</Button><Button variant="ghost" onClick={onUseAnotherConnection}>{t("onboarding.chooseAnotherConnection")}</Button></div> : null}
+  </section>;
 }
 
 function LanguageSelect() {

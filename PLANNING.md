@@ -1,6 +1,6 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-08-03.
+Last reviewed: 2026-08-05.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
@@ -109,25 +109,19 @@ models only; Messages-only models are not inserted into that list. Native
 Messages clients use the model IDs from their explicitly configured source and
 key.
 
-The current client configuration is intentionally conservative: Relay does not
-ship a large hard-coded list of models into a profile. The next catalog phase
-will be generated from the local or remote pool's live
-<code>/v1/models</code> response:
+Profile attachment fetches the selected endpoint's live Codex catalog and
+writes a bounded Relay-managed <code>model_catalog_json</code>. It contains
+only models that the endpoint and selected key can serve; disabled,
+unsupported, or unavailable pool models are not advertised. Model ids are
+encoded reversibly when Codex needs a Relay route, including ids that already
+contain <code>/</code>.
 
-1. **Native client models** remain in the user's existing client provider
-   section.
-2. **Zenith Relay pool models** are written into a separate, Relay-managed
-   provider section with clear labels.
-3. Only models that the selected pool and key can serve are emitted. Disabled,
-   unsupported, or currently absent pool models are not advertised.
-4. A pool model change regenerates only that managed section. User-owned
-   providers, custom models, and unrelated profile settings stay untouched.
-5. Every regeneration runs through inspect, snapshot, apply, verify, and
-   restore, so the model catalog is reversible.
-
-This keeps the model chooser understandable in Codex: a user can distinguish
-native models from models offered by the local Relay pool, while Relay never
-advertises a model that its endpoint would reject.
+Relay snapshots the previous profile catalog, auth, and provider configuration
+before attaching. Native and user-managed catalog rows are used only as a
+validated schema template while Relay is attached; they are not presented as
+pool routes. A refresh changes the managed catalog only after validation,
+invalidates Codex's model cache only after the new catalog is written, and
+restores the previous profile state when the managed files are still unchanged.
 
 ## Client protocol boundaries
 

@@ -633,7 +633,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "start_local_account_import": return importSession("11111111-2222-4333-8444-555555555555");
           case "current_chatgpt_profile_available": return input.currentProfileAvailable ?? true;
-          case "preview_current_codex_account_import": return importSession("current_codex_profile");
+          case "preview_current_codex_account_import":
+            if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
+            return importSession("current_codex_profile");
           case "preview_local_account_import_files":
             if (input.importPreviewDelayMs) await new Promise((resolve) => setTimeout(resolve, input.importPreviewDelayMs));
             return importSession("11111111-2222-4333-8444-555555555555");
