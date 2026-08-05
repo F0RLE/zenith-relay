@@ -1,21 +1,148 @@
+mod connector;
 mod stats;
 
+pub use connector::SourceConnector;
 pub use stats::{fetch_source_provider_stats, SourceProviderStats, SourceStatsProvider};
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};
 
-use crate::{Error, Result};
+use crate::{Error, MessagesReasoningMode, Result, SourceAdapter};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use url::{Host, Url};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WireApi {
     Responses,
     ChatCompletions,
     Messages,
+}
+
+/// Associates a client-facing wire contract, an explicit adapter, and the
+/// models that are known to work through that route.
+///
+/// `Native` keeps the client and upstream contracts equal. A bridge changes the
+/// upstream contract only when it is explicitly selected and validated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceProtocolBinding {
+    pub wire_api: WireApi,
+    #[serde(default)]
+    pub adapter: SourceAdapter,
+    #[serde(default)]
+    pub reasoning_mode: MessagesReasoningMode,
+    #[serde(default)]
+    pub model_ids: Vec<String>,
+}
+
+/// Stable in-memory identity for one source connector route.
+///
+/// A source can expose more than one Responses-facing route when the models
+/// behind those routes require different upstream contracts. The adapter is
+/// part of the identity: `responses/native` and
+/// `responses/responses_to_messages` are distinct routes.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct SourceProtocolBindingKey {
+    pub wire_api: WireApi,
+    pub adapter: SourceAdapter,
+}
+
+impl SourceProtocolBinding {
+    pub fn legacy(wire_api: WireApi, models: &[String]) -> Self {
+        Self {
+            wire_api,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: models.to_vec(),
+        }
+    }
+
+    pub const fn key(&self) -> SourceProtocolBindingKey {
+        SourceProtocolBindingKey {
+            wire_api: self.wire_api,
+            adapter: self.adapter,
+        }
+    }
+}
+
+/// Normalizes source protocol bindings while keeping the source-provided
+/// model order.
+///
+/// A legacy source has one implicit binding and therefore still expands an
+/// empty model list to the source catalog. For an explicitly mixed source an
+/// empty list means that the route has not been verified yet. Expanding it to
+/// every source model would make an unknown route look usable, so the binding
+/// stays empty until discovery fills it.
+pub fn normalize_source_protocol_bindings(
+    bindings: Vec<SourceProtocolBinding>,
+    fallback_wire_api: WireApi,
+    models: &[String],
+) -> Result<Vec<SourceProtocolBinding>> {
+    let models = crate::catalog::normalize_model_ids(models);
+    let known_models = models
+        .iter()
+        .map(|model| model.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    let bindings = if bindings.is_empty() {
+        vec![SourceProtocolBinding::legacy(fallback_wire_api, &models)]
+    } else {
+        bindings
+    };
+    let mut seen_routes = BTreeSet::new();
+    let mut assigned_models = BTreeMap::<WireApi, HashSet<String>>::new();
+    let mut normalized = Vec::with_capacity(bindings.len());
+
+    let expand_empty_models = bindings.len() == 1;
+    for binding in bindings {
+        binding
+            .adapter
+            .validate(binding.wire_api, binding.reasoning_mode)
+            .map_err(|error| {
+                Error::Validation(format!(
+                    "source protocol binding is invalid: {}",
+                    error.message()
+                ))
+            })?;
+        if !seen_routes.insert(binding.key()) {
+            return Err(Error::Validation(
+                "each client protocol and adapter route may be configured only once".to_string(),
+            ));
+        }
+        let mut model_ids = crate::catalog::normalize_model_ids(binding.model_ids);
+        if model_ids.is_empty() && expand_empty_models {
+            model_ids = models.clone();
+        }
+        if !known_models.is_empty()
+            && model_ids
+                .iter()
+                .any(|model| !known_models.contains(&model.to_ascii_lowercase()))
+        {
+            return Err(Error::Validation(
+                "source protocol binding references a model not exposed by the source".to_string(),
+            ));
+        }
+        let assigned_for_protocol = assigned_models.entry(binding.wire_api).or_default();
+        if model_ids
+            .iter()
+            .any(|model| !assigned_for_protocol.insert(model.to_ascii_lowercase()))
+        {
+            return Err(Error::Validation(
+                "a model may be assigned to only one source route for the same client protocol"
+                    .to_string(),
+            ));
+        }
+        normalized.push(SourceProtocolBinding {
+            wire_api: binding.wire_api,
+            adapter: binding.adapter,
+            reasoning_mode: binding.reasoning_mode,
+            model_ids,
+        });
+    }
+
+    Ok(normalized)
 }
 
 #[derive(Clone)]
@@ -168,6 +295,164 @@ fn require_value(name: &str, value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_empty_protocol_bindings_stay_unconfirmed() {
+        let bindings = normalize_source_protocol_bindings(
+            vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: Vec::new(),
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: Vec::new(),
+                },
+            ],
+            WireApi::Responses,
+            &["gpt-test".to_string(), "claude-test".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            bindings,
+            [
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: Vec::new(),
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn single_empty_protocol_binding_keeps_legacy_source_catalog() {
+        let bindings = normalize_source_protocol_bindings(
+            vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: Vec::new(),
+            }],
+            WireApi::Responses,
+            &["gpt-test".to_string()],
+        )
+        .unwrap();
+        assert_eq!(bindings[0].model_ids, ["gpt-test"]);
+    }
+
+    #[test]
+    fn bridge_binding_is_responses_only_and_reasoning_is_bridge_only() {
+        let bridged = normalize_source_protocol_bindings(
+            vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToMessages,
+                reasoning_mode: MessagesReasoningMode::Adaptive,
+                model_ids: vec!["claude-test".to_string()],
+            }],
+            WireApi::Responses,
+            &["claude-test".to_string()],
+        )
+        .unwrap();
+        assert_eq!(bridged[0].adapter, SourceAdapter::ResponsesToMessages);
+        assert_eq!(bridged[0].reasoning_mode, MessagesReasoningMode::Adaptive);
+
+        let invalid_protocol = normalize_source_protocol_bindings(
+            vec![SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::ResponsesToMessages,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-test".to_string()],
+            }],
+            WireApi::Messages,
+            &["claude-test".to_string()],
+        )
+        .unwrap_err();
+        assert!(invalid_protocol
+            .to_string()
+            .contains("cannot serve this client protocol"));
+
+        let invalid_reasoning = normalize_source_protocol_bindings(
+            vec![SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Budget,
+                model_ids: vec!["gpt-test".to_string()],
+            }],
+            WireApi::Responses,
+            &["gpt-test".to_string()],
+        )
+        .unwrap_err();
+        assert!(invalid_reasoning
+            .to_string()
+            .contains("does not expose reasoning"));
+    }
+
+    #[test]
+    fn responses_native_and_messages_bridge_are_distinct_source_routes() {
+        let bindings = normalize_source_protocol_bindings(
+            vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["gpt-test".to_string()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::ResponsesToMessages,
+                    reasoning_mode: MessagesReasoningMode::Adaptive,
+                    model_ids: vec!["claude-test".to_string()],
+                },
+            ],
+            WireApi::Responses,
+            &["gpt-test".to_string(), "claude-test".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(bindings.len(), 2);
+        assert_ne!(bindings[0].key(), bindings[1].key());
+        assert_eq!(bindings[0].model_ids, ["gpt-test"]);
+        assert_eq!(bindings[1].model_ids, ["claude-test"]);
+    }
+
+    #[test]
+    fn model_cannot_be_assigned_to_two_routes_for_the_same_client_protocol() {
+        let error = normalize_source_protocol_bindings(
+            vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["shared-model".to_string()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::ResponsesToMessages,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["shared-model".to_string()],
+                },
+            ],
+            WireApi::Responses,
+            &["shared-model".to_string()],
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("only one source route for the same client protocol"));
+    }
 
     #[test]
     fn source_validation_rejects_unsafe_urls_and_redacts_secrets() {

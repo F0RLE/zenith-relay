@@ -1,30 +1,45 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Check, Copy, KeyRound, Pencil, Plus, Power, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ClientKeyCreateInput, ClientWireApi, GeneratedClientKey, KeySummary, RuntimeSnapshot } from "../../api/types";
+import type { ClientKeyCreateInput, ClientWireApi, GeneratedClientKey, GeneratedLocalKey, KeySummary, LocalGatewayKeyInput, RuntimeSnapshot } from "../../api/types";
 import { relayCommands } from "../../api/commands";
 import { ActionMenu, ActionMenuItem, Button, Dialog, IconButton, StatusIcon, copyText } from "../../components/Ui";
+import { effectiveSourceProtocolBindings } from "../../sourceProtocolBindings";
+import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 type EditorTarget = "create" | KeySummary | null;
 type Confirmation = { kind: "rotate" | "delete"; key: KeySummary } | null;
 type ModelPolicy = "all" | "allow" | "exclude";
+type AccessMode = "local" | "remote";
+type GeneratedKey = Pick<GeneratedClientKey, "key" | "secret"> | GeneratedLocalKey;
 
 export function RemoteClientAccess() {
+  return <ClientAccess mode="remote" />;
+}
+
+export function LocalClientAccess() {
+  return <ClientAccess mode="local" />;
+}
+
+function ClientAccess({ mode }: { mode: AccessMode }) {
   const { t } = useTranslation();
   const { runtime, busy, perform } = useRelayState();
   const [editor, setEditor] = useState<EditorTarget>(null);
   const [confirmation, setConfirmation] = useState<Confirmation>(null);
-  const [generated, setGenerated] = useState<GeneratedClientKey | null>(null);
+  const [generated, setGenerated] = useState<GeneratedKey | null>(null);
   if (!runtime?.capabilities.features.includes("client_access")) return null;
 
   const keys = runtime.keys.filter((key) => !key.system);
   const supportedApis = clientApis(runtime);
+  const operationPrefix = `${mode}-client`;
   const save = async (input: ClientKeyCreateInput) => {
     if (editor === "create") {
-      let result: GeneratedClientKey | null = null;
-      const ok = await perform("remote-client-create", async () => {
-        result = await relayCommands.createRemoteClientKey(input);
+      let result: GeneratedKey | null = null;
+      const ok = await perform(`${operationPrefix}-create`, async () => {
+        result = mode === "local"
+          ? await relayCommands.createKey(toLocalGatewayKeyInput(input))
+          : await relayCommands.createRemoteClientKey(input);
       }, "feedback.saved");
       if (ok && result) {
         setEditor(null);
@@ -33,25 +48,41 @@ export function RemoteClientAccess() {
       return;
     }
     if (!editor) return;
-    const ok = await perform(`remote-client-update-${editor.id}`, () => relayCommands.updateRemoteClientKey(editor.id, input), "feedback.saved");
+    const ok = await perform(
+      `${operationPrefix}-update-${editor.id}`,
+      () => mode === "local"
+        ? relayCommands.updateKey({ keyId: editor.id, ...toLocalGatewayKeyInput(input) })
+        : relayCommands.updateRemoteClientKey(editor.id, input),
+      "feedback.saved",
+    );
     if (ok) setEditor(null);
   };
   const setEnabled = (key: KeySummary) => perform(
-    `remote-client-toggle-${key.id}`,
-    () => relayCommands.updateRemoteClientKey(key.id, { schemaVersion: 1, enabled: !key.enabled }),
+    `${operationPrefix}-toggle-${key.id}`,
+    () => mode === "local"
+      ? relayCommands.setKeyEnabled(key.id, !key.enabled)
+      : relayCommands.updateRemoteClientKey(key.id, { schemaVersion: 1, enabled: !key.enabled }),
     "feedback.saved",
   );
   const confirm = async () => {
     if (!confirmation) return;
     const { kind, key } = confirmation;
     if (kind === "delete") {
-      const ok = await perform(`remote-client-delete-${key.id}`, () => relayCommands.revokeRemoteClientKey(key.id), "feedback.saved");
+      const ok = await perform(
+        `${operationPrefix}-delete-${key.id}`,
+        () => mode === "local"
+          ? relayCommands.deleteKey(key.id)
+          : relayCommands.revokeRemoteClientKey(key.id),
+        "feedback.saved",
+      );
       if (ok) setConfirmation(null);
       return;
     }
-    let result: GeneratedClientKey | null = null;
-    const ok = await perform(`remote-client-rotate-${key.id}`, async () => {
-      result = await relayCommands.rotateRemoteClientKey(key.id);
+    let result: GeneratedKey | null = null;
+    const ok = await perform(`${operationPrefix}-rotate-${key.id}`, async () => {
+      result = mode === "local"
+        ? await relayCommands.rotateKey(key.id)
+        : await relayCommands.rotateRemoteClientKey(key.id);
     }, "feedback.saved");
     if (ok && result) {
       setConfirmation(null);
@@ -67,8 +98,8 @@ export function RemoteClientAccess() {
         {keys.length ? <div className="client-key-list">{keys.map((key) => <ClientKeyRow key={key.id} keyRecord={key} runtime={runtime} supportedApis={supportedApis} busy={busy} onEdit={() => setEditor(key)} onToggle={() => void setEnabled(key)} onConfirm={(kind) => setConfirmation({ kind, key })} />)}</div> : <div className="client-access-empty"><KeyRound aria-hidden /><div><strong>{t("gateway.clientAccess.empty")}</strong><small>{t("gateway.clientAccess.emptyHint")}</small></div></div>}
       </div>
     </section>
-    {editor ? <ClientKeyDialog key={editor === "create" ? "create" : editor.id} keyRecord={editor === "create" ? null : editor} runtime={runtime} supportedApis={supportedApis} busy={busy} onClose={() => setEditor(null)} onSave={(input) => void save(input)} /> : null}
-    {confirmation ? <Dialog title={t(`gateway.clientAccess.${confirmation.kind}Title`)} onClose={() => setConfirmation(null)} footer={<><Button variant="secondary" onClick={() => setConfirmation(null)}>{t("common.cancel")}</Button><Button variant={confirmation.kind === "delete" ? "danger" : "primary"} busy={busy === `remote-client-${confirmation.kind}-${confirmation.key.id}`} onClick={() => void confirm()}>{t(`gateway.clientAccess.${confirmation.kind}`)}</Button></>}><p className="confirm-dialog-message">{t(`gateway.clientAccess.${confirmation.kind}Confirm`, { label: confirmation.key.label })}</p></Dialog> : null}
+    {editor ? <ClientKeyDialog key={editor === "create" ? "create" : editor.id} keyRecord={editor === "create" ? null : editor} runtime={runtime} supportedApis={supportedApis} busy={busy} operationPrefix={operationPrefix} supportsBudgets={mode === "remote" && runtime.capabilities.features.includes("client_key_budgets")} onClose={() => setEditor(null)} onSave={(input) => void save(input)} /> : null}
+    {confirmation ? <Dialog title={t(`gateway.clientAccess.${confirmation.kind}Title`)} onClose={() => setConfirmation(null)} footer={<><Button variant="secondary" onClick={() => setConfirmation(null)}>{t("common.cancel")}</Button><Button variant={confirmation.kind === "delete" ? "danger" : "primary"} busy={busy === `${operationPrefix}-${confirmation.kind}-${confirmation.key.id}`} onClick={() => void confirm()}>{t(`gateway.clientAccess.${confirmation.kind}`)}</Button></>}><p className="confirm-dialog-message">{t(`gateway.clientAccess.${confirmation.kind}Confirm`, { label: confirmation.key.label })}</p></Dialog> : null}
     {generated ? <GeneratedSecretDialog generated={generated} endpoint={runtime.gateway.baseUrl} onClose={() => setGenerated(null)} /> : null}
   </>;
 }
@@ -100,11 +131,13 @@ function ClientKeyRow({ keyRecord, runtime, supportedApis, busy, onEdit, onToggl
   </div>;
 }
 
-function ClientKeyDialog({ keyRecord, runtime, supportedApis, busy, onClose, onSave }: {
+function ClientKeyDialog({ keyRecord, runtime, supportedApis, busy, operationPrefix, supportsBudgets, onClose, onSave }: {
   keyRecord: KeySummary | null;
   runtime: RuntimeSnapshot;
   supportedApis: ClientWireApi[];
   busy: string | null;
+  operationPrefix: string;
+  supportsBudgets: boolean;
   onClose: () => void;
   onSave: (input: ClientKeyCreateInput) => void;
 }) {
@@ -118,11 +151,13 @@ function ClientKeyDialog({ keyRecord, runtime, supportedApis, busy, onClose, onS
   const [modelPolicy, setModelPolicy] = useState<ModelPolicy>(initialModelPolicy);
   const [modelIds, setModelIds] = useState(initialModelPolicy === "allow" ? keyRecord?.allowedModels ?? [] : initialModelPolicy === "exclude" ? keyRecord?.excludedModels ?? [] : []);
   const [modelPrefix, setModelPrefix] = useState(keyRecord?.modelPrefix ?? "");
-  const [wireApis, setWireApis] = useState<ClientWireApi[]>(keyRecord?.wireApis ?? supportedApis);
-  const supportsBudgets = runtime.capabilities.features.includes("client_key_budgets");
+  const [wireApis, setWireApis] = useState<ClientWireApi[]>(() => normalizedClientApis(keyRecord?.wireApis ?? supportedApis, supportedApis));
   const [budget, setBudget] = useState(formatEditableMicroUsd(keyRecord?.softBudgetMicroUsd ?? null));
   const budgetMicroUsd = parseUsdMicro(budget);
-  const modelOptions = [...new Set([...(runtime.gateway.models?.map((model) => model.id) ?? []), ...runtime.gateway.visibleModelIds])].sort();
+  const modelOptions = useMemo(
+    () => scopedModelOptions(runtime, allSources, sourceIds, allAccounts, accountIds, wireApis, modelIds),
+    [accountIds, allAccounts, allSources, modelIds, runtime, sourceIds, wireApis],
+  );
   const valid = label.trim().length > 0 && wireApis.length > 0 && (modelPolicy === "all" || modelIds.length > 0) && (!supportsBudgets || budgetMicroUsd !== undefined);
   const toggle = (values: string[], value: string, setValues: (values: string[]) => void) => setValues(values.includes(value) ? values.filter((item) => item !== value) : [...values, value]);
   const submit = () => onSave({
@@ -137,7 +172,7 @@ function ClientKeyDialog({ keyRecord, runtime, supportedApis, busy, onClose, onS
     ...(supportsBudgets ? { softBudgetMicroUsd: budgetMicroUsd } : {}),
   });
 
-  return <Dialog wide title={keyRecord ? t("gateway.clientAccess.editTitle") : t("gateway.clientAccess.createTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === (keyRecord ? `remote-client-update-${keyRecord.id}` : "remote-client-create")} disabled={!valid} onClick={submit}>{t("common.save")}</Button></>}>
+  return <Dialog wide title={keyRecord ? t("gateway.clientAccess.editTitle") : t("gateway.clientAccess.createTitle")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === (keyRecord ? `${operationPrefix}-update-${keyRecord.id}` : `${operationPrefix}-create`)} disabled={!valid} onClick={submit}>{t("common.save")}</Button></>}>
     <div className="relay-form client-key-form">
       <label className="relay-field"><span>{t("gateway.clientAccess.name")}</span><input autoFocus value={label} maxLength={128} onChange={(event) => setLabel(event.target.value)} placeholder={t("gateway.clientAccess.namePlaceholder")} /></label>
       {supportsBudgets ? <label className="relay-field"><span>{t("gateway.clientAccess.budget")}</span><input value={budget} inputMode="decimal" maxLength={16} onChange={(event) => setBudget(event.target.value)} placeholder={t("gateway.clientAccess.budgetPlaceholder")} />{budgetMicroUsd === undefined ? <small className="field-error">{t("gateway.clientAccess.budgetInvalid")}</small> : <small className="form-note">{t("gateway.clientAccess.budgetHint")}</small>}</label> : null}
@@ -158,7 +193,7 @@ function CheckGrid({ values, options, setValues, empty }: { values: string[]; op
   return <div className="scope-grid client-scope-grid">{options.map((option) => <label key={option.id}><input type="checkbox" checked={values.includes(option.id)} onChange={() => setValues(values.includes(option.id) ? values.filter((id) => id !== option.id) : [...values, option.id])} /><span title={option.label}>{option.label}</span></label>)}</div>;
 }
 
-function GeneratedSecretDialog({ generated, endpoint, onClose }: { generated: GeneratedClientKey; endpoint: string; onClose: () => void }) {
+function GeneratedSecretDialog({ generated, endpoint, onClose }: { generated: GeneratedKey; endpoint: string; onClose: () => void }) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
   const copy = async () => { await copyText(generated.secret); setCopied(true); };
@@ -169,8 +204,64 @@ function clientApis(runtime: RuntimeSnapshot): ClientWireApi[] {
   const apis: ClientWireApi[] = [];
   if (runtime.capabilities.supportedWireApis?.includes("responses")) apis.push("responses");
   if (runtime.capabilities.supportedWireApis?.includes("chat_completions")) apis.push("chat_completions");
-  if (runtime.capabilities.features.includes("images")) apis.push("images");
+  if (runtime.capabilities.supportedWireApis?.includes("messages")) apis.push("messages");
   return apis;
+}
+
+function toLocalGatewayKeyInput(input: ClientKeyCreateInput): LocalGatewayKeyInput {
+  const { schemaVersion: _schemaVersion, softBudgetMicroUsd: _softBudgetMicroUsd, ...localInput } = input;
+  return localInput;
+}
+
+function normalizedClientApis(
+  selected: ClientWireApi[],
+  supported: ClientWireApi[],
+): ClientWireApi[] {
+  return [...new Set(selected
+    .map((api) => api === "images" ? "chat_completions" : api)
+    .filter((api): api is Exclude<ClientWireApi, "images"> => supported.includes(api)))];
+}
+
+function scopedModelOptions(
+  runtime: RuntimeSnapshot,
+  allSources: boolean,
+  sourceIds: string[],
+  allAccounts: boolean,
+  accountIds: string[],
+  wireApis: ClientWireApi[],
+  retainedModelIds: string[],
+) {
+  const models = new Map<string, string>();
+  const add = (model: string) => {
+    const value = model.trim();
+    if (value) models.set(value.toLocaleLowerCase(), value);
+  };
+  const allowsModel = (model: string, allowed: string[], excluded: string[]) => (
+    (!allowed.length || allowed.some((candidate) => candidate.localeCompare(model, undefined, { sensitivity: "accent" }) === 0))
+    && !excluded.some((candidate) => candidate.localeCompare(model, undefined, { sensitivity: "accent" }) === 0)
+  );
+  const allowsSourceProtocol = (wireApi: "responses" | "chat_completions" | "messages") => (
+    wireApis.includes(wireApi)
+  );
+  for (const source of runtime.sources) {
+    if (!allSources && !sourceIds.includes(source.id)) continue;
+    for (const binding of effectiveSourceProtocolBindings(source)) {
+      if (!allowsSourceProtocol(binding.wireApi)) continue;
+      for (const model of binding.modelIds) {
+        if (allowsModel(model, source.allowedModels, source.excludedModels)) add(model);
+      }
+    }
+  }
+  if (wireApis.includes("responses")) {
+    for (const account of runtime.accounts) {
+      if (!allAccounts && !accountIds.includes(account.id)) continue;
+      for (const model of account.models) {
+        if (allowsModel(model, account.allowedModels, account.excludedModels)) add(model);
+      }
+    }
+  }
+  for (const model of retainedModelIds) add(model);
+  return sortModelIdsForLauncher([...models.values()]);
 }
 
 function scopeLabel(ids: string[] | null, total: number, all: string) {

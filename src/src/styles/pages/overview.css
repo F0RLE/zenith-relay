@@ -491,6 +491,11 @@
 
 .overview-analytics.loading .overview-chart-canvas {
   opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+.overview-analytics.loading.has-data .overview-chart-canvas {
+  opacity: 0.78;
 }
 
 .relay-page h2,
@@ -522,6 +527,18 @@
 .detail-list dd {
   min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-list .detail-copy-value {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-copy-value code {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }

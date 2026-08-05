@@ -2588,6 +2588,7 @@ mod tests {
             success: false,
             http_status: 500,
             error_category: Some("upstream_error".to_string()),
+            tool_use: crate::ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: None,

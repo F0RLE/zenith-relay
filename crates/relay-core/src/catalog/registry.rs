@@ -1,10 +1,17 @@
+use super::normalize_model_ids;
 use crate::scheduler::{CandidateScope, PoolScheduler};
 use crate::WireApi;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::HashSet;
 
 #[derive(Clone, Debug, Default)]
 pub struct ModelRegistry {
-    models_by_candidate: BTreeMap<String, BTreeSet<String>>,
+    candidates: Vec<RegisteredCandidate>,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredCandidate {
+    id: String,
+    models: Vec<String>,
 }
 
 impl ModelRegistry {
@@ -14,16 +21,35 @@ impl ModelRegistry {
         S: AsRef<str>,
     {
         let candidate_id = candidate_id.into();
-        let models = normalized_models(models);
+        let models = normalize_model_ids(models);
         if models.is_empty() {
-            self.models_by_candidate.remove(&candidate_id);
+            self.remove(&candidate_id);
+            return;
+        }
+        if let Some(candidate) = self
+            .candidates
+            .iter_mut()
+            .find(|candidate| candidate.id == candidate_id)
+        {
+            candidate.models = models;
         } else {
-            self.models_by_candidate.insert(candidate_id, models);
+            self.candidates.push(RegisteredCandidate {
+                id: candidate_id,
+                models,
+            });
         }
     }
 
     pub fn remove(&mut self, candidate_id: &str) -> bool {
-        self.models_by_candidate.remove(candidate_id).is_some()
+        let Some(index) = self
+            .candidates
+            .iter()
+            .position(|candidate| candidate.id == candidate_id)
+        else {
+            return false;
+        };
+        self.candidates.remove(index);
+        true
     }
 
     pub fn visible_models(
@@ -33,38 +59,40 @@ impl ModelRegistry {
         allowed_protocols: &[WireApi],
         _now_ms: u64,
     ) -> Vec<String> {
-        let mut visible = BTreeMap::new();
-        for (candidate_id, models) in &self.models_by_candidate {
-            let Some(candidate) = scheduler.candidate(candidate_id) else {
+        let mut visible = Vec::new();
+        let mut seen = HashSet::new();
+        // Native ChatGPT account candidates own bare model ids.  Sources are
+        // still registered after them, but an upstream-looking provider id
+        // must not shadow the native entry (or make the picker lose its
+        // native reasoning/service-tier metadata).
+        let mut ordered = self
+            .candidates
+            .iter()
+            .filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_some_and(|candidate| candidate.kind == crate::CandidateKind::OAuthAccount)
+            })
+            .chain(self.candidates.iter().filter(|registered| {
+                scheduler
+                    .candidate(&registered.id)
+                    .is_none_or(|candidate| candidate.kind != crate::CandidateKind::OAuthAccount)
+            }));
+        for registered in &mut ordered {
+            let Some(candidate) = scheduler.candidate(&registered.id) else {
                 continue;
             };
-            for model in models {
+            for model in &registered.models {
                 if candidate.is_catalog_visible(model, allowed_protocols, scope) {
-                    visible
-                        .entry(model.to_ascii_lowercase())
-                        .or_insert_with(|| model.clone());
+                    let normalized = model.to_ascii_lowercase();
+                    if seen.insert(normalized) {
+                        visible.push(model.clone());
+                    }
                 }
             }
         }
-        visible.into_values().collect()
+        visible
     }
-}
-
-fn normalized_models<I, S>(models: I) -> BTreeSet<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut normalized = BTreeMap::new();
-    for model in models {
-        let model = model.as_ref().trim();
-        if !model.is_empty() {
-            normalized
-                .entry(model.to_ascii_lowercase())
-                .or_insert_with(|| model.to_string());
-        }
-    }
-    normalized.into_values().collect()
 }
 
 #[cfg(test)]
@@ -72,6 +100,7 @@ mod tests {
     use super::*;
     use crate::scheduler::{CandidateHealth, CandidateKind, CandidateQuota, RuntimeCandidate};
     use crate::ModelRules;
+    use std::collections::BTreeMap;
 
     fn candidate(id: &str, source_id: &str) -> RuntimeCandidate {
         RuntimeCandidate {
@@ -177,6 +206,75 @@ mod tests {
                 100,
             ),
             vec!["gpt-5"]
+        );
+    }
+
+    #[test]
+    fn visible_models_keep_the_first_source_response_order() {
+        let mut scheduler = PoolScheduler::new();
+        let mut source = candidate("source", "source-a");
+        source.models = [
+            "unknown-second".to_string(),
+            "glm-4.7".to_string(),
+            "gpt-5.4-mini".to_string(),
+            "unknown-first".to_string(),
+            "claude-fable-5".to_string(),
+        ]
+        .into();
+        scheduler.upsert(source);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace(
+            "source",
+            [
+                "unknown-second",
+                "glm-4.7",
+                "gpt-5.4-mini",
+                "unknown-first",
+                "claude-fable-5",
+            ],
+        );
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                0,
+            ),
+            [
+                "unknown-second",
+                "glm-4.7",
+                "gpt-5.4-mini",
+                "unknown-first",
+                "claude-fable-5",
+            ]
+        );
+    }
+
+    #[test]
+    fn native_account_model_ids_take_precedence_over_provider_spelling() {
+        let mut scheduler = PoolScheduler::new();
+        let mut source = candidate("source", "source-a");
+        source.models = ["GPT-5.4".to_string()].into();
+        scheduler.upsert(source);
+        let mut account = candidate("account", "source-a");
+        account.kind = CandidateKind::OAuthAccount;
+        account.models = ["gpt-5.4".to_string()].into();
+        scheduler.upsert(account);
+
+        let mut registry = ModelRegistry::default();
+        registry.replace("source", ["GPT-5.4"]);
+        registry.replace("account", ["gpt-5.4"]);
+
+        assert_eq!(
+            registry.visible_models(
+                &scheduler,
+                &CandidateScope::default(),
+                &[WireApi::Responses],
+                0,
+            ),
+            ["gpt-5.4"]
         );
     }
 }

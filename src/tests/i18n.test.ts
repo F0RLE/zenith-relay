@@ -5,6 +5,7 @@ import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
 import type { AccountSummary } from "../src/features/relay/api/types";
 import { currentAccountErrorCode, formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../src/features/relay/components/Ui";
+import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
   test("account cards prefer the latest quota refresh error in every view", () => {
@@ -18,6 +19,52 @@ describe("Relay translations", () => {
     } as unknown as AccountSummary;
 
     expect(currentAccountErrorCode(account)).toBe("credential_error");
+  });
+
+  test("feedback diagnostics redact token-shaped values before they reach the UI", () => {
+    const result = sanitizeFeedbackError({
+      code: "upstream_http_502",
+      message: "Bearer live-secret api_key=sk-live-1234567890 token=abc123 Cookie: session=browser-secret; id_token=identity-secret x-api-key=provider-secret eyJhbGciOiJub25lIn0.eyJzdWIiOiIxIn0.signature",
+    });
+
+    expect(result.code).toBe("upstream_http_502");
+    expect(result.message).not.toContain("live-secret");
+    expect(result.message).not.toContain("sk-live-1234567890");
+    expect(result.message).not.toContain("browser-secret");
+    expect(result.message).not.toContain("identity-secret");
+    expect(result.message).not.toContain("provider-secret");
+    expect(result.message).not.toContain("eyJhbGciOiJub25lIn0");
+    expect(result.message).toContain("Bearer [redacted]");
+    expect(result.message).toContain("api_key=[redacted]");
+  });
+
+  test("feedback diagnostics keep only bounded routing context", () => {
+    const result = sanitizeFeedbackError({
+      code: "gateway_unavailable",
+      message: "provider failed",
+      diagnostic: {
+        reason: "upstream",
+        model: "claude-opus-5",
+        source: "source_anthropic",
+        route: "/v1/messages",
+        requestId: "req_123",
+        status: 429,
+        retryable: true,
+      },
+      prompt: "must never be copied",
+    });
+
+    expect(result).toMatchObject({
+      code: "gateway_unavailable",
+      reason: "upstream",
+      model: "claude-opus-5",
+      source: "source_anthropic",
+      route: "/v1/messages",
+      requestId: "req_123",
+      status: 429,
+      retryable: true,
+    });
+    expect(JSON.stringify(result)).not.toContain("must never be copied");
   });
 
   test("English and Russian expose the same keys", () => {

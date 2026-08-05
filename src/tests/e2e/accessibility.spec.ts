@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "../bun-playwright";
 import { installTauriMock } from "./tauri-mock";
 
 test("interactive controls have names and dialogs trap focus", async ({ page }) => {

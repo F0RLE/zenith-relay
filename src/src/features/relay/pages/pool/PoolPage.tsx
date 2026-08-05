@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
-import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
+import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, BrainCircuit, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
+import { effectiveSourceProtocolBindings, sourceModelsForWireApi } from "../../sourceProtocolBindings";
 import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
-import { groupModels, supportsCacheWritePricing } from "../../modelGroups";
+import { groupModels, sortModelIdsForLauncher, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
-import { compareRoutingOrder, compareSubscriptionPlanPriority, routingOrderPositions } from "../../routingOrder";
+import { activeModelCounts, activeRequestCount, compareRoutingOrder, compareSubscriptionPlanPriority, routingOrderPositions } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountErrorDialog, SourceDialog } from "../connections/ConnectionsPage";
 
@@ -34,7 +35,6 @@ export function PoolPage() {
   useEffect(() => {
     if (view === "models" && !supportsModels) setView("members");
   }, [view, supportsModels]);
-  const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   const selectedOauthAccountId = codexPoolOauthSelection !== "none" && codexPoolOauthSelection !== "auto"
     && runtime?.accounts.some((account) => account.id === codexPoolOauthSelection && isCodexOauthAccountEligible(account))
     ? codexPoolOauthSelection
@@ -59,8 +59,8 @@ export function PoolPage() {
     </div> : null}
     {view === "members" ? <Button data-action="pool-add" variant="secondary" icon={<Plus aria-hidden />} aria-label={t("pool.addMember")} disabled={!supportsMembers} title={!supportsMembers ? t("remote.capabilityUnavailable") : t("pool.addMember")} onClick={() => setAddMembers(true)}>{t("pool.addMemberShort")}</Button> : null}
     {mode === "local" ? <>
-      <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} disabled={!running && !poolReady} title={!running && !poolReady ? t("pool.startUnavailable") : poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleShortLabel}</Button>
-      <Button data-action="pool-switch" variant="primary" icon={<ArrowRightLeft aria-hidden />} aria-label={t("pool.switchChatGPT")} busy={busy === "pool-switch"} disabled={!running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !running ? t("pool.start") : t("pool.switchChatGPT")} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPTShort")}</Button>
+      <Button data-action="pool-toggle" variant="secondary" icon={running ? <Power aria-hidden /> : <Play aria-hidden />} aria-label={poolToggleLabel} busy={busy === "pool-toggle"} title={poolToggleLabel} onClick={() => void perform("pool-toggle", running ? relayCommands.stopGateway : relayCommands.startGateway, running ? "feedback.stopped" : "feedback.started")}>{poolToggleShortLabel}</Button>
+      <Button data-action="pool-switch" variant="primary" icon={<ArrowRightLeft aria-hidden />} aria-label={t("pool.switchChatGPT")} busy={busy === "pool-switch"} disabled={!running} title={!running ? t("pool.start") : t("pool.switchChatGPT")} onClick={() => void switchCodexToPool()}>{t("pool.switchChatGPTShort")}</Button>
     </> : null}
   </div>;
   const tabs = [{ id: "members", label: t("pool.members") }, ...(supportsModels ? [{ id: "models", label: t("pool.modelRules") }] : [])];
@@ -93,10 +93,11 @@ function formatConfigurationValue(value: unknown) {
 
 function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy, codexPoolOauthSelection, localUsage, remoteUsage, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
+  const { mode, runtime, runtimeRevision, perform, busy, codexPoolOauthSelection, localUsage, remoteUsage, loadLocalUsage, loadRemoteUsage, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
+  const canReadUsage = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
   const serviceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const routingStrategy = runtime?.gateway.routingStrategy ?? "adaptive";
   const subscriptionExpiryFormat = new Intl.DateTimeFormat(i18n.language, { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -106,6 +107,11 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   const [quotaReport, setQuotaReport] = useState<{ succeeded: number; failed: number } | null>(null);
   const [sourceStats, setSourceStats] = useState<Record<string, SourceStatsState>>({});
   const sourceStatsGeneration = useRef(0);
+  useEffect(() => {
+    if (!runtime || mode === "zenith" || !canReadUsage) return;
+    const load = mode === "local" ? loadLocalUsage : loadRemoteUsage;
+    void load({ page: 1, pageSize: 1 }).catch(() => undefined);
+  }, [canReadUsage, loadLocalUsage, loadRemoteUsage, mode, runtime, runtimeRevision]);
   const poolMembers: Member[] = [
     ...(runtime?.accounts ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "account" as const })),
     ...(runtime?.sources ?? []).filter((item) => item.inPool).map((item) => ({ ...item, kind: "source" as const })),
@@ -115,7 +121,9 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     (latest, event) => latest == null || event.id > latest.id ? event : latest,
     null,
   );
-  const latestRequestedModel = latestUsage?.requestedModel ?? null;
+  // Codex may send a Relay-managed alias here.  The resolved model is the
+  // actual upstream model that routing evaluated against member capabilities.
+  const latestPoolModel = latestUsage?.resolvedModel ?? latestUsage?.requestedModel ?? null;
   const runtimeByMember = new Map(runtimeOrder.map((candidate) => [candidate.candidateId, candidate]));
   const orderByMember = routingOrderPositions(runtimeOrder);
   const members = [...poolMembers].sort((left, right) => comparePoolMembers(left, right, orderByMember));
@@ -154,10 +162,28 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
     return () => window.clearTimeout(timer);
   }, [nowMs, showSeconds]);
-  const activeMembers = members.filter((member) => (runtimeByMember.get(member.id)?.inFlight ?? 0) > 0);
+  const activeMembers = members.filter((member) => activeRequestCount(runtimeByMember.get(member.id)) > 0);
+  const activeRuntime = activeMembers.flatMap((member) => {
+    const candidate = runtimeByMember.get(member.id);
+    return candidate ? [candidate] : [];
+  });
+  const activeRequestTotal = activeRuntime.reduce((total, candidate) => total + activeRequestCount(candidate), 0);
+  const activeModels = activeModelCounts(activeRuntime);
+  const activeModelList = activeModels
+    .map(({ model, requestCount }) => requestCount > 1 ? t("pool.activeModelCount", { model, count: requestCount }) : model)
+    .join(" · ");
+  const activeRequestSummary = activeRequestTotal > 0
+    ? activeModelList
+      ? t("pool.activeRequests", { count: activeRequestTotal, models: activeModelList })
+      : t("pool.activeRequestsUnknown", { count: activeRequestTotal })
+    : null;
   const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
   const lastUsedMember = lastUsedRuntime ? members.find((member) => member.id === lastUsedRuntime.candidateId) ?? null : null;
   const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
+  const currentRouteMember = activeMembers.length === 1 ? activeMembers[0] : nextMember;
+  const readyRouteModels = currentRouteMember
+    ? poolVisibleModels(runtime ?? undefined).filter((model) => memberSupportsModel(currentRouteMember, model))
+    : [];
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
@@ -224,7 +250,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small></span></div>
+        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : latestPoolModel ? <small className="pool-latest-model" data-latest-model={latestPoolModel}>{t("pool.latestModel", { model: latestPoolModel })}</small> : currentRouteMember && readyRouteModels.length ? <small className="pool-latest-model" data-ready-route={currentRouteMember.id} data-ready-models={readyRouteModels.join(",")}>{t("pool.readyModels", { member: memberName(currentRouteMember), models: readyRouteModels.join(", ") })}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
@@ -248,7 +274,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
       {members.map((member) => {
         const memberId = `${member.kind}:${member.id}`;
         const runtimeState = runtimeByMember.get(member.id);
-        const unsupportedLatestModel = latestRequestedModel != null && !memberSupportsModel(member, latestRequestedModel);
+        const unsupportedLatestModel = latestPoolModel != null && !memberSupportsModel(member, latestPoolModel);
         const statusKey = member.operationalStatus;
         const statusTone = unsupportedLatestModel && statusKey === "rotation" ? "warning" : operationalStatusTone(statusKey);
         const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
@@ -265,14 +291,14 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
             ? { date: t("pool.subscriptionExpiryUnknown"), remaining: null }
             : { date: subscriptionExpiryFormat.format(member.subscription.activeUntilMs), remaining: formatDetailedRemainingTime(member.subscription.activeUntilMs, nowMs, t) }
           : null;
-        const isCurrent = (runtimeState?.inFlight ?? 0) > 0;
+        const isCurrent = activeRequestCount(runtimeState) > 0;
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
         const runtimeHint = runtimeState?.halfOpen
           ? t("pool.recoveryProbe")
           : member.kind === "source" && runtimeState?.nextRetryAtMs
             ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
             : unsupportedLatestModel
-              ? t("pool.latestModelUnsupported", { model: latestRequestedModel })
+              ? t("pool.latestModelUnsupported", { model: latestPoolModel })
             : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
         const removeLabel = `${t("pool.removeMember")}: ${member.kind === "source" ? member.name : member.label}`;
@@ -440,12 +466,16 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
   const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
   const [sourceWeight, setSourceWeight] = useState(member.weight);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
+  const pricedModels = member.kind === "source" ? Object.keys(member.modelPriceOverrides ?? {}) : [];
+  const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels, ...pricedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
   const [enabledModels, setEnabledModels] = useState(() => {
     const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
     const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
     return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
   });
+  const toggleEnabledModel = useCallback((model: string) => {
+    setEnabledModels((values) => toggle(values, model));
+  }, []);
   const [draining, setDraining] = useState(member.draining);
   const [sourcePriceDraftsState, setSourcePriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(member.kind === "source" ? member.modelPriceOverrides ?? {} : {}));
   const sourcePriceOverrides = useMemo(() => parseSourcePriceDrafts(sourcePriceDraftsState), [sourcePriceDraftsState]);
@@ -466,7 +496,8 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
           ? relayCommands.updateAccount({ accountId: member.id, ...payload })
           : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
       }
-      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: sourceWeight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {} };
+      const protocolBindings = effectiveSourceProtocolBindings(member);
+      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: sourceWeight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
       const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
       return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
     }, "feedback.saved");
@@ -490,18 +521,17 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
           <div className="relay-field source-routing-control"><span>{t("sources.recoveryDelay")}</span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /><small>{t("sources.recoveryDelayHint")}</small></div>
         </div>
       </section> : <><div className="settings-row"><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><label className="relay-field"><span>{t("accounts.economics.purchaseCost")}</span><input type="number" min="0" max="1000000" step="0.01" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder="0.00" /><small>{t("accounts.economics.purchaseCostHint")}</small></label></>}
-      {member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} /> : null}
-      <details className="member-model-rules source-editor-panel">
+      {member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} enabledModels={enabledModels} onToggleModel={toggleEnabledModel} /> : <details className="member-model-rules source-editor-panel">
         <summary className="source-editor-panel-summary"><span><strong>{t("common.models")}</strong><small>{t("models.memberRulesHint")}</small></span><small>{t("common.enabled")}: {enabledModels.length}/{modelIds.length}</small></summary>
         <div className="member-model-content">{modelIds.length ? <ul>{modelIds.map((model) => {
           const enabled = enabledModels.includes(model);
           return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
             <code>{model}</code>
             <StatusIcon status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
-            <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => setEnabledModels((values) => toggle(values, model))} />
+            <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => toggleEnabledModel(model)} />
           </li>;
         })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}</div>
-      </details>
+      </details>}
     </div>
   </Dialog>;
 }
@@ -585,8 +615,8 @@ function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [priceModel, setPriceModel] = useState<ModelSummary | null>(null);
-  const models = runtime ? modelSummaries(runtime).sort(compareModelCatalog) : [];
-  const modelGroups = groupModels(models, (model) => model.id);
+  const models = runtime ? modelSummaries(runtime) : [];
+  const modelGroups = groupModelSummariesForLauncher(models, runtime?.accounts ?? []);
   const canEditPrice = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("model_pricing"));
   const toggleModel = (model: ModelSummary) => perform(
     `model-toggle-${model.id}`,
@@ -601,10 +631,10 @@ function ModelsView() {
       <div className="model-rules-copy"><h2>{t("models.visible")}</h2><p>{t("models.explanation")}</p></div>
     </header>
     <div className="relay-table-wrap"><table className="relay-table model-rules-table">
-      <colgroup><col data-column="model" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
-      <thead><tr><th>{t("common.model")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
+      <colgroup><col data-column="model" /><col data-column="codex" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
+      <thead><tr><th>{t("common.model")}</th><th>{t("models.codexColumn")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
       {modelGroups.map((group) => <tbody key={group.id}>
-      <tr className="model-group-row"><th colSpan={4} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`)}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
+      <tr className="model-group-row"><th colSpan={5} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`)}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
       {group.items.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
       const hasPrice = model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
@@ -616,9 +646,11 @@ function ModelsView() {
         ...(supportsCacheWritePricing(model.id) && model.cacheWrite5mMicroUsdPerMillion != null ? [{ label: t("models.cacheWrite5mPriceLabel"), value: formatModelPrice(model.cacheWrite5mMicroUsdPerMillion, i18n.language) }] : []),
         ...(supportsCacheWritePricing(model.id) && model.cacheWrite1hMicroUsdPerMillion != null ? [{ label: t("models.cacheWrite1hPriceLabel"), value: formatModelPrice(model.cacheWrite1hMicroUsdPerMillion, i18n.language) }] : []),
       ] : [];
+      const displayName = model.codexDisplayName || model.id;
       const toggleLabel = t(model.enabled ? "models.disable" : "models.enable", { model: model.id });
       return <tr key={model.id} data-model-id={model.id} data-enabled={model.enabled ? "true" : "false"}>
-        <td data-column="model"><div className="model-rule-identity"><code>{model.id}</code><span className={`model-rule-state ${model.enabled ? "ready" : "disabled"}`}><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /><span>{t(model.enabled ? "models.available" : "models.disabled")}</span></span></div></td>
+        <td data-column="model"><div className="model-rule-identity"><strong title={displayName}>{displayName}</strong>{displayName !== model.id ? <code title={model.id}>{model.id}</code> : null}<span className={`model-rule-state ${model.enabled ? "ready" : "disabled"}`}><StatusIcon status={model.enabled ? "ready" : "disabled"} label={t(model.enabled ? "models.available" : "models.disabled")} /><span>{t(model.enabled ? "models.available" : "models.disabled")}</span></span></div></td>
+        <td data-column="codex"><div className={`model-codex-state ${model.codexVisible ? "visible" : "hidden"}`}><BrainCircuit aria-hidden /><span><strong>{t(model.codexVisible ? "models.codexVisible" : model.enabled ? "models.codexUnsupported" : "models.codexDisabled")}</strong></span></div></td>
         <td data-column="price"><div className="model-price">{hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
         <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
         <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
@@ -687,11 +719,17 @@ function formatApiEquivalent(microUsd: number, locale: string) { return `≈${ne
 function formatProviderMicroUsd(value: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000); }
 function formatModelPrice(microUsd: number, locale: string) { return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
-  if (runtime.gateway.models?.length) return [...runtime.gateway.models];
+  if (runtime.gateway.models?.length) return runtime.gateway.models.map((model) => ({
+    ...model,
+    codexVisible: model.codexVisible ?? false,
+    codexDisplayName: model.codexDisplayName || model.id,
+  }));
   return runtime.gateway.visibleModelIds.map((id) => ({
     id,
     enabled: true,
     memberCount: [...runtime.sources, ...runtime.accounts].filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
+    codexVisible: false,
+    codexDisplayName: id,
     catalogRank: null,
     inputMicroUsdPerMillion: null,
     cachedInputMicroUsdPerMillion: null,
@@ -701,18 +739,15 @@ function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["r
     customPrice: false,
   }));
 }
-function compareModelCatalog(left: ModelSummary, right: ModelSummary) {
-  return (left.catalogRank ?? Number.MAX_SAFE_INTEGER) - (right.catalogRank ?? Number.MAX_SAFE_INTEGER)
-    || compareModelPrice(left, right, -1)
-    || left.id.localeCompare(right.id);
-}
-function compareModelPrice(left: ModelSummary, right: ModelSummary, direction: 1 | -1) {
-  const leftKnown = left.inputMicroUsdPerMillion != null && left.outputMicroUsdPerMillion != null;
-  const rightKnown = right.inputMicroUsdPerMillion != null && right.outputMicroUsdPerMillion != null;
-  if (leftKnown !== rightKnown) return leftKnown ? -1 : 1;
-  if (!leftKnown) return 0;
-  return direction * (left.outputMicroUsdPerMillion! - right.outputMicroUsdPerMillion!)
-    || direction * (left.inputMicroUsdPerMillion! - right.inputMicroUsdPerMillion!);
+function groupModelSummariesForLauncher(models: ModelSummary[], accounts: AccountSummary[]) {
+  const chatGptModelIds = new Set(
+    accounts.flatMap((account) => account.models.map((model) => model.toLowerCase())),
+  );
+  return groupModels(
+    models,
+    (model) => model.id,
+    (model) => chatGptModelIds.has(model.id.toLowerCase()),
+  );
 }
 function comparePoolMembers(left: Member, right: Member, order: Map<string, number>) {
   const unavailable = (member: Member) => member.operationalStatus === "unavailable" || member.operationalStatus === "disabled" ? 1 : 0;
@@ -724,9 +759,20 @@ function memberName(member: Member) { return member.kind === "source" ? member.n
 function memberSupportsModel(member: Member, model: string) {
   const normalized = model.toLowerCase();
   const includes = (values: string[]) => values.some((value) => value.toLowerCase() === normalized);
-  return includes(member.models)
+  const models = member.kind === "source"
+    ? sourceModelsForWireApi(member, "responses")
+    : member.models;
+  return includes(models)
     && (!member.allowedModels.length || includes(member.allowedModels))
     && !includes(member.excludedModels);
+}
+function poolVisibleModels(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]> | undefined) {
+  if (!runtime) return [];
+  const enabledCatalog = runtime.gateway.models?.filter((model) => model.enabled).map((model) => model.id) ?? [];
+  const enabled = new Set(enabledCatalog.map((model) => model.toLowerCase()));
+  const visible = runtime.gateway.visibleModelIds.filter((model) => !enabled.size || enabled.has(model.toLowerCase()));
+  const models = visible.length ? visible : enabledCatalog;
+  return sortModelIdsForLauncher(models.filter((model, index) => models.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index));
 }
 
 type RoutingPolicyPayload = {

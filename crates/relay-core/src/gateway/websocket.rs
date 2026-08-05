@@ -1,15 +1,19 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
-    rate_limit_body_hint_value, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
+    failure_requires_independent_source_endpoint, rate_limit_body_hint, rate_limit_body_hint_value,
+    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
-use super::request::CODEX_RESPONSES_LITE_HEADER;
+use super::request::{
+    forwarded_codex_headers, tool_use_diagnostics, with_forwarded_tool_diagnostics,
+    CODEX_RESPONSES_LITE_HEADER,
+};
 use super::response::{apply_usage, emit_usage, usage_event};
 use super::streaming::has_output_delta;
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
-use crate::{GatewayRuntime, UsageEvent, WireApi};
+use crate::{GatewayRuntime, ToolUseDiagnostics, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -37,30 +41,6 @@ const RESPONSES_WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_LITE_METADATA_KEY: &str =
     "ws_request_header_x_openai_internal_codex_responses_lite";
 const WEBSOCKET_PROTOCOLS: &[WireApi] = &[WireApi::Responses];
-
-const FORWARDED_HEADERS: &[&str] = &[
-    "openai-beta",
-    "originator",
-    "session-id",
-    "session_id",
-    "thread-id",
-    "traceparent",
-    "tracestate",
-    "user-agent",
-    "version",
-    "x-client-request-id",
-    "x-codex-beta-features",
-    "x-codex-installation-id",
-    "x-codex-parent-thread-id",
-    "x-codex-turn-metadata",
-    "x-codex-turn-state",
-    "x-codex-window-id",
-    "x-oai-attestation",
-    "x-openai-memgen-request",
-    "x-openai-subagent",
-    "x-responsesapi-include-timing-metrics",
-    "x-session-id",
-];
 
 pub(super) async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
@@ -171,7 +151,6 @@ impl ClientRequest {
         let object = value
             .as_object_mut()
             .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
-        super::request::normalize_service_tier(object, runtime.default_service_tier());
         if object
             .get("type")
             .and_then(Value::as_str)
@@ -188,15 +167,8 @@ impl ClientRequest {
             .filter(|model| !model.is_empty())
             .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
             .to_string();
-        if !runtime
-            .visible_models(key, WEBSOCKET_PROTOCOLS, now_ms())
-            .iter()
-            .any(|model| model.eq_ignore_ascii_case(&requested_model))
-        {
-            return Err(GatewayFailure::model_not_found());
-        }
         let resolved_model = runtime
-            .resolve_model(key, &requested_model)
+            .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
             .ok_or_else(GatewayFailure::model_not_found)?;
         let responses_lite = headers.contains_key(CODEX_RESPONSES_LITE_HEADER)
             || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
@@ -239,6 +211,13 @@ impl ClientRequest {
             .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
     }
 
+    fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {
+        let client = tool_use_diagnostics(&self.value);
+        self.payload_for(route)
+            .map(|payload| with_forwarded_tool_diagnostics(&client, payload.as_bytes()))
+            .unwrap_or(client)
+    }
+
     fn has_previous_response_id(&self) -> bool {
         self.previous_response_id().is_some()
     }
@@ -251,8 +230,8 @@ impl ClientRequest {
             .filter(|value| !value.is_empty())
     }
 
-    fn has_function_call_output(&self) -> bool {
-        super::request::contains_function_call_output(&self.value)
+    fn has_tool_call_output(&self) -> bool {
+        super::request::contains_tool_call_output(&self.value)
     }
 
     fn drop_previous_response_id(&mut self) -> bool {
@@ -305,17 +284,19 @@ async fn connect_upstream(
             owner_recovery_confirmed,
         ) + usize::from(encrypted_content_recovered)
     {
-        let selected = runtime.select_and_reserve(
-            key,
-            &request.resolved_model,
-            WEBSOCKET_PROTOCOLS,
-            &tried,
-            (
-                request.response_affinity_key.as_deref(),
-                request.prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &tried,
+                (
+                    request.response_affinity_key.as_deref(),
+                    request.prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             break;
         };
@@ -329,6 +310,11 @@ async fn connect_upstream(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         if route.wire_api != WireApi::Responses {
+            continue;
+        }
+        if !route.adapter.is_passthrough() {
+            drop(lease);
+            last_failure = Some(GatewayFailure::adapter_unsupported());
             continue;
         }
         attempt = attempt.saturating_add(1);
@@ -352,7 +338,12 @@ async fn connect_upstream(
         let mut prepared = prepared;
         let mut refresh_fence = None;
         let upgrade = loop {
-            let headers = upstream_headers(client_headers, &prepared, request.responses_lite);
+            let headers = upstream_headers(
+                client_headers,
+                &prepared,
+                request.responses_lite,
+                &request.request_id,
+            );
             let upgrade = runtime
                 .websocket_client(&route.candidate_id)
                 .get(route.upstream_url.clone())
@@ -365,6 +356,7 @@ async fn connect_upstream(
                     record_connect_failure(
                         runtime, key, &route, &request, attempt, started, &failure, None,
                     );
+                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     last_failure = Some(failure);
                     continue 'candidates;
                 }
@@ -467,6 +459,7 @@ async fn connect_upstream(
                         .map(rate_limit_body_hint)
                         .unwrap_or_default(),
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -480,6 +473,7 @@ async fn connect_upstream(
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -489,6 +483,7 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
+            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         }
@@ -506,6 +501,7 @@ async fn connect_upstream(
                     &failure,
                     Some(&response_headers),
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -570,6 +566,7 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
+                        exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     }
                     last_failure = Some(failure);
                     if affinity_miss
@@ -596,7 +593,7 @@ async fn connect_upstream(
     if allow_previous_response_reset
         && request.has_previous_response_id()
         && confirmed_response_missing
-        && !request.has_function_call_output()
+        && !request.has_tool_call_output()
     {
         let mut reset_request = request.clone();
         if reset_request.drop_previous_response_id() {
@@ -706,6 +703,17 @@ fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTermin
     Some((has_output_delta(&value, event_type), event_terminal(&value)))
 }
 
+fn exclude_correlated_source_endpoint(
+    runtime: &GatewayRuntime,
+    route: &ExecutorRoute,
+    failure: &GatewayFailure,
+    tried: &mut HashSet<String>,
+) {
+    if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+        runtime.exclude_same_source_endpoint(&route.candidate_id, tried);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_connect_failure(
     runtime: &GatewayRuntime,
@@ -771,6 +779,7 @@ fn record_connect_failure_with_hint(
         failure.status.as_u16(),
         Some(failure.category.to_string()),
         started.elapsed().as_millis() as u64,
+        request.tool_use_for(route),
     );
     apply_failure_state(&mut event, state);
     emit_usage(runtime, event);
@@ -797,6 +806,7 @@ fn record_connect_affinity_miss(
             status.as_u16(),
             Some("response_affinity_miss".to_string()),
             started.elapsed().as_millis() as u64,
+            request.tool_use_for(route),
         ),
     );
 }
@@ -822,6 +832,7 @@ fn record_connect_rejection(
             failure.status.as_u16(),
             Some(failure.category.to_string()),
             started.elapsed().as_millis() as u64,
+            request.tool_use_for(route),
         ),
     );
 }
@@ -830,13 +841,9 @@ fn upstream_headers(
     client_headers: &HeaderMap,
     prepared: &crate::runtime::PreparedAuthorization,
     responses_lite: bool,
+    request_id: &str,
 ) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    for &name in FORWARDED_HEADERS {
-        if let Some(value) = client_headers.get(name) {
-            headers.insert(HeaderName::from_static(name), value.clone());
-        }
-    }
+    let mut headers = forwarded_codex_headers(client_headers, request_id);
     headers.insert(AUTHORIZATION, prepared.authorization.clone());
     if let Some(identity) = prepared.identity.as_ref() {
         identity.insert(&mut headers);
@@ -910,6 +917,7 @@ async fn bridge(
         StatusCode::OK.as_u16(),
         None,
         0,
+        connected.request.tool_use_for(&connected.route),
     );
     let upstream_candidate_id = connected.route.candidate_id.clone();
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
@@ -1105,17 +1113,19 @@ async fn start_next_request(
         .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
     {
         let tried = HashSet::new();
-        let selected = runtime.select_and_reserve(
-            key,
-            &request.resolved_model,
-            WEBSOCKET_PROTOCOLS,
-            &tried,
-            (
-                request.response_affinity_key.as_deref(),
-                request.prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &tried,
+                (
+                    request.response_affinity_key.as_deref(),
+                    request.prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             if let Some(retry_at_ms) = runtime.earliest_retry_at(
                 key,
@@ -1152,6 +1162,7 @@ async fn start_next_request(
             StatusCode::OK.as_u16(),
             None,
             0,
+            request.tool_use_for(&route),
         );
         state.lease = Some(lease);
         state.in_flight = Some(InFlight {
@@ -1183,6 +1194,7 @@ async fn start_next_request(
         StatusCode::OK.as_u16(),
         None,
         0,
+        request.tool_use_for(&route),
     );
     let _ = upstream
         .send(UpstreamMessage::Close {
@@ -1276,6 +1288,7 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
     };
     let event_type = value.get("type").and_then(Value::as_str);
     if let Some(in_flight) = state.in_flight.as_mut() {
+        in_flight.event.tool_use.observe_stream_payload(&value);
         if has_output_delta(&value, event_type) && in_flight.event.ttft_ms.is_none() {
             in_flight.event.ttft_ms = Some(in_flight.started.elapsed().as_millis() as u64);
         }
@@ -1333,6 +1346,9 @@ fn finish_terminal(
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     in_flight.event.success = success;
+    if success {
+        in_flight.event.tool_use.finish();
+    }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
         terminal.status.unwrap_or(if success {
@@ -1586,6 +1602,16 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message,
+            cooldown_ms: 0,
+            retry_at_ms: None,
+        }
+    }
+
+    fn adapter_unsupported() -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            category: "adapter_websocket_not_supported",
+            message: "the selected source adapter does not support Responses WebSocket transport",
             cooldown_ms: 0,
             retry_at_ms: None,
         }

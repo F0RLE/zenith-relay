@@ -2,7 +2,7 @@ use crate::state::AppState;
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::StatusCode,
+    http::{header::HOST, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -18,6 +18,14 @@ pub async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> Resp
         Ok(Some(runtime)) => runtime,
         _ => return unavailable("runtime_unavailable"),
     };
+    // relay-core is also used by the desktop loopback gateway. The server
+    // invokes it in-process, so replace the untrusted public Host header with
+    // a loopback authority at this internal boundary.
+    let (mut parts, body) = request.into_parts();
+    parts
+        .headers
+        .insert(HOST, HeaderValue::from_static("127.0.0.1"));
+    let request = Request::from_parts(parts, body);
     zenith_relay_core::gateway::router(runtime)
         .oneshot(request)
         .await

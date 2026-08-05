@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
-    discover_source_models, fetch_source_provider_stats, normalize_model_price_overrides,
-    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, WireApi,
+    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
+    normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
+    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -37,6 +38,8 @@ pub struct SourceInput {
     base_url: String,
     api_key: String,
     wire_api: WireApi,
+    #[serde(default)]
+    protocol_bindings: Vec<SourceProtocolBinding>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -63,7 +66,10 @@ pub async fn create_source(
     let secret_ref = format!("source:{id}");
     let mut record = source_record(id, secret_ref.clone(), input)?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    record.models = discover_models(&record, &api_key).await?;
+    let discovery = discover_models(&record, &api_key).await?;
+    record.models = discovery.models;
+    record.protocol_bindings = discovery.protocol_bindings;
+    normalize_record_protocol_bindings(&mut record)?;
     state
         .vault
         .save(&secret_ref, &api_key)
@@ -87,6 +93,7 @@ pub struct SourcePatch {
     base_url: Option<String>,
     api_key: Option<String>,
     wire_api: Option<WireApi>,
+    protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     models: Option<Vec<String>>,
     allowed_models: Option<Vec<String>>,
     excluded_models: Option<Vec<String>>,
@@ -123,6 +130,9 @@ pub async fn update_source(
     if let Some(value) = input.wire_api {
         record.wire_api = value;
     }
+    if let Some(value) = input.protocol_bindings {
+        record.protocol_bindings = value;
+    }
     if let Some(value) = input.models {
         record.models = normalized_values(value);
     }
@@ -152,6 +162,20 @@ pub async fn update_source(
     }
     if let Some(value) = input.model_price_overrides {
         record.model_price_overrides = normalize_source_prices(value)?;
+    }
+    normalize_record_protocol_bindings(&mut record)?;
+    if record.in_pool
+        && !record
+            .supports_wire_api(WireApi::Responses)
+            .map_err(|message| ManagementError::validation("source_protocol_invalid", message))?
+    {
+        return Err(ManagementError::new(
+            StatusCode::CONFLICT,
+            "source_pool_protocol_unsupported",
+            "only Responses API sources can join the ChatGPT pool",
+            "pool",
+            false,
+        ));
     }
     validate_source_record(&record, input.api_key.as_deref().unwrap_or(&old_secret))?;
     ensure_not_server_self_source(&state, &record.base_url)?;
@@ -226,14 +250,17 @@ pub async fn test_source(
             ManagementError::not_found("source_secret_missing", "source secret missing")
         })?;
     ensure_not_server_self_source(&state, &record.base_url)?;
-    record.models = match discover_models(&record, &api_key).await {
-        Ok(models) => models,
+    let discovery = match discover_models(&record, &api_key).await {
+        Ok(discovery) => discovery,
         Err(error) => {
             record.last_error_code = Some(error.code.clone());
             state.store.save_source(&record).map_err(store_error)?;
             return Err(error);
         }
     };
+    record.models = discovery.models;
+    record.protocol_bindings = discovery.protocol_bindings;
+    normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
     state.store.save_source(&record).map_err(store_error)?;
     if let Err(error) = state.rebuild_runtime().await {
@@ -275,7 +302,7 @@ fn source_record(
     secret_ref: String,
     input: SourceInput,
 ) -> Result<SourceRecord, ManagementError> {
-    let record = SourceRecord {
+    let mut record = SourceRecord {
         id,
         name: clean_label(&input.name, "source name")?,
         enabled: true,
@@ -284,6 +311,7 @@ fn source_record(
         base_url: input.base_url.trim().to_string(),
         secret_ref,
         wire_api: input.wire_api,
+        protocol_bindings: input.protocol_bindings,
         models: normalized_values(input.models),
         allowed_models: normalized_values(input.allowed_models),
         excluded_models: normalized_values(input.excluded_models),
@@ -293,6 +321,7 @@ fn source_record(
         model_price_overrides: normalize_source_prices(input.model_price_overrides)?,
         last_error_code: None,
     };
+    normalize_record_protocol_bindings(&mut record)?;
     validate_source_record(&record, &input.api_key)?;
     Ok(record)
 }
@@ -300,12 +329,7 @@ fn source_record(
 fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), ManagementError> {
     valid_recovery_delay(record.recovery_delay_seconds)?;
     normalize_source_prices(record.model_price_overrides.clone())?;
-    if matches!(record.wire_api, WireApi::Messages) {
-        return Err(ManagementError::validation(
-            "source_protocol_unsupported",
-            "source protocol is not supported",
-        ));
-    }
+    validate_record_protocol_bindings(record)?;
     ProviderSource {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -316,6 +340,32 @@ fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), Ma
     }
     .validate()
     .map_err(|error| validation_error(error.to_string()))
+}
+
+fn validate_record_protocol_bindings(record: &SourceRecord) -> Result<(), ManagementError> {
+    if record.protocol_bindings.is_empty() {
+        return Ok(());
+    }
+    normalize_source_protocol_bindings(
+        record.protocol_bindings.clone(),
+        record.wire_api,
+        &record.models,
+    )
+    .map(drop)
+    .map_err(|error| validation_error(error.to_string()))
+}
+
+fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), ManagementError> {
+    if record.protocol_bindings.is_empty() {
+        return Ok(());
+    }
+    record.protocol_bindings = normalize_source_protocol_bindings(
+        std::mem::take(&mut record.protocol_bindings),
+        record.wire_api,
+        &record.models,
+    )
+    .map_err(|error| validation_error(error.to_string()))?;
+    Ok(())
 }
 
 fn valid_recovery_delay(value: u64) -> Result<u64, ManagementError> {
@@ -337,7 +387,7 @@ fn normalize_source_prices(
 async fn discover_models(
     record: &SourceRecord,
     api_key: &str,
-) -> Result<Vec<String>, ManagementError> {
+) -> Result<SourceDiscovery, ManagementError> {
     let source = ProviderSource {
         id: record.id.clone(),
         name: record.name.clone(),
@@ -346,22 +396,25 @@ async fn discover_models(
         wire_api: record.wire_api,
         models: record.models.clone(),
     };
-    let models = discover_source_models(&source).await.map_err(|_| {
-        ManagementError::new(
-            StatusCode::BAD_GATEWAY,
-            "source_test_failed",
-            "source model discovery failed",
-            "upstream",
-            true,
-        )
-    })?;
-    if models.is_empty() {
+    let discovery =
+        discover_source_models_and_protocol_bindings(&source, &record.protocol_bindings)
+            .await
+            .map_err(|_| {
+                ManagementError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "source_test_failed",
+                    "source model discovery failed",
+                    "upstream",
+                    true,
+                )
+            })?;
+    if discovery.models.is_empty() {
         return Err(ManagementError::validation(
             "source_models_empty",
             "source did not expose any models",
         ));
     }
-    Ok(models)
+    Ok(discovery)
 }
 
 fn find_source(state: &AppState, id: &str) -> Result<SourceRecord, ManagementError> {

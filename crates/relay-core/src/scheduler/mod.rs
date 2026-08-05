@@ -10,6 +10,7 @@ pub use candidate::{
 };
 pub use capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
 pub use selection::{
-    normalize_subscription_plan_order, CandidateRuntimeSnapshot, PoolScheduler, RoutingDiagnostics,
-    RoutingStrategy, Selection, SelectionReason, SelectionRequest, RESPONSE_AFFINITY_TTL_MS,
+    normalize_subscription_plan_order, ActiveModelRuntime, CandidateRuntimeSnapshot, PoolScheduler,
+    RoutingDiagnostics, RoutingStrategy, Selection, SelectionReason, SelectionRequest,
+    RESPONSE_AFFINITY_TTL_MS,
 };

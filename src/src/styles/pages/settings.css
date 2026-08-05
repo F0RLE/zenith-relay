@@ -276,6 +276,27 @@
   margin: 0;
 }
 
+.snapshot-restore-backup-choice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--relay-border);
+  color: var(--relay-text);
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.snapshot-restore-backup-choice input {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--relay-accent);
+}
+
 .profile-snapshot-table-wrap {
   margin: 0;
 }

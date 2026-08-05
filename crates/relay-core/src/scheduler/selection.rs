@@ -17,13 +17,14 @@ pub const RESPONSE_AFFINITY_TTL_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
 const PROMPT_AFFINITY_MAX_ENTRIES: usize = 4_096;
 pub const PROMPT_AFFINITY_TTL_MS: u64 = 60 * 60 * 1_000;
 const PROMPT_AFFINITY_QUOTA_SLACK_BPS: u64 = 500;
+const MAX_OAUTH_TEXT_IN_FLIGHT: u32 = 1;
 const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 const PROVIDER_STORM_WINDOW_MS: u64 = 10_000;
 const PROVIDER_STORM_OPEN_MS: u64 = 30_000;
 const PROVIDER_STORM_THRESHOLD: usize = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum InFlightLane {
+pub(super) enum InFlightLane {
     Text,
     Image,
 }
@@ -48,11 +49,22 @@ pub struct Selection {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ActiveModelRuntime {
+    pub model: String,
+    pub request_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateRuntimeSnapshot {
     pub candidate_id: String,
     pub kind: CandidateKind,
     pub available: bool,
     pub in_flight: u32,
+    #[serde(default)]
+    pub active_request_count: u32,
+    #[serde(default)]
+    pub active_models: Vec<ActiveModelRuntime>,
     pub last_used_at_ms: Option<u64>,
     pub next_retry_at_ms: Option<u64>,
     pub half_open: bool,
@@ -96,6 +108,7 @@ pub struct PoolScheduler {
     prompt_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
     image_in_flight: BTreeMap<String, u32>,
+    active_models: BTreeMap<String, BTreeMap<String, u32>>,
     half_open: BTreeSet<(String, String)>,
     dispatches: BTreeMap<String, u64>,
     image_dispatches: BTreeMap<String, u64>,
@@ -137,6 +150,7 @@ impl PoolScheduler {
             ),
             in_flight: BTreeMap::new(),
             image_in_flight: BTreeMap::new(),
+            active_models: BTreeMap::new(),
             half_open: BTreeSet::new(),
             dispatches: BTreeMap::new(),
             image_dispatches: BTreeMap::new(),
@@ -222,6 +236,7 @@ impl PoolScheduler {
         self.prompt_affinity.invalidate_candidate(candidate_id);
         self.in_flight.remove(candidate_id);
         self.image_in_flight.remove(candidate_id);
+        self.active_models.remove(candidate_id);
         self.half_open
             .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
         self.dispatches.remove(candidate_id);
@@ -295,12 +310,15 @@ impl PoolScheduler {
         );
         candidates
             .into_iter()
-            .map(
-                |(candidate, available, in_flight)| CandidateRuntimeSnapshot {
+            .map(|(candidate, available, in_flight)| {
+                let active_models = self.active_models_for(&candidate.id);
+                CandidateRuntimeSnapshot {
                     candidate_id: candidate.id.clone(),
                     kind: candidate.kind,
                     available,
                     in_flight,
+                    active_request_count: self.active_request_count(&candidate.id),
+                    active_models,
                     last_used_at_ms: candidate.last_used_at,
                     next_retry_at_ms: candidate
                         .cooldowns
@@ -317,8 +335,8 @@ impl PoolScheduler {
                         .get(&candidate.id)
                         .copied()
                         .unwrap_or_default(),
-                },
-            )
+                }
+            })
             .collect()
     }
 
@@ -581,14 +599,41 @@ impl PoolScheduler {
     }
 
     fn lane_allows(&self, candidate: &RuntimeCandidate, lane: InFlightLane) -> bool {
-        lane == InFlightLane::Text
-            || candidate.kind != CandidateKind::OAuthAccount
-            || self
-                .image_in_flight
-                .get(&candidate.id)
-                .copied()
-                .unwrap_or_default()
-                < MAX_OAUTH_IMAGE_IN_FLIGHT
+        if candidate.kind != CandidateKind::OAuthAccount {
+            return true;
+        }
+        match lane {
+            InFlightLane::Text => {
+                self.in_flight_count(&candidate.id, lane) < MAX_OAUTH_TEXT_IN_FLIGHT
+            }
+            InFlightLane::Image => {
+                self.in_flight_count(&candidate.id, lane) < MAX_OAUTH_IMAGE_IN_FLIGHT
+            }
+        }
+    }
+
+    pub(crate) fn has_waitable_text_candidate(&mut self, request: SelectionRequest<'_>) -> bool {
+        let response_affinity_candidate = request.response_affinity_key.and_then(|key| {
+            self.response_affinity
+                .get(key, request.now_ms)
+                .map(str::to_string)
+        });
+        let is_waitable = |candidate: &RuntimeCandidate| {
+            candidate.kind == CandidateKind::OAuthAccount
+                && !request.tried.contains(&candidate.id)
+                && !self.lane_allows(candidate, InFlightLane::Text)
+                && self.is_eligible(
+                    candidate,
+                    request.model,
+                    request.allowed_protocols,
+                    request.scope,
+                    request.now_ms,
+                )
+        };
+        if let Some(candidate_id) = response_affinity_candidate {
+            return self.candidates.get(&candidate_id).is_some_and(is_waitable);
+        }
+        self.candidates.values().any(is_waitable)
     }
 
     fn is_half_open_probe(&self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
@@ -794,6 +839,7 @@ impl PoolScheduler {
             .entry(candidate_id.to_string())
             .or_default();
         *dispatches = dispatches.saturating_add(1);
+        self.reserve_active_model(candidate_id, model);
         true
     }
 
@@ -825,15 +871,18 @@ impl PoolScheduler {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
         }
-        let in_flight_map = self.in_flight_map_mut(lane);
-        let Some(in_flight) = in_flight_map.get_mut(candidate_id) else {
-            return false;
-        };
-        if *in_flight <= 1 {
-            in_flight_map.remove(candidate_id);
-        } else {
-            *in_flight -= 1;
+        {
+            let in_flight_map = self.in_flight_map_mut(lane);
+            let Some(in_flight) = in_flight_map.get_mut(candidate_id) else {
+                return false;
+            };
+            if *in_flight <= 1 {
+                in_flight_map.remove(candidate_id);
+            } else {
+                *in_flight -= 1;
+            }
         }
+        self.release_active_model(candidate_id, model);
         true
     }
 
@@ -958,11 +1007,86 @@ impl PoolScheduler {
             .unwrap_or_default()
     }
 
+    fn active_request_count(&self, candidate_id: &str) -> u32 {
+        self.active_models
+            .get(candidate_id)
+            .into_iter()
+            .flat_map(|models| models.values())
+            .fold(0_u32, |count, model_count| {
+                count.saturating_add(*model_count)
+            })
+    }
+
+    fn active_models_for(&self, candidate_id: &str) -> Vec<ActiveModelRuntime> {
+        self.active_models
+            .get(candidate_id)
+            .into_iter()
+            .flat_map(|models| models.iter())
+            .filter(|(model, count)| !model.is_empty() && **count > 0)
+            .map(|(model, request_count)| ActiveModelRuntime {
+                model: model.clone(),
+                request_count: *request_count,
+            })
+            .collect()
+    }
+
+    fn reserve_active_model(&mut self, candidate_id: &str, model: &str) {
+        let request_count = self
+            .active_models
+            .entry(candidate_id.to_string())
+            .or_default()
+            .entry(model.to_ascii_lowercase())
+            .or_default();
+        *request_count = request_count.saturating_add(1);
+    }
+
+    fn release_active_model(&mut self, candidate_id: &str, model: Option<&str>) {
+        let model_key = model
+            .map(str::to_ascii_lowercase)
+            .or_else(|| self.active_models.get(candidate_id)?.keys().next().cloned());
+        let Some(model_key) = model_key else {
+            return;
+        };
+        let empty = {
+            let Some(models) = self.active_models.get_mut(candidate_id) else {
+                return;
+            };
+            let remove_model = models.get(&model_key).is_some_and(|count| *count <= 1);
+            if remove_model {
+                models.remove(&model_key);
+            } else if let Some(request_count) = models.get_mut(&model_key) {
+                *request_count -= 1;
+            } else {
+                return;
+            }
+            models.is_empty()
+        };
+        if empty {
+            self.active_models.remove(candidate_id);
+        }
+    }
+
     fn dispatch_count(&self, candidate_id: &str, lane: InFlightLane) -> u64 {
         self.dispatch_map(lane)
             .get(candidate_id)
             .copied()
             .unwrap_or_default()
+    }
+
+    pub(super) fn rotation_dispatch_count(
+        &self,
+        candidate: &RuntimeCandidate,
+        lane: InFlightLane,
+    ) -> u64 {
+        let dispatches = self.dispatch_count(&candidate.id, lane);
+        if candidate.kind == CandidateKind::ApiSource {
+            // API providers can safely handle concurrent requests. A reservation
+            // must not count toward source rotation until it has settled, or an
+            // unrelated active chat would move subsequent chats to another API.
+            dispatches.saturating_sub(u64::from(self.in_flight_count(&candidate.id, lane)))
+        } else {
+            dispatches
+        }
     }
 
     fn in_flight_map(&self, lane: InFlightLane) -> &BTreeMap<String, u32> {
@@ -1139,6 +1263,38 @@ mod tests {
 
         assert!(scheduler.release_image_for("first", Some("gpt-image-2")));
         assert!(scheduler.release_for("first", Some("gpt-5")));
+    }
+
+    #[test]
+    fn oauth_text_leases_serialize_an_account_while_api_sources_remain_parallel() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(oauth_candidate("oauth"));
+        scheduler.upsert(candidate("api"));
+
+        assert!(scheduler.reserve_for("oauth", "gpt-5", 100));
+        assert!(!scheduler.reserve_for("oauth", "gpt-5", 100));
+        assert!(scheduler.reserve_for("api", "gpt-5", 100));
+        assert!(scheduler.reserve_for("api", "gpt-5", 100));
+
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "api"
+        );
+        assert!(scheduler.has_waitable_text_candidate(SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &[WireApi::Responses],
+            scope: &CandidateScope::default(),
+            tried: &HashSet::new(),
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: 100,
+        }));
+
+        assert!(scheduler.release_for("oauth", Some("gpt-5")));
+        assert!(scheduler.release_for("api", Some("gpt-5")));
+        assert!(scheduler.release_for("api", Some("gpt-5")));
     }
 
     #[test]
@@ -1375,14 +1531,6 @@ mod tests {
         );
 
         scheduler = PoolScheduler::new();
-        scheduler.upsert(candidate("busy-source"));
-        scheduler.upsert(candidate("free-source"));
-        assert!(scheduler.reserve("busy-source"));
-        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "free-source");
-        assert_eq!(selected.diagnostics.reason, SelectionReason::SourceLoad);
-
-        scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("b"));
         scheduler.upsert(candidate("a"));
         assert_eq!(
@@ -1390,6 +1538,34 @@ mod tests {
                 .unwrap()
                 .candidate_id,
             "a"
+        );
+    }
+
+    #[test]
+    fn active_api_source_does_not_rotate_concurrent_requests() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("active-source"));
+        scheduler.upsert(candidate("other-source"));
+
+        for _ in 0..2 {
+            let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+            assert_eq!(selected.candidate_id, "active-source");
+            assert!(scheduler.reserve(&selected.candidate_id));
+        }
+        assert_eq!(
+            select(&mut scheduler, &HashSet::new())
+                .unwrap()
+                .candidate_id,
+            "active-source"
+        );
+
+        assert!(scheduler.release("active-source"));
+        assert!(scheduler.release("active-source"));
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "other-source");
+        assert_eq!(
+            selected.diagnostics.reason,
+            SelectionReason::WeightedRotation
         );
     }
 
@@ -1531,7 +1707,7 @@ mod tests {
             select(&mut stabilizer, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "account"
+            "stabilizer-source"
         );
     }
 
@@ -1564,7 +1740,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_difference_inside_provider_precision_prefers_free_capacity() {
+    fn occupied_oauth_account_is_excluded_from_text_selection() {
         let mut scheduler = PoolScheduler::new();
         let mut busy = oauth_candidate("busy");
         busy.quota = CandidateQuota::Available(5_000);
@@ -1577,11 +1753,11 @@ mod tests {
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
 
         assert_eq!(selected.candidate_id, "free");
-        assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
+        assert_eq!(selected.diagnostics.reason, SelectionReason::OnlyEligible);
     }
 
     #[test]
-    fn one_account_accepts_multiple_parallel_requests() {
+    fn one_oauth_account_serializes_text_requests() {
         let mut scheduler = PoolScheduler::new();
         let mut account = oauth_candidate("only");
         account.quota = CandidateQuota::Available(5_000);
@@ -1594,9 +1770,9 @@ mod tests {
             "only"
         );
         assert!(scheduler.reserve("only"));
-        let second = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(second.candidate_id, "only");
-        assert_eq!(second.diagnostics.in_flight_before, 1);
+        assert!(select(&mut scheduler, &HashSet::new()).is_none());
+        assert!(!scheduler.reserve("only"));
+        assert!(scheduler.release("only"));
     }
 
     #[test]
@@ -1662,7 +1838,7 @@ mod tests {
         assert!(scheduler.reserve("first"));
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
         assert_eq!(selected.candidate_id, "second");
-        assert_eq!(selected.diagnostics.reason, SelectionReason::ParallelLoad);
+        assert_eq!(selected.diagnostics.reason, SelectionReason::OnlyEligible);
         assert!(scheduler.release("first"));
         assert_eq!(
             select(&mut scheduler, &HashSet::new())
@@ -1748,19 +1924,26 @@ mod tests {
         }
 
         let mut counts = BTreeMap::new();
-        for _ in 0..7 {
+        for _ in 0..3 {
             let selected = select(&mut scheduler, &HashSet::new()).unwrap();
             assert!(scheduler.reserve(&selected.candidate_id));
             *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
         }
 
-        assert_eq!(counts.get("full"), Some(&7));
-        assert_eq!(counts.get("half"), None);
-        assert_eq!(counts.get("quarter"), None);
+        assert_eq!(
+            counts,
+            [
+                ("full".to_string(), 1),
+                ("half".to_string(), 1),
+                ("quarter".to_string(), 1),
+            ]
+            .into()
+        );
+        assert!(select(&mut scheduler, &HashSet::new()).is_none());
     }
 
     #[test]
-    fn concurrent_requests_keep_the_greatest_quota() {
+    fn concurrent_requests_fill_each_oauth_account_once() {
         let mut scheduler = PoolScheduler::new();
         for (id, quota) in [
             ("sixty-three", 6_300),
@@ -1774,13 +1957,23 @@ mod tests {
         }
 
         let mut counts = BTreeMap::new();
-        for _ in 0..200 {
+        for _ in 0..4 {
             let selected = select(&mut scheduler, &HashSet::new()).unwrap();
             assert!(scheduler.reserve(&selected.candidate_id));
             *counts.entry(selected.candidate_id).or_insert(0_u32) += 1;
         }
 
-        assert_eq!(counts, [("sixty-three".to_string(), 200)].into());
+        assert_eq!(
+            counts,
+            [
+                ("fifty-one".to_string(), 1),
+                ("fifty-two".to_string(), 1),
+                ("fifty-four".to_string(), 1),
+                ("sixty-three".to_string(), 1),
+            ]
+            .into()
+        );
+        assert!(select(&mut scheduler, &HashSet::new()).is_none());
     }
 
     #[test]
@@ -1822,7 +2015,7 @@ mod tests {
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "nearest"
+            "later"
         );
         assert!(scheduler.release("nearest"));
         assert!(scheduler.update_candidate_availability(
@@ -1882,7 +2075,7 @@ mod tests {
             select(&mut scheduler, &HashSet::new())
                 .unwrap()
                 .candidate_id,
-            "business"
+            "plus"
         );
         assert!(scheduler.release("business"));
         assert!(scheduler.update_candidate_availability(
@@ -2130,6 +2323,14 @@ mod tests {
         let loaded = scheduler.runtime_order(50);
         assert_eq!(loaded[0].candidate_id, "first");
         assert_eq!(loaded[0].in_flight, 1);
+        assert_eq!(loaded[0].active_request_count, 1);
+        assert_eq!(
+            loaded[0].active_models,
+            vec![ActiveModelRuntime {
+                model: "gpt-5".into(),
+                request_count: 1,
+            }]
+        );
         assert_eq!(loaded[0].dispatches, 1);
         assert_eq!(loaded[0].last_used_at_ms, None);
         assert_eq!(
@@ -2145,7 +2346,7 @@ mod tests {
                 })
                 .unwrap()
                 .candidate_id,
-            "second"
+            "first"
         );
         assert!(scheduler.record_success("first", "gpt-5", 75));
         assert_eq!(scheduler.runtime_order(75)[0].last_used_at_ms, Some(75));
@@ -2167,6 +2368,50 @@ mod tests {
             .unwrap();
         assert!(second.half_open);
         assert!(!second.available);
+    }
+
+    #[test]
+    fn runtime_order_groups_parallel_requests_by_active_model() {
+        let mut scheduler = PoolScheduler::new();
+        let mut first = candidate("first");
+        first
+            .models
+            .extend(["claude-opus-5".to_string(), "gpt-image-2".to_string()]);
+        scheduler.upsert(first);
+
+        assert!(scheduler.reserve_for("first", "gpt-5", 50));
+        assert!(scheduler.reserve_for("first", "gpt-5", 50));
+        assert!(scheduler.reserve_for("first", "claude-opus-5", 50));
+        assert!(scheduler.reserve_image_for("first", "gpt-image-2", 50));
+
+        let snapshot = scheduler.runtime_order(50).remove(0);
+        assert_eq!(snapshot.in_flight, 3);
+        assert_eq!(snapshot.active_request_count, 4);
+        assert_eq!(
+            snapshot.active_models,
+            vec![
+                ActiveModelRuntime {
+                    model: "claude-opus-5".into(),
+                    request_count: 1,
+                },
+                ActiveModelRuntime {
+                    model: "gpt-5".into(),
+                    request_count: 2,
+                },
+                ActiveModelRuntime {
+                    model: "gpt-image-2".into(),
+                    request_count: 1,
+                },
+            ]
+        );
+
+        assert!(scheduler.release_for("first", Some("gpt-5")));
+        assert!(scheduler.release_for("first", Some("gpt-5")));
+        assert!(scheduler.release_for("first", Some("claude-opus-5")));
+        assert!(scheduler.release_image_for("first", Some("gpt-image-2")));
+        let released = scheduler.runtime_order(50).remove(0);
+        assert_eq!(released.active_request_count, 0);
+        assert!(released.active_models.is_empty());
     }
 
     #[test]

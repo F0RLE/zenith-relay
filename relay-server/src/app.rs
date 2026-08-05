@@ -21,8 +21,8 @@ use zenith_relay_core::{
     },
     protocol::{
         account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
-        GatewaySummary, KeySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot,
-        RuntimeTargetSummary, SourceSummary, UsageTotals,
+        ClientWireApi, GatewaySummary, KeySummary, OperationalStatus, ProxyMode,
+        RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary, UsageTotals,
     },
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
@@ -30,7 +30,7 @@ use zenith_relay_core::{
     },
     ApiEquivalentSummary, CandidateKind, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
     LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount, RuntimeChatGptAuth,
-    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, QUOTA_STALE_AFTER_MS,
+    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -194,6 +194,25 @@ impl AppState {
             _,
             subscription_plan_order,
         ) = self.store.routing_policy()?;
+        // Keep every enabled source/account in the runtime so explicitly
+        // scoped private keys can use native Messages or Chat Completions.
+        // `in_pool` only defines membership of the managed ChatGPT/Codex
+        // Responses key.
+        let mut pool_source_ids = source_records
+            .iter()
+            .filter(|record| {
+                record.in_pool
+                    && record
+                        .supports_wire_api(WireApi::Responses)
+                        .unwrap_or(false)
+            })
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let mut pool_account_ids = account_records
+            .iter()
+            .filter(|record| record.in_pool)
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
         if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
             return self.replace_runtime(None);
         }
@@ -254,13 +273,33 @@ impl AppState {
         {
             return self.replace_runtime(None);
         }
+        let active_source_ids = sources
+            .iter()
+            .filter(|source| source.enabled && !source.draining)
+            .map(|source| source.source.id.as_str())
+            .collect::<HashSet<_>>();
+        pool_source_ids.retain(|id| active_source_ids.contains(id.as_str()));
+        let active_account_ids = accounts
+            .iter()
+            .filter(|account| account.enabled && !account.draining)
+            .map(|account| account.id.as_str())
+            .collect::<HashSet<_>>();
+        pool_account_ids.retain(|id| active_account_ids.contains(id.as_str()));
 
         let mut keys = Vec::new();
         for record in key_records {
             let Some(secret) = self.vault.load(&record.secret_ref)? else {
                 continue;
             };
-            keys.push(runtime_key(record, secret));
+            if record.system && pool_source_ids.is_empty() && pool_account_ids.is_empty() {
+                continue;
+            }
+            keys.push(runtime_key(
+                record,
+                secret,
+                &pool_source_ids,
+                &pool_account_ids,
+            ));
         }
         if keys.is_empty() || (sources.is_empty() && accounts.is_empty()) {
             return self.replace_runtime(None);
@@ -376,12 +415,8 @@ impl AppState {
                 Ok(source_summary(
                     record,
                     secret_available,
-                    (running && record.in_pool).then(|| {
-                        source_runtime
-                            .get(record.id.as_str())
-                            .copied()
-                            .unwrap_or(false)
-                    }),
+                    (running && record.enabled)
+                        .then(|| source_runtime_available(&source_runtime, &record.id)),
                     equivalents
                         .get(&identity_hint(&record.id))
                         .copied()
@@ -499,7 +534,9 @@ impl AppState {
                 candidate_count: source_summaries
                     .iter()
                     .filter(|record| {
-                        record.in_pool && record.operational_status == OperationalStatus::Rotation
+                        record.in_pool
+                            && record.supports_wire_api(WireApi::Responses)
+                            && record.operational_status == OperationalStatus::Rotation
                     })
                     .count()
                     + account_summaries
@@ -845,6 +882,16 @@ fn account_proxy_status(
     (ProxyMode::Direct, !account_proxy_required)
 }
 
+fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &str) -> bool {
+    source_runtime.iter().any(|(candidate_id, available)| {
+        *available
+            && (*candidate_id == source_id
+                || candidate_id
+                    .strip_prefix(source_id)
+                    .is_some_and(|suffix| suffix.starts_with("::")))
+    })
+}
+
 fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
     RuntimeSource {
         source: ProviderSource {
@@ -855,7 +902,8 @@ fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
             wire_api: record.wire_api,
             models: record.models,
         },
-        enabled: record.enabled && record.in_pool,
+        protocol_bindings: record.protocol_bindings,
+        enabled: record.enabled,
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
@@ -874,7 +922,9 @@ fn runtime_account(
 ) -> RuntimeChatGptAccount {
     let operational = account_operational_state(AccountOperationalInput {
         enabled: record.enabled,
-        in_pool: record.in_pool,
+        // Runtime eligibility is independent from managed pool membership;
+        // the latter is applied only to the system key scope.
+        in_pool: true,
         draining: record.draining,
         secret_available: true,
         proxy_available: true,
@@ -911,19 +961,32 @@ fn runtime_account(
     }
 }
 
-fn runtime_key(record: GatewayKeyRecord, secret: String) -> RuntimeMixedLocalKey {
+fn runtime_key(
+    record: GatewayKeyRecord,
+    secret: String,
+    pool_source_ids: &[String],
+    pool_account_ids: &[String],
+) -> RuntimeMixedLocalKey {
+    let system = record.system;
     RuntimeMixedLocalKey {
         key: LocalGatewayKey {
             id: record.id,
             secret,
         },
         enabled: record.enabled,
-        source_ids: record.source_ids,
-        account_ids: record.account_ids,
+        source_ids: system
+            .then(|| pool_source_ids.to_vec())
+            .or(record.source_ids),
+        account_ids: system
+            .then(|| pool_account_ids.to_vec())
+            .or(record.account_ids),
         allowed_models: record.allowed_models,
         excluded_models: record.excluded_models,
         model_prefix: record.model_prefix,
-        wire_apis: record.wire_apis,
+        wire_apis: system
+            .then(|| Some(vec![ClientWireApi::Responses]))
+            .flatten()
+            .or(record.wire_apis),
     }
 }
 
@@ -947,6 +1010,7 @@ fn source_summary(
         ),
         base_url: record.base_url.clone(),
         wire_api: record.wire_api,
+        protocol_bindings: record.protocol_bindings.clone(),
         models: record.models.clone(),
         allowed_models: record.allowed_models.clone(),
         excluded_models: record.excluded_models.clone(),
@@ -1347,6 +1411,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: zenith_relay_core::ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1521,5 +1586,18 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(failure.code, "proxy_client_missing");
+    }
+
+    #[test]
+    fn source_runtime_status_matches_protocol_candidates() {
+        let runtime = HashMap::from([
+            ("source::messages", true),
+            ("source::responses", false),
+            ("other", true),
+        ]);
+
+        assert!(source_runtime_available(&runtime, "source"));
+        assert!(!source_runtime_available(&runtime, "missing"));
+        assert!(!source_runtime_available(&runtime, "sour"));
     }
 }

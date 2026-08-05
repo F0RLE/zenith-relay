@@ -124,8 +124,8 @@ pub fn restore(
     codex_home: &Path,
     backup_root: &Path,
     id: &str,
-    safety_name: &str,
-) -> Result<ProfileSnapshotSummary> {
+    safety_name: Option<&str>,
+) -> Result<()> {
     restore_with(codex_home, backup_root, id, safety_name, &OsSnapshotSecrets)
 }
 
@@ -178,9 +178,9 @@ fn restore_with(
     codex_home: &Path,
     backup_root: &Path,
     id: &str,
-    safety_name: &str,
+    safety_name: Option<&str>,
     secrets: &impl SnapshotSecrets,
-) -> Result<ProfileSnapshotSummary> {
+) -> Result<()> {
     let path = metadata_path(backup_root, id)?;
     let record = read_record(&path)?;
     validate_record(&record, id)?;
@@ -192,7 +192,9 @@ fn restore_with(
         ));
     }
     let payload = load_payload(&record, secrets)?;
-    let safety = create_with(&profile_dir, backup_root, safety_name, secrets)?;
+    if let Some(safety_name) = safety_name {
+        create_with(&profile_dir, backup_root, safety_name, secrets)?;
+    }
     codex::restore_user_profile_snapshot(
         &profile_dir,
         backup_root,
@@ -200,8 +202,7 @@ fn restore_with(
             config: payload.config,
             auth: payload.auth,
         },
-    )?;
-    Ok(safety)
+    )
 }
 
 fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> Result<()> {
@@ -459,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn named_snapshots_encrypt_payload_restore_and_keep_a_safety_copy() {
+    fn named_snapshots_can_save_the_current_profile_before_restore() {
         let root =
             std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
         let profile = root.join("profile");
@@ -476,9 +477,14 @@ mod tests {
 
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
         fs::write(profile.join("auth.json"), "{\"token\":\"changed\"}").unwrap();
-        create_with(&profile, &backups, "Changed", &secrets).unwrap();
-        let safety =
-            restore_with(&profile, &backups, &first.id, "Before restore", &secrets).unwrap();
+        restore_with(
+            &profile,
+            &backups,
+            &first.id,
+            Some("Before restoring Original"),
+            &secrets,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
@@ -488,9 +494,44 @@ mod tests {
             fs::read_to_string(profile.join("auth.json")).unwrap(),
             "{\"token\":\"auth-secret\"}"
         );
-        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 3);
-        delete_with(&backups, &safety.id, &secrets).unwrap();
-        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 2);
+        let snapshots = list_with(&backups, &secrets).unwrap().snapshots;
+        assert_eq!(snapshots.len(), 2);
+        let safety_copy = snapshots
+            .iter()
+            .find(|snapshot| snapshot.name == "Before restoring Original")
+            .unwrap();
+        restore_with(&profile, &backups, &safety_copy.id, None, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(profile.join("config.toml")).unwrap(),
+            "model = \"changed\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(profile.join("auth.json")).unwrap(),
+            "{\"token\":\"changed\"}"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn named_snapshots_restore_without_saving_the_current_profile_when_not_requested() {
+        let root =
+            std::env::temp_dir().join(format!("zenith-profile-snapshots-{}", Uuid::new_v4()));
+        let profile = root.join("profile");
+        let backups = root.join("backups");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(profile.join("config.toml"), "model = \"original\"\n").unwrap();
+        let secrets = MemorySecrets::default();
+
+        let original = create_with(&profile, &backups, "Original", &secrets).unwrap();
+        fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
+        restore_with(&profile, &backups, &original.id, None, &secrets).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(profile.join("config.toml")).unwrap(),
+            "model = \"original\"\n"
+        );
+        assert_eq!(list_with(&backups, &secrets).unwrap().snapshots.len(), 1);
 
         fs::remove_dir_all(root).unwrap();
     }

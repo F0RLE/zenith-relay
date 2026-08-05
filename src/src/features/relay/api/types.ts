@@ -102,6 +102,23 @@ export type ApiModelPriceOverride = {
   outputMicroUsdPerMillion: number;
 };
 
+export type SourceWireApi = "responses" | "chat_completions" | "messages";
+
+export type SourceAdapter = "native" | "responses_to_messages";
+
+export type MessagesReasoningMode = "disabled" | "budget" | "adaptive";
+
+export type SourceProtocolBinding = {
+  wireApi: SourceWireApi;
+  modelIds: string[];
+  /**
+   * Older Relay records do not have adapter metadata. The editor and runtime
+   * treat an omitted value as the native passthrough.
+   */
+  adapter?: SourceAdapter;
+  reasoningMode?: MessagesReasoningMode;
+};
+
 export type SourceSummary = {
   id: string;
   name: string;
@@ -110,7 +127,8 @@ export type SourceSummary = {
   draining: boolean;
   operationalStatus: OperationalStatus;
   baseUrl: string;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: SourceWireApi;
+  protocolBindings?: SourceProtocolBinding[];
   models: string[];
   allowedModels: string[];
   excludedModels: string[];
@@ -220,7 +238,7 @@ export type KeySummary = {
   lastUsedAtMs: number | null;
 };
 
-export type ClientWireApi = "responses" | "chat_completions" | "images";
+export type ClientWireApi = "responses" | "chat_completions" | "messages" | "images";
 
 export type ClientKeyCreateInput = {
   schemaVersion: 1;
@@ -234,6 +252,12 @@ export type ClientKeyCreateInput = {
   softBudgetMicroUsd?: number | null;
 };
 
+export type LocalGatewayKeyInput = Omit<ClientKeyCreateInput, "schemaVersion" | "softBudgetMicroUsd">;
+
+export type LocalGatewayKeyUpdateInput = LocalGatewayKeyInput & {
+  keyId: string;
+};
+
 export type ClientKeyPatch = Partial<Omit<ClientKeyCreateInput, "schemaVersion">> & {
   schemaVersion: 1;
   enabled?: boolean;
@@ -245,10 +269,17 @@ export type GeneratedClientKey = {
   secret: string;
 };
 
+export type GeneratedLocalKey = {
+  key: KeySummary;
+  secret: string;
+};
+
 export type ModelSummary = {
   id: string;
   enabled: boolean;
   memberCount: number;
+  codexVisible: boolean;
+  codexDisplayName: string;
   catalogRank: number | null;
   inputMicroUsdPerMillion: number | null;
   cachedInputMicroUsdPerMillion?: number | null;
@@ -263,6 +294,11 @@ export type CandidateRuntimeSnapshot = {
   kind: "api_source" | "oauth_account";
   available: boolean;
   inFlight: number;
+  activeRequestCount?: number;
+  activeModels?: Array<{
+    model: string;
+    requestCount: number;
+  }>;
   lastUsedAtMs: number | null;
   nextRetryAtMs: number | null;
   halfOpen: boolean;
@@ -344,7 +380,8 @@ type ConfigurationPresetMemberRule = {
 export type ConfigurationPresetSourceRule = ConfigurationPresetMemberRule & {
   name: string;
   baseUrl: string;
-  wireApi: "responses" | "chat_completions" | "messages";
+  wireApi: SourceWireApi;
+  protocolBindings?: SourceProtocolBinding[];
   serviceTier?: DefaultServiceTier;
   recoveryDelaySeconds: number;
   modelPriceOverrides: Record<string, ApiModelPriceOverride>;
@@ -463,6 +500,15 @@ export type RoutingDiagnostics = {
   dispatchesBefore: number;
 };
 
+export type ToolUseDiagnostics = {
+  clientToolCount: number;
+  forwardedToolCount: number;
+  toolChoice: "unspecified" | "auto" | "required" | "none" | "allowed_tools" | "specific";
+  toolCallCount: number;
+  textOutput: boolean;
+  terminalOutput: "unknown" | "empty" | "text" | "tool_call" | "mixed";
+};
+
 export type LocalUsage = {
   id: number;
   createdAt: string;
@@ -480,6 +526,7 @@ export type LocalUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs: number | null;
   generationMs: number | null;
@@ -585,6 +632,7 @@ export type RemoteUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs?: number | null;
   generationMs?: number | null;

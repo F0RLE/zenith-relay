@@ -986,10 +986,11 @@ textarea:focus-visible {
   left: 248px;
   width: min(340px, calc(100vw - 264px));
   min-height: 36px;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 6px 0 12px;
+  gap: 6px;
+  padding: 4px 6px 4px 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
@@ -1002,9 +1003,35 @@ textarea:focus-visible {
   width: min(340px, calc(100vw - 88px));
 }
 
-.global-feedback > span {
+.global-feedback-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.global-feedback-copy > span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.global-feedback-copy > code {
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 650;
+  opacity: 0.78;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-feedback-actions {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .global-feedback.success {
@@ -1024,6 +1051,67 @@ textarea:focus-visible {
   background: transparent;
   color: currentColor;
   pointer-events: auto;
+}
+
+.global-feedback .relay-action-menu {
+  pointer-events: auto;
+}
+
+.global-feedback .relay-action-menu summary {
+  width: 28px;
+  height: 28px;
+  border-color: transparent;
+  background: transparent;
+  color: currentColor;
+}
+
+.global-feedback .relay-action-menu summary:hover,
+.global-feedback .relay-action-menu[open] summary {
+  border-color: color-mix(in srgb, currentColor 28%, transparent);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.global-feedback .relay-action-menu > div {
+  top: auto;
+  right: 0;
+  bottom: 34px;
+}
+
+.global-feedback-copy-state {
+  min-width: 0;
+  max-width: 72px;
+  overflow: hidden;
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-feedback-details {
+  grid-column: 1 / -1;
+  min-width: 0;
+  max-height: min(220px, calc(100vh - 96px));
+  overflow: auto;
+  padding: 8px 9px;
+  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+}
+
+.global-feedback-details pre {
+  margin: 0;
+  color: currentColor;
+  font-size: 11px;
+  line-height: 15px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.global-feedback-details p {
+  margin: 7px 0 0;
+  color: currentColor;
+  font-size: 10px;
+  line-height: 14px;
+  opacity: 0.78;
 }
 
 .relay-loading {

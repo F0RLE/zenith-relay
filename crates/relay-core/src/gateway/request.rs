@@ -1,22 +1,38 @@
-use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
-use super::errors::{api_error, AttemptFailure};
-use super::execution::{execute_account_endpoint, execute_client_request};
+mod account;
+mod codex_models;
+mod headers;
+mod normalization;
+
+#[cfg(test)]
 use super::now_ms;
-use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
-use crate::runtime::{AuthenticatedKey, DefaultServiceTier, IMAGE_API_MODEL};
-use crate::{GatewayRuntime, WireApi};
+pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, AccountEndpoint};
+pub(super) use codex_models::models;
+#[cfg(test)]
+use codex_models::{
+    build_codex_models_response, build_codex_models_response_with_source_reasoning,
+};
+pub(super) use headers::{
+    forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
+};
+pub(super) use normalization::{
+    normalize_account_request, request_service_tier, try_recover_encrypted_content,
+};
+
+use super::execution::execute_client_request;
+#[cfg(test)]
+use crate::codex_catalog_entry_is_compatible;
+use crate::{GatewayRuntime, ToolChoiceMode, ToolUseDiagnostics, WireApi};
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::header::AUTHORIZATION;
-use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode, Uri};
-use axum::response::IntoResponse;
-use axum::Json;
-use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use axum::http::HeaderValue;
+use axum::http::{Request, Response};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -24,371 +40,15 @@ pub(super) const MAX_CLIENT_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 pub(super) const MAX_CLIENT_REQUEST_BODY_ERROR: &str = "request body exceeds 64 MiB";
 
-const MAX_CODEX_MODELS_BODY_BYTES: usize = 512 * 1024;
-
 const MAX_ALPHA_SEARCH_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(super) const CODEX_RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
-
-pub(super) async fn models(
-    State(runtime): State<Arc<GatewayRuntime>>,
-    headers: HeaderMap,
-    uri: Uri,
-) -> Response<Body> {
-    if !valid_local_host(&headers) {
-        return invalid_host();
-    }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
-        return unauthorized();
-    };
-    let protocols = allowed_model_protocols(&runtime, &key);
-    let models = runtime.visible_models(&key, &protocols, now_ms());
-    let client_version = uri.query().and_then(|query| {
-        url::form_urlencoded::parse(query.as_bytes())
-            .find(|(key, _)| key == "client_version")
-            .map(|(_, value)| value.into_owned())
-    });
-    if let Some(client_version) = client_version.as_deref() {
-        if !valid_codex_client_version(client_version) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "client_version is invalid",
-                "invalid_request",
-            );
-        }
-        if let Some(catalog) =
-            codex_models_response(runtime.as_ref(), &key, &models, client_version).await
-        {
-            return Json(catalog).into_response();
-        }
-    }
-    Json(json!({
-        "object": "list",
-        "data": models.into_iter().map(|id| json!({
-            "id": id,
-            "object": "model",
-            "owned_by": "zenith-relay",
-        })).collect::<Vec<_>>()
-    }))
-    .into_response()
-}
-
-async fn codex_models_response(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    visible_models: &[String],
-    client_version: &str,
-) -> Option<Value> {
-    let now_ms = now_ms();
-    let routes = runtime.codex_models_routes(key, now_ms).await;
-    let candidate_ids = routes
-        .iter()
-        .map(|(candidate_id, _)| candidate_id.clone())
-        .collect::<Vec<_>>();
-    let client_versions = if client_version == CODEX_MODELS_CLIENT_VERSION {
-        vec![client_version]
-    } else {
-        vec![client_version, CODEX_MODELS_CLIENT_VERSION]
-    };
-    for (candidate_id, mut url) in routes {
-        for client_version in &client_versions {
-            url.query_pairs_mut()
-                .clear()
-                .append_pair("client_version", client_version);
-            let request = runtime
-                .request_client(&candidate_id, false)
-                .get(url.clone())
-                .timeout(Duration::from_secs(10));
-            let Ok(response) = runtime
-                .send_authorized_request(&candidate_id, request, Some(client_version))
-                .await
-            else {
-                continue;
-            };
-            if !response.status().is_success() {
-                continue;
-            }
-            let Ok(body) =
-                crate::runtime::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES).await
-            else {
-                continue;
-            };
-            if let Some(catalog) = filter_codex_models_response(runtime, key, visible_models, &body)
-            {
-                runtime.clear_candidate_capability_blocks(&candidate_id);
-                runtime.remember_codex_model_manifest(&candidate_id, catalog.clone(), now_ms);
-                return Some(catalog);
-            }
-        }
-    }
-    runtime.stale_codex_model_manifest(candidate_ids.iter().map(String::as_str))
-}
-
-fn filter_codex_models_response(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    visible_models: &[String],
-    body: &[u8],
-) -> Option<Value> {
-    let payload: Value = serde_json::from_slice(body).ok()?;
-    let models = payload.get("models")?.as_array()?;
-    if models.len() > 4_096 {
-        return None;
-    }
-    let visible = visible_models
-        .iter()
-        .filter_map(|display_id| {
-            runtime
-                .resolve_model(key, display_id)
-                .map(|upstream_id| (upstream_id.to_ascii_lowercase(), display_id.clone()))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut seen = HashSet::new();
-    let mut models = models
-        .iter()
-        .filter_map(|model| {
-            let mut model = model.as_object()?.clone();
-            let slug = model.get("slug")?.as_str()?.trim();
-            if slug.is_empty()
-                || slug.len() > 256
-                || slug.chars().any(char::is_control)
-                || model.get("supported_in_api") == Some(&Value::Bool(false))
-                || model
-                    .get("visibility")
-                    .and_then(Value::as_str)
-                    .is_some_and(|value| value.eq_ignore_ascii_case("hide"))
-            {
-                return None;
-            }
-            let normalized = slug.to_ascii_lowercase();
-            let display_id = visible.get(&normalized)?;
-            if !seen.insert(normalized) {
-                return None;
-            }
-            if model
-                .get("use_responses_lite")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                runtime.remember_codex_responses_lite_model(slug);
-                model.insert(
-                    "supports_parallel_tool_calls".to_string(),
-                    Value::Bool(false),
-                );
-            }
-            model.insert("slug".to_string(), Value::String(display_id.clone()));
-            Some(Value::Object(model))
-        })
-        .collect::<Vec<_>>();
-    if let Some(display_id) = visible.get(IMAGE_API_MODEL.to_ascii_lowercase().as_str()) {
-        if seen.insert(IMAGE_API_MODEL.to_string()) {
-            models.push(json!({
-                "slug": display_id,
-                "display_name": "GPT Image 2",
-                "visibility": "list",
-                "supported_in_api": true,
-                "supports_parallel_tool_calls": false
-            }));
-        }
-    }
-    (!models.is_empty()).then(|| json!({ "models": models }))
-}
-
-fn valid_codex_client_version(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
-}
-
-pub(super) fn normalize_service_tier(
-    object: &mut Map<String, Value>,
-    default_service_tier: DefaultServiceTier,
-) {
-    if default_service_tier == DefaultServiceTier::Fast {
-        object.insert(
-            "service_tier".to_string(),
-            Value::String("priority".to_string()),
-        );
-    } else if let Some(Value::String(value)) = object.get_mut("service_tier") {
-        match value.to_ascii_lowercase().as_str() {
-            "fast" => *value = "priority".to_string(),
-            "standard" => *value = "default".to_string(),
-            _ => {}
-        }
-    }
-}
-
-pub(super) fn request_service_tier(request: &Value) -> DefaultServiceTier {
-    if request
-        .get("service_tier")
-        .and_then(Value::as_str)
-        .is_some_and(|tier| tier.eq_ignore_ascii_case("priority"))
-    {
-        DefaultServiceTier::Fast
-    } else {
-        DefaultServiceTier::Standard
-    }
-}
 
 pub(super) async fn responses(
     State(runtime): State<Arc<GatewayRuntime>>,
     request: Request<Body>,
 ) -> Response<Body> {
     execute_client_request(runtime, request, WireApi::Responses).await
-}
-
-pub(super) async fn responses_compact(
-    State(runtime): State<Arc<GatewayRuntime>>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let (parts, body) = request.into_parts();
-    let headers = parts.headers;
-    if !valid_local_host(&headers) {
-        return invalid_host();
-    }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
-        return unauthorized();
-    };
-    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
-        return client_api_forbidden();
-    }
-    let mut request = match read_json_object(body).await {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    if request.get("stream").is_some_and(|stream| stream != false) {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "streaming is not supported for compact responses",
-            "invalid_request",
-        );
-    }
-    normalize_service_tier(&mut request, runtime.default_service_tier());
-    let Some(requested_model) = request
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|model| !model.trim().is_empty())
-        .map(str::to_string)
-    else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "model must be a non-empty string",
-            "invalid_request",
-        );
-    };
-    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
-    else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "model is not available for this local key",
-            "model_not_found",
-        );
-    };
-    let responses_lite = headers
-        .get(CODEX_RESPONSES_LITE_HEADER)
-        .cloned()
-        .or_else(|| {
-            runtime
-                .codex_model_uses_responses_lite(&resolved_model)
-                .then(|| HeaderValue::from_static("true"))
-        });
-    let response_affinity_key =
-        runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
-    normalize_account_request(&mut request, responses_lite.is_some());
-    request.remove("stream");
-    execute_account_endpoint(
-        runtime,
-        key,
-        Value::Object(request),
-        requested_model,
-        resolved_model,
-        headers,
-        AccountEndpoint::Compact,
-        responses_lite,
-        response_affinity_key,
-        true,
-    )
-    .await
-}
-
-pub(super) async fn alpha_search(
-    State(runtime): State<Arc<GatewayRuntime>>,
-    request: Request<Body>,
-) -> Response<Body> {
-    let (parts, body) = request.into_parts();
-    let mut headers = parts.headers;
-    if !valid_local_host(&headers) {
-        return invalid_host();
-    }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
-        return unauthorized();
-    };
-    if !runtime.allows_client_wire_api(&key, ClientWireApi::Responses) {
-        return client_api_forbidden();
-    }
-    let mut request = match read_json_object(body).await {
-        Ok(request) => request,
-        Err(response) => return response,
-    };
-    let model_was_provided = request
-        .get("model")
-        .and_then(Value::as_str)
-        .is_some_and(|model| !model.trim().is_empty());
-    let requested_model = request
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|model| !model.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| runtime.visible_account_models(&key).into_iter().next());
-    let Some(requested_model) = requested_model else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no OAuth account model is available for search",
-            "no_eligible_source",
-        );
-    };
-    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
-    else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "model is not available for this local key",
-            "model_not_found",
-        );
-    };
-    if !model_was_provided {
-        request.remove("model");
-    }
-    request.remove("prompt_cache_key");
-    request.remove("prompt_cache_retention");
-    if let Some(session_id) = request
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 256)
-        .and_then(|value| HeaderValue::from_str(value).ok())
-    {
-        if !headers.contains_key("x-session-id") {
-            headers.insert("x-session-id", session_id.clone());
-        }
-        if !headers.contains_key("session_id") {
-            headers.insert("session_id", session_id);
-        }
-    }
-    execute_account_endpoint(
-        runtime,
-        key,
-        Value::Object(request),
-        requested_model,
-        resolved_model,
-        headers,
-        AccountEndpoint::AlphaSearch,
-        None,
-        None,
-        model_was_provided,
-    )
-    .await
 }
 
 pub(super) async fn chat_completions(
@@ -398,294 +58,182 @@ pub(super) async fn chat_completions(
     execute_client_request(runtime, request, WireApi::ChatCompletions).await
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum AccountEndpoint {
-    Compact,
-    AlphaSearch,
+pub(super) async fn messages(
+    State(runtime): State<Arc<GatewayRuntime>>,
+    request: Request<Body>,
+) -> Response<Body> {
+    super::messages::native_messages_error_response(
+        execute_client_request(runtime, request, WireApi::Messages).await,
+    )
+    .await
 }
 
-impl AccountEndpoint {
-    pub(super) fn response_limit(self) -> usize {
-        match self {
-            Self::Compact => crate::runtime::MAX_NON_STREAM_BODY_BYTES,
-            Self::AlphaSearch => MAX_ALPHA_SEARCH_RESPONSE_BYTES,
-        }
-    }
-}
-
-async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Body>> {
-    let body = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES)
-        .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                MAX_CLIENT_REQUEST_BODY_ERROR,
-                "request_too_large",
-            )
-        })?;
-    match serde_json::from_slice(&body) {
-        Ok(Value::Object(object)) => Ok(object),
-        _ => Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "request body must be a JSON object",
-            "invalid_request",
-        )),
-    }
-}
-
-fn resolve_visible_account_model(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    requested_model: &str,
-) -> Option<String> {
-    runtime
-        .visible_account_models(key)
-        .iter()
-        .any(|model| model.eq_ignore_ascii_case(requested_model))
-        .then(|| runtime.resolve_model(key, requested_model))
-        .flatten()
-}
-
-pub(super) fn account_endpoint_url(
-    mut responses_url: url::Url,
-    endpoint: AccountEndpoint,
-) -> Option<url::Url> {
-    let mut segments = responses_url.path_segments_mut().ok()?;
-    segments.pop_if_empty().pop();
-    match endpoint {
-        AccountEndpoint::Compact => {
-            segments.push("responses").push("compact");
-        }
-        AccountEndpoint::AlphaSearch => {
-            segments.push("alpha").push("search");
-        }
-    }
-    drop(segments);
-    Some(responses_url)
-}
-
-pub(super) fn normalize_account_request_body(
-    body: &[u8],
-    responses_lite: bool,
-) -> Result<Vec<u8>, AttemptFailure> {
-    let mut request =
-        serde_json::from_slice::<Value>(body).map_err(|_| AttemptFailure::invalid_request())?;
-    let object = request
-        .as_object_mut()
-        .ok_or_else(AttemptFailure::invalid_request)?;
-    normalize_account_request(object, responses_lite);
-    serde_json::to_vec(&request).map_err(|_| AttemptFailure::invalid_request())
-}
-
-pub(super) fn normalize_account_request(
-    object: &mut serde_json::Map<String, Value>,
-    responses_lite: bool,
-) {
-    object.insert("store".to_string(), Value::Bool(false));
-    object.insert("stream".to_string(), Value::Bool(true));
-    object.remove("max_output_tokens");
-    sanitize_unstored_reasoning_items(object);
-    if responses_lite {
-        object.insert("parallel_tool_calls".to_string(), Value::Bool(false));
-        filter_responses_lite_tools(object);
-    }
-    match object.get("input") {
-        Some(Value::String(text)) if text.trim().is_empty() => {
-            object.insert("input".to_string(), Value::Array(Vec::new()));
-        }
-        Some(Value::String(text)) => {
-            object.insert(
-                "input".to_string(),
-                json!([{"role": "user", "content": [{"type": "input_text", "text": text}]}]),
-            );
-        }
-        Some(Value::Object(item)) => {
-            object.insert(
-                "input".to_string(),
-                Value::Array(vec![Value::Object(item.clone())]),
-            );
-        }
-        _ => {}
-    }
-}
-
-fn sanitize_unstored_reasoning_items(object: &mut Map<String, Value>) {
-    let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for item in input {
-        let Some(item) = item.as_object_mut() else {
-            continue;
-        };
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            continue;
-        }
-        let has_encrypted_content = item
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty());
-        if !has_encrypted_content {
-            item.remove("id");
-            item.remove("encrypted_content");
-        }
-    }
-}
-
-pub(super) fn try_recover_encrypted_content(request: &mut Value, attempted: &mut bool) -> bool {
-    if *attempted {
-        return false;
-    }
-    let mut recovered = request.clone();
-    let mut changed = false;
-    strip_encrypted_reasoning(&mut recovered, &mut changed);
-    if !changed {
-        return false;
-    }
-    *request = recovered;
-    *attempted = true;
-    true
-}
-
-fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
+pub(super) fn contains_tool_call_output(value: &Value) -> bool {
     match value {
-        Value::Array(values) => {
-            for value in values {
-                strip_encrypted_reasoning(value, changed);
-            }
-        }
-        Value::Object(object) => {
-            if object.get("type").and_then(Value::as_str) == Some("reasoning")
-                && object
-                    .get("encrypted_content")
-                    .and_then(Value::as_str)
-                    .is_some_and(|content| !content.trim().is_empty())
-            {
-                object.remove("encrypted_content");
-                object.remove("id");
-                *changed = true;
-            }
-            for value in object.values_mut() {
-                strip_encrypted_reasoning(value, changed);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn filter_responses_lite_tools(object: &mut Map<String, Value>) {
-    if let Some(Value::Array(tools)) = object.get_mut("tools") {
-        tools.retain(responses_lite_tool_allowed);
-    }
-    if object
-        .get_mut("tool_choice")
-        .is_some_and(|choice| !responses_lite_tool_choice_allowed(choice))
-    {
-        object.remove("tool_choice");
-    }
-    if let Some(Value::Array(input)) = object.get_mut("input") {
-        input.retain_mut(|item| {
-            let Some(item) = item.as_object_mut() else {
-                return true;
-            };
-            if item.get("type").and_then(Value::as_str) != Some("additional_tools") {
-                return true;
-            }
-            filter_responses_lite_tools(item);
-            item.get("tools")
-                .and_then(Value::as_array)
-                .is_some_and(|tools| !tools.is_empty())
-        });
-    }
-    if let Some(Value::Object(response)) = object.get_mut("response") {
-        filter_responses_lite_tools(response);
-    }
-}
-
-fn responses_lite_tool_allowed(tool: &Value) -> bool {
-    let Some(tool_type) = tool.get("type").and_then(Value::as_str).map(str::trim) else {
-        return false;
-    };
-    if ["function", "custom", "namespace"]
-        .iter()
-        .any(|allowed| tool_type.eq_ignore_ascii_case(allowed))
-    {
-        return true;
-    }
-    tool_type.eq_ignore_ascii_case("tool_search")
-        && tool
-            .get("execution")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"))
-}
-
-fn responses_lite_tool_choice_allowed(choice: &mut Value) -> bool {
-    if let Some(choice) = choice.as_str() {
-        return ["auto", "none", "required"]
-            .iter()
-            .any(|value| choice.trim().eq_ignore_ascii_case(value));
-    }
-    let Some(choice) = choice.as_object_mut() else {
-        return false;
-    };
-    let Some(choice_type) = choice.get("type").and_then(Value::as_str).map(str::trim) else {
-        return false;
-    };
-    if ["function", "custom", "namespace"]
-        .iter()
-        .any(|allowed| choice_type.eq_ignore_ascii_case(allowed))
-    {
-        return true;
-    }
-    if choice_type.eq_ignore_ascii_case("tool_search") {
-        return choice
-            .get("execution")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("client"));
-    }
-    if choice_type.eq_ignore_ascii_case("allowed_tools") {
-        let mut any_allowed = false;
-        for name in ["tools", "allowed_tools"] {
-            if let Some(tools) = choice.get_mut(name).and_then(Value::as_array_mut) {
-                tools.retain(responses_lite_tool_allowed);
-                any_allowed |= !tools.is_empty();
-            }
-        }
-        return any_allowed;
-    }
-    false
-}
-
-pub(super) fn contains_function_call_output(value: &Value) -> bool {
-    match value {
-        Value::Array(items) => items.iter().any(contains_function_call_output),
+        Value::Array(items) => items.iter().any(contains_tool_call_output),
         Value::Object(object) => {
             object
                 .get("type")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| kind == "function_call_output")
-                || object.values().any(contains_function_call_output)
+                .is_some_and(|kind| kind == "tool_search_output" || kind.ends_with("_call_output"))
+                || object.values().any(contains_tool_call_output)
         }
         _ => false,
     }
 }
 
+pub(super) fn tool_use_diagnostics(value: &Value) -> ToolUseDiagnostics {
+    ToolUseDiagnostics {
+        client_tool_count: tool_definition_count(value),
+        tool_choice: tool_choice_mode(value),
+        ..ToolUseDiagnostics::default()
+    }
+}
+
+pub(super) fn with_forwarded_tool_diagnostics(
+    client: &ToolUseDiagnostics,
+    request_body: &[u8],
+) -> ToolUseDiagnostics {
+    let mut diagnostics = client.clone();
+    diagnostics.forwarded_tool_count = serde_json::from_slice::<Value>(request_body)
+        .ok()
+        .map_or(0, |value| tool_definition_count(&value));
+    diagnostics
+}
+
+fn tool_definition_count(value: &Value) -> u16 {
+    let mut count = 0_u16;
+    count = count.saturating_add(tool_array_count(value.get("tools")));
+    count = count.saturating_add(tool_array_count(value.get("functions")));
+    count = count.saturating_add(tool_array_count(
+        value
+            .get("response")
+            .and_then(|response| response.get("tools")),
+    ));
+    if let Some(items) = value.get("input").and_then(Value::as_array) {
+        for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                count = count.saturating_add(tool_array_count(item.get("tools")));
+            }
+        }
+    }
+    count
+}
+
+fn tool_array_count(value: Option<&Value>) -> u16 {
+    value.and_then(Value::as_array).map_or(0, |tools| {
+        tools.iter().fold(0_u16, |count, tool| {
+            count.saturating_add(tool_definition_leaf_count(tool))
+        })
+    })
+}
+
+fn tool_definition_leaf_count(tool: &Value) -> u16 {
+    if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+        let nested = tool_array_count(tool.get("tools"));
+        return if nested == 0 { 1 } else { nested };
+    }
+    u16::from(tool.is_object())
+}
+
+fn tool_choice_mode(value: &Value) -> ToolChoiceMode {
+    let choice = value.get("tool_choice").or_else(|| {
+        value
+            .get("response")
+            .and_then(|response| response.get("tool_choice"))
+    });
+    match choice {
+        None => ToolChoiceMode::Unspecified,
+        Some(Value::String(value)) => tool_choice_mode_from_type(value),
+        Some(Value::Object(object)) => object
+            .get("type")
+            .and_then(Value::as_str)
+            .map_or(ToolChoiceMode::Specific, tool_choice_mode_from_type),
+        Some(_) => ToolChoiceMode::Unspecified,
+    }
+}
+
+fn tool_choice_mode_from_type(value: &str) -> ToolChoiceMode {
+    match value.to_ascii_lowercase().as_str() {
+        "auto" => ToolChoiceMode::Auto,
+        "required" | "any" => ToolChoiceMode::Required,
+        "none" => ToolChoiceMode::None,
+        "allowed_tools" => ToolChoiceMode::AllowedTools,
+        _ => ToolChoiceMode::Specific,
+    }
+}
+
 pub(super) fn candidate_protocols(wire_api: WireApi) -> &'static [WireApi] {
     match wire_api {
-        WireApi::Responses => &[WireApi::Responses, WireApi::ChatCompletions],
-        WireApi::ChatCompletions => &[WireApi::ChatCompletions, WireApi::Responses],
+        WireApi::Responses => &[WireApi::Responses],
+        WireApi::ChatCompletions => &[WireApi::ChatCompletions],
         WireApi::Messages => &[WireApi::Messages],
     }
 }
 
-fn allowed_model_protocols(runtime: &GatewayRuntime, key: &AuthenticatedKey) -> Vec<WireApi> {
-    let mut protocols = Vec::new();
-    if runtime.allows_client_wire_api(key, ClientWireApi::Responses) {
-        protocols.push(WireApi::Responses);
+pub(super) fn chat_request_uses_tools(value: &Value) -> bool {
+    let Some(request) = value.as_object() else {
+        return false;
+    };
+    ["tools", "functions", "tool_choice", "parallel_tool_calls"]
+        .iter()
+        .any(|field| request.contains_key(*field))
+        || request
+            .get("messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| messages.iter().any(chat_message_uses_tools))
+}
+
+pub(super) fn chat_request_is_text_or_image_only(value: &Value) -> bool {
+    let Some(request) = value.as_object() else {
+        return false;
+    };
+    if request.contains_key("audio") {
+        return false;
     }
-    if runtime.allows_client_wire_api(key, ClientWireApi::ChatCompletions) {
-        protocols.push(WireApi::ChatCompletions);
+    if let Some(modalities) = request.get("modalities") {
+        let Some(modalities) = modalities.as_array() else {
+            return false;
+        };
+        if modalities
+            .iter()
+            .any(|modality| modality.as_str() != Some("text"))
+        {
+            return false;
+        }
     }
-    protocols
+    request
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_none_or(|messages| messages.iter().all(chat_message_is_text_or_image_only))
+}
+
+fn chat_message_uses_tools(message: &Value) -> bool {
+    let Some(message) = message.as_object() else {
+        return false;
+    };
+    matches!(
+        message.get("role").and_then(Value::as_str),
+        Some("tool" | "function")
+    ) || ["tool_calls", "tool_call_id", "function_call"]
+        .iter()
+        .any(|field| message.contains_key(*field))
+}
+
+fn chat_message_is_text_or_image_only(message: &Value) -> bool {
+    let Some(message) = message.as_object() else {
+        return false;
+    };
+    match message.get("content") {
+        None | Some(Value::Null) | Some(Value::String(_)) => true,
+        Some(Value::Array(parts)) => parts.iter().all(|part| {
+            matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text" | "image_url")
+            )
+        }),
+        Some(_) => false,
+    }
 }
 
 pub(super) fn request_id() -> String {
@@ -700,32 +248,88 @@ pub(super) fn request_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        DefaultServiceTier, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+        RuntimeLocalKey, RuntimeSource,
+    };
 
     #[test]
-    fn standard_mode_follows_each_chat_service_tier() {
-        let mut standard = json!({"service_tier": "standard"});
-        normalize_service_tier(
-            standard.as_object_mut().unwrap(),
-            DefaultServiceTier::Standard,
-        );
-        assert_eq!(standard["service_tier"], "default");
+    fn tool_diagnostics_count_codex_tool_definitions_without_names() {
+        let request = json!({
+            "tools": [
+                {"type": "function", "name": "read_private_file"},
+                {"type": "namespace", "name": "collaboration", "tools": [
+                    {"type": "function", "name": "spawn_agent"},
+                    {"type": "function", "name": "wait_agent"}
+                ]}
+            ],
+            "input": [{
+                "type": "additional_tools",
+                "tools": [{"type": "custom", "name": "apply_patch"}]
+            }],
+            "response": {
+                "tools": [{"type": "function", "name": "hidden_function"}]
+            },
+            "tool_choice": {"type": "allowed_tools", "tools": []}
+        });
 
-        let mut fast = json!({"service_tier": "fast"});
-        normalize_service_tier(fast.as_object_mut().unwrap(), DefaultServiceTier::Standard);
-        assert_eq!(fast["service_tier"], "priority");
+        let diagnostics = tool_use_diagnostics(&request);
+        let forwarded =
+            with_forwarded_tool_diagnostics(&diagnostics, &serde_json::to_vec(&request).unwrap());
 
-        let mut inherited = json!({});
-        normalize_service_tier(
-            inherited.as_object_mut().unwrap(),
-            DefaultServiceTier::Standard,
-        );
-        assert!(inherited.get("service_tier").is_none());
+        assert_eq!(diagnostics.client_tool_count, 5);
+        assert_eq!(diagnostics.tool_choice, ToolChoiceMode::AllowedTools);
+        assert_eq!(forwarded.forwarded_tool_count, 5);
+        assert!(!serde_json::to_string(&forwarded)
+            .unwrap()
+            .contains("read_private_file"));
     }
 
     #[test]
-    fn responses_lite_keeps_only_client_executed_tools() {
+    fn service_tier_metrics_classify_legacy_fast_without_rewriting_the_request() {
+        assert_eq!(
+            request_service_tier(&json!({"service_tier": "priority"})),
+            DefaultServiceTier::Fast
+        );
+        assert_eq!(
+            request_service_tier(&json!({"service_tier": "fast"})),
+            DefaultServiceTier::Fast
+        );
+        for tier in [None, Some("standard"), Some("default"), Some("flex")] {
+            let request = tier.map_or_else(|| json!({}), |tier| json!({"service_tier": tier}));
+            assert_eq!(
+                request_service_tier(&request),
+                DefaultServiceTier::Standard,
+                "{tier:?} must remain a non-fast client tier"
+            );
+        }
+    }
+
+    #[test]
+    fn native_account_reasoning_and_speed_selections_are_opaque() {
+        let mut request = json!({
+            "model": "gpt-5.6-terra",
+            "service_tier": "flex",
+            "reasoning": {
+                "effort": "ultra",
+                "summary": "detailed",
+                "context": "client_selected"
+            }
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), false);
+
+        assert_eq!(request["service_tier"], "flex");
+        assert_eq!(request["reasoning"]["effort"], "ultra");
+        assert_eq!(request["reasoning"]["summary"], "detailed");
+        assert_eq!(request["reasoning"]["context"], "client_selected");
+    }
+
+    #[test]
+    fn responses_lite_preserves_codex_client_tools_without_server_hosted_tools() {
         let mut request = json!({
             "model": "gpt-lite",
+            "parallel_tool_calls": true,
             "tools": [
                 {"type": "function", "name": "lookup"},
                 {"type": "custom", "name": "patch"},
@@ -733,16 +337,24 @@ mod tests {
                     {"type": "function", "name": "spawn_agent"},
                     {"type": "function", "name": "wait_agent"}
                 ]},
-                {"type": "tool_search", "execution": "client"},
+                {"type": "tool_search"},
                 {"type": "tool_search", "execution": "server"},
+                {"type": "future_client_tool", "name": "future_tool"},
+                {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
                 {"type": "web_search"},
-                {"type": "image_generation"}
+                {"type": "web_search_preview_2025_03_11"},
+                {"type": "image_generation"},
+                {"type": "file_search"},
+                {"type": "mcp", "name": "hosted_mcp"}
             ],
             "tool_choice": {
                 "type": "allowed_tools",
                 "tools": [
                     {"type": "function", "name": "lookup"},
                     {"type": "namespace", "name": "collaboration"},
+                    {"type": "tool_search"},
+                    {"type": "future_client_tool", "name": "future_tool"},
+                    {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
                     {"type": "web_search"}
                 ]
             },
@@ -751,6 +363,10 @@ mod tests {
                 {"type": "additional_tools", "tools": [
                     {"type": "custom", "name": "patch"},
                     {"type": "image_generation"}
+                ]},
+                {"type": "additional_tools", "tools": [
+                    {"type": "tool_search"},
+                    {"type": "future_client_tool", "name": "future_tool"}
                 ]},
                 {"role": "user", "content": "hello"}
             ],
@@ -772,14 +388,27 @@ mod tests {
         };
         assert_eq!(
             types("/tools"),
-            ["function", "custom", "namespace", "tool_search"]
+            [
+                "function",
+                "custom",
+                "namespace",
+                "tool_search",
+                "future_client_tool"
+            ]
         );
-        assert_eq!(types("/tool_choice/tools"), ["function", "namespace"]);
+        assert_eq!(
+            types("/tool_choice/tools"),
+            ["function", "namespace", "tool_search", "future_client_tool"]
+        );
         assert_eq!(types("/input/0/tools"), ["custom"]);
+        assert_eq!(
+            types("/input/1/tools"),
+            ["tool_search", "future_client_tool"]
+        );
         assert_eq!(types("/response/tools"), ["function"]);
-        assert_eq!(request["input"].as_array().unwrap().len(), 2);
+        assert_eq!(request["input"].as_array().unwrap().len(), 3);
         assert!(request.pointer("/response/tool_choice").is_none());
-        assert_eq!(request["parallel_tool_calls"], false);
+        assert_eq!(request["parallel_tool_calls"], true);
     }
 
     #[test]
@@ -793,6 +422,92 @@ mod tests {
 
         assert_eq!(request["tools"][0]["type"], "namespace");
         assert_eq!(request["tool_choice"]["type"], "namespace");
+    }
+
+    #[test]
+    fn responses_lite_removes_choices_that_do_not_reference_remaining_client_tools() {
+        let mut required = json!({
+            "tools": [{"type": "web_search", "name": "server_only"}],
+            "tool_choice": {"type": "function", "name": "server_only"}
+        });
+        normalize_account_request(required.as_object_mut().unwrap(), true);
+        assert!(required
+            .get("tools")
+            .is_some_and(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+        assert!(required.get("tool_choice").is_none());
+
+        let mut allowed = json!({
+            "tools": [
+                {"type": "function", "name": "client"},
+                {"type": "namespace", "name": "collaboration", "tools": [
+                    {"name": "spawn_agent"},
+                    {"type": "web_search"}
+                ]},
+                {"type": "web_search", "name": "server_only"}
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [
+                    {"type": "function", "name": "client"},
+                    {"type": "function", "name": "missing"},
+                    {"type": "function", "namespace": "collaboration", "name": "spawn_agent"},
+                    {"type": "web_search", "name": "server_only"}
+                ]
+            }
+        });
+        normalize_account_request(allowed.as_object_mut().unwrap(), true);
+
+        assert_eq!(
+            allowed["tools"][1]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["spawn_agent"]
+        );
+        assert_eq!(
+            allowed["tool_choice"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["client", "spawn_agent"]
+        );
+    }
+
+    #[test]
+    fn responses_lite_forces_all_turns_reasoning_context_without_losing_effort() {
+        let mut request = json!({
+            "reasoning": {"effort": "high", "summary": "detailed"}
+        });
+
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+
+        assert_eq!(request["reasoning"]["context"], "all_turns");
+        assert_eq!(request["reasoning"]["effort"], "high");
+        assert_eq!(request["reasoning"]["summary"], "detailed");
+
+        let mut malformed = json!({"reasoning": null});
+        normalize_account_request(malformed.as_object_mut().unwrap(), true);
+        assert_eq!(malformed["reasoning"], json!({"context": "all_turns"}));
+    }
+
+    #[test]
+    fn tool_output_detection_covers_all_client_tool_result_shapes() {
+        for output in [
+            json!({"type": "function_call_output", "call_id": "call_function"}),
+            json!({"type": "custom_tool_call_output", "call_id": "call_custom"}),
+            json!({"type": "tool_search_output", "call_id": "call_search"}),
+            json!({"type": "computer_call_output", "call_id": "call_future"}),
+        ] {
+            assert!(contains_tool_call_output(&json!({"input": [output]})));
+        }
+        assert!(!contains_tool_call_output(&json!({
+            "input": [{"type": "custom_tool_call", "call_id": "call_custom"}]
+        })));
     }
 
     #[test]
@@ -834,5 +549,324 @@ mod tests {
         assert!(request.pointer("/input/1/encrypted_content").is_none());
         assert_eq!(request.pointer("/input/2/id").unwrap(), "rs_valid");
         assert_eq!(request.pointer("/input/3/id").unwrap(), "msg_1");
+    }
+
+    #[test]
+    fn api_sources_generate_strict_codex_models_without_hidden_or_media_rows() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "vendor/claude-opus-4-8".into(),
+                    "gpt-image-2".into(),
+                    "hidden-code".into(),
+                    "disabled-code".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions {
+                hidden_models: vec!["hidden-code".into()],
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [
+            {"slug": "gpt-image-2", "supported_in_api": true},
+            {"slug": "disabled-code", "supported_in_api": false}
+        ]});
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        for model in models {
+            assert!(codex_catalog_entry_is_compatible(model));
+        }
+        let claude = models
+            .iter()
+            .find(|model| model["slug"] == crate::codex_model_alias("vendor/claude-opus-4-8"))
+            .expect("routed Claude model");
+        assert_eq!(claude["display_name"], "Claude Opus 4.8");
+        assert_eq!(claude["supported_reasoning_levels"], json!([]));
+        assert!(models
+            .iter()
+            .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
+    }
+
+    #[test]
+    fn api_source_reasoning_metadata_is_visible_to_codex_without_native_model_identity() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["vendor/claude-fable-5".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let source_reasoning = std::collections::BTreeMap::from([(
+            "vendor/claude-fable-5".to_string(),
+            json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ],
+                "default_reasoning_level": "high",
+                "supports_reasoning_summary_parameter": true,
+                "supports_reasoning_summaries": true,
+                "default_reasoning_summary": "detailed"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )]);
+
+        let response = build_codex_models_response_with_source_reasoning(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            &source_reasoning,
+            None,
+        )
+        .expect("coding model catalog");
+        let model = &response["models"][0];
+
+        assert_eq!(
+            model["slug"],
+            crate::codex_model_alias("vendor/claude-fable-5")
+        );
+        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "ultra", "description": "Ultra"}
+            ])
+        );
+        assert_eq!(model["supports_reasoning_summary_parameter"], true);
+        assert_eq!(model["supports_reasoning_summaries"], true);
+        assert_eq!(model["default_reasoning_summary"], "detailed");
+        assert!(codex_catalog_entry_is_compatible(model));
+    }
+
+    #[test]
+    fn codex_catalog_uses_unique_priorities_and_keeps_unconfirmed_capabilities_disabled() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "vendor/glm-5.2".into(),
+                    "vendor/grok-4.5".into(),
+                    "vendor/gemini-3.6-flash".into(),
+                    "vendor/claude-opus-4-8".into(),
+                    "gpt-5.4".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [{
+            "slug": "vendor/glm-5.2",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/grok-4.5",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/gemini-3.6-flash",
+            "supported_in_api": true
+        }, {
+            "slug": "vendor/claude-opus-4-8",
+            "supported_in_api": true
+        }, {
+            "slug": "gpt-5.4",
+            "use_responses_lite": true,
+            "supports_parallel_tool_calls": true
+        }]});
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        let priorities = models
+            .iter()
+            .filter_map(|model| model["priority"].as_u64())
+            .collect::<Vec<_>>();
+        let display_names = models
+            .iter()
+            .filter_map(|model| model["display_name"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(priorities, [1_000, 1_001, 1_002, 1_003, 1_004]);
+        assert_eq!(
+            display_names,
+            [
+                "GPT 5.4",
+                "Claude Opus 4.8",
+                "Gemini 3.6 Flash",
+                "GLM 5.2",
+                "Grok 4.5",
+            ]
+        );
+        assert!(models.iter().all(codex_catalog_entry_is_compatible));
+        // A generic Responses source can reuse an OpenAI-looking model ID
+        // without supporting Codex's native tool contract. Only account
+        // manifests are authoritative for this capability.
+        assert_eq!(models[0]["supports_parallel_tool_calls"], false);
+    }
+
+    #[test]
+    fn mixed_upstream_and_fallback_catalog_rows_get_unique_priorities() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec![
+                    "gpt-5.6-sol".into(),
+                    "vendor/claude-opus".into(),
+                    "vendor/grok".into(),
+                ],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({
+            "models": [
+                {"slug": "gpt-5.6-sol", "priority": 1_000},
+            ]
+        });
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let models = response["models"].as_array().unwrap();
+        let priorities = models
+            .iter()
+            .map(|model| model["priority"].as_u64().expect("priority"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(priorities, [1_000, 1_001, 1_002]);
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["display_name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["GPT 5.6 Sol", "Claude Opus", "Grok"]
+        );
+    }
+
+    #[test]
+    fn source_context_replaces_stale_codex_context_for_matching_models() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["gpt-5.4".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let upstream = json!({"models": [{
+            "slug": "gpt-5.4",
+            "context_window": 128_000,
+            "max_context_window": 128_000,
+            "auto_compact_token_limit": 122_000,
+            "effective_context_window_percent": 95
+        }]});
+        let source_context_windows =
+            std::collections::BTreeMap::from([("gpt-5.4".into(), 1_000_000)]);
+
+        let response = build_codex_models_response(
+            &runtime,
+            &key,
+            &visible,
+            &source_context_windows,
+            Some(&upstream),
+        )
+        .expect("coding model catalog");
+        let model = &response["models"][0];
+
+        assert_eq!(model["context_window"], 1_000_000);
+        assert_eq!(model["max_context_window"], 1_000_000);
+        assert!(model.get("auto_compact_token_limit").is_none());
     }
 }

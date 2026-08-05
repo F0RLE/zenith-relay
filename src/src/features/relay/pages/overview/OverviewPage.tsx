@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowRight, CircleAlert, CreditCard, Gauge, Play, RefreshCw, Server, Square, Users } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
@@ -12,6 +12,7 @@ type Range = "today" | "week" | "month";
 type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
 type Analytics = { totals: UsageTotals; buckets: UsageBucket[] };
 type ActivityItem = { id: number; success: boolean; model: string | null; latencyMs: number };
+type OverviewData = { analytics: Analytics; activity: ActivityItem[] };
 type UsageSample = {
   createdAtMs: number;
   success: boolean;
@@ -34,13 +35,21 @@ export function OverviewPage() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, runtimeRevision, setPage, perform, busy } = useRelayState();
   const [range, setRange] = useState<Range>("today");
-  const [analytics, setAnalytics] = useState<Analytics | null>(null);
-  const [activity, setActivity] = useState<ActivityItem[]>([]);
+  const [overviewData, setOverviewData] = useState<OverviewData | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState(false);
   const [chartsReady, setChartsReady] = useState(false);
+  const analyticsScope = useRef<string | null>(null);
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const windows = useMemo(() => chartWindows(range, locale), [range, locale]);
+  const now = new Date();
+  const calendarDay = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
+  const windows = useMemo(() => chartWindows(range, locale), [range, locale, calendarDay]);
+  const usageAvailable = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("usage"));
+  const windowStartMs = windows[0].startMs;
+  const windowEndMs = windows[windows.length - 1].endMs;
+  const usageScope = `${mode}:${range}:${windowStartMs}:${windowEndMs}`;
+  const analytics = overviewData?.analytics ?? null;
+  const activity = overviewData?.activity ?? [];
   const running = Boolean(runtime?.gateway.running);
 
   useEffect(() => {
@@ -56,8 +65,9 @@ export function OverviewPage() {
 
   useEffect(() => {
     let active = true;
-    setAnalytics(null);
-    setActivity([]);
+    const scopeChanged = analyticsScope.current !== usageScope;
+    analyticsScope.current = usageScope;
+    if (scopeChanged) startTransition(() => setOverviewData(null));
     setAnalyticsError(false);
     if (mode === "zenith") {
       setAnalyticsLoading(false);
@@ -67,25 +77,29 @@ export function OverviewPage() {
       setAnalyticsLoading(false);
       return () => { active = false; };
     }
-    if (mode === "remote" && !runtime?.capabilities.features.includes("usage")) {
+    if (!usageAvailable) {
+      startTransition(() => setOverviewData(null));
       setAnalyticsLoading(false);
       return () => { active = false; };
     }
     setAnalyticsLoading(true);
-    const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windows[0].startMs, toMs: windows[windows.length - 1].endMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
+    const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
     const request = mode === "local"
       ? relayCommands.localUsagePage(input).then((page) => ({ analytics: analyticsFromPage(page.totals, page.buckets, localSamples(page.events), windows), activity: page.events.map(activityFromUsage) }))
       : relayCommands.remoteUsage(input).then((page) => page ? { analytics: analyticsFromPage(page.totals, page.buckets, remoteSamples(page.events), windows), activity: page.events.map(activityFromUsage) } : null);
     request
       .then((result) => {
-        if (!active || !result) return;
-        setAnalytics(result.analytics);
-        setActivity(result.activity);
+        if (!active) return;
+        if (!result) {
+          setAnalyticsError(true);
+          return;
+        }
+        startTransition(() => setOverviewData(result));
       })
       .catch(() => active && setAnalyticsError(true))
       .finally(() => active && setAnalyticsLoading(false));
     return () => { active = false; };
-  }, [mode, range, windows, runtimeRevision, runtime?.capabilities.features]);
+  }, [mode, range, runtimeRevision, usageAvailable, usageScope, windowEndMs, windowStartMs, windows]);
 
   if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} />;
 
@@ -111,17 +125,21 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState(false);
   const [statsRevision, setStatsRevision] = useState(0);
+  const lastStatsSourceId = useRef<string | null>(null);
   const source = sources.find((item) => item.id === selection) ?? sources[0] ?? null;
 
   useEffect(() => {
     if (!source) {
+      lastStatsSourceId.current = null;
       setStats(null);
       setStatsError(false);
       setStatsLoading(false);
       return;
     }
     let active = true;
-    setStats(null);
+    const sourceChanged = lastStatsSourceId.current !== source.id;
+    lastStatsSourceId.current = source.id;
+    if (sourceChanged) setStats(null);
     setStatsError(false);
     setStatsLoading(true);
     void relayCommands.localSourceStats(source.id)
@@ -136,7 +154,7 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
     setSelection(sourceId);
   };
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const display = (value: string | null | undefined) => statsLoading ? "…" : value || "—";
+  const display = (value: string | null | undefined) => value || (statsLoading ? "…" : "—");
   const money = (value: number | null | undefined) => value == null ? null : new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000);
   const requests = stats?.requests == null ? null : new Intl.NumberFormat(locale).format(stats.requests);
   const totalTokens = stats?.totalTokens == null ? null : new Intl.NumberFormat(locale).format(stats.totalTokens);

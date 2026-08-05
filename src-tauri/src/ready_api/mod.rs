@@ -1,5 +1,5 @@
 use std::{env, time::Instant};
-use tauri::{Manager, RunEvent, WebviewWindowBuilder, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::{
     codex_config::ensure_provider_on_launch,
@@ -189,6 +189,7 @@ mod tests {
 
 pub fn run() {
     let started = Instant::now();
+    let start_in_tray = env::args().any(|arg| arg == "--tray");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             let shown_at = Instant::now();
@@ -208,33 +209,24 @@ pub fn run() {
         .manage(AppState::new())
         .setup(move |app| {
             let handle = app.handle().clone();
+            platform::resolve_codex_home().map_err(std::io::Error::other)?;
             let relay_state = local_pool::initialize(&handle)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             app.manage(relay_state);
             let native_startup_ms = started.elapsed().as_secs_f64() * 1_000.0;
-            let window_config = app
-                .config()
-                .app
-                .windows
-                .iter()
-                .find(|window| window.label == "main")
-                .cloned()
-                .ok_or_else(|| std::io::Error::other("main window configuration is missing"))?;
-            let webview_data =
-                platform::webview_data_dir(&handle).map_err(std::io::Error::other)?;
-            WebviewWindowBuilder::from_config(app, &window_config)?
-                .data_directory(webview_data)
-                .build()?;
-            let window_ms = started.elapsed().as_secs_f64() * 1_000.0;
             let relay_state = app.state::<local_pool::DesktopState>();
             let _ =
                 relay_state.record_performance("native_startup", native_startup_ms, Some("cold"));
-            let _ = relay_state.record_performance("window", window_ms, Some("cold"));
-            if cfg!(debug_assertions) {
-                eprintln!(
-                    "[startup] native_window={}ms",
-                    started.elapsed().as_millis()
-                );
+            if !start_in_tray {
+                crate::tray::create_main_window(&handle)?;
+                let window_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                let _ = relay_state.record_performance("window", window_ms, Some("cold"));
+                if cfg!(debug_assertions) {
+                    eprintln!(
+                        "[startup] native_window={}ms",
+                        started.elapsed().as_millis()
+                    );
+                }
             }
             local_pool::background::start(handle.clone());
             let relay_state = app.state::<local_pool::DesktopState>();
@@ -248,16 +240,15 @@ pub fn run() {
                 let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
                 crate::tray::refresh_tray(&startup_handle).await;
             });
-            if env::args().any(|arg| arg == "--tray") {
-                close_main_window(&handle);
-            }
-
             Ok(())
         })
         .on_window_event(|window, event| {
+            if !crate::tray::is_main_window_label(window.label()) {
+                return;
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                close_main_window(window.app_handle());
             }
         })
         .invoke_handler(tauri::generate_handler![

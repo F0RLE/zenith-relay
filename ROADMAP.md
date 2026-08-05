@@ -1,6 +1,6 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-07-29.
+Last reviewed: 2026-08-05.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
@@ -71,32 +71,31 @@ has been renamed.
 
 ## P3 - Dynamic model catalogs and client integrations
 
-### Pool-backed model catalog for Codex
+### Provider-neutral source adapter acceptance
 
-1. Treat the live pool catalog as the source of truth.
-2. Generate a separate Relay-managed provider section in the Codex profile.
-3. Include only models exposed by the selected pool and client key.
-4. Preserve native Codex models and user-managed provider entries separately.
-5. Rebuild the managed catalog on a relevant pool revision, then snapshot,
-   apply, verify, and restore safely.
-6. Test empty pool, disabled model, removed model, unavailable candidate, and
-   profile restore cases.
-7. Use Codex's root `model_catalog_json` setting and derive strict catalog
-   entries from an installed native template instead of inventing incomplete
-   JSON rows.
-8. Namespace Relay models separately and keep an exact reversible mapping for
-   upstream model ids that already contain `/`.
-9. Keep the OpenAI list response and the Codex
-   `/v1/models?client_version=...` catalog filtered by the same live registry
-   and client-key policy.
-10. Write the managed catalog atomically and invalidate `models_cache.json`
-    only after a verified catalog change. Recovery restores the previous
-    catalog and leaves native/user-managed entries untouched.
+The source catalog must remain provider-neutral. A source contributes model
+capabilities and an explicit client/upstream binding; the scheduler does not
+branch on vendor names.
 
-This avoids a hard-coded model list and makes the source of each model clear in
-the client selector. OpenCodex's MIT-licensed implementation was reviewed as a
-compatibility reference; Relay reuses the Codex-native file/endpoint contract,
-not its proxy, provider adapters, scheduler, or configuration store.
+1. Keep native passthrough as the default and require an explicit adapter for
+   every protocol conversion.
+2. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or
+   WebSocket bridging until an exact adapter path and regression coverage exist.
+3. Before release, run a real `codex.exe` acceptance matrix for every claimed
+   source family: initial tool call, actual local tool execution, follow-up
+   `function_call_output`, streaming, and a fresh turn after restart.
+
+### Pool-backed Codex catalog acceptance
+
+Relay already derives a managed `model_catalog_json` from the live pool and
+restores the previous profile catalog on recovery. Remaining release gates:
+
+1. Run attach, refresh, disabled-model, removed-model, and restore cycles
+   against a real current Codex profile, including a model id containing `/`.
+2. Prove that the live `/v1/models` view and Codex-specific catalog make the
+   same model visible for each scoped client key.
+3. Keep a failure during catalog refresh reversible: the previous verified
+   profile must remain usable and native/user settings must not be overwritten.
 
 ### Additional client applications
 

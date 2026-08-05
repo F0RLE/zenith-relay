@@ -19,6 +19,12 @@ const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
 
+/// Marks an error body constructed by Relay itself. Native protocol handlers
+/// use this marker to normalize only local errors without rewriting an
+/// upstream provider's already-native error envelope.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct LocalGatewayError;
+
 #[derive(Clone, Copy)]
 pub(super) struct AttemptFailure {
     pub(super) status: StatusCode,
@@ -612,16 +618,6 @@ impl AttemptFailure {
         }
     }
 
-    pub(super) fn translation() -> Self {
-        Self {
-            status: StatusCode::BAD_GATEWAY,
-            category: "upstream_translation",
-            message: "upstream response could not be translated",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
-            cooldown_hint: RateLimitBodyHint::default(),
-        }
-    }
-
     pub(super) fn status_with_body(status: StatusCode, body: Option<&[u8]>) -> Self {
         let classification = classify_upstream_error(status, body);
         Self {
@@ -740,6 +736,20 @@ pub(super) fn retryable_failure(
         )
 }
 
+/// A shared endpoint is unlikely to recover by retrying an equivalent API
+/// credential in the same request. Keep that retry budget for an independent
+/// endpoint and avoid cooling credentials that were never attempted.
+pub(super) fn failure_requires_independent_source_endpoint(
+    status: StatusCode,
+    category: &str,
+) -> bool {
+    status.is_server_error()
+        || matches!(
+            category,
+            "upstream_request_timeout" | "upstream_transport_timeout"
+        )
+}
+
 pub(super) fn failure_category_requires_cooldown(category: &str) -> bool {
     !matches!(
         category,
@@ -804,6 +814,35 @@ pub(super) fn previous_response_not_found(payload: &[u8]) -> bool {
     serde_json::from_slice::<Value>(payload)
         .ok()
         .is_some_and(|value| previous_response_not_found_value(&value))
+}
+
+pub(super) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return false;
+    };
+    let text = serde_json::to_string(&value)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    text.contains("previous_response_id") && text.contains("websocket")
+}
+
+/// Strict Responses endpoints use a separate `fc_` namespace for
+/// `function_call.id`; the matching `call_id` is unchanged. This is only a
+/// recovery signal — the request repair itself still verifies that it has a
+/// call-prefixed function item before retrying.
+pub(super) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input") && text.contains("expected an id that begins with 'fc'")
+}
+
+/// Strict Responses endpoints require server-owned `msg_` item identifiers on
+/// message inputs. This only identifies the precise upstream validation error;
+/// the repair still verifies the foreign `item_` identifier before retrying.
+pub(super) fn responses_message_item_id_requires_msg_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input[")
+        && text.contains(".id")
+        && text.contains("expected an id that begins with 'msg'")
 }
 
 pub(super) fn previous_response_not_found_value(value: &Value) -> bool {
@@ -1208,7 +1247,7 @@ pub(super) fn cooldown_error(retry_at_ms: u64, failure: Option<&AttemptFailure>)
 pub(super) fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
     let code = api_error_code(code);
     let error_type = api_error_type(status, code);
-    (
+    let mut response = (
         status,
         Json(json!({
             "error": {
@@ -1219,7 +1258,9 @@ pub(super) fn api_error(status: StatusCode, message: &str, code: &str) -> Respon
             }
         })),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(LocalGatewayError);
+    response
 }
 
 pub(super) fn api_error_type(status: StatusCode, code: &str) -> &'static str {
@@ -1312,6 +1353,45 @@ mod tests {
             true,
             true,
             false,
+        ));
+    }
+
+    #[test]
+    fn websocket_only_previous_response_errors_are_detected_without_matching_other_errors() {
+        assert!(previous_response_requires_websocket(
+            br#"{"error":{"message":"previous_response_id is only supported on Responses WebSocket v2"}}"#,
+        ));
+        assert!(!previous_response_requires_websocket(
+            br#"{"error":{"message":"previous response with id resp_123 not found"}}"#,
+        ));
+        assert!(!previous_response_requires_websocket(
+            br#"{"error":{"message":"WebSocket transport is unavailable"}}"#,
+        ));
+    }
+
+    #[test]
+    fn strict_responses_function_item_id_error_is_detected_without_matching_call_id_errors() {
+        assert!(responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Invalid 'input[7].id': 'call_abc'. Expected an ID that begins with 'fc'."}}"#,
+        ));
+        assert!(!responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Invalid call_id for function_call_output"}}"#,
+        ));
+        assert!(!responses_function_item_id_requires_fc_prefix(
+            br#"{"error":{"message":"Expected an ID that begins with 'fc'."}}"#,
+        ));
+    }
+
+    #[test]
+    fn strict_responses_message_item_id_error_is_detected_without_matching_other_item_errors() {
+        assert!(responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Invalid 'input[151].id': 'item_abc'. Expected an ID that begins with 'msg'."}}"#,
+        ));
+        assert!(!responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Invalid 'input[7].id': 'call_abc'. Expected an ID that begins with 'fc'."}}"#,
+        ));
+        assert!(!responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Expected an ID that begins with 'msg'."}}"#,
         ));
     }
 

@@ -11,7 +11,7 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -45,6 +45,7 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
 
       {mode === "local" ? <SettingsGroup icon={<Database aria-hidden />} title={t("settings.localData")}>
         <SettingToggle className="settings-profile-backup-toggle" label={t("settings.profileSwitchBackupPrompt")} description={t("settings.profileSwitchBackupPromptHint")} checked={profileSwitchBackupPrompt} onChange={setProfileSwitchBackupPrompt} />
+        <SettingToggle className="settings-profile-backup-toggle" label={t("settings.profileSnapshotBackupBeforeRestore")} description={t("settings.profileSnapshotBackupBeforeRestoreHint")} checked={profileSnapshotBackupBeforeRestore} onChange={setProfileSnapshotBackupBeforeRestore} />
         <div className="settings-control-row settings-danger-row"><div><strong>{t("settings.resetData")}</strong><small>{t("settings.resetDataHint")}</small></div><Button variant="danger" icon={<Trash2 aria-hidden />} busy={busy === "recovery-reset"} onClick={reset}>{t("common.reset")}</Button></div>
       </SettingsGroup> : null}
     </div>

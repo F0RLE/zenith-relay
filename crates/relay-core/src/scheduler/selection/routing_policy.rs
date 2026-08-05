@@ -27,12 +27,24 @@ impl PoolScheduler {
     ) -> Ordering {
         let left_in_flight = self.in_flight_count(&left.id, lane);
         let right_in_flight = self.in_flight_count(&right.id, lane);
-        let left_dispatches = self.dispatch_count(&left.id, lane);
-        let right_dispatches = self.dispatch_count(&right.id, lane);
+        let left_dispatches = self.rotation_dispatch_count(left, lane);
+        let right_dispatches = self.rotation_dispatch_count(right, lane);
         let common = routing_tier(left)
             .cmp(&routing_tier(right))
             .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)));
-        let load = || right_in_flight.cmp(&left_in_flight);
+        // Parallel-load balancing protects OAuth accounts from being selected by
+        // every concurrent chat. API sources are connection-based providers:
+        // an active request must not make a different API source win selection.
+        // They still honor explicit routing tier, quota, configured weight, and
+        // normal fallback rules below.
+        let load = || {
+            if left.kind == CandidateKind::OAuthAccount && right.kind == CandidateKind::OAuthAccount
+            {
+                right_in_flight.cmp(&left_in_flight)
+            } else {
+                Ordering::Equal
+            }
+        };
         let fair_rotation =
             || self.compare_equal_quota_rotation(left, right, left_dispatches, right_dispatches);
 
@@ -69,8 +81,8 @@ impl PoolScheduler {
     ) -> SelectionReason {
         let selected_in_flight = self.in_flight_count(&selected.id, lane);
         let runner_up_in_flight = self.in_flight_count(&runner_up.id, lane);
-        let selected_dispatches = self.dispatch_count(&selected.id, lane);
-        let runner_up_dispatches = self.dispatch_count(&runner_up.id, lane);
+        let selected_dispatches = self.rotation_dispatch_count(selected, lane);
+        let runner_up_dispatches = self.rotation_dispatch_count(runner_up, lane);
         if routing_tier(selected) != routing_tier(runner_up)
             || candidate_kind_preference(selected) != candidate_kind_preference(runner_up)
         {
@@ -85,14 +97,11 @@ impl PoolScheduler {
             SelectionReason::SubscriptionPlan
         } else if self.compare_quota_and_reset(selected, runner_up) != Ordering::Equal {
             SelectionReason::QuotaHeadroom
-        } else if selected_in_flight != runner_up_in_flight {
-            if selected.kind == CandidateKind::ApiSource
-                && runner_up.kind == CandidateKind::ApiSource
-            {
-                SelectionReason::SourceLoad
-            } else {
-                SelectionReason::ParallelLoad
-            }
+        } else if selected.kind == CandidateKind::OAuthAccount
+            && runner_up.kind == CandidateKind::OAuthAccount
+            && selected_in_flight != runner_up_in_flight
+        {
+            SelectionReason::ParallelLoad
         } else if self.routing_strategy != RoutingStrategy::QuotaHighest
             && self.compare_equal_quota_rotation(
                 selected,

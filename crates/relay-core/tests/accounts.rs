@@ -33,6 +33,7 @@ use zenith_relay_core::{
 
 const LOCAL_KEY: &str = "p3-local-key";
 const MODEL: &str = "gpt-p3";
+const OFFICIAL_CODEX_MODEL: &str = "gpt-5.6-terra";
 
 #[derive(Clone, Debug)]
 struct ObservedRequest {
@@ -63,10 +64,17 @@ struct UpstreamState {
     replies: Arc<Mutex<VecDeque<Reply>>>,
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     delay: Duration,
+    model_catalog: Value,
 }
 
 #[derive(Clone, Default)]
 struct HeldStreamState {
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
+    release: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
+struct HeldThenJsonState {
     requests: Arc<Mutex<Vec<ObservedRequest>>>,
     release: Arc<Notify>,
 }
@@ -220,6 +228,88 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("provider-account-private"));
     assert!(!serialized.contains("account-access"));
+}
+
+#[tokio::test]
+async fn chatgpt_account_retries_foreign_message_item_id_after_native_rejection() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {
+                "message": "Invalid 'input[151].id': 'item_foreign_user_01'. Expected an ID that begins with 'msg'."
+            }}),
+        ),
+        success_reply("message-id-repaired"),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {
+                    "type": "message",
+                    "id": "item_foreign_user_01",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+                },
+                {
+                    "id": "item_foreign_assistant_01",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will inspect it."}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_native_01",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Keep changes scoped."}]
+                },
+                {
+                    "type": "function_call",
+                    "id": "item_function_01",
+                    "call_id": "call_function_01",
+                    "name": "run_command",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["id"], "message-id-repaired");
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["input"][0]["id"], "item_foreign_user_01");
+    assert_eq!(
+        requests[0].body["input"][1]["id"],
+        "item_foreign_assistant_01"
+    );
+    assert!(requests[1].body["input"][0].get("id").is_none());
+    assert!(requests[1].body["input"][1].get("id").is_none());
+    assert_eq!(requests[1].body["input"][2]["id"], "msg_native_01");
+    assert_eq!(requests[1].body["input"][3]["id"], "item_function_01");
+    assert_eq!(requests[1].body["input"][3]["call_id"], "call_function_01");
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
 }
 
 #[tokio::test]
@@ -444,12 +534,17 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 }
 
 #[tokio::test]
-async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
-    let (upstream, state) = spawn_upstream(Vec::new()).await;
+async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in_pool() {
+    let mut upstream_catalog = default_upstream_model_catalog();
+    upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
+    upstream_catalog["models"][0]["display_name"] = Value::String("GPT-5.6 Terra".to_string());
+    let (upstream, state) = spawn_upstream_with_catalog(Vec::new(), upstream_catalog).await;
     let authority = ready_authority("relay-account", "account-access").await;
+    let mut official_account = account("relay-account", "provider-account", &upstream, 10);
+    official_account.models = vec![OFFICIAL_CODEX_MODEL.to_string()];
     let (gateway, _, _, _) = spawn_mixed_gateway(
         Vec::new(),
-        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![official_account],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
@@ -469,27 +564,70 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         .json()
         .await
         .unwrap();
-    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert!(catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["slug"] == OFFICIAL_CODEX_MODEL));
     assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
     assert_eq!(catalog["models"][0]["use_responses_lite"], true);
-    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], false);
+    assert_eq!(catalog["models"][0]["supports_parallel_tool_calls"], true);
+    assert_eq!(catalog["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(
+        catalog["models"][0]["supported_reasoning_levels"],
+        json!([
+            {"effort": "low", "description": "Low"},
+            {"effort": "high", "description": "High"},
+            {"effort": "xhigh", "description": "Extra high"}
+        ])
+    );
+    assert_eq!(
+        catalog["models"][0]["supports_reasoning_summary_parameter"],
+        true
+    );
+    assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
+    assert_eq!(
+        catalog["models"][0]["default_reasoning_summary"],
+        "detailed"
+    );
 
-    let response = reqwest::Client::new()
-        .post(format!("{}/v1/responses", gateway.base_url))
-        .bearer_auth(LOCAL_KEY)
-        .json(&json!({
-            "model": MODEL,
+    // The pool may classify a tier for quota telemetry, but must never
+    // translate a ChatGPT/Codex client's native service-tier selection.
+    // `fast` remains here as a legacy client value that must also pass through
+    // unchanged; the current native values must remain unchanged as well.
+    let client_tiers = [
+        None,
+        Some("standard"),
+        Some("default"),
+        Some("flex"),
+        Some("priority"),
+        Some("fast"),
+    ];
+    for service_tier in client_tiers {
+        let mut body = json!({
+            "model": OFFICIAL_CODEX_MODEL,
             "input": "hello",
-            "service_tier": "priority",
-            "parallel_tool_calls": true
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+            "parallel_tool_calls": true,
+            "reasoning": {
+                "effort": "xhigh",
+                "summary": "detailed"
+            }
+        });
+        if let Some(service_tier) = service_tier {
+            body["service_tier"] = Value::String(service_tier.to_string());
+        }
+        let response = reqwest::Client::new()
+            .post(format!("{}/v1/responses", gateway.base_url))
+            .bearer_auth(LOCAL_KEY)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     let requests = state.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2 + client_tiers.len());
     assert_eq!(
         requests[0].authorization.as_deref(),
         Some("Bearer account-access")
@@ -503,9 +641,186 @@ async fn codex_catalog_exposes_and_forwards_the_native_fast_tier() {
         requests[1].body["client_version"],
         CODEX_MODELS_CLIENT_VERSION
     );
-    assert_eq!(requests[2].body["service_tier"], "priority");
-    assert_eq!(requests[2].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[2].body["parallel_tool_calls"], false);
+    for (request, expected_tier) in requests[2..].iter().zip(client_tiers) {
+        assert_eq!(request.body["model"], OFFICIAL_CODEX_MODEL);
+        assert_eq!(
+            request.body.get("service_tier").and_then(Value::as_str),
+            expected_tier
+        );
+        assert_eq!(request.responses_lite.as_deref(), Some("true"));
+        assert_eq!(request.body["parallel_tool_calls"], true);
+        assert_eq!(request.body["reasoning"]["effort"], "xhigh");
+        assert_eq!(request.body["reasoning"]["summary"], "detailed");
+        assert_eq!(request.body["reasoning"]["context"], "all_turns");
+    }
+}
+
+#[tokio::test]
+async fn pool_catalog_combines_native_metadata_from_each_available_account() {
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), default_upstream_model_catalog()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(model["default_reasoning_level"], "high");
+    assert_eq!(model["supported_reasoning_levels"][2]["effort"], "xhigh");
+    assert_eq!(model["service_tiers"][0]["id"], "priority");
+    assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_catalogs() {
+    let (first_upstream, first_state) =
+        spawn_upstream_with_catalog(Vec::new(), json!({"models": []})).await;
+    let (second_upstream, second_state) =
+        spawn_upstream_with_catalog(Vec::new(), default_upstream_model_catalog()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "first-account", "first-access").await;
+    register_ready(&authority, "second-account", "second-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("first-account", "provider-first", &first_upstream, 100),
+            account("second-account", "provider-second", &second_upstream, 10),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let url = format!(
+        "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+        gateway.base_url
+    );
+    let client = reqwest::Client::new();
+    let live: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(live["models"][0]["default_reasoning_level"], "high");
+    assert_eq!(live["models"][0]["supports_parallel_tool_calls"], true);
+
+    drop(second_upstream);
+
+    let recovered: Value = client
+        .get(&url)
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(recovered, live);
+    assert_eq!(first_state.requests.lock().unwrap().len(), 2);
+    assert_eq!(second_state.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
+    let (source_upstream, source_state) = spawn_upstream(Vec::new()).await;
+    let (account_upstream, account_state) = spawn_upstream(Vec::new()).await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        vec![source(
+            "generic-source",
+            &source_upstream,
+            "source-key",
+            100,
+        )],
+        vec![account(
+            "relay-account",
+            "provider-account",
+            &account_upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let catalog: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/v1/models?client_version={CODEX_MODELS_CLIENT_VERSION}",
+            gateway.base_url
+        ))
+        .bearer_auth(LOCAL_KEY)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == MODEL)
+        .unwrap();
+    assert_eq!(model["default_reasoning_level"], "high");
+    assert_eq!(model["supported_reasoning_levels"][2]["effort"], "xhigh");
+    assert_eq!(model["service_tiers"][0]["id"], "priority");
+    assert_eq!(model["use_responses_lite"], true);
+    assert_eq!(model["supports_reasoning_summaries"], true);
+
+    let source_requests_before = source_state.requests.lock().unwrap().len();
+    let account_requests_before = account_state.requests.lock().unwrap().len();
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        source_state.requests.lock().unwrap().len(),
+        source_requests_before
+    );
+    assert_eq!(
+        account_state.requests.lock().unwrap().len(),
+        account_requests_before + 1
+    );
 }
 
 #[tokio::test]
@@ -589,7 +904,11 @@ async fn codex_catalog_prefers_a_usable_account_token() {
         .await
         .unwrap();
 
-    assert_eq!(catalog["models"][0]["slug"], MODEL);
+    assert!(catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["slug"] == MODEL));
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(
@@ -620,6 +939,7 @@ async fn account_requests_preserve_responses_lite_compatibility() {
             "model": MODEL,
             "input": "hello",
             "parallel_tool_calls": true,
+            "reasoning": {"effort": "high"},
             "tools": [
                 {"type": "function", "name": "local_tool"},
                 {"type": "web_search"},
@@ -633,9 +953,11 @@ async fn account_requests_preserve_responses_lite_compatibility() {
 
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
-    assert_eq!(requests[0].body["parallel_tool_calls"], false);
+    assert_eq!(requests[0].body["parallel_tool_calls"], true);
     assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 1);
     assert_eq!(requests[0].body["tools"][0]["name"], "local_tool");
+    assert_eq!(requests[0].body["reasoning"]["context"], "all_turns");
+    assert_eq!(requests[0].body["reasoning"]["effort"], "high");
 }
 
 #[tokio::test]
@@ -1279,6 +1601,11 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
         });
         if index == 1 {
             request["service_tier"] = Value::String("flex".to_string());
+            request["reasoning"] = json!({
+                "effort": "high",
+                "summary": "detailed",
+                "context": "previous_turn"
+            });
         }
         socket
             .send(ClientWsMessage::Text(request.to_string()))
@@ -1323,9 +1650,12 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert_eq!(requests[0]["type"], "response.create");
     assert_eq!(requests[0]["store"], false);
     assert_eq!(requests[0]["stream"], true);
-    assert_eq!(requests[0]["parallel_tool_calls"], false);
-    assert_eq!(requests[0]["service_tier"], "priority");
-    assert_eq!(requests[1]["service_tier"], "priority");
+    assert_eq!(requests[0]["parallel_tool_calls"], true);
+    assert!(requests[0].get("service_tier").is_none());
+    assert_eq!(requests[1]["service_tier"], "flex");
+    assert_eq!(requests[1]["reasoning"]["effort"], "high");
+    assert_eq!(requests[1]["reasoning"]["summary"], "detailed");
+    assert_eq!(requests[1]["reasoning"]["context"], "all_turns");
     assert!(requests[0]["input"].is_array());
     drop(requests);
 
@@ -1888,8 +2218,12 @@ async fn assert_websocket_concurrency(requests: usize) {
 
     let client = reqwest::Client::new();
     let url = format!("{}/v1/responses", gateway.base_url);
+    // OAuth accounts serialize text chats, so a large connection burst can wait
+    // behind the accounts already serving a response.
+    let queue_timeout =
+        Duration::from_secs((u64::try_from(requests).unwrap_or(u64::MAX) / 10).saturating_add(5));
     let completed = tokio::time::timeout(
-        Duration::from_secs(20),
+        queue_timeout,
         join_all((0..requests).map(|index| {
             let client = client.clone();
             let url = url.clone();
@@ -1914,7 +2248,8 @@ async fn assert_websocket_concurrency(requests: usize) {
                     ))
                     .await
                     .unwrap();
-                receive_websocket_completion(&mut socket).await["type"] == "response.completed"
+                receive_websocket_completion_with_timeout(&mut socket, queue_timeout).await["type"]
+                    == "response.completed"
             }
         })),
     )
@@ -2933,7 +3268,7 @@ async fn http_usage_limit_immediately_excludes_the_account_until_quota_refresh()
 }
 
 #[tokio::test]
-async fn legacy_retry_cap_does_not_stop_account_rotation_after_429() {
+async fn retry_cap_stops_account_rotation_after_429() {
     let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
         StatusCode::TOO_MANY_REQUESTS,
         json!({"error": {"code": "rate_limit_exceeded"}}),
@@ -2967,13 +3302,59 @@ async fn legacy_retry_cap_does_not_stop_account_rotation_after_429() {
     .await;
 
     let response = request(&gateway, false).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.json::<Value>().await.unwrap()["id"],
-        "rotated-response"
-    );
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
-    assert_eq!(ready_state.requests.lock().unwrap().len(), 1);
+    assert!(ready_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retry_cap_stops_compact_account_rotation_after_429() {
+    let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": {"code": "rate_limit_exceeded"}}),
+    )])
+    .await;
+    let (ready_upstream, ready_state) =
+        spawn_upstream(vec![success_reply("rotated-response")]).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "limited-account", "limited-access").await;
+    register_ready(&authority, "ready-account", "ready-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![
+            account(
+                "limited-account",
+                "provider-limited",
+                &limited_upstream,
+                200,
+            ),
+            account("ready-account", "provider-ready", &ready_upstream, 100),
+        ],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            max_retry_candidates: 1,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses/compact", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": "compact this",
+            "max_output_tokens": 16,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    assert!(ready_state.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3125,18 +3506,20 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
-async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_is_open() {
+async fn independent_chat_uses_an_api_source_while_an_oauth_account_is_streaming() {
     let (stream_upstream, stream_state) = spawn_held_stream_upstream().await;
-    let (free_upstream, free_state) = spawn_upstream(vec![success_reply("free-response")]).await;
+    let (source_upstream, source_state) =
+        spawn_upstream(vec![success_reply("source-response")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "stream-account", "stream-access").await;
-    register_ready(&authority, "free-account", "free-access").await;
     let (gateway, events, _, _) = spawn_mixed_gateway(
-        Vec::new(),
-        vec![
-            account("stream-account", "provider-stream", &stream_upstream, 10),
-            account("free-account", "provider-free", &free_upstream, 0),
-        ],
+        vec![source("api-source", &source_upstream, "source-key", 0)],
+        vec![account(
+            "stream-account",
+            "provider-stream",
+            &stream_upstream,
+            10,
+        )],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
@@ -3148,21 +3531,16 @@ async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_i
     assert_eq!(open_stream.status(), StatusCode::OK);
     assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
 
-    let independent = request(&gateway, false);
-    let release = async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while stream_state.requests.lock().unwrap().len() != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
+    let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the second chat did not reach the highest-quota account");
-        stream_state.release.notify_waiters();
-    };
-    let (independent, ()) = tokio::join!(independent, release);
+        .expect("the independent chat did not use the available API source");
     assert_eq!(independent.status(), StatusCode::OK);
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
-    assert!(free_state.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        independent.json::<Value>().await.unwrap()["id"],
+        "source-response"
+    );
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
@@ -3171,7 +3549,56 @@ async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_i
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
-        .all(|event| event.account_id.as_deref() == Some("stream-account")));
+        .any(|event| event.account_id.as_deref() == Some("stream-account")));
+    assert!(events.iter().any(|event| event.source_id == "api-source"));
+}
+
+#[tokio::test]
+async fn independent_chat_waits_for_the_only_oauth_account_to_finish() {
+    let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
+    let authority = ready_authority("stream-account", "stream-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "stream-account",
+            "provider-stream",
+            &stream_upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let open_stream = request(&gateway, true).await;
+    assert_eq!(open_stream.status(), StatusCode::OK);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+
+    let queued = request(&gateway, false);
+    tokio::pin!(queued);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut queued)
+            .await
+            .is_err(),
+        "a second chat must wait while the only OAuth account is occupied"
+    );
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+
+    stream_state.release.notify_one();
+    let (stream, independent) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(open_stream.bytes(), queued)
+    })
+    .await
+    .expect("the queued chat did not resume after the account was released");
+    let _ = stream.unwrap();
+    assert_eq!(independent.status(), StatusCode::OK);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
+    drop(independent);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(events.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -3370,6 +3797,7 @@ fn source(id: &str, server: &TestServer, key: &str, priority: i32) -> RuntimeSou
             wire_api: WireApi::Responses,
             models: vec![MODEL.to_string()],
         },
+        protocol_bindings: Vec::new(),
         enabled: true,
         draining: false,
         priority,
@@ -3545,10 +3973,18 @@ async fn spawn_mixed_gateway_with_agent_identities_and_options(
 }
 
 async fn spawn_upstream(replies: Vec<Reply>) -> (TestServer, UpstreamState) {
+    spawn_upstream_with_catalog(replies, default_upstream_model_catalog()).await
+}
+
+async fn spawn_upstream_with_catalog(
+    replies: Vec<Reply>,
+    model_catalog: Value,
+) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         replies: Arc::new(Mutex::new(replies.into())),
         requests: Arc::new(Mutex::new(Vec::new())),
         delay: Duration::ZERO,
+        model_catalog,
     };
     let app = Router::new()
         .route("/v1/models", get(upstream_models))
@@ -3579,6 +4015,7 @@ async fn spawn_websocket_upstream_with_behavior(
 async fn spawn_delayed_upstream(delay: Duration) -> (TestServer, UpstreamState) {
     let state = UpstreamState {
         delay,
+        model_catalog: default_upstream_model_catalog(),
         ..UpstreamState::default()
     };
     let app = Router::new()
@@ -3592,6 +4029,14 @@ async fn spawn_held_stream_upstream() -> (TestServer, HeldStreamState) {
     let state = HeldStreamState::default();
     let app = Router::new()
         .route("/v1/responses", post(held_stream_upstream))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
+async fn spawn_held_then_json_upstream() -> (TestServer, HeldThenJsonState) {
+    let state = HeldThenJsonState::default();
+    let app = Router::new()
+        .route("/v1/responses", post(held_then_json_upstream))
         .with_state(state.clone());
     (spawn(app).await, state)
 }
@@ -3706,7 +4151,50 @@ async fn held_stream_upstream(
         session_id: header(&headers, "x-session-id"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
-    let release = state.release.clone();
+    held_stream_response(state.release)
+}
+
+async fn held_then_json_upstream(
+    State(state): State<HeldThenJsonState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response<Body> {
+    let request_count = {
+        let mut requests = state.requests.lock().unwrap();
+        requests.push(ObservedRequest {
+            path: uri.path().to_string(),
+            authorization: header(&headers, AUTHORIZATION.as_str()),
+            chatgpt_account_id: header(&headers, "chatgpt-account-id"),
+            originator: header(&headers, "originator"),
+            responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+            session_id: header(&headers, "x-session-id"),
+            body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        });
+        requests.len()
+    };
+
+    if request_count == 1 {
+        held_stream_response(state.release)
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "id": "queued-response",
+                    "object": "response",
+                    "model": MODEL,
+                    "output": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+}
+
+fn held_stream_response(release: Arc<Notify>) -> Response<Body> {
     let chunks = stream::unfold(0_u8, move |step| {
         let release = release.clone();
         async move {
@@ -3876,8 +4364,15 @@ async fn upstream_websocket(
 }
 
 async fn receive_websocket_json(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    receive_websocket_json_with_timeout(socket, Duration::from_secs(2)).await
+}
+
+async fn receive_websocket_json_with_timeout(
+    socket: &mut reqwest_websocket::WebSocket,
+    timeout_duration: Duration,
+) -> Value {
     loop {
-        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        let message = tokio::time::timeout(timeout_duration, socket.next())
             .await
             .unwrap()
             .unwrap()
@@ -3889,8 +4384,15 @@ async fn receive_websocket_json(socket: &mut reqwest_websocket::WebSocket) -> Va
 }
 
 async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    receive_websocket_completion_with_timeout(socket, Duration::from_secs(2)).await
+}
+
+async fn receive_websocket_completion_with_timeout(
+    socket: &mut reqwest_websocket::WebSocket,
+    timeout_duration: Duration,
+) -> Value {
     loop {
-        let value = receive_websocket_json(socket).await;
+        let value = receive_websocket_json_with_timeout(socket, timeout_duration).await;
         if value["type"] == "response.completed" {
             return value;
         }
@@ -3920,25 +4422,36 @@ async fn upstream_models(
     } else {
         StatusCode::BAD_REQUEST
     };
-    (
-        status,
-        Json(json!({
-            "models": [{
-                "slug": MODEL,
-                "display_name": "GPT P3",
-                "visibility": "list",
-                "supported_in_api": true,
-                "service_tiers": [{
-                    "id": "priority",
-                    "name": "Fast",
-                    "description": "Synthetic fast tier"
-                }],
-                "additional_speed_tiers": ["fast"],
-                "use_responses_lite": true,
-                "supports_parallel_tool_calls": true
-            }]
-        })),
-    )
+    (status, Json(state.model_catalog.clone()))
+}
+
+fn default_upstream_model_catalog() -> Value {
+    json!({
+        "models": [{
+            "slug": MODEL,
+            "display_name": "GPT P3",
+            "visibility": "list",
+            "supported_in_api": true,
+            "service_tiers": [{
+                "id": "priority",
+                "name": "Fast",
+                "description": "Synthetic fast tier"
+            }],
+            "additional_speed_tiers": ["fast"],
+            "default_service_tier": "priority",
+            "use_responses_lite": true,
+            "supports_parallel_tool_calls": true,
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "xhigh", "description": "Extra high"}
+            ],
+            "supports_reasoning_summary_parameter": true,
+            "supports_reasoning_summaries": true,
+            "default_reasoning_summary": "detailed"
+        }]
+    })
 }
 
 fn header(headers: &HeaderMap, name: &str) -> Option<String> {

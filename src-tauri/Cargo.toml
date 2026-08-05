@@ -9,7 +9,7 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
-base64 = "0.22.1"
+base64 = "0.23.0"
 chrono = "0.4.45"
 chacha20poly1305 = "0.11.0"
 hex = "0.4.3"

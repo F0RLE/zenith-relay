@@ -3,8 +3,9 @@ import { Activity, CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, Credit
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import type { AccountSummary, DefaultServiceTier, RemoteUsageQuery, RoutingDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { ActionMenu, ActionMenuItem, Button, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
+import type { AccountSummary, DefaultServiceTier, RemoteUsageQuery, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
+import { ActionMenu, ActionMenuItem, Button, CopyButton, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, PageHeader, StatusIcon, Tabs, useConfirm } from "../../components/Ui";
+import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import {
@@ -48,6 +49,7 @@ type UsageRow = {
   requestId: string | null;
   httpStatus: number | null;
   errorCategory: string | null;
+  toolUse: ToolUseDiagnostics | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
   candidateKind: "account" | "source";
@@ -59,7 +61,7 @@ type AccountWindowEconomics = NonNullable<NonNullable<AccountSummary["economics"
 
 export function UsagePage() {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, runtimeRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
+  const { mode, runtime, runtimeRevision, usageRevision, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, refresh, loading, busy, perform, accountDisplayName } = useRelayState();
   const confirm = useConfirm();
   const [view, setView] = useState<View>("requests");
   const [status, setStatus] = useState("all");
@@ -105,7 +107,7 @@ export function UsagePage() {
         .finally(() => active && setUsageLoading(false));
     }, 200);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [mode, runtimeRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
+  }, [mode, runtimeRevision, usageRevision, remoteUsageSupported, usageQuery, loadLocalUsage, loadRemoteUsage]);
 
   useEffect(() => {
     setPage(1);
@@ -117,8 +119,8 @@ export function UsagePage() {
   const sourceLabels = useMemo(() => new Map(runtime?.sources.map((source) => [source.id, source.name]) ?? []), [runtime?.sources]);
   const rows = useMemo<UsageRow[]>(() => {
     if (mode === "zenith") return [];
-    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, generationDurationMs: item.generationMs ?? null, apiEquivalent: item.apiEquivalent ?? null }));
-    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), generationDurationMs: item.generationMs, apiEquivalent: item.apiEquivalent ?? null }));
+    if (mode === "remote") return remoteUsage.map((item) => ({ id: item.id, time: new Date(item.createdAtMs).toISOString(), success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.candidateKind === "account" ? accountDisplayName(null, item.candidateLabel) ?? t("accounts.importUnknownAccount") : item.candidateLabel ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs ?? null, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: null, candidateKind: item.candidateKind, generationDurationMs: item.generationMs ?? null, apiEquivalent: item.apiEquivalent ?? null }));
+    return (localUsagePage?.events ?? []).map((item) => ({ id: item.id, time: item.createdAt, success: item.success, model: item.resolvedModel ?? item.requestedModel, connection: item.accountId ? accountLabels.get(item.accountId) ?? t("accounts.importUnknownAccount") : sourceLabels.get(item.sourceId) ?? t("common.unknown"), wireApi: item.wireApi, serviceTier: item.serviceTier ?? null, appliedServiceTier: item.appliedServiceTier ?? null, ttft: item.ttftMs, duration: item.latencyMs, inputTokens: item.inputTokens, cachedInputTokens: item.cachedInputTokens, cacheWriteInputTokens: item.cacheWriteInputTokens ?? null, reasoningTokens: item.reasoningTokens, outputTokens: item.outputTokens, tokens: item.totalTokens, requestId: item.requestId, httpStatus: item.httpStatus, errorCategory: item.errorCategory, toolUse: item.toolUse ?? null, routing: item.routing ?? null, accountId: item.accountId ?? null, candidateKind: item.accountId ? ("account" as const) : ("source" as const), generationDurationMs: item.generationMs, apiEquivalent: item.apiEquivalent ?? null }));
   }, [mode, remoteUsage, localUsagePage?.events, accountLabels, sourceLabels, accountDisplayName, t]);
   useEffect(() => {
     if (!selected) return;
@@ -158,7 +160,12 @@ export function UsagePage() {
   const refreshUsage = refresh;
   const modelGroups = usagePage?.models;
   const poolMemberGroups = usagePage?.poolMembers?.map((group) => ({ ...group, label: mode === "remote" ? accountDisplayName(null, group.label) ?? group.label ?? t("common.unknown") : accountLabels.get(group.key) ?? sourceLabels.get(group.key) ?? group.label ?? t("common.unknown") }));
-  const modelOptions = [{ value: "", label: t("usage.anyModel") }, ...Array.from(new Set([...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])])).filter(Boolean).sort().map((value) => ({ value, label: value }))];
+  const modelOptionIds = sortModelIdsForLauncher([...new Map(
+    [...(runtime?.gateway.visibleModelIds ?? []), ...(modelGroups?.map((group) => group.key) ?? []), ...rows.flatMap((row) => row.model ? [row.model] : []), ...(modelQuery ? [modelQuery] : [])]
+      .filter(Boolean)
+      .map((value) => [value.toLowerCase(), value] as const),
+  ).values()]);
+  const modelOptions = [{ value: "", label: t("usage.anyModel") }, ...modelOptionIds.map((value) => ({ value, label: value }))];
   const poolMemberOptions = [{ value: "", label: t("usage.anyPoolMember") }, ...(poolMemberGroups ?? []).filter((group) => group.key).map((group) => ({ value: group.key, label: group.label || group.key })).sort((left, right) => left.label.localeCompare(right.label, i18n.language))];
   const clearFilters = () => {
     setStatus("all"); setModelQuery(""); setConnectionQuery("");
@@ -218,7 +225,7 @@ function RequestsView({ rows, status, setStatus, modelQuery, modelOptions, setMo
     </div>
     <div className="usage-filter-controls">{hasFilters ? <IconButton label={t("usage.clearFilters")} icon={<X aria-hidden />} onClick={clearFilters} /> : null}<span className="usage-filter-toggle-wrap"><IconButton className="usage-filter-toggle" label={t("usage.moreFilters")} icon={<SlidersHorizontal aria-hidden />} aria-expanded={showMoreFilters} onClick={() => setShowMoreFilters((current) => !current)} />{secondaryCount ? <small>{secondaryCount}</small> : null}</span></div>
     {showMoreFilters ? <div className="usage-filters usage-filter-secondary">
-      <OptionMenu className="filter-option-menu" label={t("usage.protocol")} value={wireApi} onChange={setWireApi} options={[{ value: "", label: t("usage.anyProtocol") }, { value: "responses", label: "Responses" }, { value: "chat_completions", label: "Chat Completions" }]} />
+      <OptionMenu className="filter-option-menu" label={t("usage.protocol")} value={wireApi} onChange={setWireApi} options={[{ value: "", label: t("usage.anyProtocol") }, { value: "responses", label: "Responses" }, { value: "messages", label: "Messages" }, { value: "chat_completions", label: "Chat Completions" }]} />
       <OptionMenu className="filter-option-menu" label={t("usage.errorCategory")} value={errorQuery} onChange={setErrorQuery} options={errorOptions} />
       <input value={requestQuery} onChange={(event) => setRequestQuery(event.target.value)} aria-label={t("usage.requestId")} placeholder={t("usage.requestId")} />
     </div> : null}
@@ -370,8 +377,56 @@ function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; formatTi
 function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () => void }) {
   const { t, i18n } = useTranslation();
   const routing = row.routing;
+  const toolUse = row.toolUse;
   const speed = rowSpeedSample(row);
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}><dl className="detail-list"><div><dt>{t("usage.requestId")}</dt><dd><code>{row.requestId ?? "-"}</code></dd></div><div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div><div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div><div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div><div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div><div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div><div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div><div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div><div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div><div><dt>{t("usage.totalTime")}</dt><dd>{row.duration} ms</dd></div><div><dt>{t("usage.generationSpeed")}</dt><dd>{formatTokenSpeed(generationTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.effectiveSpeed")}</dt><dd>{formatTokenSpeed(effectiveTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div><div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div><div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div><div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div><div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div><div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div><div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>{routing ? <><div className="detail-section-heading"><dt>{t("usage.routingDiagnostics")}</dt><dd /></div><div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div><div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>{row.candidateKind === "account" ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div> : null}<div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div><div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div></> : null}</dl><p className="form-note">{t("usage.redactionHint")}</p></Dialog>;
+  const toolWarning = Boolean(
+    toolUse
+      && toolUse.forwardedToolCount > 0
+      && toolUse.toolCallCount === 0
+      && toolUse.terminalOutput === "text",
+  );
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
+    <dl className="detail-list">
+      <div><dt>{t("usage.requestId")}</dt><dd className="detail-copy-value"><code>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</dd></div>
+      <div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div>
+      <div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div>
+      <div><dt>{t("usage.protocol")}</dt><dd><code>{row.wireApi ?? "-"}</code></dd></div>
+      <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
+      <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
+      <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
+      <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
+      <div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div>
+      <div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div>
+      <div><dt>{t("usage.totalTime")}</dt><dd>{row.duration} ms</dd></div>
+      <div><dt>{t("usage.generationSpeed")}</dt><dd>{formatTokenSpeed(generationTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div>
+      <div><dt>{t("usage.effectiveSpeed")}</dt><dd>{formatTokenSpeed(effectiveTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div>
+      <div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>
+      <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
+      {toolUse ? <>
+        <div className="detail-section-heading"><dt>{t("usage.toolDiagnostics")}</dt><dd /></div>
+        <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}</dd></div>
+        <div><dt>{t("usage.forwardedTools")}</dt><dd>{toolUse.forwardedToolCount}</dd></div>
+        <div><dt>{t("usage.toolChoice")}</dt><dd>{formatToolChoice(toolUse.toolChoice, t)}</dd></div>
+        <div><dt>{t("usage.toolCallsReturned")}</dt><dd>{toolUse.toolCallCount}</dd></div>
+        <div><dt>{t("usage.terminalOutput")}</dt><dd>{formatTerminalOutput(toolUse.terminalOutput, t)}</dd></div>
+      </> : null}
+      {routing ? <>
+        <div className="detail-section-heading"><dt>{t("usage.routingDiagnostics")}</dt><dd /></div>
+        <div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
+        <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
+        {row.candidateKind === "account" ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div> : null}
+        <div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div>
+        <div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div>
+      </> : null}
+    </dl>
+    {toolWarning ? <p className="form-note warning-text">{t("usage.toolCallMissing", { count: toolUse?.forwardedToolCount ?? 0 })}</p> : null}
+    {toolUse ? <p className="form-note">{t("usage.toolDiagnosticsHint")}</p> : null}
+    <p className="form-note">{t("usage.redactionHint")}</p>
+  </Dialog>;
 }
 
 function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {
@@ -384,6 +439,14 @@ function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTi
 function formatErrorCategory(category: string | null, t: TFunction): string {
   if (!category) return t("common.unknown");
   return t(`usage.errorCategories.${category}`, { defaultValue: category.replace(/_/g, " ") });
+}
+
+function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {
+  return t(`usage.toolChoices.${choice}`);
+}
+
+function formatTerminalOutput(output: ToolUseDiagnostics["terminalOutput"], t: TFunction): string {
+  return t(`usage.terminalOutputs.${output}`);
 }
 
 function rowSpeedSample(row: UsageRow): TokenSpeedSample {

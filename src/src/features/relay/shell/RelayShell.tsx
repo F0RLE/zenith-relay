@@ -1,12 +1,12 @@
-import { Activity, ArchiveRestore, Cable, Check, ChevronDown, CircleHelp, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, ChevronDown, ChevronUp, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../../../platform/desktop";
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
-import { useRelayState } from "../state/RelayStateProvider";
-import { Button, Dialog, IconButton } from "../components/Ui";
+import { useRelayState, type Feedback } from "../state/RelayStateProvider";
+import { ActionMenu, ActionMenuItem, Button, copyText, Dialog, IconButton } from "../components/Ui";
 
 const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
@@ -236,12 +236,7 @@ export function RelayShell() {
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
-        {feedback ? (
-          <div className={`global-feedback ${feedback.kind}`} role="status">
-            <span>{t(feedback.key)}</span>
-            <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
-          </div>
-        ) : null}
+        {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
       </div>
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
@@ -253,6 +248,54 @@ export function RelayShell() {
 
 function ModeIcon({ mode }: { mode: RelayMode }) {
   return mode === "local" ? <Laptop aria-hidden /> : mode === "remote" ? <Server aria-hidden /> : <Gauge aria-hidden />;
+}
+
+function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedback, null>; clearFeedback: () => void }) {
+  const { t } = useTranslation();
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copyTimer = useRef<number | null>(null);
+  const details = feedback.error ? JSON.stringify(feedback.error, null, 2) : null;
+
+  useEffect(() => {
+    setDetailsOpen(false);
+    setCopied(false);
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    copyTimer.current = null;
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+    };
+  }, [feedback]);
+
+  const copyError = async () => {
+    if (!details) return;
+    try {
+      await copyText(details);
+      setCopied(true);
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
+      copyTimer.current = window.setTimeout(() => {
+        setCopied(false);
+        copyTimer.current = null;
+      }, 2_500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return <div className={`global-feedback ${feedback.kind}`} role="status">
+    <div className="global-feedback-copy"><span>{t(feedback.key)}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</div>
+    <div className="global-feedback-actions">
+      {feedback.error ? <>
+        <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
+        <ActionMenu className="global-feedback-menu" label={copied ? t("feedback.copied") : t("feedback.errorActions")}>
+          <ActionMenuItem icon={detailsOpen ? <ChevronUp aria-hidden /> : <CircleAlert aria-hidden />} onClick={() => setDetailsOpen((open) => !open)}>{detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}</ActionMenuItem>
+          <ActionMenuItem icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</ActionMenuItem>
+        </ActionMenu>
+      </> : null}
+      <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
+    </div>
+    {detailsOpen && details ? <div className="global-feedback-details" role="region" aria-label={t("feedback.errorDetails")}><pre><code>{details}</code></pre><p>{t("feedback.detailsHint")}</p></div> : null}
+  </div>;
 }
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {

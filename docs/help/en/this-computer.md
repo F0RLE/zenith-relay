@@ -118,6 +118,7 @@ the profile unless the backup reminder was disabled in Settings.
 contains non-secret records, quota state, settings, and request statistics.
 
 **Recovery** restores the ChatGPT configuration and available profile files.
-Relay creates a safety copy of the current state before restoring another one.
-Deleting an account from the application also removes its owned local secrets
-and related service data.
+Restoring a named snapshot requires confirmation. By default, Relay offers to
+save the current profile first; you can decline it for one restore or turn off
+that default in Settings. Deleting an account from the application also removes
+its owned local secrets and related service data.

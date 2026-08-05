@@ -2,25 +2,31 @@ use crate::accounts::{
     AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
     TokenRefreshAdapter,
 };
+use crate::catalog::{
+    apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
+    source_context_windows, source_reasoning_capabilities, SourceReasoningCapabilities,
+};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
     CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
-use crate::sources::normalized_base_url;
 use crate::ProxyConfig;
 use crate::{
-    api_model_price, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
-    CandidateQuota, CandidateScope, Error, LocalGatewayKey, ModelRegistry, ModelRules,
-    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionRequest, UsageCallback, UsageEvent, WireApi, RESPONSE_AFFINITY_TTL_MS,
+    api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order, CandidateHealth, CandidateKind, CandidateQuota,
+    CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules,
+    NativeResponsesReplayState, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
+    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest,
+    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
+    UsageEvent, WireApi, RESPONSE_AFFINITY_TTL_MS,
 };
-use futures_util::StreamExt;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use futures_util::{future::join_all, StreamExt};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -36,10 +42,48 @@ pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
+const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
+
+#[derive(Default)]
+pub(crate) struct CodexSourceModelMetadata {
+    pub context_windows: BTreeMap<String, u64>,
+    pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
+}
+
+fn source_candidate_id(
+    source_id: &str,
+    binding: &SourceProtocolBinding,
+    binding_count: usize,
+) -> String {
+    if binding_count == 1 {
+        return source_id.to_string();
+    }
+    let suffix = binding.adapter.route_suffix(binding.wire_api);
+    format!("{source_id}::{suffix}")
+}
+
+fn source_reasoning_for_route(
+    mut capabilities: SourceReasoningCapabilities,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
+) -> Option<SourceReasoningCapabilities> {
+    if adapter.is_passthrough() {
+        return Some(capabilities);
+    }
+    capabilities
+        .retain_efforts(|effort| reasoning_mode.supports_effort(effort))
+        .then_some(())?;
+    capabilities.clear_summary_capabilities();
+    Some(capabilities)
+}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
     pub source: ProviderSource,
+    /// Client-facing contracts and explicit adapters, scoped to models
+    /// verified for each route. An empty list preserves the legacy source-wide
+    /// `wire_api`.
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub enabled: bool,
     pub draining: bool,
     pub priority: i32,
@@ -53,6 +97,10 @@ pub struct RuntimeSource {
 impl RuntimeSource {
     pub fn unrestricted(source: ProviderSource) -> Self {
         Self {
+            protocol_bindings: vec![SourceProtocolBinding::legacy(
+                source.wire_api,
+                &source.models,
+            )],
             source,
             enabled: true,
             draining: false,
@@ -199,15 +247,28 @@ pub struct GatewayRuntime {
     pub(crate) bounded_client: reqwest::Client,
     websocket_client: reqwest::Client,
     discovery_client: reqwest::Client,
-    sources: BTreeMap<String, SourceExecutor>,
+    sources: BTreeMap<String, SourceConnector>,
+    source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    source_endpoint_domains: BTreeMap<String, String>,
     source_recovery_delays_ms: BTreeMap<String, u64>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
+    candidate_availability: Arc<tokio::sync::Notify>,
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
-    codex_model_manifests: Mutex<BTreeMap<String, CachedCodexManifest>>,
+    /// Native Codex catalog rows returned by `/models?client_version=...`.
+    codex_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    /// Generic source `/models` rows used only for source-declared
+    /// capabilities such as context and reasoning.
+    ///
+    /// This must remain separate from `codex_model_manifests`: a provider can
+    /// legitimately return different payload shapes for the generic endpoint
+    /// and for Codex's catalog request.
+    source_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
+    messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
+    native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
     max_retry_candidates: usize,
     quota_stale_after_ms: u64,
     default_service_tier_fast: AtomicBool,
@@ -224,13 +285,14 @@ struct PassiveQuotaState {
 }
 
 #[derive(Clone, Debug)]
-struct CachedCodexManifest {
+struct CachedModelManifest {
     value: Value,
     observed_at_ms: u64,
 }
 
 pub(crate) struct CandidateLease {
     scheduler: Arc<Mutex<PoolScheduler>>,
+    availability: Arc<tokio::sync::Notify>,
     candidate_id: String,
     model: String,
     lane: CandidateLeaseLane,
@@ -254,17 +316,20 @@ impl CandidateLease {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        let mut scheduler = self
-            .scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match self.lane {
-            CandidateLeaseLane::Text => {
-                scheduler.release_for(&self.candidate_id, Some(&self.model));
-            }
-            CandidateLeaseLane::Image => {
-                scheduler.release_image_for(&self.candidate_id, Some(&self.model));
-            }
+        let released = match self.lane {
+            CandidateLeaseLane::Text => self
+                .scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_for(&self.candidate_id, Some(&self.model)),
+            CandidateLeaseLane::Image => self
+                .scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_image_for(&self.candidate_id, Some(&self.model)),
+        };
+        if released {
+            self.availability.notify_one();
         }
     }
 }
@@ -296,16 +361,6 @@ pub(crate) struct AuthenticatedKey {
     client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
-pub(crate) struct SourceExecutor {
-    pub(crate) id: String,
-    pub(crate) wire_api: WireApi,
-    pub(crate) responses_url: Url,
-    pub(crate) chat_completions_url: Url,
-    models_url: Url,
-    source_authorization: HeaderValue,
-    configured_models: BTreeSet<String>,
-}
-
 struct ChatGptAccountExecutor {
     id: String,
     source_id: String,
@@ -331,14 +386,27 @@ pub(crate) struct ExecutorRoute {
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
     pub(crate) wire_api: WireApi,
+    pub(crate) adapter: SourceAdapter,
+    pub(crate) reasoning_mode: MessagesReasoningMode,
     pub(crate) service_tier: DefaultServiceTier,
     pub(crate) upstream_url: Url,
+    pub(crate) upstream_headers: HeaderMap,
     pub(crate) source_model: String,
     pub(crate) half_open_probe: bool,
     pub(crate) routing: Option<RoutingDiagnostics>,
 }
 
+#[derive(Clone, Debug)]
+struct SourceCandidateBinding {
+    source_id: String,
+    binding_key: SourceProtocolBindingKey,
+    wire_api: WireApi,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
+}
+
 pub(crate) struct PreparedAuthorization {
+    pub(crate) header_name: HeaderName,
     pub(crate) authorization: HeaderValue,
     pub(crate) identity: Option<CodexIdentityEnvelope>,
     pub(crate) token_generation: Option<u64>,
@@ -370,6 +438,12 @@ struct RuntimeKey {
     client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
+#[derive(Clone, Copy)]
+enum ReachabilityRequirement {
+    RequireReachable,
+    AllowUnroutable,
+}
+
 impl GatewayRuntime {
     pub fn new(
         source: ProviderSource,
@@ -395,6 +469,7 @@ impl GatewayRuntime {
             Vec::new(),
             keys.into_iter().map(Into::into).collect(),
             None,
+            ReachabilityRequirement::RequireReachable,
             options,
             usage,
         )
@@ -408,7 +483,43 @@ impl GatewayRuntime {
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
-        Self::build(sources, accounts, keys, Some(account_auth), options, usage)
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::RequireReachable,
+            options,
+            usage,
+        )
+    }
+
+    /// Builds a locally managed gateway while its persisted configuration is
+    /// temporarily unroutable.
+    ///
+    /// Desktop source and pool mutations can validly remove the final
+    /// candidate. In that state the gateway must keep authenticating its
+    /// local keys and return an empty catalog instead of preventing the
+    /// mutation from committing. Authentication, catalog visibility, and
+    /// per-request candidate selection remain unchanged; callers validating a
+    /// new configuration must use [`Self::from_mixed_pool`] instead.
+    pub fn from_mixed_pool_allow_unroutable(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeChatGptAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: RuntimeChatGptAuth,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::AllowUnroutable,
+            options,
+            usage,
+        )
     }
 
     fn build(
@@ -416,6 +527,7 @@ impl GatewayRuntime {
         accounts: Vec<RuntimeChatGptAccount>,
         keys: Vec<RuntimeMixedLocalKey>,
         account_auth: Option<RuntimeChatGptAuth>,
+        reachability_requirement: ReachabilityRequirement,
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
@@ -444,6 +556,8 @@ impl GatewayRuntime {
         scheduler.set_provider_storm_breaker_enabled(options.provider_storm_breaker);
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
+        let mut source_candidate_bindings = BTreeMap::new();
+        let mut source_endpoint_domains = BTreeMap::new();
         let mut source_recovery_delays_ms = BTreeMap::new();
         for source in sources {
             source.source.validate()?;
@@ -460,38 +574,70 @@ impl GatewayRuntime {
             if source_executors.contains_key(&source.source.id) {
                 return Err(Error::Validation("source ids must be unique".to_string()));
             }
-            let executor = SourceExecutor::new(&source.source)?;
-            let models = normalized_set(source.source.models.iter());
-            let candidate = RuntimeCandidate {
-                id: source.source.id.clone(),
-                kind: CandidateKind::ApiSource,
-                source_id: source.source.id.clone(),
-                account_id: None,
-                protocol: source.source.wire_api,
-                enabled: source.enabled,
-                draining: source.draining,
-                priority: source.priority,
-                weight: source.weight,
-                models: models.clone(),
-                model_rules: model_rules(source.allowed_models, source.excluded_models),
-                health: CandidateHealth::Healthy,
-                quota: CandidateQuota::Unknown,
-                quota_updated_at_ms: None,
-                quota_reset_at_ms: None,
-                cooldowns: BTreeMap::new(),
-                last_used_at: source.last_used_at_ms,
-                consecutive_failures: 0,
-                secret_available: true,
-            };
-            registry.replace(candidate.id.clone(), models.iter());
-            scheduler.upsert(candidate);
-            if source.recovery_delay_seconds > 0 {
-                source_recovery_delays_ms.insert(
-                    source.source.id.clone(),
-                    source.recovery_delay_seconds.saturating_mul(1_000),
+            let bindings = normalize_source_protocol_bindings(
+                source.protocol_bindings.clone(),
+                source.source.wire_api,
+                &source.source.models,
+            )?;
+            let source_endpoint_domain =
+                crate::sources::normalized_base_url(&source.source.base_url)?.to_string();
+            let source_id = source.source.id.clone();
+            let connector = SourceConnector::new(&source.source, &bindings)?;
+            let rules = model_rules(source.allowed_models, source.excluded_models);
+            for binding in &bindings {
+                let models = normalized_set(binding.model_ids.iter());
+                if models.is_empty() {
+                    continue;
+                }
+                let candidate_id = source_candidate_id(&source_id, binding, bindings.len());
+                if source_candidate_bindings.contains_key(&candidate_id) {
+                    return Err(Error::Validation(
+                        "source protocol candidate ids must be unique".to_string(),
+                    ));
+                }
+                source_endpoint_domains
+                    .insert(candidate_id.clone(), source_endpoint_domain.clone());
+                let candidate = RuntimeCandidate {
+                    id: candidate_id.clone(),
+                    kind: CandidateKind::ApiSource,
+                    source_id: source_id.clone(),
+                    account_id: None,
+                    protocol: binding.wire_api,
+                    enabled: source.enabled,
+                    draining: source.draining,
+                    priority: source.priority,
+                    weight: source.weight,
+                    models: models.clone(),
+                    model_rules: rules.clone(),
+                    health: CandidateHealth::Healthy,
+                    quota: CandidateQuota::Unknown,
+                    quota_updated_at_ms: None,
+                    quota_reset_at_ms: None,
+                    cooldowns: BTreeMap::new(),
+                    last_used_at: source.last_used_at_ms,
+                    consecutive_failures: 0,
+                    secret_available: true,
+                };
+                registry.replace(candidate_id.clone(), binding.model_ids.iter());
+                scheduler.upsert(candidate);
+                if source.recovery_delay_seconds > 0 {
+                    source_recovery_delays_ms.insert(
+                        candidate_id.clone(),
+                        source.recovery_delay_seconds.saturating_mul(1_000),
+                    );
+                }
+                source_candidate_bindings.insert(
+                    candidate_id,
+                    SourceCandidateBinding {
+                        source_id: source_id.clone(),
+                        binding_key: binding.key(),
+                        wire_api: binding.wire_api,
+                        adapter: binding.adapter,
+                        reasoning_mode: binding.reasoning_mode,
+                    },
                 );
             }
-            source_executors.insert(source.source.id, executor);
+            source_executors.insert(source_id, connector);
         }
 
         let mut account_executors = BTreeMap::new();
@@ -512,6 +658,7 @@ impl GatewayRuntime {
                 ));
             }
             if source_executors.contains_key(&account.id)
+                || source_candidate_bindings.contains_key(&account.id)
                 || account_executors.contains_key(&account.id)
             {
                 return Err(Error::Validation(
@@ -535,11 +682,13 @@ impl GatewayRuntime {
             let websocket_client = runtime_websocket_client(account.proxy.as_ref())?;
             let identity = CodexIdentityEnvelope::standard(&account.chatgpt_account_id)
                 .map_err(|message| Error::Validation(message.to_string()))?;
+            let mut published_models = account.models.clone();
             let models = normalized_set(account.models.iter());
             let image_main_model = select_image_main_model(&models, image_base_model.as_deref());
             let mut candidate_models = models.clone();
             if image_main_model.is_some() {
                 candidate_models.insert(IMAGE_API_MODEL.to_string());
+                published_models.push(IMAGE_API_MODEL.to_string());
             }
             let candidate = RuntimeCandidate {
                 id: account.id.clone(),
@@ -565,7 +714,7 @@ impl GatewayRuntime {
             let auth = account_auth
                 .as_ref()
                 .expect("account auth was validated above");
-            registry.replace(candidate.id.clone(), candidate_models.iter());
+            registry.replace(candidate.id.clone(), published_models.iter());
             let candidate_id = candidate.id.clone();
             scheduler.upsert(candidate);
             scheduler.set_candidate_subscription_expiry(
@@ -619,12 +768,12 @@ impl GatewayRuntime {
                 allowed: normalized_set(key.allowed_models.iter()),
                 excluded: normalized_set(key.excluded_models.iter()),
             };
-            configured_key_rules.push((key.enabled, scope.clone(), base_model_rules.clone()));
-            let mut model_rules = base_model_rules;
+            let mut model_rules = base_model_rules.clone();
             model_rules.excluded.extend(hidden_models.iter().cloned());
             let client_wire_apis = key.wire_apis.map(|values| {
                 values
                     .into_iter()
+                    .map(normalize_client_wire_api)
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect::<Vec<_>>()
@@ -634,6 +783,12 @@ impl GatewayRuntime {
                     "client key wire scope must not be empty".to_string(),
                 ));
             }
+            configured_key_rules.push((
+                key.enabled,
+                scope.clone(),
+                base_model_rules.clone(),
+                client_wire_apis.clone(),
+            ));
             runtime_keys.push(RuntimeKey {
                 id: key.key.id,
                 enabled: key.enabled,
@@ -645,32 +800,39 @@ impl GatewayRuntime {
             });
         }
 
-        if source_executors.is_empty() && account_executors.is_empty() {
-            return Err(Error::Validation(
-                "at least one provider source or OAuth account is required".to_string(),
-            ));
-        }
-        if !runtime_keys.iter().any(|key| key.enabled) {
-            return Err(Error::Validation(
-                "at least one enabled local gateway key is required".to_string(),
-            ));
-        }
-        let protocols = [WireApi::Responses, WireApi::ChatCompletions];
-        let has_usable_key = configured_key_rules
-            .iter()
-            .filter(|(enabled, _, _)| *enabled)
-            .any(|(_, scope, model_rules)| {
-                scheduler.candidates().any(|candidate| {
-                    candidate.models.iter().any(|model| {
-                        model_rules.allows(model)
-                            && candidate.is_configured(model, &protocols, scope)
+        if matches!(
+            reachability_requirement,
+            ReachabilityRequirement::RequireReachable
+        ) {
+            if source_executors.is_empty() && account_executors.is_empty() {
+                return Err(Error::Validation(
+                    "at least one provider source or OAuth account is required".to_string(),
+                ));
+            }
+            if !runtime_keys.iter().any(|key| key.enabled) {
+                return Err(Error::Validation(
+                    "at least one enabled local gateway key is required".to_string(),
+                ));
+            }
+            let has_usable_key = configured_key_rules
+                .iter()
+                .filter(|(enabled, _, _, _)| *enabled)
+                .any(|(_, scope, model_rules, client_wire_apis)| {
+                    let allowed_protocols = client_wire_apis
+                        .as_deref()
+                        .map_or_else(all_native_wire_apis, client_wire_apis_to_native);
+                    scheduler.candidates().any(|candidate| {
+                        candidate.models.iter().any(|model| {
+                            model_rules.allows(model)
+                                && candidate.is_configured(model, &allowed_protocols, scope)
+                        })
                     })
-                })
-            });
-        if !has_usable_key {
-            return Err(Error::Validation(
-                "no enabled local key can reach a configured Responses candidate".to_string(),
-            ));
+                });
+            if !has_usable_key {
+                return Err(Error::Validation(
+                    "no enabled local key can reach a configured source candidate".to_string(),
+                ));
+            }
         }
 
         let affinity_store = options.response_affinity_store.clone();
@@ -696,14 +858,20 @@ impl GatewayRuntime {
             websocket_client,
             discovery_client,
             sources: source_executors,
+            source_candidate_bindings,
+            source_endpoint_domains,
             source_recovery_delays_ms,
             chatgpt_accounts: account_executors,
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
+            candidate_availability: Arc::new(tokio::sync::Notify::new()),
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             codex_model_manifests: Mutex::new(BTreeMap::new()),
+            source_model_manifests: Mutex::new(BTreeMap::new()),
             passive_quotas: Mutex::new(passive_quotas),
+            messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
+            native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
             max_retry_candidates: options.max_retry_candidates,
             quota_stale_after_ms: options.quota_stale_after_ms,
             default_service_tier_fast: AtomicBool::new(
@@ -718,7 +886,7 @@ impl GatewayRuntime {
         let source = self.sources.values().next().ok_or_else(|| {
             Error::Validation("at least one provider source is required".to_string())
         })?;
-        discover_with(&self.discovery_client, source).await
+        discover_with(&self.discovery_client, source, source.protocol_bindings()).await
     }
 
     pub(crate) fn authenticate(
@@ -728,6 +896,13 @@ impl GatewayRuntime {
         let secret = authorization
             .and_then(|value| value.to_str().ok())
             .and_then(parse_bearer)?;
+        self.authenticate_secret(secret)
+    }
+
+    pub(crate) fn authenticate_secret(&self, secret: &str) -> Option<AuthenticatedKey> {
+        if secret.is_empty() || secret.len() > 4_096 {
+            return None;
+        }
         let candidate: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
         self.keys
             .iter()
@@ -763,6 +938,43 @@ impl GatewayRuntime {
         key.model_rules.allows(model).then(|| model.to_string())
     }
 
+    pub(crate) fn resolve_visible_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> Option<String> {
+        let visible = self.visible_models(key, allowed_protocols, now_ms);
+        self.resolve_from_visible(key, model, &visible)
+    }
+
+    pub(crate) fn resolve_visible_account_model(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> Option<String> {
+        self.resolve_from_visible(key, model, &self.visible_account_models(key))
+    }
+
+    fn resolve_from_visible(
+        &self,
+        key: &AuthenticatedKey,
+        requested: &str,
+        visible: &[String],
+    ) -> Option<String> {
+        let resolve = |candidate: &str| {
+            let resolved = self.resolve_model(key, candidate)?;
+            visible
+                .iter()
+                .filter_map(|visible| self.resolve_model(key, visible))
+                .any(|visible| visible.eq_ignore_ascii_case(&resolved))
+                .then_some(resolved)
+        };
+        resolve(requested)
+            .or_else(|| decode_codex_model_alias(requested).and_then(|id| resolve(&id)))
+    }
+
     pub(crate) fn visible_models(
         &self,
         key: &AuthenticatedKey,
@@ -770,10 +982,14 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Vec<String> {
         let scheduler = self.lock_scheduler();
-        self.registry
+        let models = self
+            .registry
             .visible_models(&scheduler, &key.scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| key.model_rules.allows(model))
+            .collect::<Vec<_>>();
+        crate::canonicalize_model_ids(models)
+            .into_iter()
             .map(|model| match key.model_prefix.as_deref() {
                 Some(prefix) => format!("{prefix}/{model}"),
                 None => model,
@@ -847,11 +1063,163 @@ impl GatewayRuntime {
             .collect()
     }
 
-    pub(crate) fn remember_codex_responses_lite_model(&self, model: &str) {
-        self.codex_responses_lite_models
+    /// Resolves source-provided model metadata that is safe to expose in the
+    /// generated Codex catalog.
+    ///
+    /// Metadata is evaluated per eligible candidate route. A public model may
+    /// have several source candidates behind it, so reasoning controls are
+    /// advertised only when every route proves it supports the same effort.
+    /// This avoids a Codex selection that the scheduler can legally send to an
+    /// incompatible source.
+    pub(crate) async fn codex_source_model_metadata(
+        &self,
+        key: &AuthenticatedKey,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> CodexSourceModelMetadata {
+        let routes = {
+            let scheduler = self.lock_scheduler();
+            let mut routes = Vec::new();
+            for (candidate_id, binding) in &self.source_candidate_bindings {
+                if binding.wire_api != WireApi::Responses {
+                    continue;
+                }
+                let Some(candidate) = scheduler.candidate(candidate_id) else {
+                    continue;
+                };
+                let Some(source) = self.sources.get(&binding.source_id) else {
+                    continue;
+                };
+                let Some(models) = source.models_for(binding.binding_key) else {
+                    continue;
+                };
+                let mut configured_models = BTreeSet::new();
+                for model in models {
+                    if key.model_rules.allows(model)
+                        && candidate.is_catalog_visible(model, allowed_protocols, &key.scope)
+                    {
+                        configured_models.insert(model.clone());
+                    }
+                }
+                if configured_models.is_empty() {
+                    continue;
+                }
+                let Some(source_binding) = source.binding_for(binding.binding_key) else {
+                    continue;
+                };
+                routes.push((
+                    candidate_id.clone(),
+                    source.models_url.clone(),
+                    source.authorization_for_binding(source_binding),
+                    source.protocol_headers_for_binding(source_binding),
+                    configured_models,
+                    binding.adapter,
+                    binding.reasoning_mode,
+                ));
+            }
+            routes
+        };
+        let manifests = join_all(routes.into_iter().map(
+            |(
+                candidate_id,
+                models_url,
+                (authorization_name, authorization),
+                protocol_headers,
+                configured_models,
+                adapter,
+                reasoning_mode,
+            )| async move {
+                let manifest = if let Some(value) = self.fresh_source_model_manifest(
+                    &candidate_id,
+                    now_ms,
+                    CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
+                ) {
+                    Some(value)
+                } else {
+                    let request = self
+                        .discovery_client
+                        .get(models_url)
+                        .headers(protocol_headers)
+                        .header(authorization_name, authorization)
+                        .timeout(Duration::from_secs(10));
+                    let Some(response) = request.send().await.ok() else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    if !response.status().is_success() {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    }
+                    let Some(body) = collect_limited(response, MAX_MODELS_BODY_BYTES).await.ok()
+                    else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    let Some(value) = serde_json::from_slice::<Value>(&body).ok() else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
+                    Some(value)
+                };
+                (configured_models, adapter, reasoning_mode, manifest)
+            },
+        ))
+        .await;
+
+        let mut metadata = CodexSourceModelMetadata::default();
+        let mut reasoning_by_model =
+            BTreeMap::<String, Vec<Option<SourceReasoningCapabilities>>>::new();
+        for (configured_models, adapter, reasoning_mode, manifest) in manifests {
+            let reasoning = manifest
+                .as_ref()
+                .map(|manifest| source_reasoning_capabilities(manifest, &configured_models))
+                .unwrap_or_default();
+            if let Some(manifest) = manifest.as_ref() {
+                for (model, context_window) in source_context_windows(manifest, &configured_models)
+                {
+                    metadata
+                        .context_windows
+                        .entry(model)
+                        .and_modify(|existing| *existing = (*existing).min(context_window))
+                        .or_insert(context_window);
+                }
+            }
+            for model in &configured_models {
+                let model_key = model.to_ascii_lowercase();
+                let capabilities = apply_manual_reasoning_capability_overrides(
+                    model,
+                    reasoning.get(&model_key).cloned(),
+                )
+                .and_then(|capabilities| {
+                    source_reasoning_for_route(capabilities, adapter, reasoning_mode)
+                });
+                reasoning_by_model
+                    .entry(model_key)
+                    .or_default()
+                    .push(capabilities);
+            }
+        }
+        for (model, capabilities) in reasoning_by_model {
+            let Some(capabilities) = capabilities.into_iter().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let Some(capabilities) = intersect_source_reasoning_capabilities(capabilities) else {
+                continue;
+            };
+            metadata
+                .reasoning_catalog_templates
+                .insert(model, capabilities.codex_catalog_template());
+        }
+        metadata
+    }
+
+    pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
+        let mut models = self
+            .codex_responses_lite_models
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(model.to_ascii_lowercase());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if enabled {
+            models.insert(model.to_ascii_lowercase());
+        } else {
+            models.remove(&model.to_ascii_lowercase());
+        }
     }
 
     pub(crate) fn codex_model_uses_responses_lite(&self, model: &str) -> bool {
@@ -876,17 +1244,53 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 candidate_id.to_string(),
-                CachedCodexManifest {
+                CachedModelManifest {
                     value,
                     observed_at_ms,
                 },
             );
     }
 
-    pub(crate) fn stale_codex_model_manifest<'a>(
+    fn remember_source_model_manifest(
+        &self,
+        candidate_id: &str,
+        value: Value,
+        observed_at_ms: u64,
+    ) {
+        let scheduler = self.lock_scheduler();
+        if scheduler.candidate(candidate_id).is_none() {
+            return;
+        }
+        self.source_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                candidate_id.to_string(),
+                CachedModelManifest {
+                    value,
+                    observed_at_ms,
+                },
+            );
+    }
+
+    fn fresh_source_model_manifest(
+        &self,
+        candidate_id: &str,
+        now_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<Value> {
+        self.source_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(candidate_id)
+            .filter(|manifest| now_ms.saturating_sub(manifest.observed_at_ms) <= ttl_ms)
+            .map(|manifest| manifest.value.clone())
+    }
+
+    pub(crate) fn stale_codex_model_manifests<'a>(
         &self,
         candidate_ids: impl IntoIterator<Item = &'a str>,
-    ) -> Option<Value> {
+    ) -> Vec<Value> {
         let manifests = self
             .codex_model_manifests
             .lock()
@@ -894,8 +1298,8 @@ impl GatewayRuntime {
         candidate_ids
             .into_iter()
             .filter_map(|candidate_id| manifests.get(candidate_id))
-            .max_by_key(|manifest| manifest.observed_at_ms)
             .map(|manifest| manifest.value.clone())
+            .collect()
     }
 
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
@@ -919,8 +1323,36 @@ impl GatewayRuntime {
         models.into_iter().collect()
     }
 
+    /// A bare Codex model keeps native metadata whenever a configured
+    /// ChatGPT account can serve it.  Generic sources may expose the same
+    /// upstream-looking id, but they must not downgrade the native account
+    /// entry in the pool catalog.
+    ///
+    /// This deliberately checks configured routes rather than current health:
+    /// a temporary catalogue-discovery failure must not erase native
+    /// capabilities from a saved ChatGPT manifest.
+    pub(crate) fn codex_model_has_chatgpt_account(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+    ) -> bool {
+        let Some(model) = self.resolve_model(key, model) else {
+            return false;
+        };
+        let scheduler = self.lock_scheduler();
+        self.chatgpt_accounts.values().any(|account| {
+            account
+                .configured_models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&model))
+                && scheduler.candidate(&account.id).is_some_and(|candidate| {
+                    candidate.is_configured(&model, &[WireApi::Responses], &key.scope)
+                })
+        })
+    }
+
     pub(crate) fn api_source_candidate_ids(&self) -> HashSet<String> {
-        self.sources.keys().cloned().collect()
+        self.source_candidate_bindings.keys().cloned().collect()
     }
 
     pub fn visible_models_for_secret(
@@ -989,6 +1421,10 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
+        self.source_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(candidate_id);
         self.passive_quotas
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1043,7 +1479,7 @@ impl GatewayRuntime {
         self.lock_scheduler().reset_failures(candidate_id)
     }
 
-    pub(crate) fn select_and_reserve(
+    pub(crate) async fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -1053,16 +1489,30 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        self.select_and_reserve_for(
-            key,
-            model,
-            allowed_protocols,
-            tried,
-            response_affinity_key,
-            prompt_affinity_key,
-            now_ms,
-            CandidateLeaseLane::Text,
-        )
+        let mut selection_now_ms = now_ms;
+        loop {
+            // Register before evaluating candidates so a completed request cannot
+            // release the only OAuth account between the failed selection and wait.
+            let notified = self.candidate_availability.notified();
+            let (reserved, wait_for_release) = self.try_select_and_reserve_for(
+                key,
+                model,
+                allowed_protocols,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                selection_now_ms,
+                CandidateLeaseLane::Text,
+            );
+            if let Some(reserved) = reserved {
+                return Some(reserved);
+            }
+            if !wait_for_release {
+                return None;
+            }
+            notified.await;
+            selection_now_ms = runtime_now_ms();
+        }
     }
 
     pub(crate) fn select_and_reserve_image(
@@ -1073,7 +1523,7 @@ impl GatewayRuntime {
         tried: &HashSet<String>,
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
-        self.select_and_reserve_for(
+        self.try_select_and_reserve_for(
             key,
             model,
             allowed_protocols,
@@ -1083,10 +1533,11 @@ impl GatewayRuntime {
             now_ms,
             CandidateLeaseLane::Image,
         )
+        .0
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn select_and_reserve_for(
+    fn try_select_and_reserve_for(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -1096,7 +1547,7 @@ impl GatewayRuntime {
         prompt_affinity_key: Option<&str>,
         now_ms: u64,
         lane: CandidateLeaseLane,
-    ) -> Option<(Selection, CandidateLease)> {
+    ) -> (Option<(Selection, CandidateLease)>, bool) {
         if let (Some(key), Some(store)) =
             (response_affinity_key, self.response_affinity_store.as_ref())
         {
@@ -1113,44 +1564,65 @@ impl GatewayRuntime {
             }
         }
         let mut scheduler = self.lock_scheduler();
-        let request = SelectionRequest {
-            model,
-            allowed_protocols,
-            scope: &key.scope,
-            tried,
-            response_affinity_key,
-            prompt_affinity_key,
-            now_ms,
-        };
         let selection = match lane {
-            CandidateLeaseLane::Text => scheduler.select(request),
-            CandidateLeaseLane::Image => scheduler.select_image(request),
-        }?;
-        let reserved = match lane {
-            CandidateLeaseLane::Text => {
-                scheduler.reserve_for(&selection.candidate_id, model, now_ms)
-            }
-            CandidateLeaseLane::Image => {
-                scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
-            }
-        }
-        .then(|| {
-            let lease = CandidateLease {
-                scheduler: self.scheduler.clone(),
-                candidate_id: selection.candidate_id.clone(),
-                model: model.to_string(),
-                lane,
-                released: AtomicBool::new(false),
+            CandidateLeaseLane::Text => scheduler.select(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            }),
+            CandidateLeaseLane::Image => scheduler.select_image(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            }),
+        };
+        let reserved = selection.and_then(|selection| {
+            let reserved = match lane {
+                CandidateLeaseLane::Text => {
+                    scheduler.reserve_for(&selection.candidate_id, model, now_ms)
+                }
+                CandidateLeaseLane::Image => {
+                    scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
+                }
             };
-            (selection, lease)
+            reserved.then(|| {
+                let lease = CandidateLease {
+                    scheduler: self.scheduler.clone(),
+                    availability: self.candidate_availability.clone(),
+                    candidate_id: selection.candidate_id.clone(),
+                    model: model.to_string(),
+                    lane,
+                    released: AtomicBool::new(false),
+                };
+                (selection, lease)
+            })
         });
+        let wait_for_release = matches!(lane, CandidateLeaseLane::Text)
+            && reserved.is_none()
+            && scheduler.has_waitable_text_candidate(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            });
         drop(scheduler);
         if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
             if selection.response_affinity_hit {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);
             }
         }
-        reserved
+        (reserved, wait_for_release)
     }
 
     pub(crate) fn earliest_retry_at(
@@ -1174,15 +1646,20 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
-        if let Some(source) = self.sources.get(candidate_id) {
-            let source_model = source.canonical_model(model)?;
+        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+            let source = self.sources.get(&binding.source_id)?;
+            let source_binding = source.binding_for(binding.binding_key)?;
+            let source_model = source.canonical_model_for(binding.binding_key, model)?;
             return Some(ExecutorRoute {
-                candidate_id: source.id.clone(),
-                source_id: source.id.clone(),
+                candidate_id: candidate_id.to_string(),
+                source_id: binding.source_id.clone(),
                 account_id: None,
-                wire_api: source.wire_api,
+                wire_api: binding.wire_api,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.endpoint(source.wire_api)?.clone(),
+                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,
                 routing: None,
@@ -1195,8 +1672,11 @@ impl GatewayRuntime {
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
+            upstream_headers: HeaderMap::new(),
             source_model,
             half_open_probe: false,
             routing: None,
@@ -1204,15 +1684,23 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn image_executor_route(&self, candidate_id: &str) -> Option<ExecutorRoute> {
-        if let Some(source) = self.sources.get(candidate_id) {
-            let source_model = source.canonical_model(IMAGE_API_MODEL)?;
+        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+            if !binding.adapter.is_passthrough() {
+                return None;
+            }
+            let source = self.sources.get(&binding.source_id)?;
+            let source_binding = source.binding_for(binding.binding_key)?;
+            let source_model = source.canonical_model_for(binding.binding_key, IMAGE_API_MODEL)?;
             return Some(ExecutorRoute {
-                candidate_id: source.id.clone(),
-                source_id: source.id.clone(),
+                candidate_id: candidate_id.to_string(),
+                source_id: binding.source_id.clone(),
                 account_id: None,
-                wire_api: source.wire_api,
+                wire_api: binding.wire_api,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
                 service_tier: DefaultServiceTier::Standard,
-                upstream_url: source.responses_url.clone(),
+                upstream_url: source.endpoint(binding.binding_key)?.clone(),
+                upstream_headers: source.protocol_headers_for_binding(source_binding),
                 source_model,
                 half_open_probe: false,
                 routing: None,
@@ -1224,8 +1712,11 @@ impl GatewayRuntime {
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
             wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
             service_tier: DefaultServiceTier::Standard,
             upstream_url: account.responses_url.clone(),
+            upstream_headers: HeaderMap::new(),
             source_model: account.image_main_model.clone()?,
             half_open_probe: false,
             routing: None,
@@ -1237,9 +1728,18 @@ impl GatewayRuntime {
         candidate_id: &str,
         now_ms: u64,
     ) -> std::result::Result<PreparedAuthorization, ExecutorPrepareError> {
-        if let Some(source) = self.sources.get(candidate_id) {
+        if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
+            let source = self
+                .sources
+                .get(&binding.source_id)
+                .ok_or(ExecutorPrepareError::Authentication)?;
+            let source_binding = source
+                .binding_for(binding.binding_key)
+                .ok_or(ExecutorPrepareError::Authentication)?;
+            let (header_name, authorization) = source.authorization_for_binding(source_binding);
             return Ok(PreparedAuthorization {
-                authorization: source.source_authorization(),
+                header_name,
+                authorization,
                 identity: None,
                 token_generation: None,
                 agent_task_id: None,
@@ -1261,6 +1761,7 @@ impl GatewayRuntime {
             match account.ensure_agent_identity_task(None).await {
                 Ok(agent) => {
                     return Ok(PreparedAuthorization {
+                        header_name: AUTHORIZATION,
                         authorization: agent
                             .authorization(now_ms)
                             .map_err(|_| ExecutorPrepareError::InvalidCredential)?,
@@ -1321,6 +1822,7 @@ impl GatewayRuntime {
             };
         authorization.set_sensitive(true);
         Ok(PreparedAuthorization {
+            header_name: AUTHORIZATION,
             authorization,
             identity: Some(account.identity.clone()),
             token_generation: Some(prepared.tokens.generation()),
@@ -1677,17 +2179,97 @@ impl GatewayRuntime {
         self.source_recovery_delays_ms.get(candidate_id).copied()
     }
 
+    /// Keeps a retry from fanning an endpoint-wide failure out to every
+    /// credential configured for that same source endpoint. Only the failed
+    /// candidate receives a cooldown; another credential remains eligible for
+    /// later requests in case the failure was credential-specific.
+    pub(crate) fn exclude_same_source_endpoint(
+        &self,
+        candidate_id: &str,
+        tried: &mut HashSet<String>,
+    ) {
+        let Some(endpoint) = self.source_endpoint_domains.get(candidate_id) else {
+            return;
+        };
+        tried.extend(
+            self.source_endpoint_domains
+                .iter()
+                .filter(|(_, candidate_endpoint)| *candidate_endpoint == endpoint)
+                .map(|(candidate_id, _)| candidate_id.clone()),
+        );
+    }
+
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
         self.default_service_tier_fast
             .store(tier == DefaultServiceTier::Fast, Ordering::Relaxed);
     }
 
+    #[cfg(test)]
     pub(crate) fn default_service_tier(&self) -> DefaultServiceTier {
         if self.default_service_tier_fast.load(Ordering::Relaxed) {
             DefaultServiceTier::Fast
         } else {
             DefaultServiceTier::Standard
         }
+    }
+
+    pub(crate) fn load_messages_bridge_state(
+        &self,
+        local_key_id: &str,
+        response_id: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> crate::AdapterResult<crate::MessagesBridgeState> {
+        self.messages_bridge_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(local_key_id, response_id, candidate_id, now_ms)
+    }
+
+    pub(crate) fn save_messages_bridge_response(
+        &self,
+        local_key_id: &str,
+        candidate_id: &str,
+        response: &crate::MessagesBridgeResponse,
+        now_ms: u64,
+    ) {
+        self.messages_bridge_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                local_key_id,
+                &response.response_id,
+                candidate_id,
+                response.continuation.clone(),
+                now_ms,
+            );
+    }
+
+    pub(crate) fn load_native_responses_replay(
+        &self,
+        local_key_id: &str,
+        response_id: &str,
+        candidate_id: &str,
+        now_ms: u64,
+    ) -> Option<NativeResponsesReplayState> {
+        self.native_responses_replay_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(local_key_id, response_id, candidate_id, now_ms)
+    }
+
+    pub(crate) fn save_native_responses_replay(
+        &self,
+        local_key_id: &str,
+        candidate_id: &str,
+        response_id: &str,
+        state: NativeResponsesReplayState,
+        now_ms: u64,
+    ) {
+        self.native_responses_replay_store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(local_key_id, response_id, candidate_id, state, now_ms);
     }
 
     pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
@@ -1801,6 +2383,38 @@ impl GatewayRuntime {
     }
 }
 
+fn normalize_client_wire_api(wire_api: ClientWireApi) -> ClientWireApi {
+    // Older key records could carry `images` as if it were an independent
+    // client protocol. Image requests are authorized by the
+    // Chat-Completions-compatible surface, so retain backward compatibility
+    // without exposing a dead standalone scope.
+    match wire_api {
+        ClientWireApi::Images => ClientWireApi::ChatCompletions,
+        other => other,
+    }
+}
+
+fn all_native_wire_apis() -> Vec<WireApi> {
+    vec![
+        WireApi::Responses,
+        WireApi::ChatCompletions,
+        WireApi::Messages,
+    ]
+}
+
+fn client_wire_apis_to_native(client_wire_apis: &[ClientWireApi]) -> Vec<WireApi> {
+    client_wire_apis
+        .iter()
+        .map(|wire_api| match wire_api {
+            ClientWireApi::Responses => WireApi::Responses,
+            ClientWireApi::ChatCompletions | ClientWireApi::Images => WireApi::ChatCompletions,
+            ClientWireApi::Messages => WireApi::Messages,
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 impl ChatGptAccountExecutor {
     async fn ensure_agent_identity_task(
         &self,
@@ -1889,7 +2503,7 @@ fn apply_prepared_authorization(
     prepared: &PreparedAuthorization,
     client_version: Option<&str>,
 ) -> std::result::Result<reqwest::RequestBuilder, AuthorizedRequestError> {
-    let request = request.header(AUTHORIZATION, prepared.authorization.clone());
+    let request = request.header(prepared.header_name.clone(), prepared.authorization.clone());
     let Some(identity) = prepared.identity.as_ref() else {
         return Ok(request);
     };
@@ -1920,51 +2534,6 @@ fn runtime_now_ms() -> u64 {
         })
 }
 
-impl SourceExecutor {
-    fn new(source: &ProviderSource) -> Result<Self> {
-        let base_url = normalized_base_url(&source.base_url)?;
-        let mut source_authorization = HeaderValue::from_str(&format!("Bearer {}", source.api_key))
-            .map_err(|_| {
-                Error::Validation("source API key contains invalid header characters".to_string())
-            })?;
-        source_authorization.set_sensitive(true);
-        Ok(Self {
-            id: source.id.clone(),
-            wire_api: source.wire_api,
-            responses_url: base_url
-                .join("responses")
-                .map_err(|_| Error::Validation("source responses URL is invalid".to_string()))?,
-            chat_completions_url: base_url.join("chat/completions").map_err(|_| {
-                Error::Validation("source chat completions URL is invalid".to_string())
-            })?,
-            models_url: base_url
-                .join("models")
-                .map_err(|_| Error::Validation("source models URL is invalid".to_string()))?,
-            source_authorization,
-            configured_models: normalized_set(source.models.iter()),
-        })
-    }
-
-    pub(crate) fn source_authorization(&self) -> HeaderValue {
-        self.source_authorization.clone()
-    }
-
-    pub(crate) fn endpoint(&self, wire_api: WireApi) -> Option<&Url> {
-        (wire_api == self.wire_api).then_some(match wire_api {
-            WireApi::Responses => &self.responses_url,
-            WireApi::ChatCompletions => &self.chat_completions_url,
-            WireApi::Messages => return None,
-        })
-    }
-
-    pub(crate) fn canonical_model(&self, model: &str) -> Option<String> {
-        self.configured_models
-            .iter()
-            .find(|candidate| candidate.eq_ignore_ascii_case(model))
-            .cloned()
-    }
-}
-
 impl ChatGptAccountExecutor {
     fn canonical_model(&self, model: &str) -> Option<String> {
         self.configured_models
@@ -1989,58 +2558,193 @@ impl fmt::Debug for GatewayRuntime {
     }
 }
 
-impl fmt::Debug for SourceExecutor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SourceExecutor")
-            .field("id", &self.id)
-            .field("wire_api", &self.wire_api)
-            .field("responses_url", &self.responses_url)
-            .field("chat_completions_url", &self.chat_completions_url)
-            .field("source_authorization", &"[redacted]")
-            .field("configured_models", &self.configured_models)
-            .finish()
-    }
+pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
+    discover_source_models_for_protocol_bindings(source, &[]).await
 }
 
-pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
+/// Discovers a source catalog using each explicitly configured binding.
+/// Authentication and the discovery endpoint follow the binding's upstream
+/// protocol. No request body or response format is adapted during discovery.
+pub async fn discover_source_models_for_protocol_bindings(
+    source: &ProviderSource,
+    protocol_bindings: &[SourceProtocolBinding],
+) -> Result<Vec<String>> {
+    discover_source_models_and_protocol_bindings(source, protocol_bindings)
+        .await
+        .map(|discovery| discovery.models)
+}
+
+/// The result of binding-aware model discovery.
+///
+/// `models` is the de-duplicated union in upstream response order. Each
+/// `protocol_bindings` entry contains the models advertised for that binding
+/// after its explicit allow-list is applied. A failed or empty binding is
+/// omitted. A successful `/models` response is catalog evidence, not a
+/// completion capability probe; operators must assign a model only to routes
+/// the upstream documents or has safely verified.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceDiscovery {
+    pub models: Vec<String>,
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
+}
+
+/// Discovers models independently for every configured binding.
+///
+/// Providers sometimes expose different model catalogs (and even different
+/// credentials) on their Responses, Chat Completions, and Messages endpoints.
+/// Discovery must therefore never reuse the first successful response for the
+/// remaining bindings. A configured non-empty `model_ids` list is a strict
+/// allow-list for that binding; an empty list means use the catalog returned
+/// under that binding's authentication. The function succeeds when at least
+/// one binding has a non-empty catalog.
+pub async fn discover_source_models_and_protocol_bindings(
+    source: &ProviderSource,
+    protocol_bindings: &[SourceProtocolBinding],
+) -> Result<SourceDiscovery> {
     source.validate()?;
+    let bindings = normalize_source_protocol_bindings(
+        protocol_bindings.to_vec(),
+        source.wire_api,
+        &source.models,
+    )?;
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    discover_with(&client, &SourceExecutor::new(source)?).await
+    discover_protocol_bindings_with(
+        &client,
+        &SourceConnector::new(source, &bindings)?,
+        &bindings,
+        protocol_bindings,
+    )
+    .await
 }
 
-async fn discover_with(client: &reqwest::Client, source: &SourceExecutor) -> Result<Vec<String>> {
-    let response = client
-        .get(source.models_url.clone())
-        .header(AUTHORIZATION, source.source_authorization())
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        return Err(Error::InvalidUpstreamResponse(
-            "upstream model discovery failed",
-        ));
+async fn discover_with(
+    client: &reqwest::Client,
+    source: &SourceConnector,
+    bindings: &[SourceProtocolBinding],
+) -> Result<Vec<String>> {
+    // GatewayRuntime only retains normalized bindings, so it cannot tell a
+    // legacy expanded model list from an explicit per-protocol allow-list.
+    // Keep this compatibility helper broad; management paths use the public
+    // discovery API above and retain that distinction.
+    discover_protocol_bindings_with(client, source, bindings, &[])
+        .await
+        .map(|discovery| discovery.models)
+}
+
+async fn discover_protocol_bindings_with(
+    client: &reqwest::Client,
+    source: &SourceConnector,
+    bindings: &[SourceProtocolBinding],
+    configured_bindings: &[SourceProtocolBinding],
+) -> Result<SourceDiscovery> {
+    let mut last_error = None;
+    let mut discovered_models = Vec::new();
+    let mut discovered_model_keys = HashSet::new();
+    let mut discovered_bindings = Vec::new();
+
+    for binding in bindings {
+        let (authorization_name, authorization) = source.authorization_for_binding(binding);
+        let request = client
+            .get(source.models_url.clone())
+            .headers(source.protocol_headers_for_binding(binding))
+            .header(authorization_name, authorization);
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(Error::Upstream(error));
+                continue;
+            }
+        };
+        if !response.status().is_success() {
+            last_error = Some(Error::InvalidUpstreamResponse(
+                "upstream model discovery failed",
+            ));
+            continue;
+        }
+        let body = match collect_limited(response, MAX_MODELS_BODY_BYTES).await {
+            Ok(body) => body,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let body: Value = match serde_json::from_slice(&body) {
+            Ok(body) => body,
+            Err(_) => {
+                last_error = Some(Error::InvalidUpstreamResponse(
+                    "upstream model response is invalid",
+                ));
+                continue;
+            }
+        };
+        let Some(data) = body.get("data").and_then(Value::as_array) else {
+            last_error = Some(Error::InvalidUpstreamResponse(
+                "upstream model response is invalid",
+            ));
+            continue;
+        };
+        let mut seen = HashSet::new();
+        let upstream_models = data
+            .iter()
+            .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .filter(|model| seen.insert(model.to_ascii_lowercase()))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        // An explicitly supplied model list is scoped to this protocol. The
+        // normalized legacy binding may contain source.models after expansion,
+        // so use the original configured binding to distinguish an allow-list
+        // from the legacy "discover everything" form.
+        let explicit_models = configured_bindings
+            .iter()
+            .find(|configured| configured.key() == binding.key())
+            .and_then(|configured| {
+                let models = configured
+                    .model_ids
+                    .iter()
+                    .map(|model| model.trim().to_ascii_lowercase())
+                    .filter(|model| !model.is_empty())
+                    .collect::<HashSet<_>>();
+                (!models.is_empty()).then_some(models)
+            });
+        let models = upstream_models
+            .into_iter()
+            .filter(|model| {
+                explicit_models
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))
+            })
+            .collect::<Vec<_>>();
+        if models.is_empty() {
+            continue;
+        }
+
+        for model in &models {
+            if discovered_model_keys.insert(model.to_ascii_lowercase()) {
+                discovered_models.push(model.clone());
+            }
+        }
+        discovered_bindings.push(SourceProtocolBinding {
+            wire_api: binding.wire_api,
+            adapter: binding.adapter,
+            reasoning_mode: binding.reasoning_mode,
+            model_ids: models,
+        });
     }
 
-    let body = collect_limited(response, MAX_MODELS_BODY_BYTES).await?;
-    let body: Value = serde_json::from_slice(&body)
-        .map_err(|_| Error::InvalidUpstreamResponse("upstream model response is invalid"))?;
-    let data = body
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or(Error::InvalidUpstreamResponse(
-            "upstream model response is invalid",
-        ))?;
-    let mut seen = HashSet::new();
-    Ok(data
-        .iter()
-        .filter_map(|model| model.get("id").and_then(Value::as_str))
-        .filter(|model| seen.insert(model.to_ascii_lowercase()))
-        .map(str::to_string)
-        .collect())
+    if discovered_bindings.is_empty() {
+        return Err(last_error.unwrap_or(Error::InvalidUpstreamResponse(
+            "source did not expose any confirmed models",
+        )));
+    }
+    Ok(SourceDiscovery {
+        models: discovered_models,
+        protocol_bindings: discovered_bindings,
+    })
 }
 
 pub(crate) async fn collect_limited(response: reqwest::Response, limit: usize) -> Result<Vec<u8>> {
@@ -2337,6 +3041,209 @@ mod tests {
     }
 
     #[test]
+    fn source_connector_preserves_normalized_binding_and_model_order() {
+        let source = source(
+            "source-1",
+            "upstream-secret",
+            &[
+                "gpt-5.6-sol",
+                "claude-opus-5",
+                "gpt-5.4-mini",
+                "claude-sonnet-5",
+            ],
+        );
+        let bindings = normalize_source_protocol_bindings(
+            vec![
+                SourceProtocolBinding {
+                    wire_api: WireApi::Messages,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["claude-opus-5".into(), "claude-sonnet-5".into()],
+                },
+                SourceProtocolBinding {
+                    wire_api: WireApi::Responses,
+                    adapter: SourceAdapter::Native,
+                    reasoning_mode: MessagesReasoningMode::Disabled,
+                    model_ids: vec!["gpt-5.6-sol".into(), "gpt-5.4-mini".into()],
+                },
+            ],
+            source.wire_api,
+            &source.models,
+        )
+        .unwrap();
+
+        let connector = SourceConnector::new(&source, &bindings).unwrap();
+
+        assert_eq!(connector.protocol_bindings(), bindings.as_slice());
+        assert_eq!(
+            connector
+                .canonical_model_for(bindings[1].key(), "GPT-5.4-MINI")
+                .as_deref(),
+            Some("gpt-5.4-mini")
+        );
+        assert!(connector
+            .protocol_bindings()
+            .iter()
+            .find(|binding| binding.wire_api == WireApi::ChatCompletions)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["provider/fable"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "context_window": 1_000_000,
+                    "reasoningEffortModes": ["low", "high"],
+                    "defaultReasoningLevel": "high"
+                }]
+            }),
+            now_ms,
+        );
+        // Codex asks the same source for a different payload shape. It must
+        // not overwrite the generic source metadata that powers the selector.
+        runtime.remember_codex_model_manifest(
+            "source-1",
+            serde_json::json!({"models": [{"slug": "provider/fable"}]}),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert_eq!(
+            metadata.context_windows,
+            BTreeMap::from([("provider/fable".to_string(), 1_000_000)])
+        );
+        assert_eq!(
+            metadata.reasoning_catalog_templates["provider/fable"],
+            serde_json::json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "low"},
+                    {"effort": "high", "description": "high"}
+                ],
+                "default_reasoning_level": "high"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_claude_effort_levels_are_published_when_provider_metadata_is_sparse() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["vendor/claude-fable-5"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{"id": "vendor/claude-fable-5"}]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert_eq!(
+            metadata.reasoning_catalog_templates["vendor/claude-fable-5"],
+            serde_json::json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "xhigh", "description": "Extra high"},
+                    {"effort": "max", "description": "Maximum"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ],
+                "default_reasoning_level": "medium"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[test]
+    fn messages_bridge_hides_provider_efforts_it_cannot_translate() {
+        let configured_models = ["provider/fable"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let manifest = serde_json::json!({
+            "data": [{
+                "id": "provider/fable",
+                "reasoningEffortModes": ["low", "provider-defined"],
+                "supportsReasoningSummaryParameter": true,
+                "supportsReasoningSummaries": true,
+                "defaultReasoningSummary": "detailed"
+            }]
+        });
+        let capabilities = source_reasoning_capabilities(&manifest, &configured_models)
+            .remove("provider/fable")
+            .unwrap();
+
+        for reasoning_mode in [
+            MessagesReasoningMode::Budget,
+            MessagesReasoningMode::Adaptive,
+        ] {
+            let template = source_reasoning_for_route(
+                capabilities.clone(),
+                SourceAdapter::ResponsesToMessages,
+                reasoning_mode,
+            )
+            .unwrap()
+            .codex_catalog_template();
+
+            assert_eq!(
+                template,
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"}
+                    ]
+                })
+                .as_object()
+                .unwrap()
+                .clone()
+            );
+        }
+    }
+
+    #[test]
     fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
         let models = normalized_set(
             [
@@ -2456,6 +3363,64 @@ mod tests {
     }
 
     #[test]
+    fn codex_aliases_resolve_without_shadowing_exact_model_ids() {
+        let encoded = crate::codex_model_alias("vendor/model");
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source",
+                "upstream-secret",
+                &["vendor/model", &encoded],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .resolve_visible_model(
+                    &authenticated,
+                    &encoded,
+                    &[WireApi::Responses],
+                    current_time_ms(),
+                )
+                .as_deref(),
+            Some(encoded.as_str())
+        );
+
+        let alias = crate::codex_model_alias("vendor/model");
+        let without_collision = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source",
+                "upstream-secret",
+                &["vendor/model"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key", "secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = without_collision
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        assert_eq!(
+            without_collision
+                .resolve_visible_model(
+                    &authenticated,
+                    &alias,
+                    &[WireApi::Responses],
+                    current_time_ms(),
+                )
+                .as_deref(),
+            Some("vendor/model")
+        );
+    }
+
+    #[test]
     fn explicit_empty_scope_cannot_start_a_gateway() {
         let error = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(source(
@@ -2476,6 +3441,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no enabled local key"));
+    }
+
+    #[test]
+    fn transition_runtime_allows_an_explicitly_empty_scope() {
+        let runtime = GatewayRuntime::build(
+            vec![RuntimeSource::unrestricted(source(
+                "source-a",
+                "a",
+                &["gpt-a"],
+            ))],
+            Vec::new(),
+            vec![RuntimeMixedLocalKey {
+                key: key("key", "secret"),
+                enabled: true,
+                source_ids: Some(Vec::new()),
+                account_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
+                wire_apis: None,
+            }],
+            None,
+            ReachabilityRequirement::AllowUnroutable,
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        assert!(runtime
+            .visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms())
+            .is_empty());
     }
 
     #[test]

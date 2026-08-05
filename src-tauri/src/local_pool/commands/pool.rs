@@ -22,11 +22,11 @@ use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zenith_relay_core::{
     protocol::{
-        AccountPresetRule, ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy,
-        PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
+        AccountPresetRule, ClientWireApi, ConfigurationPreset, ConfigurationPresetSettings,
+        PresetQuotaPolicy, PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -53,6 +53,7 @@ pub fn export_local_configuration_preset(
             name: record.name,
             base_url: record.base_url.trim_end_matches('/').to_string(),
             wire_api: record.wire_api,
+            protocol_bindings: record.protocol_bindings,
             enabled: record.enabled,
             in_pool: record.in_pool,
             allowed_models: record.allowed_models,
@@ -178,8 +179,10 @@ pub(super) fn ensure_system_gateway_key(
 ) -> LocalResult<LocalGatewayKeyRecord> {
     let existing = { state.store()?.keys().iter().find(|key| key.system).cloned() };
     if let Some(mut key) = existing {
-        if !key.enabled {
+        let required_wire_apis = Some(vec![ClientWireApi::Responses]);
+        if !key.enabled || key.wire_apis != required_wire_apis {
             key.enabled = true;
+            key.wire_apis = required_wire_apis;
             state.store()?.upsert_key(key.clone())?;
         }
         ensure_local_gateway_key_secret(&key)?;
@@ -198,6 +201,7 @@ pub(super) fn ensure_system_gateway_key(
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
+        wire_apis: Some(vec![ClientWireApi::Responses]),
         created_at: Utc::now().to_rfc3339(),
         last_used_at: None,
     };
@@ -210,7 +214,21 @@ pub(super) fn ensure_system_gateway_key(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateGatewayKeyInput {
+    label: String,
+    source_ids: Option<Vec<String>>,
+    account_ids: Option<Vec<String>>,
+    #[serde(default)]
+    allowed_models: Vec<String>,
+    #[serde(default)]
+    excluded_models: Vec<String>,
+    model_prefix: Option<String>,
+    wire_apis: Option<Vec<ClientWireApi>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateGatewayKeyInput {
     key_id: String,
     label: String,
@@ -221,6 +239,7 @@ pub struct UpdateGatewayKeyInput {
     #[serde(default)]
     excluded_models: Vec<String>,
     model_prefix: Option<String>,
+    wire_apis: Option<Vec<ClientWireApi>>,
 }
 
 #[derive(Deserialize)]
@@ -324,18 +343,22 @@ fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<Str
         ));
     }
     let store = state.store()?;
+    for source in store.sources().iter().filter(|source| source.in_pool) {
+        let models = source
+            .models_for_wire_api(WireApi::Responses)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+        if let Some(model) = models
+            .into_iter()
+            .find(|model| model.eq_ignore_ascii_case(requested))
+        {
+            return Ok(model);
+        }
+    }
     store
-        .sources()
+        .accounts()
         .iter()
-        .filter(|source| source.in_pool)
-        .flat_map(|source| source.models.iter())
-        .chain(
-            store
-                .accounts()
-                .iter()
-                .filter(|account| account.account.in_pool)
-                .flat_map(|account| account.models.iter()),
-        )
+        .filter(|account| account.account.in_pool)
+        .flat_map(|account| account.models.iter())
         .find(|model| model.eq_ignore_ascii_case(requested))
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
@@ -385,6 +408,23 @@ pub async fn set_local_pool_membership(
         )
         .into());
     }
+    if input.in_pool {
+        for source in old_sources
+            .iter()
+            .filter(|source| source_ids.contains(&source.id))
+        {
+            let supports_responses = source
+                .supports_wire_api(WireApi::Responses)
+                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+            if !supports_responses {
+                return Err(LocalPoolError::new(
+                    ErrorCode::Conflict,
+                    "only Responses API sources can join the local ChatGPT pool",
+                )
+                .into());
+            }
+        }
+    }
 
     let mut sources = old_sources.clone();
     let mut accounts = old_accounts.clone();
@@ -418,15 +458,9 @@ pub async fn set_local_pool_membership(
     state.snapshot().await.map_err(Into::into)
 }
 
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn create_local_gateway_key(
-    label: String,
-    source_ids: Option<Vec<String>>,
-    account_ids: Option<Vec<String>>,
-    allowed_models: Option<Vec<String>>,
-    excluded_models: Option<Vec<String>>,
-    model_prefix: Option<String>,
+    input: CreateGatewayKeyInput,
     state: State<'_, DesktopState>,
 ) -> CommandResult<GeneratedLocalKey> {
     let _mutation = state.setup_guard().await;
@@ -435,19 +469,20 @@ pub async fn create_local_gateway_key(
     let secret_ref = format!("key:{id}");
     let mut record = LocalGatewayKeyRecord {
         id,
-        label: if label.trim().is_empty() {
+        label: if input.label.trim().is_empty() {
             "Default".into()
         } else {
-            label
+            input.label
         },
         enabled: true,
         system: false,
         secret_ref: secret_ref.clone(),
-        source_ids,
-        account_ids,
-        allowed_models: allowed_models.unwrap_or_default(),
-        excluded_models: excluded_models.unwrap_or_default(),
-        model_prefix,
+        source_ids: input.source_ids,
+        account_ids: input.account_ids,
+        allowed_models: input.allowed_models,
+        excluded_models: input.excluded_models,
+        model_prefix: input.model_prefix,
+        wire_apis: input.wire_apis,
         created_at: Utc::now().to_rfc3339(),
         last_used_at: None,
     };
@@ -483,6 +518,13 @@ pub async fn update_local_gateway_key(
         .key(&input.key_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "local key not found"))?;
+    if current.system {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "the managed ChatGPT pool key cannot be edited",
+        )
+        .into());
+    }
     let mut updated = LocalGatewayKeyRecord {
         id: current.id,
         label: input.label,
@@ -494,6 +536,7 @@ pub async fn update_local_gateway_key(
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
         model_prefix: input.model_prefix,
+        wire_apis: input.wire_apis,
         created_at: current.created_at,
         last_used_at: current.last_used_at,
     };
@@ -645,6 +688,12 @@ fn validate_key_record(
             "local key label must not be empty",
         ));
     }
+    if key.wire_apis.as_ref().is_some_and(Vec::is_empty) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "local key must enable at least one client protocol",
+        ));
+    }
     if let Some(source_ids) = &key.source_ids {
         let store = state.store()?;
         if source_ids.iter().any(|id| store.source(id).is_none()) {
@@ -691,9 +740,10 @@ pub(super) fn has_usable_source(
             .is_none_or(|ids| ids.iter().any(|id| id == &source.id));
         if scoped
             && source.enabled
-            && source.in_pool
+            && (!key.system || source.in_pool)
             && !source.draining
             && secret_store::load(&source.secret_ref)?.is_some()
+            && source_supports_key_protocol(source, key)?
         {
             return Ok(true);
         }
@@ -705,8 +755,9 @@ pub(super) fn has_usable_source(
             .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id));
         if !scoped
             || !account.account.enabled
-            || !account.account.in_pool
+            || (key.system && !account.account.in_pool)
             || account.account.draining
+            || !key_allows_client_wire_api(key, ClientWireApi::Responses)
         {
             continue;
         }
@@ -721,6 +772,32 @@ pub(super) fn has_usable_source(
         }
     }
     Ok(false)
+}
+
+fn source_supports_key_protocol(
+    source: &crate::local_pool::models::ProviderSourceRecord,
+    key: &LocalGatewayKeyRecord,
+) -> LocalResult<bool> {
+    let bindings = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    Ok(bindings.into_iter().any(|binding| {
+        !binding.model_ids.is_empty()
+            && key_allows_client_wire_api(
+                key,
+                match binding.wire_api {
+                    WireApi::Responses => ClientWireApi::Responses,
+                    WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
+                    WireApi::Messages => ClientWireApi::Messages,
+                },
+            )
+    }))
+}
+
+fn key_allows_client_wire_api(key: &LocalGatewayKeyRecord, wire_api: ClientWireApi) -> bool {
+    key.wire_apis
+        .as_ref()
+        .is_none_or(|allowed| allowed.contains(&wire_api))
 }
 
 fn current_records(

@@ -8,26 +8,41 @@ use crate::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashSet,
     fmt, fs,
     path::{Path, PathBuf},
 };
 use toml_edit::{value, DocumentMut, Item, Table};
-use zenith_relay_core::accounts::TokenSet;
+use zenith_relay_core::{
+    accounts::TokenSet, canonicalize_model_ids, codex_catalog_entry_is_compatible,
+    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
+    normalize_codex_catalog_priorities, normalize_upstream_codex_catalog_entry,
+    routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
+};
 
 const PROVIDER_ID: &str = "zenith_relay_local";
 const CONFIG_FILE: &str = "config.toml";
 const AUTH_FILE: &str = "auth.json";
+const MODEL_CATALOG_FILE: &str = "codex-model-catalog.json";
+const MODELS_CACHE_FILE: &str = "models_cache.json";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
 const ACCOUNT_BACKUP_PREFIX: &str = "codex-account-";
 const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
+const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProfileBackup {
     version: u32,
     previous_model_provider: Option<String>,
+    #[serde(default)]
+    previous_model_catalog_json: Option<String>,
+    #[serde(default)]
+    previous_auth_hash: Option<String>,
     previous_auth_secret_ref: Option<String>,
     #[serde(default)]
     managed_key_id: String,
@@ -41,6 +56,18 @@ struct ProfileBackup {
     managed_bearer_in_config: bool,
     #[serde(default)]
     managed_supports_websockets: bool,
+    #[serde(default)]
+    managed_model_catalog_path: Option<String>,
+    #[serde(default)]
+    managed_model_catalog_hash: Option<String>,
+    #[serde(default)]
+    managed_model_catalog_pending_hash: Option<String>,
+    #[serde(default)]
+    managed_model_catalog_pending_remove: bool,
+    #[serde(default)]
+    attach_pending: bool,
+    #[serde(default)]
+    restore_pending: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -85,6 +112,12 @@ pub(crate) struct BoundOAuthProfile<'a> {
     pub provider_account_id: &'a str,
 }
 
+#[derive(Default)]
+struct LocalAttachOptions<'a> {
+    bound_oauth: Option<BoundOAuthProfile<'a>>,
+    catalog_json: Option<&'a str>,
+}
+
 pub(crate) struct ManagedAccountTokenUpdate {
     pub access_token: String,
     pub refresh_token: String,
@@ -115,17 +148,369 @@ pub fn attach(
         key_id,
         base_url,
         local_key,
-        None,
+        LocalAttachOptions::default(),
         &OsSecretBackend,
     )
 }
 
-pub(crate) fn attach_with_oauth(
+pub fn attach_with_catalog(
     codex_home: &Path,
     backup_root: &Path,
     key_id: &str,
     base_url: &str,
     local_key: &str,
+    catalog_json: &str,
+) -> Result<ProfileBinding> {
+    switch_to_local_with(
+        codex_home,
+        backup_root,
+        key_id,
+        base_url,
+        local_key,
+        LocalAttachOptions {
+            catalog_json: Some(catalog_json),
+            ..LocalAttachOptions::default()
+        },
+        &OsSecretBackend,
+    )
+}
+
+pub(crate) fn direct_source_model_catalog(
+    codex_home: &Path,
+    source_models: &[String],
+) -> Result<Option<String>> {
+    let user_catalog_path = configured_model_catalog_path(codex_home)?;
+    let template = collect_native_catalog_template(codex_home, user_catalog_path.as_deref(), None)?;
+    // A catalog override is optional in Codex.  Relay should prefer a verified
+    // native row when one is present, but must not make profile attachment
+    // depend on a cache that it deliberately invalidates after catalog changes.
+    let template = template.unwrap_or_default();
+    // `model_provider` points to this selected source.  Native Codex rows are
+    // useful only as a schema template here; advertising them would send their
+    // requests to this source and produce a false model picker entry.
+    let selected_models = source_models
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
+        .collect::<Vec<_>>();
+    let selected_models = canonicalize_model_ids(selected_models);
+
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, model) in selected_models.into_iter().enumerate() {
+        let normalized = model.to_ascii_lowercase();
+        if !seen.insert(normalized) {
+            continue;
+        }
+        let entry = direct_source_catalog_entry(
+            &template,
+            &model,
+            DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
+        );
+        if codex_catalog_entry_is_compatible(&entry) {
+            models.push(entry);
+        }
+    }
+    if models.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(normalize_model_catalog_values(models)?))
+}
+
+fn is_direct_source_model(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 256
+        && !model.chars().any(char::is_control)
+        && !model.to_ascii_lowercase().starts_with("zenith/")
+}
+
+fn cached_native_catalog_models(codex_home: &Path) -> Vec<Value> {
+    let Ok(content) = fs::read_to_string(codex_home.join(MODELS_CACHE_FILE)) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_str::<Value>(&content) else {
+        return Vec::new();
+    };
+    cache
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| is_native_catalog_entry(entry))
+        .filter(|entry| codex_catalog_entry_is_compatible(entry))
+        .cloned()
+        .collect()
+}
+
+fn is_native_catalog_entry(entry: &Value) -> bool {
+    entry
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_some_and(|slug| {
+            !slug.to_ascii_lowercase().starts_with("zenith/")
+                && entry
+                    .get("comp_hash")
+                    .and_then(Value::as_str)
+                    .is_none_or(|hash| hash != CODEX_RELAY_CATALOG_HASH)
+        })
+}
+
+fn model_slug(entry: &Value) -> Option<&str> {
+    entry.get("slug").and_then(Value::as_str)
+}
+
+fn catalog_entry_is_picker_eligible(entry: &Value) -> bool {
+    model_slug(entry).is_some_and(|slug| {
+        let model = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
+        codex_model_is_picker_eligible(&model)
+    })
+}
+
+fn direct_source_catalog_entry(
+    template: &serde_json::Map<String, Value>,
+    model: &str,
+    priority: u64,
+) -> Value {
+    let mut entry = routed_codex_catalog_entry(Some(template), model, priority, None);
+    entry["slug"] = Value::String(model.to_string());
+    entry["display_name"] = Value::String(codex_model_display_name(model));
+    entry["description"] = Value::String("Available through this API connection.".into());
+    entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
+    entry
+}
+
+fn collect_native_catalog_template(
+    codex_home: &Path,
+    user_catalog_path: Option<&str>,
+    managed_catalog: Option<&[u8]>,
+) -> Result<Option<serde_json::Map<String, Value>>> {
+    let mut candidates = Vec::new();
+    if let Some(path) = user_catalog_path {
+        candidates.extend(read_catalog_file_models(codex_home, path)?);
+    }
+    candidates.extend(cached_native_catalog_models(codex_home));
+    let managed_models = match managed_catalog {
+        Some(content) => read_catalog_values(content, false)?,
+        None => Vec::new(),
+    };
+    // Attaching Relay invalidates Codex's live cache after writing a verified
+    // catalog. On a later refresh, the current managed catalog is therefore
+    // the only remaining compatible schema template. It is never returned as
+    // a native model: routed_codex_catalog_entry resets capability fields for
+    // a plain upstream /v1/models row before it is advertised again.
+    let managed_template = managed_models
+        .iter()
+        .filter(|entry| {
+            codex_catalog_entry_is_compatible(entry) && catalog_entry_is_picker_eligible(entry)
+        })
+        .find_map(Value::as_object)
+        .cloned();
+    candidates.extend(managed_models);
+
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if !is_native_catalog_entry(&candidate) || !codex_catalog_entry_is_compatible(&candidate) {
+            continue;
+        }
+        let Some(slug) = model_slug(&candidate) else {
+            continue;
+        };
+        if seen.insert(slug.to_ascii_lowercase()) {
+            models.push(candidate);
+        }
+    }
+    let picker_template = |entry: &&Value| {
+        catalog_entry_is_picker_eligible(entry)
+            && entry.get("supported_in_api") != Some(&Value::Bool(false))
+    };
+    // Prefer an actual native entry over a namespaced user provider row.  The
+    // latter remains a useful schema fallback when it is the only catalog
+    // available, but must not override native client capabilities by default.
+    let template = models
+        .iter()
+        .filter(|entry| picker_template(entry))
+        .filter(|entry| model_slug(entry).is_some_and(|slug| !slug.contains('/')))
+        .find_map(Value::as_object)
+        .cloned()
+        .or_else(|| {
+            models
+                .iter()
+                .filter(|entry| picker_template(entry))
+                .find_map(Value::as_object)
+                .cloned()
+        })
+        .or(managed_template);
+    Ok(template)
+}
+
+fn configured_model_catalog_path(codex_home: &Path) -> Result<Option<String>> {
+    let config_path = codex_home.join(CONFIG_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    Ok(root_model_catalog_json(&document))
+}
+
+fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<Vec<Value>> {
+    let configured_path = Path::new(configured_path);
+    let path = if configured_path.is_absolute() {
+        configured_path.to_path_buf()
+    } else {
+        codex_home.join(configured_path)
+    };
+    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
+    read_catalog_values(&content, false)
+}
+
+fn read_catalog_values(content: &[u8], require_compatible: bool) -> Result<Vec<Value>> {
+    if content.len() > MAX_MODEL_CATALOG_BYTES {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT model catalog exceeds 512 KiB",
+        ));
+    }
+    let value: Value = serde_json::from_slice(content).map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
+    })?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .filter(|models| !models.is_empty() && models.len() <= 4_096)
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "ChatGPT model catalog has no usable models",
+            )
+        })?;
+    let mut output = Vec::new();
+    for model in models {
+        if require_compatible && !codex_catalog_entry_is_compatible(model) {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "ChatGPT model catalog contains incompatible model entries",
+            ));
+        }
+        if !require_compatible || codex_catalog_entry_is_compatible(model) {
+            output.push(model.clone());
+        }
+    }
+    Ok(output)
+}
+
+fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
+    if models.is_empty() || models.len() > 4_096 {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT model catalog has no usable models",
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut models = models
+        .into_iter()
+        .filter(codex_catalog_entry_is_compatible)
+        .filter(|model| {
+            model_slug(model).is_some_and(|slug| seen.insert(slug.to_ascii_lowercase()))
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT model catalog has no compatible models",
+        ));
+    }
+    normalize_codex_catalog_priorities(&mut models);
+    serde_json::to_string_pretty(&json!({ "models": models }))
+        .map(|content| format!("{content}\n"))
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))
+}
+
+fn build_managed_model_catalog(
+    codex_home: &Path,
+    user_catalog_path: Option<&str>,
+    current_managed_catalog: Option<&[u8]>,
+    relay_catalog_json: &str,
+) -> Result<String> {
+    let template =
+        collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
+    let template = template.unwrap_or_default();
+    let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
+    // The managed provider is the Relay endpoint, so the catalog must contain
+    // only models that its live pool exposes.  Native/user catalog rows remain
+    // untouched in their original profile and only supply a compatible template.
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    let mut accepted = 0usize;
+    for (index, relay_model) in relay_models.iter().enumerate() {
+        let Some(slug) = model_slug(relay_model) else {
+            continue;
+        };
+        let model = if slug.to_ascii_lowercase().starts_with("zenith/") {
+            let Some(model) = decode_codex_model_alias(slug) else {
+                continue;
+            };
+            model
+        } else {
+            slug.to_string()
+        };
+        if !codex_model_is_picker_eligible(&model) {
+            continue;
+        }
+        accepted += 1;
+        let context_window = relay_model
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0);
+        let priority = relay_model
+            .get("priority")
+            .and_then(Value::as_i64)
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64);
+        // A Relay model row may have come from a real upstream Codex catalog.
+        // Preserve its strictly validated capability data (including arbitrary
+        // reasoning levels) instead of inheriting anything from the native
+        // template.  Plain `/v1/models` entries receive the conservative route
+        // defaults instead.
+        let mut entry = relay_model
+            .as_object()
+            .and_then(|upstream| {
+                normalize_upstream_codex_catalog_entry(upstream, &model, priority, context_window)
+            })
+            .unwrap_or_else(|| {
+                routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
+            });
+        if !slug.to_ascii_lowercase().starts_with("zenith/") {
+            entry["slug"] = Value::String(slug.to_string());
+        }
+        entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
+        if let Some(display_name) = relay_model.get("display_name").and_then(Value::as_str) {
+            entry["display_name"] = Value::String(display_name.to_string());
+        }
+        if let Some(description) = relay_model.get("description").and_then(Value::as_str) {
+            entry["description"] = Value::String(description.to_string());
+        }
+        if let Some(slug) = model_slug(&entry) {
+            if seen.insert(slug.to_ascii_lowercase()) {
+                models.push(entry);
+            }
+        }
+    }
+    if accepted == 0 {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "pool has no compatible text models",
+        ));
+    }
+    normalize_model_catalog_values(models)
+}
+
+pub(crate) fn attach_with_oauth_and_catalog(
+    codex_home: &Path,
+    backup_root: &Path,
+    key_id: &str,
+    base_url: &str,
+    local_key: &str,
+    catalog_json: &str,
     bound_oauth: BoundOAuthProfile<'_>,
 ) -> Result<ProfileBinding> {
     switch_to_local_with(
@@ -134,7 +519,10 @@ pub(crate) fn attach_with_oauth(
         key_id,
         base_url,
         local_key,
-        Some(bound_oauth),
+        LocalAttachOptions {
+            bound_oauth: Some(bound_oauth),
+            catalog_json: Some(catalog_json),
+        },
         &OsSecretBackend,
     )
 }
@@ -217,9 +605,14 @@ fn snapshot_user_profile_with(
                 auth,
             });
         }
-    } else if let Some(backup) = local_backup(backup_root)? {
+    } else if let Some(backup) = local_backup(codex_home, backup_root)? {
         if managed_config_matches(&document, &backup) {
-            restore_config(&mut document, backup.previous_model_provider.as_deref());
+            let model_catalog = model_catalog_to_restore(&document, &backup);
+            restore_config(
+                &mut document,
+                backup.previous_model_provider.as_deref(),
+                model_catalog.as_deref(),
+            );
             let auth = if managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
                 previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
             } else {
@@ -315,7 +708,7 @@ pub(crate) fn active_managed_account_id(
         return Ok(parse_account_backup_snapshot(&snapshot, &path)?
             .map(|backup| backup.managed_account_id));
     }
-    Ok(local_backup(backup_root)?.and_then(|backup| backup.bound_oauth_account_id))
+    Ok(local_backup(codex_home, backup_root)?.and_then(|backup| backup.bound_oauth_account_id))
 }
 
 pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<ProfileBinding>> {
@@ -336,7 +729,7 @@ pub fn profile_bindings(codex_home: &Path, backup_root: &Path) -> Result<Vec<Pro
         binding.active = account_managed_config_matches(&document)
             && account_auth_matches_snapshot(&auth, &auth_path, &backup.managed_access_hash)?;
     }
-    if let Some(backup) = local_backup(backup_root)? {
+    if let Some(backup) = local_backup(codex_home, backup_root)? {
         let profile_dir = canonical_profile_dir(codex_home)?;
         let config_path = profile_dir.join(CONFIG_FILE);
         let config = read_optional_bytes(&config_path)?;
@@ -431,7 +824,7 @@ pub(crate) fn managed_account_token_update(
         }
     }
 
-    if let Some(backup) = local_backup(backup_root)? {
+    if let Some(backup) = local_backup(codex_home, backup_root)? {
         if backup.bound_oauth_account_id.as_deref() == Some(account_id)
             && backup.managed_oauth_access_hash.as_deref() == Some(current_hash.as_str())
         {
@@ -567,6 +960,7 @@ pub fn sync_local_gateway_binding(
     provider_account_id: &str,
 ) -> Result<bool> {
     let _profile_guard = lock_codex_profile();
+    let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
     let backup_bytes = read_optional_bytes(&backup_path)?;
     let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
@@ -612,13 +1006,83 @@ pub fn sync_local_gateway_binding(
     Ok(true)
 }
 
+pub(crate) fn refresh_managed_model_catalog(
+    codex_home: &Path,
+    backup_root: &Path,
+    catalog_json: &str,
+) -> Result<bool> {
+    let _profile_guard = lock_codex_profile();
+    let _ = local_backup(codex_home, backup_root)?;
+    let backup_path = backup_path(backup_root);
+    let mut backup_bytes = read_optional_bytes(&backup_path)?;
+    let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
+        return Ok(false);
+    };
+    if backup.attach_pending || backup.restore_pending {
+        return Err(profile_restore_blocked());
+    }
+    let catalog_path = managed_model_catalog_path(backup_root)?;
+    let mut catalog_bytes = read_optional_bytes(&catalog_path)?;
+    reconcile_pending_catalog_state(&backup_path, &mut backup_bytes, &mut backup, &catalog_bytes)?;
+    catalog_bytes = read_optional_bytes(&catalog_path)?;
+    if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes) {
+        return Err(profile_restore_blocked());
+    }
+    if backup.managed_model_catalog_path.is_none() {
+        return Ok(false);
+    }
+
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let auth = read_optional_bytes(&auth_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    if !managed_config_matches(&document, &backup)
+        || !managed_auth_matches_snapshot(&auth, &auth_path, &backup)?
+    {
+        return Ok(false);
+    }
+
+    let catalog = build_managed_model_catalog(
+        codex_home,
+        backup.previous_model_catalog_json.as_deref(),
+        catalog_bytes.as_deref(),
+        catalog_json,
+    )?;
+    if catalog_bytes.as_deref() == Some(catalog.as_bytes()) {
+        return Ok(false);
+    }
+
+    let original_backup_bytes = backup_bytes.clone();
+    backup.managed_model_catalog_pending_hash = Some(key_hash(&catalog));
+    backup.managed_model_catalog_pending_remove = false;
+    let pending_backup = serialize_backup(&backup)?;
+    replace_if_unchanged(&backup_path, &backup_bytes, &pending_backup)?;
+    backup_bytes = Some(pending_backup.as_bytes().to_vec());
+    if let Err(error) =
+        apply_model_catalog_change(&catalog_path, &catalog_bytes, Some(&catalog), true)
+    {
+        return Err(with_rollback(
+            error,
+            rollback_file(&backup_path, &pending_backup, &original_backup_bytes),
+        ));
+    }
+    backup.managed_model_catalog_hash = backup.managed_model_catalog_pending_hash.take();
+    backup.managed_model_catalog_pending_remove = false;
+    let committed_backup = serialize_backup(&backup)?;
+    replace_if_unchanged(&backup_path, &backup_bytes, &committed_backup)?;
+    let _ = invalidate_models_cache(codex_home);
+    Ok(true)
+}
+
 fn switch_to_local_with(
     codex_home: &Path,
     backup_root: &Path,
     key_id: &str,
     base_url: &str,
     local_key: &str,
-    bound_oauth: Option<BoundOAuthProfile<'_>>,
+    options: LocalAttachOptions<'_>,
     secrets: &impl SecretBackend,
 ) -> Result<ProfileBinding> {
     let _profile_guard = lock_codex_profile();
@@ -641,13 +1105,14 @@ fn switch_to_local_with(
         }
         None => None,
     };
+    prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
     if let Err(error) = attach_local_locked(
         codex_home,
         backup_root,
         key_id,
         base_url,
         local_key,
-        bound_oauth,
+        options,
         secrets,
     ) {
         let rollback = detached_account_backup
@@ -666,7 +1131,7 @@ fn switch_to_local_with(
             ));
         }
     }
-    let backup = local_backup(backup_root)?.ok_or_else(|| {
+    let backup = local_backup(codex_home, backup_root)?.ok_or_else(|| {
         LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "ChatGPT local gateway profile backup is missing after attach",
@@ -707,6 +1172,38 @@ fn switch_to_account_with(
 }
 
 #[cfg(test)]
+fn ensure_test_native_catalog(home: &Path) {
+    let path = home.join(MODELS_CACHE_FILE);
+    let has_compatible_native = fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                is_native_catalog_entry(model) && codex_catalog_entry_is_compatible(model)
+            })
+        });
+    if has_compatible_native {
+        return;
+    }
+    let mut entry = routed_codex_catalog_entry(None, "gpt-5.6-sol", 1, None);
+    entry["slug"] = Value::String("gpt-5.6-sol".into());
+    entry["display_name"] = Value::String("GPT-5.6 Sol".into());
+    entry["description"] = Value::String("Native test model".into());
+    entry["comp_hash"] = Value::String("official".into());
+    entry["default_reasoning_level"] = Value::String("low".into());
+    entry["supported_reasoning_levels"] = json!([
+        {"effort": "low", "description": "Low"},
+        {"effort": "medium", "description": "Medium"}
+    ]);
+    entry["input_modalities"] = json!(["text", "image"]);
+    let _ = fs::write(
+        path,
+        serde_json::to_string_pretty(&json!({"models": [entry]})).unwrap(),
+    );
+}
+
+#[cfg(test)]
 fn attach_with(
     codex_home: &Path,
     backup_root: &Path,
@@ -715,15 +1212,76 @@ fn attach_with(
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let _profile_guard = lock_codex_profile();
+    ensure_test_native_catalog(codex_home);
+    prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
     attach_local_locked(
         codex_home,
         backup_root,
         "local_gateway",
         base_url,
         local_key,
-        None,
+        LocalAttachOptions::default(),
         secrets,
     )
+}
+
+#[cfg(test)]
+fn attach_with_catalog_for_test(
+    codex_home: &Path,
+    backup_root: &Path,
+    base_url: &str,
+    local_key: &str,
+    catalog_json: &str,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let _profile_guard = lock_codex_profile();
+    ensure_test_native_catalog(codex_home);
+    prepare_existing_local_binding_locked(codex_home, backup_root, secrets)?;
+    attach_local_locked(
+        codex_home,
+        backup_root,
+        "local_gateway",
+        base_url,
+        local_key,
+        LocalAttachOptions {
+            catalog_json: Some(catalog_json),
+            ..LocalAttachOptions::default()
+        },
+        secrets,
+    )
+}
+
+fn prepare_existing_local_binding_locked(
+    codex_home: &Path,
+    backup_root: &Path,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let _ = local_backup(codex_home, backup_root)?;
+    let path = backup_path(backup_root);
+    let bytes = read_optional_bytes(&path)?;
+    let Some(mut backup) = parse_backup_snapshot(&bytes, &path)? else {
+        return Ok(());
+    };
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let config = read_optional_bytes(&config_path)?;
+    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
+    if external_provider_took_over(&document, &backup) {
+        return Ok(());
+    }
+    if backup.previous_model_catalog_json.is_none()
+        && backup.managed_model_catalog_path.is_none()
+        && backup.managed_model_catalog_hash.is_none()
+        && backup.managed_model_catalog_pending_hash.is_none()
+        && managed_config_matches(&document, &backup)
+    {
+        if let Some(legacy_catalog) = root_model_catalog_json(&document) {
+            backup.previous_model_catalog_json = Some(legacy_catalog);
+            let updated = serialize_backup(&backup)?;
+            replace_if_unchanged(&path, &bytes, &updated)?;
+        }
+    }
+    restore_local_locked(codex_home, backup_root, secrets)
 }
 
 fn attach_local_locked(
@@ -732,13 +1290,14 @@ fn attach_local_locked(
     key_id: &str,
     base_url: &str,
     local_key: &str,
-    bound_oauth: Option<BoundOAuthProfile<'_>>,
+    options: LocalAttachOptions<'_>,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
     let key_id = key_id.trim();
     let local_key = local_key.trim();
     let base_url = base_url.trim_end_matches('/');
-    let bound_oauth = normalize_bound_oauth(bound_oauth)?;
+    let catalog_json = options.catalog_json;
+    let bound_oauth = normalize_bound_oauth(options.bound_oauth)?;
     if key_id.is_empty() || local_key.is_empty() || base_url.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -747,12 +1306,15 @@ fn attach_local_locked(
     }
     fs::create_dir_all(codex_home).map_err(io_error)?;
     fs::create_dir_all(backup_root).map_err(io_error)?;
+    let _ = local_backup(codex_home, backup_root)?;
+    let catalog_path = managed_model_catalog_path(backup_root)?;
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
     let backup_path = backup_path(backup_root);
     let original_config_bytes = read_optional_bytes(&config_path)?;
     let original_auth_bytes = read_optional_bytes(&auth_path)?;
     let original_backup_bytes = read_optional_bytes(&backup_path)?;
+    let original_catalog_bytes = read_optional_bytes(&catalog_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let original_auth = snapshot_text(&original_auth_bytes, &auth_path)?;
     let mut document = parse_config(original_config)?;
@@ -764,6 +1326,22 @@ fn attach_local_locked(
         ));
     }
     let existing_backup = parse_backup_snapshot(&original_backup_bytes, &backup_path)?;
+    if existing_backup.as_ref().is_some_and(|backup| {
+        !valid_managed_model_catalog(backup, &catalog_path, &original_catalog_bytes)
+    }) {
+        return Err(profile_restore_blocked());
+    }
+    let had_managed_catalog = existing_backup
+        .as_ref()
+        .and_then(|backup| backup.managed_model_catalog_path.as_deref())
+        .is_some();
+
+    if catalog_json.is_some() && !had_managed_catalog && original_catalog_bytes.is_some() {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "managed ChatGPT model catalog exists without a profile backup",
+        ));
+    }
 
     if existing_backup.is_none() && document_has_provider(&document) {
         return Err(LocalPoolError::new(
@@ -783,15 +1361,47 @@ fn attach_local_locked(
     if let Some(backup) = existing_backup.as_ref() {
         if !external_takeover
             && !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, backup)?
+            && !previous_auth_matches_snapshot(&original_auth_bytes, backup)
         {
             return Err(profile_restore_blocked());
         }
     }
 
+    let user_catalog_path = if external_takeover {
+        existing_backup
+            .as_ref()
+            .and_then(|backup| external_model_catalog(&document, backup))
+    } else {
+        existing_backup
+            .as_ref()
+            .and_then(|backup| {
+                backup
+                    .managed_model_catalog_path
+                    .as_ref()
+                    .and(backup.previous_model_catalog_json.as_ref())
+                    .cloned()
+            })
+            .or_else(|| root_model_catalog_json(&document))
+    };
+    let catalog = catalog_json
+        .map(|content| {
+            build_managed_model_catalog(
+                codex_home,
+                user_catalog_path.as_deref(),
+                had_managed_catalog
+                    .then_some(original_catalog_bytes.as_deref())
+                    .flatten(),
+                content,
+            )
+        })
+        .transpose()?;
+
     let created_backup = existing_backup.is_none();
     let mut backup = existing_backup.unwrap_or(ProfileBackup {
         version: 1,
         previous_model_provider: root_model_provider(&document),
+        previous_model_catalog_json: root_model_catalog_json(&document),
+        previous_auth_hash: original_auth_bytes.as_deref().map(bytes_hash),
         previous_auth_secret_ref: None,
         managed_key_id: String::new(),
         managed_key_hash: String::new(),
@@ -800,9 +1410,23 @@ fn attach_local_locked(
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
         managed_supports_websockets: false,
+        managed_model_catalog_path: None,
+        managed_model_catalog_hash: None,
+        managed_model_catalog_pending_hash: None,
+        managed_model_catalog_pending_remove: false,
+        attach_pending: false,
+        restore_pending: false,
     });
+    if !created_backup
+        && backup.managed_model_catalog_path.is_none()
+        && backup.managed_model_catalog_hash.is_none()
+    {
+        backup.previous_model_catalog_json = root_model_catalog_json(&document);
+    }
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
+        backup.previous_model_catalog_json = external_model_catalog(&document, &backup);
+        backup.previous_auth_hash = original_auth_bytes.as_deref().map(bytes_hash);
         let secret_ref = backup
             .previous_auth_secret_ref
             .clone()
@@ -824,6 +1448,12 @@ fn attach_local_locked(
             secrets.save(BACKUP_SECRET_REF, previous_auth)?;
             backup.previous_auth_secret_ref = Some(BACKUP_SECRET_REF.to_string());
         }
+    } else if backup.previous_auth_hash.is_none() {
+        if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
+            backup.previous_auth_hash = secrets
+                .load(secret_ref)?
+                .map(|content| bytes_hash(content.as_bytes()));
+        }
     }
     backup.managed_key_id = key_id.to_string();
     backup.managed_key_hash = key_hash(local_key);
@@ -839,6 +1469,19 @@ fn attach_local_locked(
     backup.managed_oauth_access_hash = managed_oauth_access_hash;
     backup.managed_bearer_in_config = true;
     backup.managed_supports_websockets = false;
+    let previous_managed_catalog_path = backup.managed_model_catalog_path.clone();
+    let previous_managed_catalog_hash = backup.managed_model_catalog_hash.clone();
+    backup.managed_model_catalog_path = if catalog.is_some() {
+        Some(catalog_path.to_string_lossy().into_owned())
+    } else {
+        previous_managed_catalog_path
+    };
+    backup.managed_model_catalog_hash = previous_managed_catalog_hash;
+    backup.managed_model_catalog_pending_hash = catalog.as_deref().map(key_hash);
+    backup.managed_model_catalog_pending_remove =
+        catalog.is_none() && backup.managed_model_catalog_path.is_some();
+    backup.attach_pending = true;
+    backup.restore_pending = false;
     let backup_content = match serialize_backup(&backup) {
         Ok(content) => content,
         Err(error) => {
@@ -862,10 +1505,12 @@ fn attach_local_locked(
         ));
     }
 
-    attach_config(&mut document, base_url, local_key);
-    let managed_config = document.to_string();
-    if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
-    {
+    if let Err(error) = apply_model_catalog_change(
+        &catalog_path,
+        &original_catalog_bytes,
+        catalog.as_deref(),
+        had_managed_catalog,
+    ) {
         return Err(with_rollback(
             error,
             merge_rollbacks(
@@ -881,6 +1526,43 @@ fn attach_local_locked(
             ),
         ));
     }
+
+    attach_config(
+        &mut document,
+        base_url,
+        local_key,
+        catalog
+            .as_ref()
+            .map(|_| catalog_path.to_string_lossy().into_owned())
+            .as_deref(),
+        backup.previous_model_catalog_json.as_deref(),
+    );
+    let managed_config = document.to_string();
+    if let Err(error) = replace_if_unchanged(&config_path, &original_config_bytes, &managed_config)
+    {
+        return Err(with_rollback(
+            error,
+            merge_rollbacks(
+                rollback_model_catalog_change(
+                    &catalog_path,
+                    catalog.as_deref(),
+                    had_managed_catalog,
+                    &original_catalog_bytes,
+                ),
+                merge_rollbacks(
+                    rollback_backup(
+                        created_backup,
+                        &backup_path,
+                        &backup_content,
+                        &original_backup_bytes,
+                        &backup,
+                        secrets,
+                    ),
+                    restore_secret_snapshot(&rebased_secret, secrets),
+                ),
+            ),
+        ));
+    }
     let managed_auth = match bound_oauth {
         Some(oauth) if project_bound_oauth => {
             account_auth_content(oauth.tokens, oauth.provider_account_id)?
@@ -890,20 +1572,47 @@ fn attach_local_locked(
     if let Err(error) = replace_if_unchanged(&auth_path, &original_auth_bytes, &managed_auth) {
         let config_rollback = rollback_file(&config_path, &managed_config, &original_config_bytes);
         let backup_rollback = merge_rollbacks(
-            rollback_backup(
-                created_backup,
-                &backup_path,
-                &backup_content,
-                &original_backup_bytes,
-                &backup,
-                secrets,
+            rollback_model_catalog_change(
+                &catalog_path,
+                catalog.as_deref(),
+                had_managed_catalog,
+                &original_catalog_bytes,
             ),
-            restore_secret_snapshot(&rebased_secret, secrets),
+            merge_rollbacks(
+                rollback_backup(
+                    created_backup,
+                    &backup_path,
+                    &backup_content,
+                    &original_backup_bytes,
+                    &backup,
+                    secrets,
+                ),
+                restore_secret_snapshot(&rebased_secret, secrets),
+            ),
         );
         return Err(with_rollback(
             error,
             merge_rollbacks(config_rollback, backup_rollback),
         ));
+    }
+    let pending_backup_bytes = backup_content.as_bytes().to_vec();
+    let mut committed_backup = backup.clone();
+    committed_backup.managed_model_catalog_path = catalog
+        .as_ref()
+        .map(|_| catalog_path.to_string_lossy().into_owned());
+    committed_backup.managed_model_catalog_hash = catalog.as_deref().map(key_hash);
+    committed_backup.managed_model_catalog_pending_hash = None;
+    committed_backup.managed_model_catalog_pending_remove = false;
+    committed_backup.attach_pending = false;
+    committed_backup.restore_pending = false;
+    let committed_backup_content = serialize_backup(&committed_backup)?;
+    replace_if_unchanged(
+        &backup_path,
+        &Some(pending_backup_bytes),
+        &committed_backup_content,
+    )?;
+    if original_catalog_bytes.as_deref() != catalog.as_deref().map(str::as_bytes) {
+        let _ = invalidate_models_cache(codex_home);
     }
     Ok(())
 }
@@ -944,79 +1653,101 @@ fn restore_local_locked(
     backup_root: &Path,
     secrets: &impl SecretBackend,
 ) -> Result<()> {
+    let _ = local_backup(codex_home, backup_root)?;
     let backup_path = backup_path(backup_root);
-    let backup_bytes = read_optional_bytes(&backup_path)?;
-    let Some(backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
+    let mut backup_bytes = read_optional_bytes(&backup_path)?;
+    let Some(mut backup) = parse_backup_snapshot(&backup_bytes, &backup_path)? else {
         return Ok(());
     };
+    let catalog_path = managed_model_catalog_path(backup_root)?;
+    let catalog_bytes = read_optional_bytes(&catalog_path)?;
+    if !valid_managed_model_catalog(&backup, &catalog_path, &catalog_bytes) {
+        return Err(profile_restore_blocked());
+    }
     let config_path = codex_home.join(CONFIG_FILE);
     let auth_path = codex_home.join(AUTH_FILE);
     let original_config_bytes = read_optional_bytes(&config_path)?;
     let original_auth_bytes = read_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
-    if !managed_config_matches(&document, &backup)
-        || !managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup)?
-    {
+    let config_matches_managed = managed_config_matches(&document, &backup);
+    let config_matches_previous = previous_config_matches(&document, &backup);
+    if !config_matches_managed && !config_matches_previous {
         return Err(profile_restore_blocked());
     }
     let previous_auth = match backup.previous_auth_secret_ref.as_deref() {
-        Some(secret_ref) => Some(secrets.load(secret_ref)?.ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::RecoveryRequired,
-                "ChatGPT profile backup secret is missing",
-            )
-        })?),
+        Some(secret_ref) => secrets.load(secret_ref)?,
         None => None,
     };
-    restore_config(&mut document, backup.previous_model_provider.as_deref());
-    let restored_config = document.to_string();
-    replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
-
-    let restored_auth_bytes = previous_auth
-        .as_ref()
-        .map(|content| content.as_bytes().to_vec());
-    let auth_result = match previous_auth.as_deref() {
-        Some(previous_auth) => {
-            replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)
-        }
-        None => remove_if_unchanged(&auth_path, &original_auth_bytes),
-    };
-    if let Err(error) = auth_result {
-        return Err(with_rollback(
-            error,
-            rollback_file(&config_path, &restored_config, &original_config_bytes),
-        ));
+    if backup.previous_auth_hash.is_none() {
+        backup.previous_auth_hash = previous_auth
+            .as_deref()
+            .map(|content| bytes_hash(content.as_bytes()));
     }
-
-    if let Err(error) = remove_if_unchanged(&backup_path, &backup_bytes) {
-        let auth_rollback =
-            restore_snapshot_if_unchanged(&auth_path, &restored_auth_bytes, &original_auth_bytes);
-        let config_rollback = rollback_file(&config_path, &restored_config, &original_config_bytes);
-        return Err(with_rollback(
-            error,
-            merge_rollbacks(auth_rollback, config_rollback),
-        ));
-    }
-    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
-        if let Err(error) = secrets.delete(secret_ref) {
-            let backup_rollback = restore_snapshot_if_unchanged(&backup_path, &None, &backup_bytes);
-            let auth_rollback = restore_snapshot_if_unchanged(
-                &auth_path,
-                &restored_auth_bytes,
-                &original_auth_bytes,
-            );
-            let config_rollback =
-                rollback_file(&config_path, &restored_config, &original_config_bytes);
-            return Err(with_rollback(
-                error,
-                merge_rollbacks(
-                    backup_rollback,
-                    merge_rollbacks(auth_rollback, config_rollback),
-                ),
+    if let (Some(expected), Some(content)) = (
+        backup.previous_auth_hash.as_deref(),
+        previous_auth.as_deref(),
+    ) {
+        if bytes_hash(content.as_bytes()) != expected {
+            return Err(LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT profile backup secret does not match its integrity hash",
             ));
         }
     }
+    let auth_matches_managed =
+        managed_auth_matches_snapshot(&original_auth_bytes, &auth_path, &backup)?;
+    let auth_matches_previous = previous_auth_matches_snapshot(&original_auth_bytes, &backup);
+    if !auth_matches_managed && !auth_matches_previous {
+        return Err(profile_restore_blocked());
+    }
+    if auth_matches_managed && backup.previous_auth_secret_ref.is_some() && previous_auth.is_none()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "ChatGPT profile backup secret is missing",
+        ));
+    }
+    if read_optional_bytes(&backup_path)? != backup_bytes {
+        return Err(profile_changed_at(&backup_path));
+    }
+    if !backup.restore_pending {
+        backup.restore_pending = true;
+        let pending_backup = serialize_backup(&backup)?;
+        replace_if_unchanged(&backup_path, &backup_bytes, &pending_backup)?;
+        backup_bytes = Some(pending_backup.into_bytes());
+    }
+
+    let model_catalog = backup.previous_model_catalog_json.clone();
+    restore_config(
+        &mut document,
+        backup.previous_model_provider.as_deref(),
+        model_catalog.as_deref(),
+    );
+    let restored_config = document.to_string();
+    if original_config_bytes.as_deref() != Some(restored_config.as_bytes()) {
+        replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
+    }
+
+    if !auth_matches_previous {
+        match previous_auth.as_deref() {
+            Some(previous_auth) => {
+                replace_if_unchanged(&auth_path, &original_auth_bytes, previous_auth)?;
+            }
+            None => remove_if_unchanged(&auth_path, &original_auth_bytes)?,
+        }
+    }
+
+    if catalog_bytes.is_some() {
+        remove_if_unchanged(&catalog_path, &catalog_bytes)?;
+    }
+    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
+        secrets.delete(secret_ref)?;
+    }
+    if backup.managed_model_catalog_path.is_some() {
+        let _ = invalidate_models_cache(codex_home);
+    }
+    remove_if_unchanged(&backup_path, &backup_bytes)?;
     Ok(())
 }
 
@@ -1306,12 +2037,18 @@ fn sync_account_profile_with(
 }
 
 fn attach_account_config(document: &mut DocumentMut) {
-    restore_config(document, None);
+    let model_catalog = root_model_catalog_json(document);
+    restore_config(document, None, model_catalog.as_deref());
     document.remove("openai_base_url");
 }
 
 fn restore_account_config(document: &mut DocumentMut, backup: &AccountProfileBackup) {
-    restore_config(document, backup.previous_model_provider.as_deref());
+    let model_catalog = root_model_catalog_json(document);
+    restore_config(
+        document,
+        backup.previous_model_provider.as_deref(),
+        model_catalog.as_deref(),
+    );
     if let Some(base_url) = backup.previous_openai_base_url.as_deref() {
         document["openai_base_url"] = value(base_url);
     }
@@ -1409,7 +2146,7 @@ fn credential_kind_locked(
         return Ok(Some(ProfileCredentialKind::OAuthAccount));
     }
     if backup_path(backup_root).exists() {
-        local_backup(backup_root)?;
+        local_backup(codex_home, backup_root)?;
         return Ok(Some(ProfileCredentialKind::LocalGateway));
     }
     let auth_path = codex_home.join(AUTH_FILE);
@@ -1581,8 +2318,19 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
     Ok(())
 }
 
-fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
+fn attach_config(
+    document: &mut DocumentMut,
+    base_url: &str,
+    local_key: &str,
+    model_catalog_path: Option<&str>,
+    previous_model_catalog: Option<&str>,
+) {
     document["model_provider"] = value(PROVIDER_ID);
+    restore_root_string(
+        document,
+        "model_catalog_json",
+        model_catalog_path.or(previous_model_catalog),
+    );
     if document
         .get("model_providers")
         .and_then(Item::as_table)
@@ -1600,12 +2348,22 @@ fn attach_config(document: &mut DocumentMut, base_url: &str, local_key: &str) {
     provider["supports_websockets"] = value(false);
 }
 
-fn restore_config(document: &mut DocumentMut, previous_model_provider: Option<&str>) {
+fn restore_config(
+    document: &mut DocumentMut,
+    previous_model_provider: Option<&str>,
+    previous_model_catalog: Option<&str>,
+) {
     remove_managed_provider(document);
-    if let Some(previous_model_provider) = previous_model_provider {
-        document["model_provider"] = value(previous_model_provider);
-    } else {
-        document.remove("model_provider");
+    restore_root_string(document, "model_provider", previous_model_provider);
+    restore_root_string(document, "model_catalog_json", previous_model_catalog);
+}
+
+fn restore_root_string(document: &mut DocumentMut, key: &str, previous: Option<&str>) {
+    match previous {
+        Some(previous) => document[key] = value(previous),
+        None => {
+            document.remove(key);
+        }
     }
 }
 
@@ -1625,6 +2383,30 @@ fn root_model_provider(document: &DocumentMut) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn root_model_catalog_json(document: &DocumentMut) -> Option<String> {
+    document
+        .get("model_catalog_json")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn external_model_catalog(document: &DocumentMut, backup: &ProfileBackup) -> Option<String> {
+    let current = root_model_catalog_json(document);
+    if current.as_deref() == backup.managed_model_catalog_path.as_deref() {
+        backup.previous_model_catalog_json.clone()
+    } else {
+        current
+    }
+}
+
+fn model_catalog_to_restore(document: &DocumentMut, backup: &ProfileBackup) -> Option<String> {
+    if backup.managed_model_catalog_path.is_some() {
+        backup.previous_model_catalog_json.clone()
+    } else {
+        root_model_catalog_json(document)
+    }
+}
+
 fn root_openai_base_url(document: &DocumentMut) -> Option<String> {
     document
         .get("openai_base_url")
@@ -1641,7 +2423,15 @@ fn document_has_provider(document: &DocumentMut) -> bool {
 
 fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document).as_deref() == Some(PROVIDER_ID)
+        && (backup.managed_model_catalog_path.is_none()
+            || root_model_catalog_json(document).as_deref()
+                == backup.managed_model_catalog_path.as_deref())
         && managed_provider_matches(document, backup)
+}
+
+fn previous_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
+    root_model_provider(document) == backup.previous_model_provider
+        && root_model_catalog_json(document) == backup.previous_model_catalog_json
 }
 
 fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
@@ -1739,41 +2529,260 @@ fn managed_auth_matches_snapshot(
     }
 }
 
+fn previous_auth_matches_snapshot(snapshot: &Option<Vec<u8>>, backup: &ProfileBackup) -> bool {
+    match backup.previous_auth_hash.as_deref() {
+        Some(expected_hash) => snapshot
+            .as_deref()
+            .is_some_and(|content| bytes_hash(content) == expected_hash),
+        None if backup.previous_auth_secret_ref.is_none() => snapshot.is_none(),
+        None => false,
+    }
+}
+
 fn key_hash(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn bytes_hash(value: &[u8]) -> String {
+    hex::encode(Sha256::digest(value))
+}
+
+fn reconcile_pending_catalog_state(
+    backup_path: &Path,
+    backup_bytes: &mut Option<Vec<u8>>,
+    backup: &mut ProfileBackup,
+    catalog_bytes: &Option<Vec<u8>>,
+) -> Result<()> {
+    let Some(pending_hash) = backup.managed_model_catalog_pending_hash.clone() else {
+        return Ok(());
+    };
+    let current_hash = catalog_bytes.as_deref().map(bytes_hash);
+    let stable_hash = backup.managed_model_catalog_hash.clone();
+    if current_hash.as_deref() == Some(pending_hash.as_str()) {
+        backup.managed_model_catalog_hash = Some(pending_hash);
+        backup.managed_model_catalog_pending_hash = None;
+    } else if current_hash == stable_hash || (stable_hash.is_none() && catalog_bytes.is_none()) {
+        backup.managed_model_catalog_pending_hash = None;
+    } else {
+        return Err(profile_restore_blocked());
+    }
+    let updated = serialize_backup(backup)?;
+    replace_if_unchanged(backup_path, backup_bytes, &updated)?;
+    *backup_bytes = Some(updated.into_bytes());
+    Ok(())
+}
+
+fn valid_managed_model_catalog(
+    backup: &ProfileBackup,
+    expected_path: &Path,
+    content: &Option<Vec<u8>>,
+) -> bool {
+    if backup
+        .managed_model_catalog_hash
+        .as_deref()
+        .is_some_and(|hash| hash.len() != 64)
+        || backup
+            .managed_model_catalog_pending_hash
+            .as_deref()
+            .is_some_and(|hash| hash.len() != 64)
+        || (backup.managed_model_catalog_pending_remove
+            && backup.managed_model_catalog_pending_hash.is_some())
+    {
+        return false;
+    }
+    let Some(path) = backup.managed_model_catalog_path.as_deref() else {
+        return backup.managed_model_catalog_hash.is_none()
+            && backup.managed_model_catalog_pending_hash.is_none()
+            && !backup.managed_model_catalog_pending_remove
+            && content.is_none();
+    };
+    if Path::new(path) != expected_path {
+        return false;
+    }
+    if backup.restore_pending && content.is_none() {
+        return true;
+    }
+    let current_hash = content.as_deref().map(bytes_hash);
+    let stable_valid = match backup.managed_model_catalog_hash.as_deref() {
+        Some(hash) if hash.len() == 64 => current_hash.as_deref() == Some(hash),
+        None => content.is_none(),
+        _ => false,
+    };
+    let pending_valid = backup
+        .managed_model_catalog_pending_hash
+        .as_deref()
+        .is_some_and(|hash| hash.len() == 64 && current_hash.as_deref() == Some(hash));
+    let pending_remove_valid = backup.managed_model_catalog_pending_remove && content.is_none();
+    stable_valid || pending_valid || pending_remove_valid
+}
+
+fn managed_model_catalog_path(backup_root: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(backup_root).map_err(io_error)?;
+    Ok(root.join(MODEL_CATALOG_FILE))
+}
+
+fn apply_model_catalog_change(
+    path: &Path,
+    previous: &Option<Vec<u8>>,
+    next: Option<&str>,
+    previously_managed: bool,
+) -> Result<()> {
+    match (next, previously_managed) {
+        (Some(content), _) => replace_if_unchanged(path, previous, content),
+        (None, true) => remove_if_unchanged(path, previous),
+        (None, false) => Ok(()),
+    }
+}
+
+fn rollback_model_catalog_change(
+    path: &Path,
+    attempted: Option<&str>,
+    previously_managed: bool,
+    previous: &Option<Vec<u8>>,
+) -> Result<()> {
+    match (attempted, previously_managed) {
+        (Some(content), _) => rollback_file(path, content, previous),
+        (None, true) => restore_snapshot_if_unchanged(path, &None, previous),
+        (None, false) => Ok(()),
+    }
+}
+
+fn remove_managed_model_catalog_if_unchanged(backup: &ProfileBackup) {
+    let Some(path) = backup.managed_model_catalog_path.as_deref() else {
+        return;
+    };
+    let path = Path::new(path);
+    let Ok(Some(content)) = read_optional_bytes(path) else {
+        return;
+    };
+    let current_hash = bytes_hash(&content);
+    if backup.managed_model_catalog_hash.as_deref() == Some(current_hash.as_str())
+        || backup.managed_model_catalog_pending_hash.as_deref() == Some(current_hash.as_str())
+    {
+        let _ = remove_if_unchanged(path, &Some(content));
+    }
+}
+
+fn invalidate_models_cache(codex_home: &Path) -> Result<bool> {
+    let path = codex_home.join(MODELS_CACHE_FILE);
+    let snapshot = read_optional_bytes(&path)?;
+    if snapshot.is_none() {
+        return Ok(false);
+    }
+    remove_if_unchanged(&path, &snapshot)?;
+    Ok(true)
 }
 
 fn backup_path(root: &Path) -> std::path::PathBuf {
     root.join("codex-default.json")
 }
 
-fn local_backup(root: &Path) -> Result<Option<ProfileBackup>> {
+fn local_backup(codex_home: &Path, root: &Path) -> Result<Option<ProfileBackup>> {
     let path = backup_path(root);
-    let snapshot = read_optional_bytes(&path)?;
-    let backup = parse_backup_snapshot(&snapshot, &path)?;
-    if backup.as_ref().is_some_and(|value| {
-        let oauth_metadata_valid = match (
-            value.bound_oauth_account_id.as_deref(),
-            value.managed_oauth_access_hash.as_deref(),
-        ) {
-            (Some(account_id), Some(access_hash)) => {
-                !account_id.trim().is_empty() && access_hash.len() == 64
-            }
-            (Some(account_id), None) => !account_id.trim().is_empty(),
-            (None, None) => true,
-            _ => false,
-        };
-        value.version != 1
-            || value.managed_key_hash.len() != 64
-            || value.managed_base_url.trim().is_empty()
-            || !oauth_metadata_valid
-    }) {
+    let mut snapshot = read_optional_bytes(&path)?;
+    let Some(mut backup) = parse_backup_snapshot(&snapshot, &path)? else {
+        return Ok(None);
+    };
+    let catalog_path = managed_model_catalog_path(root)?;
+    let catalog = read_optional_bytes(&catalog_path)?;
+    migrate_legacy_managed_catalog_metadata(
+        codex_home,
+        &path,
+        &mut snapshot,
+        &mut backup,
+        &catalog_path,
+        &catalog,
+    )?;
+    let oauth_metadata_valid = match (
+        backup.bound_oauth_account_id.as_deref(),
+        backup.managed_oauth_access_hash.as_deref(),
+    ) {
+        (Some(account_id), Some(access_hash)) => {
+            !account_id.trim().is_empty() && access_hash.len() == 64
+        }
+        (Some(account_id), None) => !account_id.trim().is_empty(),
+        (None, None) => true,
+        _ => false,
+    };
+    if backup.version != 1
+        || backup.managed_key_hash.len() != 64
+        || backup.managed_base_url.trim().is_empty()
+        || !oauth_metadata_valid
+        || !valid_managed_model_catalog(&backup, &catalog_path, &catalog)
+    {
         return Err(LocalPoolError::new(
             ErrorCode::RecoveryRequired,
             "ChatGPT local gateway profile backup has invalid metadata",
         ));
     }
-    Ok(backup)
+    Ok(Some(backup))
+}
+
+fn migrate_legacy_managed_catalog_metadata(
+    codex_home: &Path,
+    backup_path: &Path,
+    backup_bytes: &mut Option<Vec<u8>>,
+    backup: &mut ProfileBackup,
+    catalog_path: &Path,
+    catalog: &Option<Vec<u8>>,
+) -> Result<()> {
+    let legacy_metadata = backup.managed_model_catalog_path.is_none()
+        && backup.managed_model_catalog_hash.is_none()
+        && backup.managed_model_catalog_pending_hash.is_none()
+        && !backup.managed_model_catalog_pending_remove;
+    let Some(content) = catalog.as_deref() else {
+        return Ok(());
+    };
+    if !legacy_metadata || !is_relay_managed_model_catalog(content) {
+        return Ok(());
+    }
+
+    backup.managed_model_catalog_path = Some(catalog_path.to_string_lossy().into_owned());
+    backup.managed_model_catalog_hash = Some(bytes_hash(content));
+    if backup.previous_model_catalog_json.is_none() {
+        let config_path = codex_home.join(CONFIG_FILE);
+        let current_catalog = read_optional_bytes(&config_path)
+            .ok()
+            .flatten()
+            .and_then(|config| {
+                snapshot_text(&Some(config), &config_path)
+                    .ok()
+                    .flatten()
+                    .map(str::to_owned)
+            })
+            .and_then(|content| parse_config(&content).ok())
+            .and_then(|document| root_model_catalog_json(&document));
+        if current_catalog
+            .as_deref()
+            .is_some_and(|path| !configured_catalog_matches_path(codex_home, path, catalog_path))
+        {
+            backup.previous_model_catalog_json = current_catalog;
+        }
+    }
+
+    let updated = serialize_backup(backup)?;
+    replace_if_unchanged(backup_path, backup_bytes, &updated)?;
+    *backup_bytes = Some(updated.into_bytes());
+    Ok(())
+}
+
+fn configured_catalog_matches_path(codex_home: &Path, configured: &str, expected: &Path) -> bool {
+    let configured = Path::new(configured);
+    let resolved = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        codex_home.join(configured)
+    };
+    resolved == expected
+}
+
+fn is_relay_managed_model_catalog(content: &[u8]) -> bool {
+    read_catalog_values(content, true).is_ok_and(|models| {
+        !models.is_empty()
+            && models.iter().all(|model| {
+                model.get("comp_hash").and_then(Value::as_str) == Some(CODEX_RELAY_CATALOG_HASH)
+            })
+    })
 }
 
 fn parse_backup_snapshot(snapshot: &Option<Vec<u8>>, path: &Path) -> Result<Option<ProfileBackup>> {
@@ -1941,12 +2950,12 @@ fn discard_managed_binding_locked(
     let Some(backup) = parse_backup_snapshot(&bytes, &path)? else {
         return Ok(());
     };
-    discard_backup(
-        &path,
-        &bytes,
-        backup.previous_auth_secret_ref.as_deref(),
-        secrets,
-    )
+    remove_managed_model_catalog_if_unchanged(&backup);
+    if let Some(secret_ref) = backup.previous_auth_secret_ref.as_deref() {
+        secrets.delete(secret_ref)?;
+    }
+    remove_if_unchanged(&path, &bytes)?;
+    Ok(())
 }
 
 fn discard_backup(
@@ -2165,6 +3174,13 @@ mod tests {
     }
 
     #[test]
+    fn missing_backup_directory_has_no_local_binding() {
+        let (root, home, backups) = profile_dirs("missing-backup-root");
+        assert!(local_backup(&home, &backups).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn attach_and_restore_preserve_previous_profile_and_nested_provider() {
         let (root, home, backups) = profile_dirs("restore");
         fs::write(
@@ -2195,6 +3211,411 @@ mod tests {
             .unwrap()
             .contains("chatgpt"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
+        let (root, home, backups) = profile_dirs("model-catalog-restore");
+        let previous_catalog_path = root.join("previous-codex-models.json");
+        write_test_catalog_file(&previous_catalog_path, "native-user-model");
+        let previous_catalog = previous_catalog_path.to_string_lossy().replace('\\', "/");
+        fs::write(
+            home.join(CONFIG_FILE),
+            format!("model_provider = \"openai\"\nmodel_catalog_json = \"{previous_catalog}\"\n"),
+        )
+        .unwrap();
+        let cache_path = home.join(MODELS_CACHE_FILE);
+        let fresh_cache =
+            r#"{"fetched_at":"2026-07-30T00:00:00Z","etag":"v1","models":[{"slug":"cached"}]}"#;
+        fs::write(&cache_path, fresh_cache).unwrap();
+        let secrets = MemorySecrets::default();
+        let catalog = r#"{"models":[{"slug":"vendor/claude-opus-4-8","service_tiers":[{"id":"priority","name":"Fast","description":"Fast tier"}],"additional_speed_tiers":["fast"],"default_service_tier":"priority","default_reasoning_level":"high","supported_reasoning_levels":[{"effort":"low","description":"Low"},{"effort":"high","description":"High"},{"effort":"ultra","description":"Ultra"}],"supports_reasoning_summary_parameter":true,"supports_reasoning_summaries":true,"default_reasoning_summary":"detailed","supports_parallel_tool_calls":true}]}"#;
+
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            catalog,
+            &secrets,
+        )
+        .unwrap();
+
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        let attached = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            root_model_catalog_json(&attached).as_deref(),
+            Some(catalog_path.to_string_lossy().as_ref())
+        );
+        let managed_catalog: Value =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        let models = managed_catalog["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "vendor/claude-opus-4-8");
+        assert_ne!(models[0]["slug"], "native-user-model");
+        assert_eq!(models[0]["default_reasoning_level"], "high");
+        assert_eq!(
+            models[0]["supported_reasoning_levels"][2]["effort"],
+            "ultra"
+        );
+        assert_eq!(models[0]["service_tiers"][0]["id"], "priority");
+        assert_eq!(models[0]["additional_speed_tiers"], json!(["fast"]));
+        assert_eq!(models[0]["default_service_tier"], "priority");
+        assert_eq!(models[0]["supports_reasoning_summary_parameter"], true);
+        assert_eq!(models[0]["supports_reasoning_summaries"], true);
+        assert_eq!(models[0]["default_reasoning_summary"], "detailed");
+        assert_eq!(models[0]["supports_parallel_tool_calls"], true);
+        assert!(!cache_path.exists());
+
+        fs::write(&cache_path, fresh_cache).unwrap();
+        restore_with(&home, &backups, &secrets).unwrap();
+
+        let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            root_model_catalog_json(&restored).as_deref(),
+            Some(previous_catalog.as_str())
+        );
+        assert!(!catalog_path.exists());
+        assert!(!cache_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_source_catalog_contains_only_selected_source_models_without_native_capabilities() {
+        let (root, home, _backups) = profile_dirs("direct-source-catalog");
+        let mut native = routed_codex_catalog_entry(None, "gpt-5.6-sol", 1, None);
+        native["slug"] = Value::String("gpt-5.6-sol".into());
+        native["display_name"] = Value::String("GPT-5.6 Sol".into());
+        native["description"] = Value::String("Native test model".into());
+        native["comp_hash"] = Value::String("official".into());
+        native["default_reasoning_level"] = Value::String("low".into());
+        native["supported_reasoning_levels"] = json!([
+            {"effort": "low", "description": "Low"},
+            {"effort": "ultra", "description": "Ultra"}
+        ]);
+        let mut relay_owned = routed_codex_catalog_entry(None, "gpt-fake", 2, None);
+        relay_owned["slug"] = Value::String("gpt-fake".into());
+        relay_owned["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
+        fs::write(
+            home.join(MODELS_CACHE_FILE),
+            serde_json::to_string_pretty(&json!({"models": [native, relay_owned]})).unwrap(),
+        )
+        .unwrap();
+
+        let catalog = direct_source_model_catalog(
+            &home,
+            &[
+                "gpt-5.6-sol".into(),
+                "vendor/claude".into(),
+                "gpt-fake".into(),
+                "zenith/alias".into(),
+            ],
+        )
+        .unwrap()
+        .expect("catalog");
+        let models = serde_json::from_str::<Value>(&catalog).unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0]["slug"], "gpt-5.6-sol");
+        assert_eq!(models[1]["slug"], "gpt-fake");
+        assert_eq!(models[2]["slug"], "vendor/claude");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["priority"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1_000, 1_001, 1_002]
+        );
+        for model in &models {
+            assert!(model.get("default_reasoning_level").is_none());
+            assert_eq!(model["supported_reasoning_levels"], json!([]));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_source_catalog_resolves_the_configured_relative_template() {
+        let (root, home, _backups) = profile_dirs("direct-source-relative-template");
+        write_test_catalog_file(&home.join("native-catalog.json"), "gpt-5.6-sol");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_catalog_json = \"native-catalog.json\"\n",
+        )
+        .unwrap();
+
+        let catalog = direct_source_model_catalog(&home, &["vendor/claude-opus".into()])
+            .unwrap()
+            .expect("catalog");
+        let models = serde_json::from_str::<Value>(&catalog).unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .clone();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["slug"], "vendor/claude-opus");
+        assert_eq!(models[0]["supported_reasoning_levels"], json!([]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn generated_catalogs_do_not_require_cached_native_metadata() {
+        let (root, home, _backups) = profile_dirs("catalog-metadata-fallback");
+
+        let direct = direct_source_model_catalog(&home, &["vendor/direct".into()])
+            .unwrap()
+            .expect("direct catalog");
+        assert_eq!(
+            serde_json::from_str::<Value>(&direct).unwrap()["models"][0]["slug"],
+            "vendor/direct"
+        );
+
+        let managed = build_managed_model_catalog(
+            &home,
+            None,
+            None,
+            r#"{"models":[{"slug":"vendor/managed"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&managed).unwrap()["models"][0]["slug"],
+            "vendor/managed"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_managed_catalog_refreshes_without_replacing_the_profile() {
+        let (root, home, backups) = profile_dirs("model-catalog-refresh");
+        let cache_path = home.join(MODELS_CACHE_FILE);
+        fs::write(
+            &cache_path,
+            r#"{"fetched_at":"2026-07-30T00:00:00Z","etag":"v1","models":[]}"#,
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            r#"{"models":[{"slug":"old-model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+
+        assert!(refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model"}]}"#
+        )
+        .unwrap());
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(catalog_path).unwrap()).unwrap();
+        assert!(catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model["slug"] == "new-model"));
+        assert!(!cache_path.exists());
+        assert!(!refresh_managed_model_catalog(
+            &home,
+            &backups,
+            r#"{"models":[{"slug":"new-model"}]}"#
+        )
+        .unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_catalog_upgrade_preserves_legacy_user_catalog() {
+        let (root, home, backups) = profile_dirs("legacy-model-catalog");
+        let previous_catalog_path = root.join("legacy-models.json");
+        write_test_catalog_file(&previous_catalog_path, "legacy-native-model");
+        let previous_catalog = previous_catalog_path.to_string_lossy().replace('\\', "/");
+        fs::write(
+            home.join(CONFIG_FILE),
+            format!("model_catalog_json = \"{previous_catalog}\"\n"),
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_old_key",
+            &secrets,
+        )
+        .unwrap();
+        let backup_path = backup_path(&backups);
+        let mut legacy: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("previousModelCatalogJson");
+        object.remove("managedModelCatalogPath");
+        object.remove("managedModelCatalogHash");
+        fs::write(&backup_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_new_key",
+            r#"{"models":[{"slug":"vendor/model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+        restore_with(&home, &backups, &secrets).unwrap();
+
+        let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            root_model_catalog_json(&restored).as_deref(),
+            Some(previous_catalog.as_str())
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_relay_catalog_metadata_is_adopted_without_overwriting_an_external_catalog() {
+        let (root, home, backups) = profile_dirs("legacy-managed-catalog-metadata");
+        let external_config =
+            "model_provider = \"custom\"\nmodel_catalog_json = \"custom-catalog.json\"\n";
+        write_test_catalog_file(&home.join("custom-catalog.json"), "native-user-model");
+        fs::write(home.join(CONFIG_FILE), external_config).unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            r#"{"models":[{"slug":"vendor/model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+
+        let backup_path = backup_path(&backups);
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        for field in [
+            "previousModelCatalogJson",
+            "managedModelCatalogPath",
+            "managedModelCatalogHash",
+            "managedModelCatalogPendingHash",
+            "managedModelCatalogPendingRemove",
+        ] {
+            object.remove(field);
+        }
+        fs::write(&backup_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+        fs::write(home.join(CONFIG_FILE), external_config).unwrap();
+
+        let backup = local_backup(&home, &backups).unwrap().expect("backup");
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        assert_eq!(
+            backup.managed_model_catalog_path.as_deref(),
+            Some(catalog_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            backup.managed_model_catalog_hash.as_deref(),
+            Some(bytes_hash(&fs::read(&catalog_path).unwrap()).as_str())
+        );
+        assert_eq!(
+            backup.previous_model_catalog_json.as_deref(),
+            Some("custom-catalog.json")
+        );
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            external_config
+        );
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            external_config
+        );
+        assert!(!catalog_path.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_catalog_without_the_relay_marker_is_not_adopted() {
+        let (root, home, backups) = profile_dirs("legacy-unowned-catalog-metadata");
+        let secrets = MemorySecrets::default();
+        attach_with_catalog_for_test(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            r#"{"models":[{"slug":"vendor/model"}]}"#,
+            &secrets,
+        )
+        .unwrap();
+
+        let backup_path = backup_path(&backups);
+        let mut legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        for field in [
+            "managedModelCatalogPath",
+            "managedModelCatalogHash",
+            "managedModelCatalogPendingHash",
+            "managedModelCatalogPendingRemove",
+        ] {
+            object.remove(field);
+        }
+        fs::write(&backup_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let catalog_path = managed_model_catalog_path(&backups).unwrap();
+        let mut catalog: Value =
+            serde_json::from_str(&fs::read_to_string(&catalog_path).unwrap()).unwrap();
+        for model in catalog["models"].as_array_mut().unwrap() {
+            model["comp_hash"] = Value::String("external-catalog".into());
+        }
+        fs::write(
+            &catalog_path,
+            serde_json::to_string_pretty(&catalog).unwrap(),
+        )
+        .unwrap();
+        let original_backup = fs::read(&backup_path).unwrap();
+
+        let error = local_backup(&home, &backups).unwrap_err();
+        assert_eq!(error.code, ErrorCode::RecoveryRequired);
+        assert_eq!(fs::read(&backup_path).unwrap(), original_backup);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn snapshot_discard_removes_only_an_unchanged_managed_catalog() {
+        let catalog = r#"{"models":[{"slug":"vendor/model"}]}"#;
+        for changed in [false, true] {
+            let (root, home, backups) = profile_dirs(if changed {
+                "discard-changed-catalog"
+            } else {
+                "discard-managed-catalog"
+            });
+            let secrets = MemorySecrets::default();
+            attach_with_catalog_for_test(
+                &home,
+                &backups,
+                "http://127.0.0.1:14998/v1",
+                "zlr_key",
+                catalog,
+                &secrets,
+            )
+            .unwrap();
+            let catalog_path = managed_model_catalog_path(&backups).unwrap();
+            if changed {
+                fs::write(&catalog_path, "externally changed").unwrap();
+            }
+
+            discard_managed_binding_locked(&home, &backups, &secrets).unwrap();
+
+            assert_eq!(catalog_path.exists(), changed);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
@@ -2614,9 +4035,8 @@ mod tests {
             &secrets,
         )
         .unwrap();
-        let previous_backup = fs::read(backup_path(&backups)).unwrap();
-        let previous_config = fs::read(home.join(CONFIG_FILE)).unwrap();
-        let previous_auth = fs::read(home.join(AUTH_FILE)).unwrap();
+        let managed_config = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
         fs::create_dir(home.join("config.tmp")).unwrap();
 
         assert!(attach_with(
@@ -2627,9 +4047,17 @@ mod tests {
             &secrets,
         )
         .is_err());
-        assert_eq!(fs::read(backup_path(&backups)).unwrap(), previous_backup);
-        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), previous_config);
-        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), previous_auth);
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
+        let pending: Value =
+            serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
+        assert_eq!(pending["restorePending"], true);
+        fs::remove_dir_all(home.join("config.tmp")).unwrap();
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            "model_provider = \"openai\"\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2651,14 +4079,18 @@ mod tests {
             &secrets,
         )
         .unwrap();
-        let managed_config = fs::read(home.join(CONFIG_FILE)).unwrap();
-        let managed_auth = fs::read(home.join(AUTH_FILE)).unwrap();
-        let managed_backup = fs::read(backup_path(&backups)).unwrap();
-
         assert!(restore_with(&home, &backups, &secrets).is_err());
-        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), managed_config);
-        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), managed_auth);
-        assert_eq!(fs::read(backup_path(&backups)).unwrap(), managed_backup);
+        assert_eq!(
+            fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
+            "model_provider = \"openai\"\n"
+        );
+        assert!(fs::read_to_string(home.join(AUTH_FILE))
+            .unwrap()
+            .contains("old"));
+        let pending: Value =
+            serde_json::from_str(&fs::read_to_string(backup_path(&backups)).unwrap()).unwrap();
+        assert_eq!(pending["restorePending"], true);
+        assert!(!managed_model_catalog_path(&backups).unwrap().exists());
         assert!(secrets.load(BACKUP_SECRET_REF).unwrap().is_some());
         fs::remove_dir_all(root).unwrap();
     }
@@ -2927,7 +4359,7 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            None,
+            LocalAttachOptions::default(),
             &secrets,
         )
         .unwrap();
@@ -2955,7 +4387,7 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            None,
+            LocalAttachOptions::default(),
             &secrets,
         )
         .unwrap();
@@ -2984,7 +4416,7 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            None,
+            LocalAttachOptions::default(),
             &secrets,
         )
         .unwrap();
@@ -3043,11 +4475,14 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            Some(BoundOAuthProfile {
-                account_id: "account-local",
-                tokens: &tokens,
-                provider_account_id: "provider-account",
-            }),
+            LocalAttachOptions {
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "account-local",
+                    tokens: &tokens,
+                    provider_account_id: "provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
             &secrets,
         )
         .unwrap();
@@ -3093,11 +4528,14 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            Some(BoundOAuthProfile {
-                account_id: "account-local",
-                tokens: &tokens,
-                provider_account_id: "provider-account",
-            }),
+            LocalAttachOptions {
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "account-local",
+                    tokens: &tokens,
+                    provider_account_id: "provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
             &secrets,
         )
         .unwrap();
@@ -3185,11 +4623,14 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            Some(BoundOAuthProfile {
-                account_id: "account-local",
-                tokens: &tokens,
-                provider_account_id: "provider-account",
-            }),
+            LocalAttachOptions {
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "account-local",
+                    tokens: &tokens,
+                    provider_account_id: "provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
             &secrets,
         )
         .unwrap();
@@ -3199,7 +4640,7 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            None,
+            LocalAttachOptions::default(),
             &secrets,
         )
         .unwrap();
@@ -3235,11 +4676,14 @@ base_url = "https://custom.example.com/v1"
             "key-local",
             "http://127.0.0.1:14998/v1",
             "zlr_key",
-            Some(BoundOAuthProfile {
-                account_id: "account-local",
-                tokens: &tokens,
-                provider_account_id: "provider-account",
-            }),
+            LocalAttachOptions {
+                bound_oauth: Some(BoundOAuthProfile {
+                    account_id: "account-local",
+                    tokens: &tokens,
+                    provider_account_id: "provider-account",
+                }),
+                ..LocalAttachOptions::default()
+            },
             &secrets,
         )
         .unwrap();
@@ -3346,5 +4790,22 @@ base_url = "https://custom.example.com/v1"
                 entry.path().extension().and_then(|value| value.to_str()) == Some("json")
             })
             .count()
+    }
+
+    fn write_test_catalog_file(path: &Path, slug: &str) {
+        let mut entry = routed_codex_catalog_entry(None, slug, 2, None);
+        entry["slug"] = Value::String(slug.into());
+        entry["display_name"] = Value::String(slug.into());
+        entry["description"] = Value::String("Native user model".into());
+        entry["comp_hash"] = Value::String("official".into());
+        entry["default_reasoning_level"] = Value::String("medium".into());
+        entry["supported_reasoning_levels"] = json!([
+            {"effort": "medium", "description": "Medium"}
+        ]);
+        fs::write(
+            path,
+            serde_json::to_string_pretty(&json!({"models": [entry]})).unwrap(),
+        )
+        .unwrap();
     }
 }

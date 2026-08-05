@@ -6,6 +6,16 @@ import { defaultWakeInput, relayCommands } from "../../api/commands";
 import type { AccountExportFormat, AccountImportProgress, AccountSummary, AccountTransferProgress, ConfirmAccountImportResponse, ImportSession, OAuthFlow, ProfileBinding, ProxyAssignmentResult, ProxyPoolEntry, ProxyPoolSummary, RelayMode, RuntimeSnapshot, SourceSummary, StoredProxyAssignmentResult, WakeTask } from "../../api/types";
 import { ApiProviderForm, apiProviderReady, apiProviderSourceInput, defaultApiProviderValue } from "../../components/ApiProviderForm";
 import {
+  SourceProtocolBindingsSummary,
+  SourceProtocolRoutingDisclosure,
+} from "../../components/SourceProtocolRoutingDisclosure";
+import {
+  effectiveSourceProtocolBindings,
+  sourceSupportsNativeResponses,
+  sourceSupportsWireApi,
+} from "../../sourceProtocolBindings";
+import { sortModelIdsForLauncher } from "../../modelGroups";
+import {
   Button,
   QuotaEconomicsStrip,
   AccountPlanBadge,
@@ -210,7 +220,13 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
-  const sources = runtime.sources.filter((source) => matchesQuery(query, source.name, source.baseUrl, source.wireApi, source.models));
+  const sources = runtime.sources.filter((source) => matchesQuery(
+    query,
+    source.name,
+    source.baseUrl,
+    effectiveSourceProtocolBindings(source).map((binding) => binding.wireApi),
+    source.models,
+  ));
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
   const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
@@ -230,13 +246,15 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   return (
     <div className="relay-table-wrap relay-compact-content">
       <table className="relay-table source-table">
-        <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.protocol")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
+        <thead><tr><th>{t("common.status")}</th><th>{t("common.name")}</th><th>{t("sources.host")}</th><th>{t("sources.route")}</th><th>{t("common.models")}</th><th><span className="sr-only">{t("common.actions")}</span></th></tr></thead>
         <tbody>{sources.map((source) => {
           const launchBusy = busy === `launch-source-${source.id}`;
-          const launchDisabled = !localSource || source.wireApi !== "responses" || !source.enabled || !source.secretAvailable || launchBusy;
+          const supportsResponses = sourceSupportsWireApi(source, "responses");
+          const supportsNativeResponses = sourceSupportsNativeResponses(source);
+          const launchDisabled = !localSource || !supportsNativeResponses || !source.enabled || !source.secretAvailable || launchBusy;
           const launchTitle = !localSource
             ? t("sources.launchLocalOnly")
-            : source.wireApi !== "responses"
+            : !supportsNativeResponses
               ? t("sources.launchResponsesOnly")
               : !source.enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
@@ -245,20 +263,20 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
             <td><StatusIcon status={operationalStatusTone(source.operationalStatus)} label={t(`connections.status.${source.operationalStatus}`)} /></td>
             <td><strong>{source.name}</strong></td>
             <td><code>{safeHost(source.baseUrl)}</code></td>
-            <td>{source.wireApi === "chat_completions" ? "Chat Completions" : "Responses"}</td>
+            <td><SourceProtocolBindingsSummary source={source} /></td>
             <td>{source.models.length}</td>
             <td className="row-actions-cell"><div className="row-actions">
+              <ActionMenu>
+                <ActionMenuItem icon={busy === `source-models-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={busy === `source-models-${source.id}`} onClick={() => void refreshModels(source)}>{t("sources.refreshModels")}</ActionMenuItem>
+                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}` || (!source.inPool && !supportsResponses)} title={!source.inPool && !supportsResponses ? t("sources.poolResponsesOnly") : undefined} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
+                <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
+                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
+              </ActionMenu>
+              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => {
                 void activateCodexProfile(`launch-source-${source.id}`, () => relayCommands.launchCodexSource(source.id), true)
                   .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", source.id); });
               }} />
-              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
-              <ActionMenu>
-                <ActionMenuItem icon={busy === `source-models-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={busy === `source-models-${source.id}`} onClick={() => void refreshModels(source)}>{t("sources.refreshModels")}</ActionMenuItem>
-                {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}`} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
-                <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
-                <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
-              </ActionMenu>
             </div></td>
           </tr>;
         })}</tbody>
@@ -1016,7 +1034,7 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
   const [name, setName] = useState(source?.name ?? "");
   const [baseUrl, setBaseUrl] = useState(source?.baseUrl ?? "");
   const [apiKey, setApiKey] = useState("");
-  const [wireApi, setWireApi] = useState<SourceSummary["wireApi"]>(source?.wireApi ?? "responses");
+  const [protocolBindings, setProtocolBindings] = useState(() => source ? effectiveSourceProtocolBindings(source) : []);
   const [priceDrafts, setPriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(source?.modelPriceOverrides ?? {}));
   const modelPriceOverrides = useMemo(() => parseSourcePriceDrafts(priceDrafts), [priceDrafts]);
   const submit = async (event: FormEvent) => {
@@ -1034,7 +1052,8 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
         }
         return;
       }
-      const update = { name, baseUrl, wireApi, models: source.models, allowedModels: source.allowedModels, excludedModels: source.excludedModels, draining: source.draining, priority: source.priority, weight: source.weight, recoveryDelaySeconds: source.recoveryDelaySeconds, modelPriceOverrides };
+      const wireApi = protocolBindings[0]?.wireApi ?? source.wireApi;
+      const update = { name, baseUrl, wireApi, protocolBindings, models: source.models, allowedModels: source.allowedModels, excludedModels: source.excludedModels, draining: source.draining, priority: source.priority, weight: source.weight, recoveryDelaySeconds: source.recoveryDelaySeconds, modelPriceOverrides };
       if (mode !== "remote") {
         await relayCommands.updateSource({ sourceId: source.id, ...update });
         if (apiKey) await relayCommands.rotateSourceKey(source.id, apiKey);
@@ -1044,7 +1063,14 @@ export function SourceDialog({ source, onClose, addToPool = false }: { source: S
     }, source ? "feedback.saved" : "feedback.sourceAdded");
     if (ok) onClose();
   };
-  return <Dialog wide title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={(!source && !apiProviderReady(provider)) || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><div className="source-access-grid"><div className="relay-field"><span>{t("sources.protocol")}</span><OptionMenu className="field-option-menu" label={t("sources.protocol")} value={wireApi} onChange={(value) => setWireApi(value as SourceSummary["wireApi"])} options={[{ value: "responses", label: "Responses API" }, { value: "chat_completions", label: "Chat Completions" }]} /></div><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} /></> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
+  const canShowSave = Boolean(source || provider.kind);
+  const dialogClassName = source
+    ? "source-edit-dialog"
+    : `source-add-dialog ${canShowSave ? "source-add-configuring" : "source-add-selecting"}`;
+  const footer = canShowSave
+    ? <><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "source-save"} disabled={(!source && !apiProviderReady(provider)) || (Boolean(source) && !protocolBindings.length) || !modelPriceOverrides} onClick={() => document.querySelector<HTMLFormElement>("#source-form")?.requestSubmit()}>{t("common.save")}</Button></>
+    : <Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button>;
+  return <Dialog wide className={dialogClassName} title={source ? t("sources.edit") : addToPool ? t("sources.addToPool") : t("sources.add")} onClose={onClose} footer={footer}><form id="source-form" className="relay-form source-form" onSubmit={submit}>{source ? <><section className="source-form-section"><header><h3>{t("sources.connection")}</h3></header><div className="source-identity-grid"><label className="relay-field"><span>{t("common.name")}</span><input value={name} onChange={(event) => setName(event.target.value)} required /></label><label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" required /></label></div><SourceProtocolRoutingDisclosure models={source.models} value={protocolBindings} onChange={setProtocolBindings} /><div className="source-access-grid"><SecretField label={t("sources.replaceKey")} value={apiKey} onChange={setApiKey} /></div></section><SourcePriceEditor source={source} drafts={priceDrafts} onChange={setPriceDrafts} /></> : <ApiProviderForm value={provider} onChange={setProvider} />}</form></Dialog>;
 }
 
 function OAuthDialog({ flow, onCancel }: { flow: OAuthFlow; onCancel: () => Promise<void> }) {
@@ -1306,7 +1332,7 @@ function AutomationDialog({ task, onClose }: { task: WakeTask | null; onClose: (
   const rawPoolModels = runtime?.gateway.visibleModelIds.length
     ? runtime.gateway.visibleModelIds
     : (runtime?.gateway.models ?? []).filter((model) => model.enabled).map((model) => model.id);
-  const poolModels = rawPoolModels.filter((model, index) => rawPoolModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index);
+  const poolModels = sortModelIdsForLauncher(rawPoolModels.filter((model, index) => rawPoolModels.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index));
   const modelSets = targetAccounts.map((account) => account.models.filter((model) => (account.allowedModels.length === 0 || account.allowedModels.some((allowed) => allowed.toLowerCase() === model.toLowerCase())) && !account.excludedModels.some((excluded) => excluded.toLowerCase() === model.toLowerCase())));
   const targetModels = selectorKind === "account_ids" && modelSets.length > 1
     ? modelSets[0].filter((model) => modelSets.slice(1).every((set) => set.some((candidate) => candidate.toLowerCase() === model.toLowerCase())))

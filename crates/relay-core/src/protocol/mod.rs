@@ -1,7 +1,18 @@
+mod adapter;
 mod capabilities;
 mod management;
 mod version;
 
+pub use adapter::{
+    bridged_response_id, bridged_response_id_scoped, prepare_responses_to_messages,
+    prepare_responses_to_messages_scoped, translate_messages_response, AdapterError,
+    AdapterRequestContext, AdapterResult, MessagesBridgeRequest, MessagesBridgeResponse,
+    MessagesBridgeState, MessagesBridgeStore, MessagesReasoningMode, MessagesStreamBridge,
+    NativeResponsesReplayState, NativeResponsesReplayStore, PreparedAdapterRequest, SourceAdapter,
+};
+pub(crate) use adapter::{
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids,
+};
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 pub use management::{
     account_operational_state, operational_status, pool_model_summaries, quota_refresh_status,

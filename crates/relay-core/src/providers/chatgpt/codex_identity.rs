@@ -58,11 +58,9 @@ impl CodexIdentityEnvelope {
     }
 
     pub fn apply(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request
-            .header(USER_AGENT, self.user_agent.clone())
-            .header("version", self.version.clone())
-            .header("originator", self.originator.clone())
-            .header("chatgpt-account-id", self.account_id.clone())
+        let mut headers = HeaderMap::new();
+        self.insert(&mut headers);
+        request.headers(headers)
     }
 
     pub fn insert(&self, headers: &mut HeaderMap) {

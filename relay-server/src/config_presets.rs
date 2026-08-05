@@ -5,7 +5,8 @@ use crate::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_price_overrides, normalize_subscription_plan_order,
+    normalize_image_base_model, normalize_model_price_overrides,
+    normalize_source_protocol_bindings, normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
@@ -165,6 +166,14 @@ fn normalize_source_rules(rules: &mut [SourcePresetRule]) -> Result<(), PresetEr
         rule.excluded_models = normalize_models(std::mem::take(&mut rule.excluded_models))?;
         rule.model_price_overrides =
             normalize_prices(std::mem::take(&mut rule.model_price_overrides))?;
+        if !rule.protocol_bindings.is_empty() {
+            rule.protocol_bindings = normalize_source_protocol_bindings(
+                std::mem::take(&mut rule.protocol_bindings),
+                rule.wire_api,
+                &[],
+            )
+            .map_err(|error| PresetError::Invalid(error.to_string()))?;
+        }
     }
     rules.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(())

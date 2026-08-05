@@ -283,6 +283,7 @@ export function IconButton({ label, icon, className = "", title, onMouseEnter, o
       className={`relay-icon-button ${className}`.trim()}
       aria-label={label}
       aria-describedby={tooltip.describedBy}
+      title={props.disabled ? title ?? label : undefined}
       {...props}
       onMouseEnter={(event) => { tooltip.show(); onMouseEnter?.(event); }}
       onMouseLeave={(event) => { tooltip.hideAfterHover(); onMouseLeave?.(event); }}
@@ -362,9 +363,15 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       if (!triggerRef.current?.contains(target) && !listRef.current?.contains(target)) close();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close(true);
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(true);
+        return;
+      }
+      // A listbox is rendered in a portal. Closing it before a surrounding
+      // Dialog handles Tab lets the dialog keep focus inside its own subtree
+      // instead of leaving focus on a detached portal option.
+      if (event.key === "Tab") close();
     };
     const dismiss = () => close();
     const dismissOnWheel = (event: WheelEvent) => {
@@ -373,12 +380,15 @@ export function OptionMenu({ label, value, options, icon, onChange, className = 
       close();
     };
     document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
+    // Capture Escape before a containing Dialog's document listener sees it.
+    // The Dialog then observes defaultPrevented and stays open while the
+    // listbox closes.
+    document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("resize", dismiss);
     window.addEventListener("wheel", dismissOnWheel, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("resize", dismiss);
       window.removeEventListener("wheel", dismissOnWheel, true);
     };
@@ -470,29 +480,91 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
-export function Dialog({ title, children, onClose, footer, wide = false }: { title: string; children: ReactNode; onClose: () => void; footer: ReactNode; wide?: boolean }) {
+export function Dialog({ title, children, onClose, footer, wide = false, className = "" }: { title: string; children: ReactNode; onClose: () => void; footer: ReactNode; wide?: boolean; className?: string }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+  // Capture the opener during render, before a descendant with autoFocus can
+  // move focus during the commit phase. The cleanup must restore the control
+  // that actually opened this dialog, not an input that disappears with it.
+  const returnFocusRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
+  onCloseRef.current = onClose;
+  if (returnFocusRef.current === null && typeof document !== "undefined") {
+    returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  }
   useEffect(() => {
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const focusable = () => Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? []);
-    dialogRef.current?.focus();
+    const previouslyFocused = returnFocusRef.current;
+    const focusable = () => {
+      const dialog = dialogRef.current;
+      if (!dialog) return [];
+      return Array.from(dialog.querySelectorAll<HTMLElement>([
+        "a[href]",
+        "button",
+        "input",
+        "select",
+        "textarea",
+        "[contenteditable=\"true\"]",
+        "[tabindex]",
+      ].join(","))).filter((element) => {
+        if (element.matches("input[type=\"hidden\"]") || element.hasAttribute("disabled")) return false;
+        if (element.tabIndex < 0 || element.hidden || element.closest("[aria-hidden=\"true\"]")) return false;
+        const style = window.getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden";
+      });
+    };
+    const isTopmost = () => {
+      const dialogs = document.querySelectorAll<HTMLElement>("[data-relay-dialog]");
+      return dialogs.length > 0 && dialogs[dialogs.length - 1] === dialogRef.current;
+    };
+    const focusInitial = () => {
+      const dialog = dialogRef.current;
+      if (!dialog || dialog.contains(document.activeElement)) return;
+      dialog.focus({ preventScroll: true });
+    };
+    focusInitial();
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) onClose();
+      const dialog = dialogRef.current;
+      if (!dialog || !isTopmost() || event.defaultPrevented) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
       if (event.key !== "Tab") return;
       const items = focusable();
-      if (!items.length) return;
+      if (!items.length) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
       const first = items[0];
       const last = items[items.length - 1];
-      if (document.activeElement === dialogRef.current) { event.preventDefault(); (event.shiftKey ? last : first).focus(); }
-      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+      const active = document.activeElement;
+      if (active === dialog || !dialog.contains(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus({ preventScroll: true });
+      } else if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
     };
-    window.addEventListener("keydown", onKey);
-    return () => { window.removeEventListener("keydown", onKey); previouslyFocused?.focus(); };
-  }, [onClose]);
-  return <div className="relay-modal-backdrop" role="presentation"><section ref={dialogRef} className={`relay-dialog ${wide ? "wide" : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div><footer>{footer}</footer></section></div>;
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (
+        previouslyFocused?.isConnected
+        && !previouslyFocused.hidden
+        && !previouslyFocused.closest("[aria-hidden=\"true\"]")
+      ) {
+        previouslyFocused.focus({ preventScroll: true });
+      }
+    };
+  }, []);
+  return <div className="relay-modal-backdrop" role="presentation"><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div><footer>{footer}</footer></section></div>;
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
@@ -576,10 +648,34 @@ export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "
   return t("quota.minutes", { count: Math.ceil(minutes) });
 }
 
-export function SecretField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string }) {
+export function SecretField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  labelAction,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  labelAction?: ReactNode;
+}) {
   const { t } = useTranslation();
   const [visible, setVisible] = useState(false);
-  return <label className="relay-field"><span>{label}</span><div className="secret-field"><input type={visible ? "text" : "password"} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} autoComplete="off" spellCheck={false} /><IconButton label={visible ? t("common.hide") : t("common.reveal")} icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setVisible((current) => !current)} type="button" /></div></label>;
+  const inputId = useId();
+  return <div className="relay-field">
+    {labelAction
+      ? <div className="relay-field-label-row">
+        <label htmlFor={inputId}>{label}</label>
+        {labelAction}
+      </div>
+      : <label htmlFor={inputId}>{label}</label>}
+    <div className="secret-field">
+      <input id={inputId} type={visible ? "text" : "password"} value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} autoComplete="off" spellCheck={false} />
+      <IconButton label={visible ? t("common.hide") : t("common.reveal")} icon={visible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} onClick={() => setVisible((current) => !current)} type="button" />
+    </div>
+  </div>;
 }
 
 export async function copyText(value: string) {

@@ -3,36 +3,42 @@ use super::errors::{
     api_error, apply_attempt_failure_cooldown, apply_cooldown, apply_failure_cooldown_with_body,
     apply_failure_cooldown_with_hint, apply_failure_state, cooldown_error,
     failure_category_is_request_terminal, failure_category_requires_cooldown,
-    previous_response_not_found, recoverable_response_affinity_miss, retry_candidate_limit,
-    retryable_failure, retryable_status, AttemptFailure, TRANSIENT_COOLDOWN_MS,
+    failure_requires_independent_source_endpoint, previous_response_not_found,
+    previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
+    retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure,
+    TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{
-    account_endpoint_url, candidate_protocols, contains_function_call_output,
-    normalize_account_request, normalize_account_request_body, normalize_service_tier, request_id,
-    request_service_tier, try_recover_encrypted_content, AccountEndpoint,
-    CODEX_RESPONSES_LITE_HEADER, MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
+    account_endpoint_url, candidate_protocols, chat_request_is_text_or_image_only,
+    chat_request_uses_tools, contains_tool_call_output, forwarded_bridge_messages_headers,
+    forwarded_codex_headers, forwarded_messages_headers, normalize_account_request, request_id,
+    request_service_tier, tool_use_diagnostics, try_recover_encrypted_content,
+    with_forwarded_tool_diagnostics, AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
+    MAX_CLIENT_REQUEST_BODY_BYTES, MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use super::response::{
     completed_account_response, emit_usage, populate_tokens, proxy_json_response, proxy_response,
     proxy_sse_response, response_id_from_bytes, upstream_body_error_response, usage_event,
     CompletionCallback,
 };
-use super::streaming::{bootstrap_stream, UsageStream};
-use super::translation::{
-    completed_chat_sse, completed_sse, translate_chat_request, translate_chat_response,
-    translate_responses_request, translate_responses_response,
-};
+use super::streaming::{bootstrap_stream, bridge_messages_stream, UsageStream};
 use crate::protocol::ClientWireApi;
-use crate::runtime::AuthenticatedKey;
+use crate::protocol::{
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids, AdapterError,
+    AdapterRequestContext, MessagesBridgeResponse,
+};
+use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
 use crate::{Error, GatewayRuntime, WireApi};
 use axum::body::{Body, Bytes};
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
-use futures_util::{stream, StreamExt};
+use futures_util::{stream, Stream, StreamExt};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 #[allow(clippy::too_many_arguments)]
@@ -50,6 +56,7 @@ pub(super) async fn execute_account_endpoint(
 ) -> Response<Body> {
     let request_id = request_id();
     let service_tier = request_service_tier(&request);
+    let client_tool_use = tool_use_diagnostics(&request);
     let prompt_affinity_key = runtime.prompt_affinity_key(
         &key.id,
         &resolved_model,
@@ -63,26 +70,29 @@ pub(super) async fn execute_account_endpoint(
     let mut tried = account_only_exclusions.clone();
     let mut attempt = 0_u16;
     let mut owner_recovery_confirmed = false;
-    let mut exhaust_pool = false;
     let mut encrypted_content_recovered = false;
+    let mut function_item_id_repair_attempted = false;
+    let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
 
-    while exhaust_pool
-        || usize::from(attempt)
-            < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-                + usize::from(encrypted_content_recovered)
+    while usize::from(attempt)
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
-        let Some((selected, lease)) = runtime.select_and_reserve(
-            &key,
-            &resolved_model,
-            &[WireApi::Responses],
-            &tried,
-            (
-                response_affinity_key.as_deref(),
-                prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        ) else {
+        let Some((selected, lease)) = runtime
+            .select_and_reserve(
+                &key,
+                &resolved_model,
+                &[WireApi::Responses],
+                &tried,
+                (
+                    response_affinity_key.as_deref(),
+                    prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await
+        else {
             break;
         };
         tried.insert(selected.candidate_id.clone());
@@ -118,6 +128,7 @@ pub(super) async fn execute_account_endpoint(
                 )
             }
         };
+        let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
         attempt = attempt.saturating_add(1);
         let started = Instant::now();
@@ -125,24 +136,12 @@ pub(super) async fn execute_account_endpoint(
             .request_client(&route.candidate_id, false)
             .post(upstream_url)
             .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json");
+            .header(ACCEPT, "application/json")
+            .headers(forwarded_codex_headers(&client_headers, &request_id));
         if endpoint == AccountEndpoint::Compact {
             if let Some(value) = responses_lite.as_ref() {
                 upstream_request =
                     upstream_request.header(CODEX_RESPONSES_LITE_HEADER, value.clone());
-            }
-        } else {
-            for name in [
-                USER_AGENT.as_str(),
-                "version",
-                "session_id",
-                "x-session-id",
-                "x-client-request-id",
-                "x-openai-actor-authorization",
-            ] {
-                if let Some(value) = client_headers.get(name) {
-                    upstream_request = upstream_request.header(name, value.clone());
-                }
             }
         }
         let upstream = runtime
@@ -173,6 +172,7 @@ pub(super) async fn execute_account_endpoint(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -181,7 +181,6 @@ pub(super) async fn execute_account_endpoint(
             }
         };
         let status = upstream.status();
-        exhaust_pool |= status == StatusCode::TOO_MANY_REQUESTS;
         let response_headers = upstream.headers().clone();
         let bytes = match crate::runtime::collect_limited(upstream, endpoint.response_limit()).await
         {
@@ -205,6 +204,7 @@ pub(super) async fn execute_account_endpoint(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -213,6 +213,24 @@ pub(super) async fn execute_account_endpoint(
             }
         };
         if !status.is_success() {
+            if !function_item_id_repair_attempted
+                && responses_function_item_id_requires_fc_prefix(&bytes)
+                && repair_call_prefixed_function_item_ids(&mut request)
+            {
+                function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if !message_item_id_repair_attempted
+                && responses_message_item_id_requires_msg_prefix(&bytes)
+                && remove_item_prefixed_message_ids(&mut request)
+            {
+                message_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             let mut event = usage_event(
                 &request_id,
@@ -224,6 +242,7 @@ pub(super) async fn execute_account_endpoint(
                 status.as_u16(),
                 Some(failure.category.to_string()),
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             if failure.category == "upstream_encrypted_content_invalid"
                 && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
@@ -277,6 +296,7 @@ pub(super) async fn execute_account_endpoint(
             status.as_u16(),
             None,
             started.elapsed().as_millis() as u64,
+            tool_use,
         );
         populate_tokens(&mut event, &bytes);
         let recovered = runtime.record_success_with_metrics(
@@ -323,13 +343,22 @@ pub(super) async fn execute_client_request(
     if !valid_local_host(&headers) {
         return invalid_host();
     }
-    let Some(key) = runtime.authenticate(headers.get(AUTHORIZATION)) else {
+    let key = runtime
+        .authenticate(headers.get(AUTHORIZATION))
+        .or_else(|| {
+            (wire_api == WireApi::Messages)
+                .then(|| headers.get("x-api-key"))
+                .flatten()
+                .and_then(|value| value.to_str().ok())
+                .and_then(|secret| runtime.authenticate_secret(secret))
+        });
+    let Some(key) = key else {
         return unauthorized();
     };
     let client_wire_api = match wire_api {
         WireApi::Responses => ClientWireApi::Responses,
         WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
-        WireApi::Messages => return client_api_forbidden(),
+        WireApi::Messages => ClientWireApi::Messages,
     };
     if !runtime.allows_client_wire_api(&key, client_wire_api) {
         return client_api_forbidden();
@@ -345,7 +374,7 @@ pub(super) async fn execute_client_request(
         }
     };
 
-    let mut request: Value = match serde_json::from_slice(&body) {
+    let request: Value = match serde_json::from_slice(&body) {
         Ok(Value::Object(request)) => Value::Object(request),
         _ => {
             return api_error(
@@ -355,8 +384,19 @@ pub(super) async fn execute_client_request(
             )
         }
     };
-    if let Some(object) = request.as_object_mut() {
-        normalize_service_tier(object, runtime.default_service_tier());
+    if wire_api == WireApi::ChatCompletions && chat_request_uses_tools(&request) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "tool use is not supported through Chat Completions; use Responses or Messages",
+            "tool_use_not_supported",
+        );
+    }
+    if wire_api == WireApi::ChatCompletions && !chat_request_is_text_or_image_only(&request) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "Chat Completions supports text and image content only",
+            "chat_feature_not_supported",
+        );
     }
     let Some(requested_model) = request
         .get("model")
@@ -381,34 +421,43 @@ pub(super) async fn execute_client_request(
         }
         None => false,
     };
-    let visible_models = runtime.visible_models(&key, candidate_protocols(wire_api), now_ms());
-    if !visible_models
-        .iter()
-        .any(|model| model.eq_ignore_ascii_case(&requested_model))
-    {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "model is not available for this local key",
-            "model_not_found",
-        );
-    }
-    let Some(resolved_model) = runtime.resolve_model(&key, &requested_model) else {
+    let Some(resolved_model) = runtime.resolve_visible_model(
+        &key,
+        &requested_model,
+        candidate_protocols(wire_api),
+        now_ms(),
+    ) else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this local key",
             "model_not_found",
         );
     };
-    let responses_lite = headers
-        .get(CODEX_RESPONSES_LITE_HEADER)
-        .cloned()
-        .or_else(|| {
+    let responses_lite = (wire_api == WireApi::Responses)
+        .then(|| {
+            headers
+                .get(CODEX_RESPONSES_LITE_HEADER)
+                .cloned()
+                .or_else(|| {
+                    runtime
+                        .codex_model_uses_responses_lite(&resolved_model)
+                        .then(|| HeaderValue::from_static("true"))
+                })
+        })
+        .flatten();
+    let response_affinity_key = (wire_api == WireApi::Responses)
+        .then(|| {
             runtime
-                .codex_model_uses_responses_lite(&resolved_model)
-                .then(|| HeaderValue::from_static("true"))
-        });
-    let response_affinity_key =
-        runtime.response_affinity_key(request.get("previous_response_id").and_then(Value::as_str));
+                .response_affinity_key(request.get("previous_response_id").and_then(Value::as_str))
+        })
+        .flatten();
+    let request_id = request_id();
+    let forwarded_headers = match wire_api {
+        WireApi::Messages => forwarded_messages_headers(&headers),
+        WireApi::Responses | WireApi::ChatCompletions => {
+            forwarded_codex_headers(&headers, &request_id)
+        }
+    };
     execute_request(
         runtime,
         key,
@@ -416,7 +465,8 @@ pub(super) async fn execute_client_request(
         requested_model,
         resolved_model,
         stream,
-        request_id(),
+        request_id,
+        forwarded_headers,
         response_affinity_key,
         wire_api,
         responses_lite,
@@ -435,47 +485,61 @@ async fn execute_request(
     resolved_model: String,
     stream: bool,
     request_id: String,
+    forwarded_headers: HeaderMap,
     response_affinity_key: Option<String>,
     wire_api: WireApi,
     responses_lite: Option<HeaderValue>,
     allow_previous_response_reset: bool,
     attempt_offset: u16,
 ) -> Response<Body> {
-    let service_tier = request_service_tier(&request);
+    let service_tier = if wire_api != WireApi::Messages {
+        request_service_tier(&request)
+    } else {
+        DefaultServiceTier::Standard
+    };
+    let client_tool_use = tool_use_diagnostics(&request);
     let mut tried = HashSet::new();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
-    let mut exhaust_pool = false;
     let mut confirmed_response_missing = false;
     let mut encrypted_content_recovered = false;
+    let mut native_replay_attempted = false;
+    let mut function_item_id_repair_attempted = false;
+    let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
-    let has_previous_response_id = request
-        .get("previous_response_id")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.trim().is_empty());
-    let prompt_affinity_key = runtime.prompt_affinity_key(
-        &key.id,
-        &resolved_model,
-        request.get("prompt_cache_key").and_then(Value::as_str),
-    );
+    let has_previous_response_id = wire_api == WireApi::Responses
+        && request
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+    let prompt_affinity_key = (wire_api != WireApi::Messages)
+        .then(|| {
+            runtime.prompt_affinity_key(
+                &key.id,
+                &resolved_model,
+                request.get("prompt_cache_key").and_then(Value::as_str),
+            )
+        })
+        .flatten();
 
-    while exhaust_pool
-        || attempts_this_run
-            < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
-                + usize::from(encrypted_content_recovered)
+    while attempts_this_run
+        < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
+            + usize::from(encrypted_content_recovered)
     {
-        let selected = runtime.select_and_reserve(
-            &key,
-            &resolved_model,
-            candidate_protocols(wire_api),
-            &tried,
-            (
-                response_affinity_key.as_deref(),
-                prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                &key,
+                &resolved_model,
+                candidate_protocols(wire_api),
+                &tried,
+                (
+                    response_affinity_key.as_deref(),
+                    prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             if attempt == 0 {
                 if let Some(retry_at) = runtime.earliest_retry_at(
@@ -501,66 +565,80 @@ async fn execute_request(
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
         let source_model = route.source_model.clone();
-        let responses_via_chat =
-            wire_api == WireApi::Responses && route.wire_api == WireApi::ChatCompletions;
-        let chat_via_responses =
-            wire_api == WireApi::ChatCompletions && route.wire_api == WireApi::Responses;
+        debug_assert_eq!(wire_api, route.wire_api);
         let account_route = route.account_id.is_some();
-        let request_body = if responses_via_chat {
-            match translate_responses_request(&request, &source_model, false) {
-                Ok(body) => body,
-                Err(failure) => {
-                    last_failure = Some(failure);
-                    continue;
-                }
-            }
-        } else if chat_via_responses {
-            match translate_chat_request(&request, &source_model, false) {
-                Ok(body) if account_route => {
-                    match normalize_account_request_body(&body, responses_lite.is_some()) {
-                        Ok(body) => body,
-                        Err(failure) => {
-                            last_failure = Some(failure);
-                            continue;
-                        }
-                    }
-                }
-                Ok(body) => body,
-                Err(failure) => {
-                    last_failure = Some(failure);
-                    continue;
-                }
+        let previous = if route.adapter.uses_local_continuation_state() {
+            match request
+                .get("previous_response_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(response_id) => match runtime.load_messages_bridge_state(
+                    &key.id,
+                    response_id,
+                    &route.candidate_id,
+                    now_ms(),
+                ) {
+                    Ok(previous) => Some(previous),
+                    Err(error) => return adapter_error_response(error),
+                },
+                None => None,
             }
         } else {
-            let mut upstream_request = request.clone();
-            let Value::Object(object) = &mut upstream_request else {
+            None
+        };
+        let mut adapter_request = match route.adapter.prepare_request(AdapterRequestContext {
+            client_wire_api: wire_api,
+            request: &request,
+            model: &source_model,
+            stream,
+            reasoning_mode: route.reasoning_mode,
+            previous,
+            response_scope: &route.candidate_id,
+        }) {
+            Ok(request) => request,
+            Err(error) => return adapter_error_response(error),
+        };
+        if account_route {
+            let Some(upstream_body) = adapter_request.native_upstream_body_mut() else {
+                return adapter_error_response(AdapterError::unsupported_binding());
+            };
+            let Value::Object(object) = upstream_body else {
                 unreachable!("request object was validated before execution")
             };
-            object.insert("model".to_string(), Value::String(source_model.clone()));
-            if account_route {
-                normalize_account_request(object, responses_lite.is_some());
-            }
-            match serde_json::to_vec(&upstream_request) {
-                Ok(body) => body,
-                Err(_) => {
-                    return api_error(
-                        StatusCode::BAD_REQUEST,
-                        "request body could not be serialized",
-                        "invalid_request",
-                    )
-                }
+            normalize_account_request(object, responses_lite.is_some());
+        }
+        let adapter_is_passthrough = adapter_request.is_passthrough();
+        let request_body = match serde_json::to_vec(adapter_request.upstream_body()) {
+            Ok(body) => body,
+            Err(_) => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "request body could not be serialized",
+                    "invalid_request",
+                )
             }
         };
+        let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
-        // ponytail: cross-protocol streams are buffered into one terminal SSE sequence; add delta translation when adapter TTFT matters.
-        let upstream_stream = stream && !responses_via_chat && !chat_via_responses;
+        let upstream_stream = stream;
         attempt = attempt.saturating_add(1);
         attempts_this_run = attempts_this_run.saturating_add(1);
         let started = Instant::now();
         let client = runtime.request_client(&route.candidate_id, upstream_stream);
+        let mut upstream_headers = if adapter_request.requires_bridge_headers() {
+            forwarded_bridge_messages_headers(&forwarded_headers)
+        } else {
+            forwarded_headers.clone()
+        };
+        for (name, value) in &route.upstream_headers {
+            upstream_headers.insert(name.clone(), value.clone());
+        }
         let mut upstream_request = client
             .post(route.upstream_url.clone())
-            .header(CONTENT_TYPE, "application/json");
+            .header(CONTENT_TYPE, "application/json")
+            .headers(upstream_headers);
         if upstream_stream {
             upstream_request = upstream_request.header(ACCEPT, "text/event-stream");
         }
@@ -587,6 +665,9 @@ async fn execute_request(
                     failure.cooldown_ms,
                     route.half_open_probe,
                 );
+                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                }
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -597,6 +678,7 @@ async fn execute_request(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
@@ -606,7 +688,6 @@ async fn execute_request(
         };
 
         let status = upstream.status();
-        exhaust_pool |= status == StatusCode::TOO_MANY_REQUESTS;
         let response_headers = upstream.headers().clone();
         if !status.is_success() {
             let mut event = usage_event(
@@ -619,6 +700,7 @@ async fn execute_request(
                 status.as_u16(),
                 None,
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             let bytes = match crate::runtime::collect_limited(
                 upstream,
@@ -641,15 +723,76 @@ async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
                     continue;
                 }
                 Err(error) => return upstream_body_error_response(&runtime, event, started, error),
             };
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && !function_item_id_repair_attempted
+                && responses_function_item_id_requires_fc_prefix(&bytes)
+                && repair_call_prefixed_function_item_ids(&mut request)
+            {
+                function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && !message_item_id_repair_attempted
+                && responses_message_item_id_requires_msg_prefix(&bytes)
+                && remove_item_prefixed_message_ids(&mut request)
+            {
+                message_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             event.error_category = Some(failure.category.to_string());
-            if failure.category == "upstream_encrypted_content_invalid"
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && has_previous_response_id
+                && !native_replay_attempted
+                && previous_response_requires_websocket(&bytes)
+            {
+                let previous_response_id = request
+                    .get("previous_response_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if let Some(previous_response_id) = previous_response_id {
+                    if let Some(replay) = runtime.load_native_responses_replay(
+                        &key.id,
+                        previous_response_id,
+                        &route.candidate_id,
+                        now_ms(),
+                    ) {
+                        request = match replay.replay_request(&request, &source_model, stream) {
+                            Ok(request) => request,
+                            Err(error) => return adapter_error_response(error),
+                        };
+                        native_replay_attempted = true;
+                        tried.remove(&route.candidate_id);
+                        emit_usage(&runtime, event);
+                        last_failure = Some(failure);
+                        continue;
+                    }
+                }
+            }
+            if wire_api == WireApi::Responses
+                && failure.category == "upstream_encrypted_content_invalid"
                 && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
             {
                 tried.remove(&route.candidate_id);
@@ -684,6 +827,12 @@ async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                 }
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -691,6 +840,15 @@ async fn execute_request(
                     break;
                 }
                 continue;
+            }
+            if !adapter_is_passthrough {
+                event.error_category = Some("adapter_upstream_error".to_string());
+                emit_usage(&runtime, event);
+                return api_error(
+                    failure.status,
+                    "upstream source rejected the translated request",
+                    "adapter_upstream_error",
+                );
             }
             populate_tokens(&mut event, &bytes);
             emit_usage(&runtime, event);
@@ -707,6 +865,7 @@ async fn execute_request(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
+                    let failure = AttemptFailure::body();
                     let state = apply_cooldown(
                         &runtime,
                         &route.candidate_id,
@@ -714,6 +873,12 @@ async fn execute_request(
                         TRANSIENT_COOLDOWN_MS,
                         route.half_open_probe,
                     );
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                     let mut event = usage_event(
                         &request_id,
                         attempt,
@@ -728,10 +893,11 @@ async fn execute_request(
                             "upstream_body".to_string()
                         }),
                         started.elapsed().as_millis() as u64,
+                        tool_use.clone(),
                     );
                     apply_failure_state(&mut event, state);
                     emit_usage(&runtime, event);
-                    last_failure = Some(AttemptFailure::body());
+                    last_failure = Some(failure);
                     continue;
                 }
             };
@@ -739,7 +905,6 @@ async fn execute_request(
                 match completed_account_response(&bytes) {
                     Ok(bytes) => bytes,
                     Err(failure) => {
-                        exhaust_pool |= failure.status == StatusCode::TOO_MANY_REQUESTS;
                         let state =
                             failure_category_requires_cooldown(failure.category).then(|| {
                                 apply_attempt_failure_cooldown(
@@ -761,8 +926,10 @@ async fn execute_request(
                             failure.status.as_u16(),
                             Some(failure.category.to_string()),
                             started.elapsed().as_millis() as u64,
+                            tool_use.clone(),
                         );
-                        if failure.category == "upstream_encrypted_content_invalid"
+                        if wire_api == WireApi::Responses
+                            && failure.category == "upstream_encrypted_content_invalid"
                             && try_recover_encrypted_content(
                                 &mut request,
                                 &mut encrypted_content_recovered,
@@ -787,58 +954,32 @@ async fn execute_request(
             } else {
                 bytes
             };
-            let bytes = if responses_via_chat {
-                match translate_chat_response(&bytes) {
-                    Ok(bytes) => bytes,
-                    Err(failure) => {
-                        let state =
-                            failure_category_requires_cooldown(failure.category).then(|| {
-                                apply_attempt_failure_cooldown(
-                                    &runtime,
-                                    &route.candidate_id,
-                                    &source_model,
-                                    &failure,
-                                    &response_headers,
-                                    route.half_open_probe,
-                                )
-                            });
-                        let mut event = usage_event(
-                            &request_id,
-                            attempt,
-                            &key.id,
-                            &route,
-                            &requested_model,
-                            false,
-                            failure.status.as_u16(),
-                            Some(failure.category.to_string()),
-                            started.elapsed().as_millis() as u64,
-                        );
-                        if let Some(state) = state {
-                            apply_failure_state(&mut event, state);
-                        }
-                        emit_usage(&runtime, event);
-                        if failure_category_is_request_terminal(failure.category) {
-                            return api_error(failure.status, failure.message, failure.category);
-                        }
-                        last_failure = Some(failure);
-                        continue;
-                    }
+            let bridge_response = match adapter_request.translate_response_bytes(&bytes) {
+                Ok(response) => response,
+                Err(error) => {
+                    let mut event = usage_event(
+                        &request_id,
+                        attempt,
+                        &key.id,
+                        &route,
+                        &requested_model,
+                        false,
+                        StatusCode::BAD_GATEWAY.as_u16(),
+                        Some(error.code().to_string()),
+                        started.elapsed().as_millis() as u64,
+                        tool_use.clone(),
+                    );
+                    event.error_category = Some(error.code().to_string());
+                    emit_usage(&runtime, event);
+                    drop(lease);
+                    return adapter_error_response(error);
                 }
-            } else if chat_via_responses {
-                match translate_responses_response(&bytes) {
+            };
+            let bytes = if let Some(response) = bridge_response.as_ref() {
+                match serde_json::to_vec(&response.response_body) {
                     Ok(bytes) => bytes,
-                    Err(failure) => {
-                        let state =
-                            failure_category_requires_cooldown(failure.category).then(|| {
-                                apply_attempt_failure_cooldown(
-                                    &runtime,
-                                    &route.candidate_id,
-                                    &source_model,
-                                    &failure,
-                                    &response_headers,
-                                    route.half_open_probe,
-                                )
-                            });
+                    Err(_) => {
+                        let error = AdapterError::upstream_response_invalid();
                         let mut event = usage_event(
                             &request_id,
                             attempt,
@@ -846,19 +987,15 @@ async fn execute_request(
                             &route,
                             &requested_model,
                             false,
-                            failure.status.as_u16(),
-                            Some(failure.category.to_string()),
+                            StatusCode::BAD_GATEWAY.as_u16(),
+                            Some(error.code().to_string()),
                             started.elapsed().as_millis() as u64,
+                            tool_use.clone(),
                         );
-                        if let Some(state) = state {
-                            apply_failure_state(&mut event, state);
-                        }
+                        event.error_category = Some(error.code().to_string());
                         emit_usage(&runtime, event);
-                        if failure_category_is_request_terminal(failure.category) {
-                            return api_error(failure.status, failure.message, failure.category);
-                        }
-                        last_failure = Some(failure);
-                        continue;
+                        drop(lease);
+                        return adapter_error_response(error);
                     }
                 }
             } else {
@@ -874,6 +1011,7 @@ async fn execute_request(
                 status.as_u16(),
                 None,
                 started.elapsed().as_millis() as u64,
+                tool_use.clone(),
             );
             populate_tokens(&mut event, &bytes);
             let recovered = runtime.record_success_with_metrics(
@@ -890,21 +1028,42 @@ async fn execute_request(
                 now_ms(),
             );
             emit_usage(&runtime, event);
-            let completed_response_id = response_id_from_bytes(&bytes);
-            runtime.bind_response_affinity(
-                completed_response_id.as_deref(),
-                &route.candidate_id,
-                now_ms(),
-            );
-            if stream {
-                let body = match wire_api {
-                    WireApi::Responses => completed_sse(&bytes),
-                    WireApi::ChatCompletions => completed_chat_sse(&bytes),
-                    WireApi::Messages => Bytes::new(),
-                };
-                return proxy_sse_response(status, &response_headers, Body::from(body));
+            if let Some(bridge_response) = bridge_response.as_ref() {
+                runtime.save_messages_bridge_response(
+                    &key.id,
+                    &route.candidate_id,
+                    bridge_response,
+                    now_ms(),
+                );
             }
-            if account_route {
+            if wire_api == WireApi::Responses && adapter_is_passthrough {
+                if let Ok(upstream) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some((response_id, replay)) =
+                        crate::NativeResponsesReplayState::from_response(
+                            &request,
+                            &source_model,
+                            &upstream,
+                        )
+                    {
+                        runtime.save_native_responses_replay(
+                            &key.id,
+                            &route.candidate_id,
+                            &response_id,
+                            replay,
+                            now_ms(),
+                        );
+                    }
+                }
+            }
+            if wire_api == WireApi::Responses {
+                let completed_response_id = response_id_from_bytes(&bytes);
+                runtime.bind_response_affinity(
+                    completed_response_id.as_deref(),
+                    &route.candidate_id,
+                    now_ms(),
+                );
+            }
+            if account_route || !adapter_is_passthrough {
                 return proxy_json_response(status, &response_headers, Body::from(bytes));
             }
             return proxy_response(status, &response_headers, Body::from(bytes));
@@ -918,6 +1077,16 @@ async fn execute_request(
                 let completion_prompt_affinity = prompt_affinity_key.clone();
                 let completion_half_open_probe = route.half_open_probe;
                 let completion_headers = headers.clone();
+                let completion_uses_response_affinity = wire_api == WireApi::Responses;
+                let completion_bridge_state = (!adapter_is_passthrough)
+                    .then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
+                let completion_bridge_state_for_callback = completion_bridge_state.clone();
+                let completion_native_response = (wire_api == WireApi::Responses
+                    && adapter_is_passthrough)
+                    .then(|| Arc::new(Mutex::new(None::<Value>)));
+                let completion_native_response_for_callback = completion_native_response.clone();
+                let completion_native_template = request.clone();
+                let completion_local_key = key.id.clone();
                 let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
                     lease.release();
                     if event.success {
@@ -934,11 +1103,50 @@ async fn execute_request(
                             &completion_source,
                             now_ms(),
                         );
-                        completion_runtime.bind_response_affinity(
-                            response_id,
-                            &completion_source,
-                            now_ms(),
-                        );
+                        if completion_uses_response_affinity {
+                            completion_runtime.bind_response_affinity(
+                                response_id,
+                                &completion_source,
+                                now_ms(),
+                            );
+                        }
+                        if let Some(shared) = completion_bridge_state_for_callback.as_ref() {
+                            if let Some(response) = shared
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take()
+                            {
+                                completion_runtime.save_messages_bridge_response(
+                                    &completion_local_key,
+                                    &completion_source,
+                                    &response,
+                                    now_ms(),
+                                );
+                            }
+                        }
+                        if let Some(shared) = completion_native_response_for_callback.as_ref() {
+                            if let Some(response) = shared
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take()
+                            {
+                                if let Some((response_id, replay)) =
+                                    crate::NativeResponsesReplayState::from_response(
+                                        &completion_native_template,
+                                        &completion_model,
+                                        &response,
+                                    )
+                                {
+                                    completion_runtime.save_native_responses_replay(
+                                        &completion_local_key,
+                                        &completion_source,
+                                        &response_id,
+                                        replay,
+                                        now_ms(),
+                                    );
+                                }
+                            }
+                        }
                     } else if let Some(category) = event
                         .error_category
                         .as_deref()
@@ -959,8 +1167,18 @@ async fn execute_request(
                         apply_failure_state(event, state);
                     }
                 });
-                let combined =
-                    stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining);
+                let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+                    if let Some(bridge) = adapter_request.into_stream_bridge() {
+                        let completed = completion_bridge_state
+                            .clone()
+                            .expect("bridge state is configured for bridge routes");
+                        Box::pin(bridge_messages_stream(first, remaining, bridge, completed))
+                    } else {
+                        Box::pin(
+                            stream::once(async move { Ok::<_, reqwest::Error>(first) })
+                                .chain(remaining),
+                        )
+                    };
                 let usage_stream = UsageStream::with_runtime(
                     combined,
                     runtime.clone(),
@@ -974,14 +1192,15 @@ async fn execute_request(
                         status.as_u16(),
                         None,
                         0,
+                        tool_use.clone(),
                     ),
                     started,
                     completion,
+                    completion_native_response,
                 );
                 return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
             Err(failure) => {
-                exhaust_pool |= failure.status == StatusCode::TOO_MANY_REQUESTS;
                 let state = failure_category_requires_cooldown(failure.category).then(|| {
                     apply_attempt_failure_cooldown(
                         &runtime,
@@ -1002,8 +1221,10 @@ async fn execute_request(
                     failure.status.as_u16(),
                     Some(failure.category.to_string()),
                     started.elapsed().as_millis() as u64,
+                    tool_use.clone(),
                 );
-                if failure.category == "upstream_encrypted_content_invalid"
+                if wire_api == WireApi::Responses
+                    && failure.category == "upstream_encrypted_content_invalid"
                     && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
                 {
                     tried.remove(&route.candidate_id);
@@ -1026,7 +1247,7 @@ async fn execute_request(
     if allow_previous_response_reset
         && has_previous_response_id
         && confirmed_response_missing
-        && !contains_function_call_output(&request)
+        && !contains_tool_call_output(&request)
     {
         let mut reset_request = request;
         if let Some(object) = reset_request.as_object_mut() {
@@ -1039,6 +1260,7 @@ async fn execute_request(
                 resolved_model,
                 stream,
                 request_id,
+                forwarded_headers,
                 None,
                 wire_api,
                 responses_lite,
@@ -1063,4 +1285,13 @@ async fn execute_request(
         }
     }
     api_error(failure.status, failure.message, failure.category)
+}
+
+fn adapter_error_response(error: AdapterError) -> Response<Body> {
+    let status = if error.is_upstream_failure() {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    api_error(status, error.message(), error.code())
 }

@@ -1,4 +1,4 @@
-FROM rust:1.95-bookworm AS build
+FROM rust:1.97.1-bookworm AS build
 WORKDIR /build
 COPY crates/relay-core crates/relay-core
 COPY relay-server relay-server

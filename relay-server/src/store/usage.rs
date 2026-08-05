@@ -13,6 +13,9 @@ use zenith_relay_core::{
     ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, UsageEvent, WireApi,
 };
 
+#[cfg(test)]
+use zenith_relay_core::ToolUseDiagnostics;
+
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
 const RAW_USAGE_RETENTION_MS: u64 = 90 * DAY_MS;
@@ -40,16 +43,16 @@ impl Store {
                         error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
-                        service_tier, applied_service_tier
+                        service_tier, applied_service_tier, tool_use_json
                     ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24
+                        ?23, ?24, ?25
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     AND (?4 != 'account' OR EXISTS (
-                        SELECT 1 FROM accounts WHERE id = ?25
+                        SELECT 1 FROM accounts WHERE id = ?26
                     ))
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -74,7 +77,8 @@ impl Store {
                         created_at_ms=excluded.created_at_ms,
                         routing_json=excluded.routing_json,
                         service_tier=excluded.service_tier,
-                        applied_service_tier=excluded.applied_service_tier
+                        applied_service_tier=excluded.applied_service_tier,
+                        tool_use_json=excluded.tool_use_json
                     WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
@@ -92,6 +96,11 @@ impl Store {
                 let candidate_hint =
                     hex::encode(Sha256::digest(candidate_id.as_bytes()))[..12].to_string();
                 let routing_json = event.routing.as_ref().map(to_json).transpose()?;
+                let tool_use_json = event
+                    .tool_use
+                    .has_evidence()
+                    .then(|| to_json(&event.tool_use))
+                    .transpose()?;
                 statement
                     .execute(params![
                         event.request_id,
@@ -118,6 +127,7 @@ impl Store {
                         routing_json,
                         service_tier_name(event.service_tier),
                         event.applied_service_tier.map(service_tier_name),
+                        tool_use_json,
                         candidate_id,
                     ])
                     .map_err(db_error)?;
@@ -172,7 +182,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -201,6 +211,10 @@ impl Store {
                         .get::<_, Option<String>>(23)?
                         .as_deref()
                         .map(parse_service_tier),
+                    tool_use: row
+                        .get::<_, Option<String>>(24)?
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
                     success: row.get::<_, i64>(8)? != 0,
                     http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
                     error_category: row.get(10)?,
@@ -1044,6 +1058,7 @@ mod tests {
     use zenith_relay_core::ResponseAffinityStore;
     use zenith_relay_core::RoutingDiagnostics;
     use zenith_relay_core::SelectionReason;
+    use zenith_relay_core::{TerminalOutputKind, ToolChoiceMode};
 
     #[test]
     fn usage_keeps_one_terminal_row_per_request() {
@@ -1065,6 +1080,14 @@ mod tests {
             success: false,
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
+            tool_use: ToolUseDiagnostics {
+                client_tool_count: 2,
+                forwarded_tool_count: 2,
+                tool_choice: ToolChoiceMode::Auto,
+                tool_call_count: 1,
+                text_output: false,
+                terminal_output: TerminalOutputKind::ToolCall,
+            },
             cooldown_scope: Some("*".into()),
             retry_at_ms: Some(60_000),
             consecutive_failures: Some(1),
@@ -1118,6 +1141,13 @@ mod tests {
         assert_eq!(
             fallback.applied_service_tier,
             Some(DefaultServiceTier::Standard)
+        );
+        assert_eq!(
+            fallback
+                .tool_use
+                .as_ref()
+                .map(|tool_use| tool_use.tool_call_count),
+            Some(1)
         );
         let failed = page
             .events
@@ -1180,6 +1210,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1201,6 +1232,7 @@ mod tests {
         // price keeps the test stable when prices move.
         assert!(usage.events[0].api_equivalent.micro_usd > 0);
         assert_eq!(usage.totals.api_equivalent, usage.events[0].api_equivalent);
+        assert!(usage.events[0].tool_use.is_none());
         let candidate_hint = hex::encode(Sha256::digest(account_id.as_bytes()))[..12].to_string();
         store
             .lock()
@@ -1255,6 +1287,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1357,6 +1390,7 @@ mod tests {
                     base_url: "https://example.test/v1".into(),
                     secret_ref: format!("source:{id}"),
                     wire_api: WireApi::Responses,
+                    protocol_bindings: Vec::new(),
                     models: vec!["private-model".into()],
                     allowed_models: Vec::new(),
                     excluded_models: Vec::new(),
@@ -1384,6 +1418,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1482,6 +1517,7 @@ mod tests {
                         success,
                         http_status: if success { 200 } else { 429 },
                         error_category: error.map(str::to_string),
+                        tool_use: ToolUseDiagnostics::default(),
                         cooldown_scope: None,
                         retry_at_ms: None,
                         consecutive_failures: None,

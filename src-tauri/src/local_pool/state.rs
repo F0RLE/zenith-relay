@@ -34,11 +34,12 @@ use zenith_relay_core::{
         WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
         WakeTask,
     },
+    protocol::ClientWireApi,
     quota::{
         quota_reference_value, quota_valuation_revision, QuotaRefreshPermit, QuotaRefreshQueue,
         QuotaTransition,
     },
-    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent,
+    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent, WireApi,
 };
 
 #[cfg(test)]
@@ -619,21 +620,30 @@ impl DesktopState {
             if !key_secret_available {
                 warnings.push(warning_code("local_key_secret_missing", &key.id));
             }
-            let usable_source = sources.iter().any(|source| {
-                source.enabled
-                    && source.in_pool
-                    && !source.draining
-                    && sources_with_secrets.contains(source.id.as_str())
-                    && key
-                        .source_ids
-                        .as_ref()
-                        .is_none_or(|ids| ids.iter().any(|id| id == &source.id))
-            });
+            let mut usable_source = false;
+            for source in &sources {
+                let scoped = key
+                    .source_ids
+                    .as_ref()
+                    .is_none_or(|ids| ids.iter().any(|id| id == &source.id));
+                if !scoped
+                    || !source.enabled
+                    || (key.system && !source.in_pool)
+                    || source.draining
+                    || !sources_with_secrets.contains(source.id.as_str())
+                    || !source_supports_key_protocol(source, key)?
+                {
+                    continue;
+                }
+                usable_source = true;
+                break;
+            }
             let usable_account = accounts.iter().any(|account| {
                 account.account.enabled
-                    && account.account.in_pool
+                    && (!key.system || account.account.in_pool)
                     && !account.account.draining
                     && accounts_with_secrets.contains(account.account.id.as_str())
+                    && key_allows_client_wire_api(key, ClientWireApi::Responses)
                     && key
                         .account_ids
                         .as_ref()
@@ -698,6 +708,38 @@ impl DesktopState {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+fn source_supports_key_protocol(
+    source: &crate::local_pool::models::ProviderSourceRecord,
+    key: &crate::local_pool::models::LocalGatewayKeyRecord,
+) -> Result<bool> {
+    let bindings = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    Ok(bindings.into_iter().any(|binding| {
+        !binding.model_ids.is_empty()
+            && key_allows_client_wire_api(
+                key,
+                match binding.wire_api {
+                    WireApi::Responses => ClientWireApi::Responses,
+                    WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
+                    WireApi::Messages => ClientWireApi::Messages,
+                },
+            )
+    }))
+}
+
+fn key_allows_client_wire_api(
+    key: &crate::local_pool::models::LocalGatewayKeyRecord,
+    wire_api: ClientWireApi,
+) -> bool {
+    if key.system {
+        return wire_api == ClientWireApi::Responses;
+    }
+    key.wire_apis
+        .as_ref()
+        .is_none_or(|allowed| allowed.contains(&wire_api))
 }
 
 fn account_secret_available(
@@ -992,6 +1034,7 @@ mod tests {
                 base_url: "https://example.test/v1".into(),
                 secret_ref: "source:source_1".into(),
                 wire_api: WireApi::Responses,
+                protocol_bindings: Vec::new(),
                 models: vec!["gpt-test".into()],
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
@@ -1019,6 +1062,7 @@ mod tests {
                 allowed_models: Vec::new(),
                 excluded_models: Vec::new(),
                 model_prefix: None,
+                wire_apis: None,
                 created_at: "2026-07-10T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -1040,6 +1084,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: zenith_relay_core::ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1633,6 +1678,7 @@ mod tests {
             base_url: "https://example.test/v1".into(),
             secret_ref: format!("source:{id}"),
             wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
             models: vec!["gpt-test".into()],
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
@@ -1659,6 +1705,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         }
@@ -1783,6 +1830,7 @@ mod tests {
             success,
             http_status: if success { 200 } else { 500 },
             error_category: (!success).then(|| "upstream".into()),
+            tool_use: zenith_relay_core::ToolUseDiagnostics::default(),
             cooldown_scope: (!success).then(|| "*".into()),
             retry_at_ms: (!success).then_some(60_000),
             consecutive_failures: Some(u32::from(!success)),
@@ -1822,6 +1870,7 @@ mod tests {
             success: false,
             http_status,
             error_category: Some("upstream_status".into()),
+            tool_use: zenith_relay_core::ToolUseDiagnostics::default(),
             cooldown_scope: cooldown_scope.map(str::to_string),
             retry_at_ms,
             consecutive_failures: Some(consecutive_failures),

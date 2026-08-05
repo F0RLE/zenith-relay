@@ -4,6 +4,7 @@ use crate::{
     local_pool::{
         accounts::{
             credentials::CredentialStore,
+            oauth::{collect_limited, LimitedBodyError},
             quota_refresh::{
                 prepare_account_credentials, sync_managed_account_profile,
                 PreparedAccountCredentials,
@@ -12,7 +13,7 @@ use crate::{
             NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{LocalGatewayKeyRecord, LocalPoolSnapshot},
+        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
         profiles::{codex, repair, snapshots},
         remote::client::RemoteProfileCredential,
         state::DesktopState,
@@ -21,15 +22,170 @@ use crate::{
     platform::default_codex_home,
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tauri::State;
 use url::Url;
 use zenith_relay_core::{
     protocol::{Feature, ProfileKeyRotation},
-    CandidateQuota, WireApi, QUOTA_STALE_AFTER_MS,
+    providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+    CandidateQuota, SourceAdapter, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 const ZENITH_API_HOST: &str = "api.zenithmarket.dev";
+const MAX_CODEX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
+
+async fn fetch_codex_model_catalog(base_url: &str, secret: &str) -> Result<String, CommandError> {
+    let mut base = Url::parse(base_url)
+        .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "pool API address is invalid"))?;
+    if !base.path().ends_with('/') {
+        base.set_path(&format!("{}/", base.path()));
+    }
+    let mut url = base.join("models").map_err(|_| {
+        LocalPoolError::new(ErrorCode::InvalidState, "pool model address is invalid")
+    })?;
+    url.query_pairs_mut()
+        .append_pair("client_version", CODEX_MODELS_CLIENT_VERSION);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "pool model request could not be initialized",
+            )
+        })?;
+    let response = client
+        .get(url)
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|_| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                "pool model catalog is unavailable",
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "pool model catalog request was rejected",
+        )
+        .into());
+    }
+    let body = collect_limited(response, MAX_CODEX_MODEL_CATALOG_BYTES)
+        .await
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::GatewayUnavailable,
+                match error {
+                    LimitedBodyError::TooLarge => "pool model catalog is too large",
+                    LimitedBodyError::Transport => "pool model catalog could not be read",
+                },
+            )
+        })?;
+    let catalog: serde_json::Value = serde_json::from_slice(&body).map_err(|_| {
+        LocalPoolError::new(
+            ErrorCode::GatewayUnavailable,
+            "pool returned an invalid model catalog",
+        )
+    })?;
+    if catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "pool has no Codex-compatible models",
+        )
+        .into());
+    }
+    serde_json::to_string(&catalog)
+        .map_err(|_| LocalPoolError::new(ErrorCode::InvalidState, "model catalog failed").into())
+}
+
+enum CodexCatalogRefreshTarget {
+    LocalGateway(String),
+    DirectSource(Vec<String>),
+}
+
+fn active_catalog_refresh_target(
+    binding: &codex::ProfileBinding,
+    keys: &[LocalGatewayKeyRecord],
+    sources: &[ProviderSourceRecord],
+) -> Option<CodexCatalogRefreshTarget> {
+    if !binding.active || binding.credential_kind != codex::ProfileCredentialKind::LocalGateway {
+        return None;
+    }
+    keys.iter()
+        .find(|key| key.system && key.id == binding.credential_id)
+        .map(|key| CodexCatalogRefreshTarget::LocalGateway(key.id.clone()))
+        .or_else(|| {
+            sources
+                .iter()
+                .find(|source| source.enabled && source.id == binding.credential_id)
+                .and_then(|source| {
+                    direct_source_response_models(source)
+                        .ok()
+                        .map(CodexCatalogRefreshTarget::DirectSource)
+                })
+        })
+}
+
+pub(super) async fn refresh_active_codex_catalog(state: &DesktopState) -> LocalResult<()> {
+    if is_codex_running() {
+        return Ok(());
+    }
+    let profile_dir = default_codex_home();
+    let backup_root = state.profile_backup_root();
+    let Some(binding) = codex::profile_bindings(&profile_dir, &backup_root)?
+        .into_iter()
+        .find(|binding| {
+            binding.active && binding.credential_kind == codex::ProfileCredentialKind::LocalGateway
+        })
+    else {
+        return Ok(());
+    };
+    let target = {
+        let store = state.store()?;
+        active_catalog_refresh_target(&binding, store.keys(), store.sources())
+    };
+    let Some(target) = target else {
+        return Ok(());
+    };
+    let catalog = match target {
+        CodexCatalogRefreshTarget::LocalGateway(key_id) => {
+            let Some(address) = state.gateway.address().await else {
+                return Ok(());
+            };
+            let Some(key) = state
+                .store()?
+                .key(&key_id)
+                .filter(|key| key.system)
+                .cloned()
+            else {
+                return Ok(());
+            };
+            let secret = super::pool::ensure_local_gateway_key_secret(&key)?;
+            fetch_codex_model_catalog(&format!("http://{address}/v1"), &secret)
+                .await
+                .map_err(|error| LocalPoolError::new(error.code, error.message))?
+        }
+        CodexCatalogRefreshTarget::DirectSource(models) => {
+            let Some(catalog) = codex::direct_source_model_catalog(&profile_dir, &models)? else {
+                return Ok(());
+            };
+            catalog
+        }
+    };
+    codex::refresh_managed_model_catalog(&profile_dir, &backup_root, &catalog)?;
+    Ok(())
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -153,25 +309,28 @@ pub async fn attach_codex_to_local_gateway(
             CodexHistoryProvider::LocalGateway,
         )?;
         let base_url = format!("http://127.0.0.1:{port}/v1");
+        let catalog = fetch_codex_model_catalog(&base_url, &secret).await?;
         let attached: Result<_, CommandError> = match bound_oauth.as_ref() {
-            Some((account_id, prepared)) => codex::attach_with_oauth(
+            Some((account_id, prepared)) => codex::attach_with_oauth_and_catalog(
                 &profile_dir,
                 &state.profile_backup_root(),
                 &key_id,
                 &base_url,
                 &secret,
+                &catalog,
                 codex::BoundOAuthProfile {
                     account_id,
                     tokens: prepared.tokens(),
                     provider_account_id: prepared.provider_account_id(),
                 },
             ),
-            None => codex::attach(
+            None => codex::attach_with_catalog(
                 &profile_dir,
                 &state.profile_backup_root(),
                 &key_id,
                 &base_url,
                 &secret,
+                &catalog,
             ),
         }
         .map_err(Into::into);
@@ -246,12 +405,27 @@ pub async fn attach_codex_to_remote_gateway(
                 current_credential.base_url.as_str(),
                 current_credential.secret.as_str(),
             ));
-        let attached = codex::attach(
+        let catalog = match fetch_codex_model_catalog(base_url, secret).await {
+            Ok(catalog) => catalog,
+            Err(mut error) => {
+                if let Some(rotation) = rotation.as_ref() {
+                    append_remote_cleanup_error(
+                        &mut error,
+                        client
+                            .abort_profile_key_rotation(&rotation.rotation_id)
+                            .await,
+                    );
+                }
+                return Err(error);
+            }
+        };
+        let attached = codex::attach_with_catalog(
             &profile_dir,
             &state.profile_backup_root(),
             key_id,
             base_url,
             secret,
+            &catalog,
         )
         .map_err(Into::into);
         let binding = match rollback_history_on_error(&state, history_backup.as_deref(), attached) {
@@ -590,7 +764,7 @@ pub async fn launch_codex_source(
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    validate_direct_source(source.enabled, source.wire_api)?;
+    let response_models = validate_direct_source(&source)?;
     let api_key = load_direct_source_api_key(
         &source.base_url,
         &source.secret_ref,
@@ -599,16 +773,25 @@ pub async fn launch_codex_source(
         secret_store::save,
     )?;
     let profile_dir = default_codex_home();
+    let catalog = codex::direct_source_model_catalog(&profile_dir, &response_models)?;
+    if catalog.is_none() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no compatible text models",
+        )
+        .into());
+    }
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result =
         synchronize_history_for_command(&state, &profile_dir, CodexHistoryProvider::LocalGateway)
             .and_then(|history_backup| {
-                let result = codex::attach(
+                let result = codex::attach_with_catalog(
                     &profile_dir,
                     &state.profile_backup_root(),
                     &source.id,
                     &source.base_url,
                     &api_key,
+                    catalog.as_deref().expect("validated direct source catalog"),
                 )
                 .map(|binding| ProfileActivation { binding })
                 .map_err(Into::into);
@@ -669,16 +852,16 @@ pub async fn create_codex_profile_snapshot(
 #[tauri::command]
 pub async fn restore_codex_profile_snapshot(
     snapshot_id: String,
-    safety_name: String,
+    safety_name: Option<String>,
     state: State<'_, DesktopState>,
-) -> Result<snapshots::ProfileSnapshotSummary, CommandError> {
+) -> Result<(), CommandError> {
     let _mutation = state.setup_guard().await;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result = snapshots::restore(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
-        &safety_name,
+        safety_name.as_deref(),
     )
     .map_err(Into::into);
     restart_codex_after_restore(stopped, result, launch_codex_with_profile)
@@ -901,20 +1084,35 @@ fn profile_rotation_commit_state(
     }
 }
 
-fn validate_direct_source(enabled: bool, wire_api: WireApi) -> LocalResult<()> {
-    if !enabled {
+fn direct_source_response_models(source: &ProviderSourceRecord) -> LocalResult<Vec<String>> {
+    let bindings = source
+        .effective_protocol_bindings()
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    let Some(binding) = bindings.into_iter().find(|binding| {
+        binding.wire_api == WireApi::Responses && binding.adapter == SourceAdapter::Native
+    }) else {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "direct ChatGPT launch requires a native Responses API source",
+        ));
+    };
+    if binding.model_ids.is_empty() {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "source has no Responses API models",
+        ));
+    }
+    Ok(binding.model_ids)
+}
+
+fn validate_direct_source(source: &ProviderSourceRecord) -> LocalResult<Vec<String>> {
+    if !source.enabled {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "source must be enabled before launching ChatGPT",
         ));
     }
-    if wire_api != WireApi::Responses {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "direct ChatGPT launch requires a Responses API source",
-        ));
-    }
-    Ok(())
+    direct_source_response_models(source)
 }
 
 fn load_direct_source_api_key(
@@ -1055,6 +1253,71 @@ fn resolve_profile_dir(profile_dir: Option<String>) -> Result<PathBuf, CommandEr
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use zenith_relay_core::{MessagesReasoningMode, SourceProtocolBinding};
+
+    fn source_record(id: &str) -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: id.into(),
+            name: "Provider".into(),
+            enabled: true,
+            in_pool: false,
+            draining: false,
+            base_url: "https://provider.test/v1".into(),
+            secret_ref: "source:test".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["provider-model".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn active_catalog_refresh_targets_a_direct_source_unless_a_system_gateway_key_owns_it() {
+        let binding = codex::ProfileBinding {
+            profile_dir: "profile".into(),
+            credential_kind: codex::ProfileCredentialKind::LocalGateway,
+            credential_id: "source".into(),
+            bound_oauth_account_id: None,
+            active: true,
+        };
+        let source = source_record("source");
+
+        assert!(matches!(
+            active_catalog_refresh_target(&binding, &[], std::slice::from_ref(&source)),
+            Some(CodexCatalogRefreshTarget::DirectSource(models))
+                if models == vec!["provider-model".to_string()]
+        ));
+
+        let system_key = LocalGatewayKeyRecord {
+            id: "source".into(),
+            label: "Local gateway".into(),
+            enabled: true,
+            system: true,
+            secret_ref: "key:source".into(),
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: Some(vec![zenith_relay_core::protocol::ClientWireApi::Responses]),
+            created_at: "2026-08-01T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        assert!(matches!(
+            active_catalog_refresh_target(&binding, &[system_key], &[source]),
+            Some(CodexCatalogRefreshTarget::LocalGateway(_))
+        ));
+    }
 
     #[test]
     fn lost_profile_rotation_commit_response_is_reconciled_without_a_blind_rollback() {
@@ -1208,10 +1471,66 @@ mod tests {
     }
 
     #[test]
-    fn direct_source_launch_requires_an_enabled_responses_source() {
-        assert!(validate_direct_source(true, WireApi::Responses).is_ok());
-        assert!(validate_direct_source(false, WireApi::Responses).is_err());
-        assert!(validate_direct_source(true, WireApi::ChatCompletions).is_err());
+    fn direct_source_launch_requires_an_enabled_responses_binding() {
+        let source = source_record("source");
+        assert_eq!(
+            validate_direct_source(&source).unwrap(),
+            vec!["provider-model".to_string()]
+        );
+
+        let mut disabled = source.clone();
+        disabled.enabled = false;
+        assert!(validate_direct_source(&disabled).is_err());
+
+        let mut messages_only = source.clone();
+        messages_only.wire_api = WireApi::Messages;
+        messages_only.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["claude-native".to_string()],
+        }];
+        assert!(validate_direct_source(&messages_only).is_err());
+
+        let mut bridged_only = source.clone();
+        bridged_only.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["claude-bridge".to_string()],
+        }];
+        bridged_only.models = vec!["claude-bridge".to_string()];
+        assert!(validate_direct_source(&bridged_only).is_err());
+    }
+
+    #[test]
+    fn direct_source_launch_uses_only_models_bound_to_responses() {
+        let mut source = source_record("source");
+        source.wire_api = WireApi::Messages;
+        source.models = vec![
+            "claude-native".to_string(),
+            "claude-responses".to_string(),
+            "gpt-responses".to_string(),
+        ];
+        source.protocol_bindings = vec![
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-native".to_string()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-responses".to_string(), "gpt-responses".to_string()],
+            },
+        ];
+
+        assert_eq!(
+            validate_direct_source(&source).unwrap(),
+            vec!["claude-responses".to_string(), "gpt-responses".to_string()]
+        );
     }
 
     #[test]

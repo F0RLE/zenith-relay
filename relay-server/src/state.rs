@@ -9,18 +9,20 @@ use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
+    normalize_source_protocol_bindings,
     protocol::{Capabilities, ClientWireApi},
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaEconomicsState, QuotaSnapshot, Subscription},
-    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, WireApi,
+    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, SourceProtocolBinding,
+    WireApi,
 };
 
-pub const SERVER_SCHEMA_VERSION: u32 = 30;
+pub const SERVER_SCHEMA_VERSION: u32 = 31;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -46,6 +48,8 @@ pub struct SourceRecord {
     pub base_url: String,
     pub secret_ref: String,
     pub wire_api: WireApi,
+    #[serde(default)]
+    pub protocol_bindings: Vec<SourceProtocolBinding>,
     pub models: Vec<String>,
     pub allowed_models: Vec<String>,
     pub excluded_models: Vec<String>,
@@ -56,6 +60,34 @@ pub struct SourceRecord {
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     pub last_error_code: Option<String>,
+}
+
+impl SourceRecord {
+    pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
+        let bindings = normalize_source_protocol_bindings(
+            self.protocol_bindings.clone(),
+            self.wire_api,
+            &self.models,
+        )
+        .map_err(|error| error.to_string())?;
+        let mut seen = HashSet::new();
+        let mut models = Vec::new();
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| binding.wire_api == wire_api)
+        {
+            for model in binding.model_ids {
+                if seen.insert(model.to_ascii_lowercase()) {
+                    models.push(model);
+                }
+            }
+        }
+        Ok(models)
+    }
+
+    pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
+        Ok(!self.models_for_wire_api(wire_api)?.is_empty())
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -336,7 +368,10 @@ fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String>
         .keys()?
         .into_iter()
         .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID);
-    let changed = existing.as_ref().is_none_or(|key| !key.enabled);
+    let required_wire_apis = Some(vec![ClientWireApi::Responses]);
+    let changed = existing
+        .as_ref()
+        .is_none_or(|key| !key.enabled || key.wire_apis != required_wire_apis);
     let mut record = existing.unwrap_or_else(|| GatewayKeyRecord {
         id: SYSTEM_GATEWAY_KEY_ID.to_string(),
         label: "ChatGPT".to_string(),
@@ -348,12 +383,15 @@ fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String>
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
-        wire_apis: None,
+        wire_apis: required_wire_apis.clone(),
         soft_budget_micro_usd: None,
         created_at_ms: now_ms(),
         last_used_at_ms: None,
     });
     record.enabled = true;
+    // The managed profile key is always the ChatGPT/Codex Responses surface.
+    // Its candidate scope is rebuilt from current pool membership at runtime.
+    record.wire_apis = required_wire_apis;
     let created_secret = vault.load(&record.secret_ref)?.is_none();
     if created_secret {
         vault.save(&record.secret_ref, &generate_pool_key())?;

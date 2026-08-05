@@ -62,15 +62,6 @@
   .api-provider-options {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-
-  .api-provider-fields {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .api-provider-fields > :nth-child(2) {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
 }
 
 @media (max-width: 700px) {
@@ -92,16 +83,54 @@
     gap: 5px;
   }
 
-  .api-provider-endpoint {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 4px;
+  .source-route-matrix-heading {
+    display: none;
   }
 
-  .api-provider-protocol-menu,
-  .api-provider-protocol-menu .relay-option-trigger {
-    width: 100%;
+  .source-route-model-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-route-model-name {
+    min-height: 38px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--relay-border);
+    background: var(--relay-subtle);
+  }
+
+  .source-route-model-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .source-route-cell {
+    grid-template-columns: minmax(0, 1fr) auto;
+    justify-items: stretch;
+    gap: 8px;
+    min-height: 39px;
+    padding: 7px 10px;
+  }
+
+  .source-route-cell:nth-child(odd) {
+    border-left: 0;
+  }
+
+  .source-route-cell:nth-child(n + 3) {
+    border-top: 1px solid var(--relay-border);
+  }
+
+  .source-route-cell-label {
     min-width: 0;
+    display: block;
+    overflow: hidden;
+    color: var(--relay-secondary);
+    font-size: 10px;
+    line-height: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .source-route-model-list {
+    max-height: none;
   }
 
   .pool-member-toolbar .pool-priority-label,
@@ -166,6 +195,45 @@
     gap: 10px;
   }
 
+  .relay-dialog.source-add-configuring .relay-dialog-body {
+    padding: 10px 16px 12px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-setup,
+  .relay-dialog.source-add-configuring .api-provider-configuration {
+    gap: 8px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-selected {
+    padding-bottom: 8px;
+  }
+
+  .relay-dialog.source-add-configuring .source-protocol-bindings {
+    gap: 6px;
+  }
+
+  .relay-dialog.source-add-configuring .source-protocol-bindings > header > p {
+    display: none;
+  }
+
+  .relay-dialog.source-add-configuring .client-protocol-grid > label {
+    min-height: 72px;
+    padding: 9px;
+  }
+
+  .relay-dialog.source-add-configuring .client-protocol-grid > label small {
+    font-size: 10px;
+    line-height: 14px;
+  }
+
+  .relay-dialog.source-add-configuring .source-route-model-list {
+    max-height: 150px;
+  }
+
+  .relay-dialog.source-add-configuring .api-provider-key-field {
+    padding-top: 10px;
+  }
+
   .relay-dialog .source-form .api-provider-options button {
     min-height: 58px;
     gap: 4px;
@@ -174,11 +242,6 @@
 
   .relay-dialog .source-form .api-provider-options button small {
     display: none;
-  }
-
-  .relay-dialog .api-provider-endpoint {
-    padding-top: 7px;
-    padding-bottom: 7px;
   }
 
   .product-intro {
@@ -239,21 +302,67 @@
   .api-provider-options {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-
-  .api-provider-fields {
-    grid-template-columns: minmax(140px, 0.8fr) minmax(230px, 1.5fr) minmax(150px, 0.8fr);
-  }
-
-  .api-provider-fields > :nth-child(2) {
-    grid-column: auto;
-    grid-row: auto;
-  }
 }
 
 @media (max-width: 560px) {
   .api-provider-options,
   .relay-dialog .api-provider-options {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-add-dialog .api-provider-selected {
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .source-add-dialog .api-provider-change {
+    grid-column: 1 / -1;
+    justify-self: center;
+  }
+
+  .onboarding-api-provider.has-selection .api-provider-selected {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .onboarding-api-provider .api-provider-selected-endpoint {
+    grid-column: 1;
+  }
+
+  .onboarding-api-provider .api-provider-change {
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: start;
+  }
+
+  .setup-oauth-pending-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 36px;
+  }
+
+  .setup-oauth-pending-actions > * {
+    width: 100%;
+  }
+
+  .setup-oauth-pending {
+    grid-template-columns: 40px minmax(0, 1fr);
+    justify-items: initial;
+    text-align: left;
+  }
+
+  .setup-current-profile-actions {
+    padding-left: 0;
+  }
+
+  .api-provider-key-field .relay-field-label-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+
+  .api-provider-key-field .api-key-link {
+    margin-left: auto;
   }
 
   .oauth-link-actions {
@@ -412,6 +521,20 @@
     border-left: 0;
   }
 
+}
+
+@media (max-width: 480px) {
+  .source-route-model-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .source-route-cell {
+    border-left: 0;
+  }
+
+  .source-route-cell + .source-route-cell {
+    border-top: 1px solid var(--relay-border);
+  }
 }
 
 @media (max-width: 700px) {

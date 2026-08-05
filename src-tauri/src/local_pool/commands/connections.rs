@@ -11,9 +11,12 @@ use std::collections::{BTreeMap, HashSet};
 use tauri::State;
 use uuid::Uuid;
 use zenith_relay_core::{
-    discover_source_models, fetch_source_provider_stats, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceProviderStats, WireApi,
+    discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
+    source_points_to_gateway, ApiModelPriceOverride, ProviderSource, SourceProtocolBinding,
+    SourceProviderStats, WireApi,
 };
+#[cfg(test)]
+use zenith_relay_core::{MessagesReasoningMode, SourceAdapter};
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
 
@@ -25,6 +28,8 @@ pub struct CreateSourceInput {
     api_key: String,
     #[serde(default = "responses_wire_api")]
     wire_api: WireApi,
+    #[serde(default)]
+    protocol_bindings: Vec<SourceProtocolBinding>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
@@ -50,6 +55,8 @@ pub struct UpdateSourceInput {
     name: String,
     base_url: String,
     wire_api: WireApi,
+    #[serde(default)]
+    protocol_bindings: Option<Vec<SourceProtocolBinding>>,
     models: Vec<String>,
     #[serde(default)]
     in_pool: Option<bool>,
@@ -73,7 +80,6 @@ pub async fn create_local_source(
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
     let _mutation = state.setup_guard().await;
-    ensure_supported_wire_api(input.wire_api)?;
     let id = format!("source_{}", Uuid::new_v4().simple());
     let secret_ref = format!("source:{id}");
     let mut runtime_source = ProviderSource {
@@ -86,9 +92,11 @@ pub async fn create_local_source(
     };
     runtime_source.validate().map_err(core_error)?;
     ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    runtime_source.models = discover_source_models(&runtime_source)
-        .await
-        .map_err(core_error)?;
+    let discovery =
+        discover_source_models_and_protocol_bindings(&runtime_source, &input.protocol_bindings)
+            .await
+            .map_err(core_error)?;
+    runtime_source.models = discovery.models;
     if runtime_source.models.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -106,6 +114,7 @@ pub async fn create_local_source(
         base_url: runtime_source.base_url,
         secret_ref: secret_ref.clone(),
         wire_api: runtime_source.wire_api,
+        protocol_bindings: discovery.protocol_bindings,
         models: runtime_source.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -119,6 +128,9 @@ pub async fn create_local_source(
         last_error: None,
     };
     record.normalize();
+    record
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let (old_sources, old_keys) = current_records(&state)?;
     secret_store::save(&secret_ref, &runtime_source.api_key)?;
     if let Err(error) = state.store()?.upsert_source(record.clone()) {
@@ -155,6 +167,7 @@ pub async fn update_local_source(
         base_url: input.base_url,
         secret_ref: current.secret_ref.clone(),
         wire_api: input.wire_api,
+        protocol_bindings: input.protocol_bindings.unwrap_or(current.protocol_bindings),
         models: input.models,
         allowed_models: input.allowed_models,
         excluded_models: input.excluded_models,
@@ -173,6 +186,9 @@ pub async fn update_local_source(
         updated.in_pool = in_pool;
     }
     updated.normalize();
+    updated
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
     state.store()?.upsert_source(updated)?;
@@ -272,7 +288,6 @@ pub async fn rotate_local_source_key(
         .source(&source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    ensure_supported_wire_api(source.wire_api)?;
     let api_key = api_key.trim().to_string();
     ProviderSource {
         id: source.id.clone(),
@@ -297,56 +312,104 @@ pub async fn test_local_source(
     source_id: String,
     state: State<'_, DesktopState>,
 ) -> CommandResult<ProviderSourceRecord> {
-    let _mutation = state.setup_guard().await;
+    refresh_local_source_models(&state, &source_id).await
+}
+
+pub(crate) async fn refresh_local_source_models(
+    state: &DesktopState,
+    source_id: &str,
+) -> CommandResult<ProviderSourceRecord> {
     let source = state
         .store()?
-        .source(&source_id)
+        .source(source_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
-    ensure_supported_wire_api(source.wire_api)?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     let runtime_source = ProviderSource {
         id: source.id.clone(),
         name: source.name.clone(),
         base_url: source.base_url.clone(),
-        api_key,
+        api_key: api_key.clone(),
         wire_api: source.wire_api,
         models: source.models.clone(),
     };
-    ensure_not_gateway_self_source(&state, &runtime_source.base_url)?;
-    let models = match discover_source_models(&runtime_source).await {
-        Ok(models) => models,
-        Err(error) => {
-            let error = core_error(error);
-            let mut failed = source.clone();
-            failed.last_test_at = Some(Utc::now().to_rfc3339());
-            failed.last_test_status = Some("error".into());
-            failed.last_error = Some(error.message.clone());
-            state.store()?.upsert_source(failed)?;
-            return Err(error.into());
-        }
-    };
-    if models.is_empty() {
+    ensure_not_gateway_self_source(state, &runtime_source.base_url)?;
+    let discovery =
+        discover_source_models_and_protocol_bindings(&runtime_source, &source.protocol_bindings)
+            .await
+            .map_err(core_error);
+
+    let _mutation = state.setup_guard().await;
+    let current = state
+        .store()?
+        .source(source_id)
+        .cloned()
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    let current_api_key = secret_store::load(&current.secret_ref)?;
+    if !source_probe_matches(&source, &current)
+        || current_api_key.as_deref() != Some(api_key.as_str())
+    {
         return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "source did not expose any configured models",
+            ErrorCode::Conflict,
+            "source changed while its models were being refreshed",
         )
         .into());
     }
-    let runtime_changed = source.models != models;
-    let mut updated = source;
-    updated.models = models;
+
+    let discovery = match discovery {
+        Ok(discovery) if !discovery.models.is_empty() => discovery,
+        Ok(_) => {
+            let error = LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "source did not expose any configured models",
+            );
+            persist_source_refresh_failure(state, current, &error)?;
+            return Err(error.into());
+        }
+        Err(error) => {
+            persist_source_refresh_failure(state, current, &error)?;
+            return Err(error.into());
+        }
+    };
+    let runtime_changed = current.models != discovery.models
+        || current.protocol_bindings != discovery.protocol_bindings;
+    let mut updated = current;
+    updated.models = discovery.models;
+    updated.protocol_bindings = discovery.protocol_bindings;
     updated.last_test_at = Some(Utc::now().to_rfc3339());
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
     updated.normalize();
-    let (old_sources, old_keys) = current_records(&state)?;
+    updated
+        .normalize_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
+    let (old_sources, old_keys) = current_records(state)?;
     state.store()?.upsert_source(updated.clone())?;
     if runtime_changed {
-        sync_records_or_rollback(&state, old_sources, old_keys).await?;
+        sync_records_or_rollback(state, old_sources, old_keys).await?;
     }
     Ok(updated)
+}
+
+fn persist_source_refresh_failure(
+    state: &DesktopState,
+    mut source: ProviderSourceRecord,
+    error: &LocalPoolError,
+) -> CommandResult<()> {
+    source.last_test_at = Some(Utc::now().to_rfc3339());
+    source.last_test_status = Some("error".into());
+    source.last_error = Some(error.message.clone());
+    state.store()?.upsert_source(source)?;
+    Ok(())
+}
+
+fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceRecord) -> bool {
+    before.base_url == current.base_url
+        && before.secret_ref == current.secret_ref
+        && before.wire_api == current.wire_api
+        && before.protocol_bindings == current.protocol_bindings
+        && before.models == current.models
 }
 
 #[tauri::command]
@@ -367,7 +430,6 @@ pub async fn get_local_source_stats(
 }
 
 fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -> LocalResult<()> {
-    ensure_supported_wire_api(source.wire_api)?;
     if source.recovery_delay_seconds > 24 * 60 * 60 {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
@@ -377,6 +439,9 @@ fn validate_source_record(state: &DesktopState, source: &ProviderSourceRecord) -
     source
         .validate_price_overrides()
         .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    source
+        .validate_protocol_bindings()
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     let api_key = secret_store::load(&source.secret_ref)?
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source secret is missing"))?;
     if source.models.is_empty() {
@@ -404,16 +469,6 @@ fn ensure_not_gateway_self_source(state: &DesktopState, base_url: &str) -> Local
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
             "source base URL must not point back to this Relay gateway",
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_supported_wire_api(wire_api: WireApi) -> LocalResult<()> {
-    if matches!(wire_api, WireApi::Messages) {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "messages wire API is not supported by the local runtime",
         ));
     }
     Ok(())
@@ -469,6 +524,31 @@ mod tests {
     use super::*;
     use crate::local_pool::models::LocalGatewayKeyRecord;
 
+    fn source_record() -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: "source".into(),
+            name: "Provider".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://provider.test/v1".into(),
+            secret_ref: "source:test".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["model-a".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
+
     #[test]
     fn deleting_source_keeps_explicit_empty_scope_unavailable() {
         let mut keys = [LocalGatewayKeyRecord {
@@ -482,6 +562,7 @@ mod tests {
             allowed_models: Vec::new(),
             excluded_models: Vec::new(),
             model_prefix: None,
+            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         }];
@@ -490,14 +571,55 @@ mod tests {
     }
 
     #[test]
-    fn messages_wire_api_is_rejected_at_the_desktop_boundary() {
-        assert!(ensure_supported_wire_api(WireApi::Responses).is_ok());
-        assert!(ensure_supported_wire_api(WireApi::ChatCompletions).is_ok());
-        assert!(matches!(
-            ensure_supported_wire_api(WireApi::Messages)
-                .unwrap_err()
-                .code,
-            ErrorCode::InvalidState
-        ));
+    fn messages_wire_api_is_accepted_at_the_desktop_boundary() {
+        let mut source = source_record();
+        source.wire_api = WireApi::Messages;
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: source.models.clone(),
+        }];
+
+        source.normalize();
+        source.normalize_protocol_bindings().unwrap();
+        assert!(source.validate_protocol_bindings().is_ok());
+    }
+
+    #[test]
+    fn mixed_binding_normalization_keeps_the_legacy_protocol_default_stable() {
+        let mut source = source_record();
+        source.protocol_bindings = vec![
+            SourceProtocolBinding {
+                wire_api: WireApi::Messages,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-native".into()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["gpt-native".into()],
+            },
+        ];
+        source.models = vec!["claude-native".into(), "gpt-native".into()];
+
+        source.normalize_protocol_bindings().unwrap();
+
+        assert_eq!(source.wire_api, WireApi::Responses);
+        assert!(source.supports_wire_api(WireApi::Responses).unwrap());
+        assert!(source.supports_wire_api(WireApi::Messages).unwrap());
+    }
+
+    #[test]
+    fn source_probe_rejects_configuration_changes_but_ignores_runtime_status() {
+        let before = source_record();
+        let mut current = before.clone();
+        current.last_test_status = Some("ok".into());
+        assert!(source_probe_matches(&before, &current));
+
+        current.models.push("model-b".into());
+        assert!(!source_probe_matches(&before, &current));
     }
 }

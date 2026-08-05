@@ -17,7 +17,7 @@ use zenith_relay_core::{
     api_pricing_revision, estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
     ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ResponseAffinityBinding,
-    RoutingDiagnostics, UsageEvent, WireApi,
+    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent, WireApi,
 };
 
 pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
@@ -253,7 +253,14 @@ PRAGMA user_version = 20;
 COMMIT;
 "#;
 
-const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 20;
+const MIGRATION_021: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN tool_use_json TEXT;
+PRAGMA user_version = 21;
+COMMIT;
+"#;
+
+const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 21;
 const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 const ARCHIVE_USAGE_SQL: &str = r#"
@@ -321,6 +328,7 @@ pub struct UsageLog {
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
+    pub tool_use: Option<ToolUseDiagnostics>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
     pub generation_ms: Option<u64>,
@@ -430,6 +438,9 @@ impl TelemetryDb {
         }
         if version <= 19 {
             connection.execute_batch(MIGRATION_020).map_err(db_error)?;
+        }
+        if version <= 20 {
+            connection.execute_batch(MIGRATION_021).map_err(db_error)?;
         }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
@@ -590,6 +601,17 @@ impl TelemetryDb {
                     format!("usage routing diagnostics serialization failed: {error}"),
                 )
             })?;
+        let tool_use_json = event
+            .tool_use
+            .has_evidence()
+            .then(|| serde_json::to_string(&event.tool_use))
+            .transpose()
+            .map_err(|error| {
+                LocalPoolError::new(
+                    ErrorCode::Io,
+                    format!("usage tool diagnostics serialization failed: {error}"),
+                )
+            })?;
         let connection = self
             .connection
             .lock()
@@ -601,8 +623,8 @@ impl TelemetryDb {
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+                    service_tier, applied_service_tier, routing_json, tool_use_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
                 ON CONFLICT(request_id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     attempt = excluded.attempt,
@@ -627,7 +649,8 @@ impl TelemetryDb {
                     total_tokens = excluded.total_tokens,
                     service_tier = excluded.service_tier,
                     applied_service_tier = excluded.applied_service_tier,
-                    routing_json = excluded.routing_json
+                    routing_json = excluded.routing_json,
+                    tool_use_json = excluded.tool_use_json
                 WHERE excluded.attempt >= request_logs.attempt",
                 params![
                     event.request_id,
@@ -654,6 +677,7 @@ impl TelemetryDb {
                     service_tier_name(event.service_tier),
                     event.applied_service_tier.map(service_tier_name),
                     routing_json,
+                    tool_use_json,
                 ],
             )
             .map_err(db_error)?
@@ -682,7 +706,7 @@ impl TelemetryDb {
                     resolved_model, wire_api, success, http_status, error_category, latency_ms,
                     ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json
+                    service_tier, applied_service_tier, routing_json, tool_use_json
                  FROM request_logs ORDER BY id DESC LIMIT ?1",
             )
             .map_err(db_error)?;
@@ -756,7 +780,7 @@ impl TelemetryDb {
                 resolved_model, wire_api, success, http_status, error_category, latency_ms,
                 ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                 cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                service_tier, applied_service_tier, routing_json
+                service_tier, applied_service_tier, routing_json, tool_use_json
              FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -1394,6 +1418,7 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
     let service_tier: String = row.get(23)?;
     let applied_service_tier: Option<String> = row.get(24)?;
     let routing_json: Option<String> = row.get(25)?;
+    let tool_use_json: Option<String> = row.get(26)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -1414,6 +1439,9 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         success: row.get(11)?,
         http_status: row.get(12)?,
         error_category: row.get(13)?,
+        tool_use: tool_use_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
         latency_ms: rust_u64(latency_ms),
         ttft_ms: ttft_ms.map(rust_u64),
         generation_ms: generation_ms.map(rust_u64),
@@ -1525,7 +1553,7 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zenith_relay_core::{SelectionReason, WireApi};
+    use zenith_relay_core::{SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi};
 
     #[test]
     fn usage_survives_database_reopen() {
@@ -1554,6 +1582,14 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics {
+                client_tool_count: 3,
+                forwarded_tool_count: 3,
+                tool_choice: ToolChoiceMode::Auto,
+                tool_call_count: 1,
+                text_output: false,
+                terminal_output: TerminalOutputKind::ToolCall,
+            },
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1578,6 +1614,13 @@ mod tests {
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].cache_write_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
+        assert_eq!(
+            logs[0]
+                .tool_use
+                .as_ref()
+                .map(|tool_use| tool_use.tool_call_count),
+            Some(1)
+        );
         assert_eq!(logs[0].service_tier, DefaultServiceTier::Fast);
         assert_eq!(
             logs[0].applied_service_tier,
@@ -1767,6 +1810,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -1834,6 +1878,7 @@ mod tests {
         );
         assert_eq!(page.events[0].wire_api, "chat_completions");
         assert_eq!(page.events[0].service_tier, DefaultServiceTier::Standard);
+        assert!(page.events[0].tool_use.is_none());
 
         let chat = database
             .usage_page(&UsageQuery {
@@ -1871,6 +1916,7 @@ mod tests {
             success: false,
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: Some("*".into()),
             retry_at_ms: Some(60_000),
             consecutive_failures: Some(1),
@@ -1928,6 +1974,7 @@ mod tests {
             success: false,
             http_status: 503,
             error_category: Some("upstream_unavailable".into()),
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: Some("*".into()),
             retry_at_ms: Some(60_000),
             consecutive_failures: Some(1),
@@ -1983,6 +2030,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -2036,6 +2084,7 @@ mod tests {
                 success: true,
                 http_status: 200,
                 error_category: None,
+                tool_use: ToolUseDiagnostics::default(),
                 cooldown_scope: None,
                 retry_at_ms: None,
                 consecutive_failures: Some(0),
@@ -2114,6 +2163,7 @@ mod tests {
             success: true,
             http_status: 200,
             error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
             cooldown_scope: None,
             retry_at_ms: None,
             consecutive_failures: Some(0),
@@ -2397,6 +2447,7 @@ mod tests {
                 success: true,
                 http_status: 200,
                 error_category: None,
+                tool_use: ToolUseDiagnostics::default(),
                 cooldown_scope: None,
                 retry_at_ms: None,
                 consecutive_failures: None,

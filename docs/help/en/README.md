@@ -33,7 +33,10 @@ installation. Linux releases include AppImage, DEB, and RPM packages. macOS
 releases include Intel and Apple Silicon DMG files.
 
 After the first launch, Quick Setup asks for the operating mode, connection,
-and client profile. The same wizard can be restarted from **Help**.
+and client profile. When it finds an eligible existing ChatGPT sign-in,
+**Import current profile** adds it to the local pool and continues to client
+selection after a short confirmation. The same wizard can be restarted from
+**Help**.
 
 ## Application Sections
 
