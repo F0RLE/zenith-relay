@@ -632,6 +632,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.gateway.address().await, Some(address));
+        let client = reqwest::Client::new();
         let evicted_models: serde_json::Value = client
             .get(format!("http://{address}/v1/models"))
             .bearer_auth(&secret)
@@ -658,6 +659,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(state.gateway.address().await, Some(address));
+        let client = reqwest::Client::new();
         let deleted_models: serde_json::Value = client
             .get(format!("http://{address}/v1/models"))
             .bearer_auth(&secret)
