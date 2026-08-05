@@ -45,6 +45,15 @@ struct UpstreamState {
 #[derive(Clone, Default)]
 struct NativeReplayUpstreamState {
     bodies: Arc<Mutex<Vec<Value>>>,
+    rejection: NativeReplayRejection,
+}
+
+#[derive(Clone, Copy, Default)]
+enum NativeReplayRejection {
+    #[default]
+    PreviousResponseRequiresWebsocket,
+    InvalidFunctionCallOutputCallId,
+    GenericInvalidRequest,
 }
 
 struct TestServer {
@@ -828,6 +837,109 @@ async fn native_responses_replays_http_tool_continuation_when_upstream_requires_
 }
 
 #[tokio::test]
+async fn native_responses_replays_tool_continuation_after_invalid_call_id_rejection() {
+    let (upstream, state) = spawn_native_replay_upstream_with_rejection(
+        NativeReplayRejection::InvalidFunctionCallOutputCallId,
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "use a tool",
+            "tools": [{
+                "type": "function",
+                "name": "run_command",
+                "parameters": {"type": "object"}
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": first["id"],
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_native_tool",
+                "output": "C:\\workspace"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[1]["previous_response_id"], "resp_native_tool");
+    assert!(bodies[2].get("previous_response_id").is_none());
+    let replayed_input = bodies[2]["input"].as_array().unwrap();
+    assert_eq!(replayed_input[1]["type"], "function_call");
+    assert_eq!(replayed_input[2]["type"], "function_call_output");
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(!events[1].success);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
+    assert!(events[2].success);
+}
+
+#[tokio::test]
+async fn native_responses_does_not_replay_tool_continuation_after_generic_bad_request() {
+    let (upstream, state) =
+        spawn_native_replay_upstream_with_rejection(NativeReplayRejection::GenericInvalidRequest)
+            .await;
+    let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "use a tool"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": first["id"],
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_native_tool",
+                "output": "C:\\workspace"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(state.bodies.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn native_responses_stream_replays_tool_continuation_when_upstream_requires_websocket() {
     let (upstream, state) = spawn_native_replay_upstream().await;
     let (gateway, _) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
@@ -1593,7 +1705,19 @@ async fn spawn_messages_upstream() -> (TestServer, UpstreamState) {
 }
 
 async fn spawn_native_replay_upstream() -> (TestServer, NativeReplayUpstreamState) {
-    let state = NativeReplayUpstreamState::default();
+    spawn_native_replay_upstream_with_rejection(
+        NativeReplayRejection::PreviousResponseRequiresWebsocket,
+    )
+    .await
+}
+
+async fn spawn_native_replay_upstream_with_rejection(
+    rejection: NativeReplayRejection,
+) -> (TestServer, NativeReplayUpstreamState) {
+    let state = NativeReplayUpstreamState {
+        rejection,
+        ..NativeReplayUpstreamState::default()
+    };
     let app = Router::new()
         .route("/v1/responses", post(native_replay_upstream_responses))
         .with_state(state.clone());
@@ -1810,12 +1934,25 @@ async fn native_replay_upstream_responses(
     state.bodies.lock().unwrap().push(request.clone());
 
     if request.get("previous_response_id").is_some() {
+        let (message, code) = match state.rejection {
+            NativeReplayRejection::PreviousResponseRequiresWebsocket => (
+                "previous_response_id is only supported on Responses WebSocket v2",
+                "websocket_required",
+            ),
+            NativeReplayRejection::InvalidFunctionCallOutputCallId => (
+                "Invalid call_id for function_call_output",
+                "invalid_function_call_output_call_id",
+            ),
+            NativeReplayRejection::GenericInvalidRequest => {
+                ("request payload is invalid", "invalid_request")
+            }
+        };
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": {
-                    "message": "previous_response_id is only supported on Responses WebSocket v2",
-                    "code": "websocket_required"
+                    "message": message,
+                    "code": code
                 }
             })),
         )
