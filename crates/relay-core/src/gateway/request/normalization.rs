@@ -110,9 +110,14 @@ pub(in crate::gateway) fn try_recover_encrypted_content(
 fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
     match value {
         Value::Array(values) => {
-            for value in values {
+            values.retain_mut(|value| {
+                if is_encrypted_compaction(value) {
+                    *changed = true;
+                    return false;
+                }
                 strip_encrypted_reasoning(value, changed);
-            }
+                true
+            });
         }
         Value::Object(object) => {
             if object.get("type").and_then(Value::as_str) == Some("reasoning")
@@ -131,6 +136,19 @@ fn strip_encrypted_reasoning(value: &mut Value, changed: &mut bool) {
         }
         _ => {}
     }
+}
+
+fn is_encrypted_compaction(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    matches!(
+        object.get("type").and_then(Value::as_str),
+        Some("compaction" | "compaction_summary")
+    ) && object
+        .get("encrypted_content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| !content.trim().is_empty())
 }
 
 fn filter_responses_lite_tools(object: &mut Map<String, Value>) {

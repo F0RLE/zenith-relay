@@ -53,6 +53,35 @@ fn native_prepared_request_is_transparent_for_opaque_tools() {
 }
 
 #[test]
+fn native_responses_request_keeps_image_input_opaque() {
+    let request = json!({
+        "model": "alias",
+        "input": [{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_image",
+                "image_url": "data:image/png;base64,YQ=="
+            }]
+        }]
+    });
+    let prepared = SourceAdapter::Native
+        .prepare_request(AdapterRequestContext {
+            client_wire_api: WireApi::Responses,
+            request: &request,
+            model: "resolved-model",
+            stream: false,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            previous: None,
+            response_scope: "native-route",
+        })
+        .unwrap();
+
+    assert_eq!(prepared.upstream_body()["model"], "resolved-model");
+    assert_eq!(prepared.upstream_body()["input"], request["input"]);
+}
+
+#[test]
 fn messages_bridge_converts_function_tools_and_preserves_tool_turn_state() {
     let first = prepare_responses_to_messages(
         &request(Value::String("inspect the project".to_string())),
@@ -110,6 +139,61 @@ fn messages_bridge_converts_function_tools_and_preserves_tool_turn_state() {
         second.upstream_body()["messages"][2]["content"][0]["tool_use_id"],
         "toolu_01"
     );
+}
+
+#[test]
+fn messages_bridge_converts_user_image_input_to_anthropic_blocks() {
+    let prepared = prepare_responses_to_messages(
+        &request(json!([{
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is in this image?"},
+                {"type": "input_image", "image_url": "data:image/jpeg;base64,YQ=="}
+            ]
+        }])),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        prepared.upstream_body()["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "What is in this image?"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "YQ=="
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn messages_bridge_rejects_invalid_user_image_input() {
+    let error = prepare_responses_to_messages(
+        &request(json!([{
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_image",
+                "image_url": "data:image/png;base64,not-valid-base64"
+            }]
+        }])),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "adapter_invalid_request");
 }
 
 #[test]
@@ -198,6 +282,158 @@ fn messages_bridge_preserves_custom_tool_call_and_output_shapes() {
             "content": "Cargo.toml\nsrc"
         })
     );
+}
+
+#[test]
+fn messages_bridge_converts_multimodal_function_output_to_anthropic_blocks() {
+    let first = prepare_responses_to_messages(
+        &request(Value::String("inspect the image".to_string())),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+    let response = translate_messages_response(
+        first,
+        &json!({
+            "id": "msg_image",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_image",
+                "name": "run_command",
+                "input": {"command": "view-image"}
+            }]
+        }),
+    )
+    .unwrap();
+
+    let continued = prepare_responses_to_messages(
+        &json!({
+            "model": "claude-test",
+            "previous_response_id": response.response_id,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "toolu_image",
+                "output": [
+                    {"type": "input_text", "text": "image loaded"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,YQ=="}
+                ]
+            }]
+        }),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        Some(response.continuation),
+    )
+    .unwrap();
+
+    assert_eq!(
+        continued.upstream_body()["messages"][2]["content"][0]["content"],
+        json!([
+            {"type": "text", "text": "image loaded"},
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "YQ=="
+                }
+            }
+        ])
+    );
+}
+
+#[test]
+fn messages_bridge_keeps_regular_function_output_arrays_as_json_text() {
+    let first = prepare_responses_to_messages(
+        &request(Value::String("inspect".to_string())),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+    let response = translate_messages_response(
+        first,
+        &json!({
+            "id": "msg_json_output",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_json_output",
+                "name": "run_command",
+                "input": {"command": "list"}
+            }]
+        }),
+    )
+    .unwrap();
+    let continued = prepare_responses_to_messages(
+        &json!({
+            "model": "claude-test",
+            "previous_response_id": response.response_id,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "toolu_json_output",
+                "output": [{"name": "Cargo.toml"}, {"name": "README.md"}]
+            }]
+        }),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        Some(response.continuation),
+    )
+    .unwrap();
+
+    assert_eq!(
+        continued.upstream_body()["messages"][2]["content"][0]["content"],
+        r#"[{"name":"Cargo.toml"},{"name":"README.md"}]"#
+    );
+}
+
+#[test]
+fn messages_bridge_rejects_invalid_tool_output_image_data() {
+    let first = prepare_responses_to_messages(
+        &request(Value::String("inspect".to_string())),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        None,
+    )
+    .unwrap();
+    let response = translate_messages_response(
+        first,
+        &json!({
+            "id": "msg_invalid_image",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_invalid_image",
+                "name": "run_command",
+                "input": {"command": "view-image"}
+            }]
+        }),
+    )
+    .unwrap();
+    let error = prepare_responses_to_messages(
+        &json!({
+            "model": "claude-test",
+            "previous_response_id": response.response_id,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "toolu_invalid_image",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,not-valid-base64"
+                }]
+            }]
+        }),
+        "claude-test",
+        false,
+        MessagesReasoningMode::Disabled,
+        Some(response.continuation),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "adapter_invalid_request");
 }
 
 #[test]

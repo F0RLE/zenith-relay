@@ -2,9 +2,13 @@ use super::contracts::{
     AdapterError, AdapterResult, ClientToolTarget, MessagesBridgeRequest, MessagesBridgeResponse,
     MessagesBridgeState, MessagesReasoningMode, ResponsesToolKind, TranslatedTools,
 };
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+const SUPPORTED_IMAGE_TYPES: &[&str] = &["image/gif", "image/jpeg", "image/png", "image/webp"];
 /// Converts a Codex Responses request to the Anthropic Messages contract.
 ///
 /// JSON-schema functions retain their object input. Direct custom tools are
@@ -513,6 +517,11 @@ fn content_to_messages_blocks(content: &Value) -> AdapterResult<Vec<Value>> {
                         .and_then(Value::as_str)
                         .map(text_block)
                         .ok_or_else(AdapterError::invalid_request),
+                    Some("input_image") => image_block_from_data_uri(
+                        part.get("image_url")
+                            .and_then(Value::as_str)
+                            .ok_or_else(AdapterError::invalid_request)?,
+                    ),
                     _ => Err(AdapterError::invalid_request()),
                 }
             })
@@ -560,19 +569,131 @@ fn tool_result_block(
             return Err(AdapterError::continuation_mismatch());
         }
     }
-    let content = match (kind, item.get("output")) {
-        (ResponsesToolKind::Custom, Some(Value::String(output))) => Value::String(output.clone()),
-        (ResponsesToolKind::Custom, _) => return Err(AdapterError::invalid_request()),
-        (ResponsesToolKind::Function, Some(Value::String(output))) => Value::String(output.clone()),
-        (ResponsesToolKind::Function, Some(value)) => Value::String(
-            serde_json::to_string(value).map_err(|_| AdapterError::invalid_request())?,
-        ),
-        (ResponsesToolKind::Function, None) => Value::String(String::new()),
+    let content = match kind {
+        ResponsesToolKind::Custom => match item.get("output") {
+            Some(Value::String(output)) => Value::String(output.clone()),
+            _ => return Err(AdapterError::invalid_request()),
+        },
+        ResponsesToolKind::Function => function_tool_result_content(item.get("output"))?,
     };
     Ok(json!({
         "type": "tool_result",
         "tool_use_id": call_id,
         "content": content,
+    }))
+}
+
+fn function_tool_result_content(output: Option<&Value>) -> AdapterResult<Value> {
+    match output {
+        None => Ok(Value::String(String::new())),
+        Some(Value::String(output)) => {
+            let Some(parts) = serde_json::from_str::<Value>(output)
+                .ok()
+                .and_then(|value| value.as_array().cloned())
+            else {
+                return Ok(Value::String(output.clone()));
+            };
+            match function_tool_output_parts(&parts)? {
+                Some(content) => Ok(content),
+                None => Ok(Value::String(output.clone())),
+            }
+        }
+        Some(Value::Array(parts)) => match function_tool_output_parts(parts)? {
+            Some(content) => Ok(content),
+            None => Ok(Value::String(
+                serde_json::to_string(parts).map_err(|_| AdapterError::invalid_request())?,
+            )),
+        },
+        Some(value) => Ok(Value::String(
+            serde_json::to_string(value).map_err(|_| AdapterError::invalid_request())?,
+        )),
+    }
+}
+
+/// Converts a Responses tool output array only when it contains an image.
+/// Ordinary JSON arrays keep their previous string representation.
+fn function_tool_output_parts(parts: &[Value]) -> AdapterResult<Option<Value>> {
+    let contains_image = parts.iter().any(|part| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "input_image")
+    });
+    if !contains_image {
+        return Ok(None);
+    }
+
+    let mut blocks = Vec::with_capacity(parts.len());
+    for part in parts {
+        let Some(part) = part.as_object() else {
+            return Err(AdapterError::invalid_request());
+        };
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text") => {
+                let text = part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or_else(AdapterError::invalid_request)?;
+                if !text.is_empty() {
+                    blocks.push(text_block(text));
+                }
+            }
+            Some("input_image") => blocks.push(image_block_from_data_uri(
+                part.get("image_url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(AdapterError::invalid_request)?,
+            )?),
+            _ => return Err(AdapterError::invalid_request()),
+        }
+    }
+    if blocks.is_empty() {
+        return Err(AdapterError::invalid_request());
+    }
+    Ok(Some(Value::Array(blocks)))
+}
+
+fn image_block_from_data_uri(data_uri: &str) -> AdapterResult<Value> {
+    let data_uri = data_uri.trim();
+    let Some(rest) = data_uri.strip_prefix("data:") else {
+        return Err(AdapterError::invalid_request());
+    };
+    let Some((metadata, data)) = rest.split_once(',') else {
+        return Err(AdapterError::invalid_request());
+    };
+    let mut metadata_parts = metadata.split(';');
+    let media_type = metadata_parts
+        .next()
+        .map(str::trim)
+        .filter(|value| {
+            SUPPORTED_IMAGE_TYPES
+                .iter()
+                .any(|supported| value.eq_ignore_ascii_case(supported))
+        })
+        .ok_or_else(AdapterError::invalid_request)?
+        .to_ascii_lowercase();
+    if !metadata_parts.any(|part| part.trim().eq_ignore_ascii_case("base64")) {
+        return Err(AdapterError::invalid_request());
+    }
+    let data = data.trim();
+    if data.is_empty()
+        || data.bytes().any(|byte| byte.is_ascii_whitespace())
+        || data.len() > (MAX_IMAGE_BYTES * 4 / 3).saturating_add(4)
+    {
+        return Err(AdapterError::invalid_request());
+    }
+    let decoded = STANDARD
+        .decode(data)
+        .map_err(|_| AdapterError::invalid_request())?;
+    if decoded.is_empty() || decoded.len() > MAX_IMAGE_BYTES {
+        return Err(AdapterError::invalid_request());
+    }
+
+    Ok(json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": data,
+        }
     }))
 }
 

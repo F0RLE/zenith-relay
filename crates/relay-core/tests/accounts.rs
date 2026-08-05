@@ -478,6 +478,62 @@ async fn invalid_encrypted_reasoning_is_stripped_once_before_semantic_output() {
 }
 
 #[tokio::test]
+async fn invalid_encrypted_compaction_is_dropped_once_before_semantic_output() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error":{"code":"invalid_encrypted_content"}}),
+        ),
+        success_reply("recovered-compaction-response"),
+    ])
+    .await;
+    let authority = ready_authority("relay-compaction-account", "account-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "relay-compaction-account",
+            "provider-compaction-account",
+            &upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {"id":"cmp_stale","type":"compaction","encrypted_content":"invalid"},
+                {"id":"cmp_summary_stale","type":"compaction_summary","encrypted_content":"invalid"},
+                {"id":"cmp_plain","type":"compaction","summary":[]},
+                {"role":"user","content":"continue"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["input"][0]["type"], "compaction");
+    assert_eq!(requests[0].body["input"][1]["type"], "compaction_summary");
+    assert_eq!(requests[1].body["input"].as_array().unwrap().len(), 2);
+    assert_eq!(requests[1].body["input"][0]["type"], "compaction");
+    assert!(requests[1].body["input"][0]
+        .get("encrypted_content")
+        .is_none());
+    assert_eq!(requests[1].body["input"][1]["role"], "user");
+    assert_eq!(requests[1].body["input"][1]["content"], "continue");
+}
+
+#[tokio::test]
 async fn image_generation_uses_cheapest_account_model_and_translates_response() {
     let (upstream, state) = spawn_upstream(vec![Reply::Stream(vec![
         StreamChunk::Data(
@@ -761,8 +817,23 @@ async fn pool_catalog_retains_unreachable_account_metadata_beside_live_account_c
 
 #[tokio::test]
 async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
-    let (source_upstream, source_state) = spawn_upstream(Vec::new()).await;
-    let (account_upstream, account_state) = spawn_upstream(Vec::new()).await;
+    let (source_upstream, source_state) = spawn_upstream_with_catalog(
+        Vec::new(),
+        json!({
+            "data": [{
+                "id": MODEL,
+                "context_length": 1_000_000,
+                "input_modalities": ["text", "image"]
+            }]
+        }),
+    )
+    .await;
+    let mut native_catalog = default_upstream_model_catalog();
+    native_catalog["models"][0]["context_window"] = 128_000.into();
+    native_catalog["models"][0]["max_context_window"] = 120_000.into();
+    native_catalog["models"][0]["input_modalities"] = json!(["text"]);
+    let (account_upstream, account_state) =
+        spawn_upstream_with_catalog(Vec::new(), native_catalog).await;
     let authority = ready_authority("relay-account", "account-access").await;
     let (gateway, _, _, _) = spawn_mixed_gateway(
         vec![source(
@@ -808,6 +879,9 @@ async fn pool_catalog_keeps_native_capabilities_on_a_mixed_source_model() {
     assert_eq!(model["service_tiers"][0]["id"], "priority");
     assert_eq!(model["use_responses_lite"], true);
     assert_eq!(model["supports_reasoning_summaries"], true);
+    assert_eq!(model["input_modalities"], json!(["text"]));
+    assert_eq!(model["context_window"], 128_000);
+    assert_eq!(model["max_context_window"], 120_000);
 
     let source_requests_before = source_state.requests.lock().unwrap().len();
     let account_requests_before = account_state.requests.lock().unwrap().len();

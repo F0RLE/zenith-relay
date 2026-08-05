@@ -303,9 +303,11 @@ pub fn normalize_native_codex_catalog_entry(
     template: &Map<String, Value>,
     model: &str,
     priority: u64,
-    advertised_context_window: Option<u64>,
+    _advertised_context_window: Option<u64>,
 ) -> Option<Value> {
-    let mut entry = catalog_entry_base(template, model, priority, advertised_context_window)?;
+    // Native rows own their context and capability fields. An API-source
+    // context override must never be allowed to fill or replace them.
+    let mut entry = catalog_entry_base(template, model, priority, None)?;
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
     // upstream field to retain native capabilities verbatim.
@@ -314,8 +316,7 @@ pub fn normalize_native_codex_catalog_entry(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
-    let context_window =
-        advertised_context_window.or_else(|| entry.get("context_window").and_then(context_window));
+    let context_window = entry.get("context_window").and_then(context_window);
     entry.insert("slug".into(), Value::String(model.to_string()));
     entry.insert(
         "priority".into(),
@@ -758,12 +759,16 @@ mod tests {
             "experimental_supported_tools": [],
             "apply_patch_tool_type": "freeform",
             "truncation_policy": {"mode": "tokens", "limit": 10000},
+            "context_window": 128000,
+            "max_context_window": 120000,
+            "auto_compact_token_limit": 110000,
+            "native_setting": "keep-me",
         });
         let entry = normalize_native_codex_catalog_entry(
             template.as_object().unwrap(),
             "gpt-5.6-sol",
             1_000,
-            None,
+            Some(1_000_000),
         )
         .unwrap();
 
@@ -772,6 +777,11 @@ mod tests {
         assert_eq!(entry["service_tiers"][0]["id"], "priority");
         assert_eq!(entry["supports_parallel_tool_calls"], true);
         assert_eq!(entry["use_responses_lite"], true);
+        assert_eq!(entry["input_modalities"], json!(["text"]));
+        assert_eq!(entry["context_window"], 128_000);
+        assert_eq!(entry["max_context_window"], 120_000);
+        assert_eq!(entry["auto_compact_token_limit"], 110_000);
+        assert_eq!(entry["native_setting"], "keep-me");
     }
 
     #[test]
