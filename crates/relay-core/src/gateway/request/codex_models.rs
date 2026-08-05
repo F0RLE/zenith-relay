@@ -3,7 +3,7 @@ use super::super::errors::api_error;
 use super::super::now_ms;
 use crate::catalog::{
     canonicalize_model_ids, normalize_codex_catalog_priorities,
-    normalize_native_codex_catalog_entry,
+    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
@@ -18,7 +18,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, Response, StatusCode, Uri};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -86,8 +86,8 @@ async fn codex_models_response(
     client_version: &str,
 ) -> Option<Value> {
     let now_ms = now_ms();
-    let source_context_windows = runtime
-        .codex_source_context_windows(key, allowed_protocols, now_ms)
+    let source_metadata = runtime
+        .codex_source_model_metadata(key, allowed_protocols, now_ms)
         .await;
     let routes = runtime.codex_models_routes(key, now_ms).await;
     let candidate_ids = routes
@@ -155,7 +155,8 @@ async fn codex_models_response(
         runtime,
         key,
         visible_models,
-        &source_context_windows,
+        &source_metadata.context_windows,
+        &source_metadata.reasoning_catalog_templates,
         live_manifests.iter().chain(stale.iter()),
     )
 }
@@ -173,6 +174,26 @@ pub(in crate::gateway) fn build_codex_models_response(
         key,
         visible_models,
         source_context_windows,
+        &Default::default(),
+        upstream,
+    )
+}
+
+#[cfg(test)]
+pub(in crate::gateway) fn build_codex_models_response_with_source_reasoning(
+    runtime: &GatewayRuntime,
+    key: &AuthenticatedKey,
+    visible_models: &[String],
+    source_context_windows: &BTreeMap<String, u64>,
+    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
+    upstream: Option<&Value>,
+) -> Option<Value> {
+    build_codex_models_response_from_manifests(
+        runtime,
+        key,
+        visible_models,
+        source_context_windows,
+        source_reasoning_templates,
         upstream,
     )
 }
@@ -182,6 +203,7 @@ fn build_codex_models_response_from_manifests<'a>(
     key: &AuthenticatedKey,
     visible_models: &[String],
     source_context_windows: &BTreeMap<String, u64>,
+    source_reasoning_templates: &BTreeMap<String, Map<String, Value>>,
     upstreams: impl IntoIterator<Item = &'a Value>,
 ) -> Option<Value> {
     let upstream_models = upstreams
@@ -287,14 +309,28 @@ fn build_codex_models_response_from_manifests<'a>(
                     )
                 })
         } else {
-            routed_codex_catalog_entry(
-                template,
-                &display_id,
-                priority,
-                source_context_windows
-                    .get(&upstream_id.to_ascii_lowercase())
-                    .copied(),
-            )
+            source_reasoning_templates
+                .get(&normalized)
+                .and_then(|capabilities| {
+                    normalize_upstream_codex_catalog_entry(
+                        capabilities,
+                        &display_id,
+                        priority,
+                        source_context_windows
+                            .get(&upstream_id.to_ascii_lowercase())
+                            .copied(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    routed_codex_catalog_entry(
+                        template,
+                        &display_id,
+                        priority,
+                        source_context_windows
+                            .get(&upstream_id.to_ascii_lowercase())
+                            .copied(),
+                    )
+                })
         };
         let uses_responses_lite = native_account_model
             && upstream_by_model

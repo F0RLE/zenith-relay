@@ -35,10 +35,10 @@ pub use runtime::{
     RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource, SourceDiscovery,
 };
 pub use scheduler::{
-    account_candidate_health, normalize_subscription_plan_order, CandidateHealth, CandidateKind,
-    CandidateQuota, CandidateRuntimeSnapshot, CandidateScope, PoolScheduler, RoutingDiagnostics,
-    RoutingStrategy, RuntimeCandidate, Selection, SelectionReason, SelectionRequest,
-    QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
+    account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
+    CandidateHealth, CandidateKind, CandidateQuota, CandidateRuntimeSnapshot, CandidateScope,
+    PoolScheduler, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, Selection,
+    SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
     fetch_source_provider_stats, normalize_source_protocol_bindings, source_points_to_gateway,

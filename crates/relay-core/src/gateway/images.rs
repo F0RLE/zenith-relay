@@ -2,9 +2,9 @@ use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_
 use super::errors::{
     api_error, api_error_type, apply_cooldown, apply_failure_cooldown_with_body,
     apply_failure_cooldown_with_hint, apply_failure_state, canonical_upstream_status,
-    classify_upstream_error_value, cooldown_error, rate_limit_body_hint_value, retryable_failure,
-    upstream_failure_status, upstream_status_from_value, AttemptFailure, RateLimitBodyHint,
-    TRANSIENT_COOLDOWN_MS,
+    classify_upstream_error_value, cooldown_error, failure_requires_independent_source_endpoint,
+    rate_limit_body_hint_value, retryable_failure, upstream_failure_status,
+    upstream_status_from_value, AttemptFailure, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::request_id;
@@ -518,6 +518,9 @@ async fn execute_prepared(
                     failure.cooldown_ms,
                     route.half_open_probe,
                 );
+                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                }
                 let mut event = image_usage_event(
                     &request_id,
                     attempt,
@@ -538,35 +541,39 @@ async fn execute_prepared(
 
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes =
-            match crate::runtime::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES).await {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    let failure = AttemptFailure::body();
-                    let state = apply_cooldown(
-                        &runtime,
-                        &route.candidate_id,
-                        "*",
-                        TRANSIENT_COOLDOWN_MS,
-                        route.half_open_probe,
-                    );
-                    let mut event = image_usage_event(
-                        &request_id,
-                        attempt,
-                        &key,
-                        &route,
-                        &prepared,
-                        false,
-                        failure.status,
-                        Some(failure.category.to_string()),
-                        started,
-                    );
-                    apply_failure_state(&mut event, state);
-                    emit_usage(&runtime, event);
-                    last_failure = Some(failure);
-                    continue;
+        let bytes = match crate::runtime::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                let failure = AttemptFailure::body();
+                let state = apply_cooldown(
+                    &runtime,
+                    &route.candidate_id,
+                    "*",
+                    TRANSIENT_COOLDOWN_MS,
+                    route.half_open_probe,
+                );
+                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
                 }
-            };
+                let mut event = image_usage_event(
+                    &request_id,
+                    attempt,
+                    &key,
+                    &route,
+                    &prepared,
+                    false,
+                    failure.status,
+                    Some(failure.category.to_string()),
+                    started,
+                );
+                apply_failure_state(&mut event, state);
+                emit_usage(&runtime, event);
+                last_failure = Some(failure);
+                continue;
+            }
+        };
         if !status.is_success() {
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
             let capability_failure = image_capability_unavailable(&bytes);
@@ -591,6 +598,14 @@ async fn execute_prepared(
                         route.half_open_probe,
                     )
                 };
+                if !capability_failure
+                    && failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    )
+                {
+                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                }
                 let mut event = image_usage_event(
                     &request_id,
                     attempt,

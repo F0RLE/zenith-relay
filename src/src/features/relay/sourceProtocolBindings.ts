@@ -92,6 +92,16 @@ export function effectiveSourceProtocolBindings(
     : [{ wireApi: source.wireApi, modelIds: [...source.models] }];
 }
 
+function sourceBindingModels(
+  source: ProtocolBindingSource,
+  bindings: readonly SourceProtocolBinding[],
+  binding: SourceProtocolBinding,
+) {
+  return binding.modelIds.length || bindings.length !== 1
+    ? binding.modelIds
+    : source.models;
+}
+
 /**
  * Mirrors the runtime's source capability calculation for one client
  * protocol. A sole empty binding retains the legacy source-wide catalog;
@@ -102,14 +112,10 @@ export function sourceModelsForWireApi(
   wireApi: SourceWireApi,
 ) {
   const bindings = effectiveSourceProtocolBindings(source);
-  const expandEmptyModels = bindings.length === 1;
   const seen = new Set<string>();
   return bindings.flatMap((binding) => {
     if (binding.wireApi !== wireApi) return [];
-    const models = binding.modelIds.length || !expandEmptyModels
-      ? binding.modelIds
-      : source.models;
-    return models.filter((model) => {
+    return sourceBindingModels(source, bindings, binding).filter((model) => {
       const normalized = model.toLowerCase();
       if (seen.has(normalized)) return false;
       seen.add(normalized);
@@ -131,11 +137,10 @@ export function sourceSupportsWireApi(
  */
 export function sourceSupportsNativeResponses(source: ProtocolBindingSource) {
   const bindings = effectiveSourceProtocolBindings(source);
-  const expandEmptyModels = bindings.length === 1;
   return bindings.some(
     (binding) =>
       binding.wireApi === "responses"
       && normalizedAdapter(binding) === "native"
-      && (binding.modelIds.length > 0 || (expandEmptyModels && source.models.length > 0)),
+      && sourceBindingModels(source, bindings, binding).length > 0,
   );
 }

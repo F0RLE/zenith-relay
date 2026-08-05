@@ -3,16 +3,18 @@ import { Camera, CircleAlert, FolderOpen, History, RotateCcw, ShieldCheck, Trash
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ProfileBinding, ProfileSnapshot } from "../../api/types";
-import { Button, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
+import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
-  const { mode, busy, perform } = useRelayState();
+  const { mode, busy, perform, profileSnapshotBackupBeforeRestore } = useRelayState();
   const confirm = useConfirm();
   const [bindings, setBindings] = useState<ProfileBinding[]>([]);
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
+  const [snapshotRestoreTarget, setSnapshotRestoreTarget] = useState<ProfileSnapshot | null>(null);
+  const [saveCurrentBeforeRestore, setSaveCurrentBeforeRestore] = useState(profileSnapshotBackupBeforeRestore);
   const [loadFailed, setLoadFailed] = useState(false);
 
   const loadRecovery = useCallback(() => {
@@ -40,9 +42,19 @@ export function ProfilesPage() {
     }
   };
 
-  const restoreSnapshot = async (snapshot: ProfileSnapshot) => {
-    if (await confirm(t("profiles.snapshotRestoreConfirm", { name: snapshot.name }))
-      && await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, t("profiles.safetySnapshotName", { name: snapshot.name })), "feedback.snapshotRestored")) {
+  const requestSnapshotRestore = (snapshot: ProfileSnapshot) => {
+    setSaveCurrentBeforeRestore(profileSnapshotBackupBeforeRestore);
+    setSnapshotRestoreTarget(snapshot);
+  };
+
+  const restoreSnapshot = async () => {
+    const snapshot = snapshotRestoreTarget;
+    if (!snapshot) return;
+    setSnapshotRestoreTarget(null);
+    const safetyName = saveCurrentBeforeRestore
+      ? Array.from(t("profiles.safetySnapshotName", { name: snapshot.name })).slice(0, 80).join("").trim()
+      : null;
+    if (await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, safetyName), "feedback.snapshotRestored")) {
       loadRecovery();
     }
   };
@@ -98,9 +110,20 @@ export function ProfilesPage() {
         <td><strong title={snapshot.name}>{snapshot.name}</strong><small title={displayProfilePath(snapshot.profileDir)}>{displayProfilePath(snapshot.profileDir)}</small></td>
         <td>{snapshotDate(snapshot.createdAtMs)}</td>
         <td><StatusIcon status={snapshot.configAvailable && snapshot.authAvailable ? "ready" : "info"} label={snapshot.configAvailable && snapshot.authAvailable ? t("profiles.snapshotComplete") : t("profiles.snapshotPartial")} /></td>
-        <td><div className="inline-actions"><Button variant="secondary" icon={<RotateCcw aria-hidden />} aria-label={t("profiles.restoreSnapshot", { name: snapshot.name })} disabled={busy !== null} onClick={() => restoreSnapshot(snapshot)}>{t("profiles.restoreAutomatic")}</Button><IconButton className="danger" label={t("profiles.deleteSnapshot", { name: snapshot.name })} icon={<Trash2 aria-hidden />} disabled={busy !== null} onClick={() => deleteSnapshot(snapshot)} /></div></td>
+        <td><div className="inline-actions"><Button variant="secondary" icon={<RotateCcw aria-hidden />} aria-label={t("profiles.restoreSnapshot", { name: snapshot.name })} disabled={busy !== null} onClick={() => requestSnapshotRestore(snapshot)}>{t("profiles.restoreAutomatic")}</Button><IconButton className="danger" label={t("profiles.deleteSnapshot", { name: snapshot.name })} icon={<Trash2 aria-hidden />} disabled={busy !== null} onClick={() => deleteSnapshot(snapshot)} /></div></td>
       </tr>)}</tbody></table></div></> : loadFailed ? null : <div className="profile-recovery-empty-state"><EmptyState title={t("profiles.noSnapshots")} description={t("profiles.noSnapshotsHint")} />{snapshotForm}</div>}
       </section>
     </section>}
+    {snapshotRestoreTarget ? <Dialog
+      title={t("profiles.snapshotRestoreTitle")}
+      onClose={() => setSnapshotRestoreTarget(null)}
+      footer={<><Button variant="secondary" onClick={() => setSnapshotRestoreTarget(null)}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "profile-snapshot-restore"} onClick={() => void restoreSnapshot()}>{t("profiles.restoreAutomatic")}</Button></>}
+    >
+      <p className="confirm-dialog-message">{t("profiles.snapshotRestoreConfirm", { name: snapshotRestoreTarget.name })}</p>
+      <label className="snapshot-restore-backup-choice">
+        <input type="checkbox" checked={saveCurrentBeforeRestore} onChange={(event) => setSaveCurrentBeforeRestore(event.target.checked)} />
+        <span>{t("profiles.snapshotBackupBeforeRestore")}</span>
+      </label>
+    </Dialog> : null}
   </section>;
 }

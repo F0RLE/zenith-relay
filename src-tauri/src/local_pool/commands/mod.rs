@@ -15,7 +15,7 @@ use super::{
         authority::{CredentialPersistence, StoredRefreshAdapter},
         credentials::CredentialStore,
         proxy::{effective_proxy_config, ProxyRefreshClient},
-        records::{candidate_health, candidate_quota_with_stale_after, CODEX_RESPONSES_URL},
+        records::CODEX_RESPONSES_URL,
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
@@ -26,7 +26,11 @@ use super::{
 };
 use std::{collections::HashMap, sync::Arc};
 use zenith_relay_core::{
-    protocol::{account_operational_state, AccountOperationalInput, ClientWireApi},
+    accounts::AccountRecord,
+    protocol::{
+        account_operational_state, AccountOperationalInput, AccountOperationalState,
+        AccountRoutingBlockReason, ClientWireApi,
+    },
     GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
     RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, WireApi, QUOTA_STALE_AFTER_MS,
 };
@@ -127,30 +131,21 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
                 .await
                 .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
         }
-        let operational = account_operational_state(AccountOperationalInput {
-            enabled: account.account.enabled,
-            // Pool membership is a system-key scope, not a global runtime
-            // eligibility switch. This lets an explicitly scoped ordinary
-            // local key reach an enabled account outside the ChatGPT pool.
-            in_pool: true,
-            draining: account.account.draining,
-            secret_available: true,
-            proxy_available: true,
-            auth_state: account.account.auth_state,
-            health: account.account.health,
-            subscription: &account.account.subscription,
-            quota: &account.account.quota,
-            last_error_code: account.account.last_error_code.as_deref(),
-            now_ms: current_time_ms(),
-            quota_stale_after_ms,
-        });
+        let operational = runtime_account_operational_state(&account.account, current_time_ms());
+        // Candidate `enabled` represents base configuration availability.
+        // Quota remains a separate scheduler decision for every request and
+        // model-list response. Do not fold a temporary exhausted quota into
+        // this flag: doing so makes a healthy pool look structurally invalid
+        // until a later refresh happens to repair it.
+        let candidate_enabled =
+            account_candidate_enabled(account.account.enabled, operational.routing_block_reason);
         accounts.push(RuntimeChatGptAccount {
             id: account_id.clone(),
             source_id: account.account.source_id,
             chatgpt_account_id: chatgpt_account_id.to_string(),
             responses_url: CODEX_RESPONSES_URL.to_string(),
             models: account.models,
-            enabled: operational.routing_eligible,
+            enabled: candidate_enabled,
             draining: account.account.draining,
             priority: account.priority,
             weight: account.weight,
@@ -214,29 +209,36 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         credentials,
         state.account_metadata_sink(),
     ));
-    let runtime = GatewayRuntime::from_mixed_pool(
+    let auth = RuntimeChatGptAuth {
+        token_authority: authority,
+        refresh_adapter: refresh,
+        persistence_adapter: persistence,
+        refresh_skew_ms: 60_000,
+        agent_identities,
+    };
+    let options = GatewayRuntimeOptions {
+        max_retry_candidates: usize::from(settings.max_retry_candidates),
+        routing_strategy: settings.routing_strategy,
+        subscription_plan_order: settings.subscription_plan_order,
+        hidden_models: settings.hidden_models,
+        default_service_tier: settings.default_service_tier,
+        quota_stale_after_ms,
+        image_base_model: None,
+        response_affinity_store: Some(state.response_affinity_store()),
+        provider_storm_breaker: false,
+    };
+    let usage_callback = state.usage_callback();
+    // A desktop configuration can legitimately have no route while the user
+    // is editing sources, recovering an account, or has removed its final
+    // member. Runtime construction must preserve that manageable state across
+    // restarts; individual requests still require an eligible candidate.
+    let runtime = GatewayRuntime::from_mixed_pool_allow_unroutable(
         sources,
         accounts,
         keys,
-        RuntimeChatGptAuth {
-            token_authority: authority,
-            refresh_adapter: refresh,
-            persistence_adapter: persistence,
-            refresh_skew_ms: 60_000,
-            agent_identities,
-        },
-        GatewayRuntimeOptions {
-            max_retry_candidates: usize::from(settings.max_retry_candidates),
-            routing_strategy: settings.routing_strategy,
-            subscription_plan_order: settings.subscription_plan_order,
-            hidden_models: settings.hidden_models,
-            default_service_tier: settings.default_service_tier,
-            quota_stale_after_ms,
-            image_base_model: None,
-            response_affinity_store: Some(state.response_affinity_store()),
-            provider_storm_breaker: false,
-        },
-        state.usage_callback(),
+        auth,
+        options,
+        usage_callback,
     )
     .map_err(core_error)?;
     runtime.set_protected_candidate(
@@ -260,6 +262,40 @@ fn account_credential_error(
     error: super::accounts::credentials::CredentialError,
 ) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
+}
+
+fn account_candidate_enabled(
+    account_enabled: bool,
+    routing_block_reason: Option<AccountRoutingBlockReason>,
+) -> bool {
+    account_enabled
+        && matches!(
+            routing_block_reason,
+            None | Some(AccountRoutingBlockReason::QuotaExhausted)
+        )
+}
+
+fn runtime_account_operational_state(
+    account: &AccountRecord,
+    now_ms: u64,
+) -> AccountOperationalState {
+    account_operational_state(AccountOperationalInput {
+        enabled: account.enabled,
+        // Pool membership is a system-key scope, not a global runtime
+        // eligibility switch. This lets an explicitly scoped ordinary local
+        // key reach an enabled account outside the ChatGPT pool.
+        in_pool: true,
+        draining: account.draining,
+        secret_available: true,
+        proxy_available: true,
+        auth_state: account.auth_state,
+        health: account.health,
+        subscription: &account.subscription,
+        quota: &account.quota,
+        last_error_code: account.last_error_code.as_deref(),
+        now_ms,
+        quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
+    })
 }
 
 pub(super) async fn sync_records_or_rollback(
@@ -304,14 +340,11 @@ pub(super) async fn sync_refreshed_account_or_rollback(
         let account = store
             .account(account_id)
             .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+        let operational = runtime_account_operational_state(&account.account, current_time_ms());
         (
-            account.account.enabled,
-            candidate_health(&account.account),
-            candidate_quota_with_stale_after(
-                &account.account.quota,
-                current_time_ms(),
-                QUOTA_STALE_AFTER_MS,
-            ),
+            account_candidate_enabled(account.account.enabled, operational.routing_block_reason),
+            operational.health,
+            operational.quota,
             account.account.quota.updated_at_ms,
         )
     };
@@ -428,6 +461,33 @@ mod tests {
         assert_eq!(timestamp_ms("not-a-date"), None);
     }
 
+    #[test]
+    fn exhausted_account_stays_configured_while_the_scheduler_blocks_requests() {
+        assert!(account_candidate_enabled(
+            true,
+            Some(AccountRoutingBlockReason::QuotaExhausted)
+        ));
+        assert!(account_candidate_enabled(true, None));
+        assert!(!account_candidate_enabled(
+            true,
+            Some(AccountRoutingBlockReason::ReauthRequired)
+        ));
+        for reason in [
+            AccountRoutingBlockReason::AuthError,
+            AccountRoutingBlockReason::Checkpoint,
+            AccountRoutingBlockReason::Captcha,
+            AccountRoutingBlockReason::SubscriptionForbidden,
+            AccountRoutingBlockReason::SubscriptionExpired,
+            AccountRoutingBlockReason::AccountUnhealthy,
+        ] {
+            assert!(!account_candidate_enabled(true, Some(reason)));
+        }
+        assert!(!account_candidate_enabled(
+            false,
+            Some(AccountRoutingBlockReason::QuotaExhausted)
+        ));
+    }
+
     #[tokio::test]
     async fn runtime_creates_and_reuses_the_system_gateway_key() {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -488,6 +548,133 @@ mod tests {
         assert!(response.status().is_success());
 
         state.gateway.stop().await;
+        secret_store::delete(&source_secret_ref).unwrap();
+        secret_store::delete(&key.secret_ref).unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn runtime_restarts_after_pool_eviction_and_source_deletion() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-empty-pool-{id}"));
+        let source_secret_ref = format!("source:empty-pool-{id}");
+        let state = DesktopState::open(root.clone()).unwrap();
+        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        let source = ProviderSourceRecord {
+            id: "source_1".into(),
+            name: "Synthetic".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            secret_ref: source_secret_ref.clone(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        };
+        state
+            .store()
+            .unwrap()
+            .upsert_source(source.clone())
+            .unwrap();
+
+        let runtime = runtime_from_store(&state).await.unwrap();
+        let key = state
+            .store()
+            .unwrap()
+            .keys()
+            .iter()
+            .find(|key| key.system)
+            .cloned()
+            .unwrap();
+        let secret = secret_store::load(&key.secret_ref).unwrap().unwrap();
+        let address = state.gateway.start(runtime, 0).await.unwrap();
+        let mut gateway = state.store().unwrap().gateway().clone();
+        gateway.port = address.port();
+        state.store().unwrap().replace_gateway(gateway).unwrap();
+        let client = reqwest::Client::new();
+        let initial_models: serde_json::Value = client
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth(&secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(initial_models["data"].as_array().unwrap().len(), 1);
+
+        let mut outside_pool = source;
+        outside_pool.in_pool = false;
+        let (old_sources, keys) = {
+            let store = state.store().unwrap();
+            (store.sources().to_vec(), store.keys().to_vec())
+        };
+        state
+            .store()
+            .unwrap()
+            .replace_records(vec![outside_pool], keys.clone())
+            .unwrap();
+        restart_or_rollback(&state, || {
+            state.store()?.replace_records(old_sources, keys.clone())
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.gateway.address().await, Some(address));
+        let evicted_models: serde_json::Value = client
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth(&secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(evicted_models["data"].as_array().unwrap().is_empty());
+
+        let (old_sources, old_keys) = {
+            let store = state.store().unwrap();
+            (store.sources().to_vec(), store.keys().to_vec())
+        };
+        state
+            .store()
+            .unwrap()
+            .replace_records(Vec::new(), old_keys.clone())
+            .unwrap();
+        restart_or_rollback(&state, || {
+            state.store()?.replace_records(old_sources, old_keys)
+        })
+        .await
+        .unwrap();
+        assert_eq!(state.gateway.address().await, Some(address));
+        let deleted_models: serde_json::Value = client
+            .get(format!("http://{address}/v1/models"))
+            .bearer_auth(&secret)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(deleted_models["data"].as_array().unwrap().is_empty());
+
+        state.gateway.stop().await;
+        let restarted_runtime = runtime_from_store(&state).await.unwrap();
+        assert!(restarted_runtime
+            .visible_models_for_secret(&secret, &[WireApi::Responses], current_time_ms())
+            .is_empty());
+        drop(restarted_runtime);
         secret_store::delete(&source_secret_ref).unwrap();
         secret_store::delete(&key.secret_ref).unwrap();
         drop(state);
@@ -659,36 +846,82 @@ mod tests {
 
     #[tokio::test]
     async fn build_failure_rolls_back_once_without_stopping_old_gateway() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-command-rollback-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let root = std::env::temp_dir().join(format!("zenith-relay-command-rollback-{id}"));
+        let source_secret_ref = format!("source:command-rollback-{id}");
+        let key_secret_ref = format!("key:command-rollback-{id}");
         let state = DesktopState::open(root.clone()).unwrap();
-        let runtime = Arc::new(
-            GatewayRuntime::new(
-                ProviderSource {
-                    id: "old_source".into(),
-                    name: "Old".into(),
-                    base_url: "http://127.0.0.1:9/v1".into(),
-                    api_key: "upstream".into(),
-                    wire_api: zenith_relay_core::WireApi::Responses,
-                    models: vec!["old-model".into()],
-                },
-                LocalGatewayKey {
-                    id: "old_key".into(),
-                    secret: "old-secret".into(),
-                },
-                Arc::new(|_| {}),
-            )
-            .unwrap(),
-        );
+        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
+        secret_store::save(&key_secret_ref, "old-secret").unwrap();
+        let source = ProviderSourceRecord {
+            id: "old_source".into(),
+            name: "Old".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            secret_ref: source_secret_ref.clone(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["old-model".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        };
+        let key = LocalGatewayKeyRecord {
+            id: "old_key".into(),
+            label: "Old key".into(),
+            enabled: true,
+            system: false,
+            secret_ref: key_secret_ref.clone(),
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: None,
+            created_at: "2026-08-05T00:00:00Z".into(),
+            last_used_at: None,
+        };
+        state
+            .store()
+            .unwrap()
+            .replace_records(vec![source.clone()], vec![key])
+            .unwrap();
+        let runtime = runtime_from_store(&state).await.unwrap();
         let address = state.gateway.start(runtime, 0).await.unwrap();
+        let (old_sources, old_keys) = {
+            let store = state.store().unwrap();
+            (store.sources().to_vec(), store.keys().to_vec())
+        };
+        let secret_refs = old_keys
+            .iter()
+            .map(|key| key.secret_ref.clone())
+            .collect::<Vec<_>>();
+        let mut invalid_source = source;
+        invalid_source.protocol_bindings = vec![zenith_relay_core::SourceProtocolBinding {
+            wire_api: WireApi::Messages,
+            adapter: zenith_relay_core::SourceAdapter::ResponsesToMessages,
+            reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
+            model_ids: vec!["old-model".into()],
+        }];
+        state
+            .store()
+            .unwrap()
+            .replace_records(vec![invalid_source], old_keys.clone())
+            .unwrap();
         let rollback_calls = Arc::new(AtomicUsize::new(0));
-        let observed = rollback_calls.clone();
 
-        assert!(restart_or_rollback(&state, move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(())
+        assert!(restart_or_rollback(&state, || {
+            rollback_calls.fetch_add(1, Ordering::SeqCst);
+            state.store()?.replace_records(old_sources, old_keys)
         })
         .await
         .is_err());
@@ -700,10 +933,19 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert!(response.status().is_success());
-        assert!(response.text().await.unwrap().contains("old-model"));
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert!(
+            status.is_success(),
+            "old listener returned {status}: {body}"
+        );
+        assert!(body.contains("old-model"));
 
         state.gateway.stop().await;
+        secret_store::delete(&source_secret_ref).unwrap();
+        for secret_ref in secret_refs {
+            secret_store::delete(&secret_ref).unwrap();
+        }
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }

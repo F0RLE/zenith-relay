@@ -2,7 +2,10 @@ use crate::accounts::{
     AccountAuthState, TokenAuthority, TokenAuthorityError, TokenPersistenceAdapter,
     TokenRefreshAdapter,
 };
-use crate::catalog::source_context_windows;
+use crate::catalog::{
+    apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
+    source_context_windows, source_reasoning_capabilities, SourceReasoningCapabilities,
+};
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
@@ -23,7 +26,7 @@ use futures_util::{future::join_all, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -41,6 +44,12 @@ const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
 
+#[derive(Default)]
+pub(crate) struct CodexSourceModelMetadata {
+    pub context_windows: BTreeMap<String, u64>,
+    pub reasoning_catalog_templates: BTreeMap<String, Map<String, Value>>,
+}
+
 fn source_candidate_id(
     source_id: &str,
     binding: &SourceProtocolBinding,
@@ -51,6 +60,21 @@ fn source_candidate_id(
     }
     let suffix = binding.adapter.route_suffix(binding.wire_api);
     format!("{source_id}::{suffix}")
+}
+
+fn source_reasoning_for_route(
+    mut capabilities: SourceReasoningCapabilities,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
+) -> Option<SourceReasoningCapabilities> {
+    if adapter.is_passthrough() {
+        return Some(capabilities);
+    }
+    capabilities
+        .retain_efforts(|effort| reasoning_mode.supports_effort(effort))
+        .then_some(())?;
+    capabilities.clear_summary_capabilities();
+    Some(capabilities)
 }
 
 #[derive(Clone, Debug)]
@@ -225,13 +249,23 @@ pub struct GatewayRuntime {
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
+    source_endpoint_domains: BTreeMap<String, String>,
     source_recovery_delays_ms: BTreeMap<String, u64>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
+    candidate_availability: Arc<tokio::sync::Notify>,
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
-    codex_model_manifests: Mutex<BTreeMap<String, CachedCodexManifest>>,
+    /// Native Codex catalog rows returned by `/models?client_version=...`.
+    codex_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    /// Generic source `/models` rows used only for source-declared
+    /// capabilities such as context and reasoning.
+    ///
+    /// This must remain separate from `codex_model_manifests`: a provider can
+    /// legitimately return different payload shapes for the generic endpoint
+    /// and for Codex's catalog request.
+    source_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
@@ -251,13 +285,14 @@ struct PassiveQuotaState {
 }
 
 #[derive(Clone, Debug)]
-struct CachedCodexManifest {
+struct CachedModelManifest {
     value: Value,
     observed_at_ms: u64,
 }
 
 pub(crate) struct CandidateLease {
     scheduler: Arc<Mutex<PoolScheduler>>,
+    availability: Arc<tokio::sync::Notify>,
     candidate_id: String,
     model: String,
     lane: CandidateLeaseLane,
@@ -281,17 +316,20 @@ impl CandidateLease {
         if self.released.swap(true, Ordering::AcqRel) {
             return;
         }
-        let mut scheduler = self
-            .scheduler
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match self.lane {
-            CandidateLeaseLane::Text => {
-                scheduler.release_for(&self.candidate_id, Some(&self.model));
-            }
-            CandidateLeaseLane::Image => {
-                scheduler.release_image_for(&self.candidate_id, Some(&self.model));
-            }
+        let released = match self.lane {
+            CandidateLeaseLane::Text => self
+                .scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_for(&self.candidate_id, Some(&self.model)),
+            CandidateLeaseLane::Image => self
+                .scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release_image_for(&self.candidate_id, Some(&self.model)),
+        };
+        if released {
+            self.availability.notify_one();
         }
     }
 }
@@ -400,6 +438,12 @@ struct RuntimeKey {
     client_wire_apis: Option<Vec<ClientWireApi>>,
 }
 
+#[derive(Clone, Copy)]
+enum ReachabilityRequirement {
+    RequireReachable,
+    AllowUnroutable,
+}
+
 impl GatewayRuntime {
     pub fn new(
         source: ProviderSource,
@@ -425,6 +469,7 @@ impl GatewayRuntime {
             Vec::new(),
             keys.into_iter().map(Into::into).collect(),
             None,
+            ReachabilityRequirement::RequireReachable,
             options,
             usage,
         )
@@ -438,7 +483,43 @@ impl GatewayRuntime {
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
-        Self::build(sources, accounts, keys, Some(account_auth), options, usage)
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::RequireReachable,
+            options,
+            usage,
+        )
+    }
+
+    /// Builds a locally managed gateway while its persisted configuration is
+    /// temporarily unroutable.
+    ///
+    /// Desktop source and pool mutations can validly remove the final
+    /// candidate. In that state the gateway must keep authenticating its
+    /// local keys and return an empty catalog instead of preventing the
+    /// mutation from committing. Authentication, catalog visibility, and
+    /// per-request candidate selection remain unchanged; callers validating a
+    /// new configuration must use [`Self::from_mixed_pool`] instead.
+    pub fn from_mixed_pool_allow_unroutable(
+        sources: Vec<RuntimeSource>,
+        accounts: Vec<RuntimeChatGptAccount>,
+        keys: Vec<RuntimeMixedLocalKey>,
+        account_auth: RuntimeChatGptAuth,
+        options: GatewayRuntimeOptions,
+        usage: UsageCallback,
+    ) -> Result<Self> {
+        Self::build(
+            sources,
+            accounts,
+            keys,
+            Some(account_auth),
+            ReachabilityRequirement::AllowUnroutable,
+            options,
+            usage,
+        )
     }
 
     fn build(
@@ -446,6 +527,7 @@ impl GatewayRuntime {
         accounts: Vec<RuntimeChatGptAccount>,
         keys: Vec<RuntimeMixedLocalKey>,
         account_auth: Option<RuntimeChatGptAuth>,
+        reachability_requirement: ReachabilityRequirement,
         options: GatewayRuntimeOptions,
         usage: UsageCallback,
     ) -> Result<Self> {
@@ -475,6 +557,7 @@ impl GatewayRuntime {
         let mut registry = ModelRegistry::default();
         let mut source_executors = BTreeMap::new();
         let mut source_candidate_bindings = BTreeMap::new();
+        let mut source_endpoint_domains = BTreeMap::new();
         let mut source_recovery_delays_ms = BTreeMap::new();
         for source in sources {
             source.source.validate()?;
@@ -496,6 +579,8 @@ impl GatewayRuntime {
                 source.source.wire_api,
                 &source.source.models,
             )?;
+            let source_endpoint_domain =
+                crate::sources::normalized_base_url(&source.source.base_url)?.to_string();
             let source_id = source.source.id.clone();
             let connector = SourceConnector::new(&source.source, &bindings)?;
             let rules = model_rules(source.allowed_models, source.excluded_models);
@@ -510,6 +595,8 @@ impl GatewayRuntime {
                         "source protocol candidate ids must be unique".to_string(),
                     ));
                 }
+                source_endpoint_domains
+                    .insert(candidate_id.clone(), source_endpoint_domain.clone());
                 let candidate = RuntimeCandidate {
                     id: candidate_id.clone(),
                     kind: CandidateKind::ApiSource,
@@ -713,34 +800,39 @@ impl GatewayRuntime {
             });
         }
 
-        if source_executors.is_empty() && account_executors.is_empty() {
-            return Err(Error::Validation(
-                "at least one provider source or OAuth account is required".to_string(),
-            ));
-        }
-        if !runtime_keys.iter().any(|key| key.enabled) {
-            return Err(Error::Validation(
-                "at least one enabled local gateway key is required".to_string(),
-            ));
-        }
-        let has_usable_key = configured_key_rules
-            .iter()
-            .filter(|(enabled, _, _, _)| *enabled)
-            .any(|(_, scope, model_rules, client_wire_apis)| {
-                let allowed_protocols = client_wire_apis
-                    .as_deref()
-                    .map_or_else(all_native_wire_apis, client_wire_apis_to_native);
-                scheduler.candidates().any(|candidate| {
-                    candidate.models.iter().any(|model| {
-                        model_rules.allows(model)
-                            && candidate.is_configured(model, &allowed_protocols, scope)
+        if matches!(
+            reachability_requirement,
+            ReachabilityRequirement::RequireReachable
+        ) {
+            if source_executors.is_empty() && account_executors.is_empty() {
+                return Err(Error::Validation(
+                    "at least one provider source or OAuth account is required".to_string(),
+                ));
+            }
+            if !runtime_keys.iter().any(|key| key.enabled) {
+                return Err(Error::Validation(
+                    "at least one enabled local gateway key is required".to_string(),
+                ));
+            }
+            let has_usable_key = configured_key_rules
+                .iter()
+                .filter(|(enabled, _, _, _)| *enabled)
+                .any(|(_, scope, model_rules, client_wire_apis)| {
+                    let allowed_protocols = client_wire_apis
+                        .as_deref()
+                        .map_or_else(all_native_wire_apis, client_wire_apis_to_native);
+                    scheduler.candidates().any(|candidate| {
+                        candidate.models.iter().any(|model| {
+                            model_rules.allows(model)
+                                && candidate.is_configured(model, &allowed_protocols, scope)
+                        })
                     })
-                })
-            });
-        if !has_usable_key {
-            return Err(Error::Validation(
-                "no enabled local key can reach a configured source candidate".to_string(),
-            ));
+                });
+            if !has_usable_key {
+                return Err(Error::Validation(
+                    "no enabled local key can reach a configured source candidate".to_string(),
+                ));
+            }
         }
 
         let affinity_store = options.response_affinity_store.clone();
@@ -767,13 +859,16 @@ impl GatewayRuntime {
             discovery_client,
             sources: source_executors,
             source_candidate_bindings,
+            source_endpoint_domains,
             source_recovery_delays_ms,
             chatgpt_accounts: account_executors,
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
+            candidate_availability: Arc::new(tokio::sync::Notify::new()),
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             codex_model_manifests: Mutex::new(BTreeMap::new()),
+            source_model_manifests: Mutex::new(BTreeMap::new()),
             passive_quotas: Mutex::new(passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
@@ -968,12 +1063,20 @@ impl GatewayRuntime {
             .collect()
     }
 
-    pub(crate) async fn codex_source_context_windows(
+    /// Resolves source-provided model metadata that is safe to expose in the
+    /// generated Codex catalog.
+    ///
+    /// Metadata is evaluated per eligible candidate route. A public model may
+    /// have several source candidates behind it, so reasoning controls are
+    /// advertised only when every route proves it supports the same effort.
+    /// This avoids a Codex selection that the scheduler can legally send to an
+    /// incompatible source.
+    pub(crate) async fn codex_source_model_metadata(
         &self,
         key: &AuthenticatedKey,
         allowed_protocols: &[WireApi],
         now_ms: u64,
-    ) -> BTreeMap<String, u64> {
+    ) -> CodexSourceModelMetadata {
         let routes = {
             let scheduler = self.lock_scheduler();
             let mut routes = Vec::new();
@@ -1010,6 +1113,8 @@ impl GatewayRuntime {
                     source.authorization_for_binding(source_binding),
                     source.protocol_headers_for_binding(source_binding),
                     configured_models,
+                    binding.adapter,
+                    binding.reasoning_mode,
                 ));
             }
             routes
@@ -1021,44 +1126,88 @@ impl GatewayRuntime {
                 (authorization_name, authorization),
                 protocol_headers,
                 configured_models,
+                adapter,
+                reasoning_mode,
             )| async move {
-                if let Some(value) = self.fresh_codex_model_manifest(
+                let manifest = if let Some(value) = self.fresh_source_model_manifest(
                     &candidate_id,
                     now_ms,
                     CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
                 ) {
-                    return Some((configured_models, value));
-                }
-                let request = self
-                    .discovery_client
-                    .get(models_url)
-                    .headers(protocol_headers)
-                    .header(authorization_name, authorization)
-                    .timeout(Duration::from_secs(10));
-                let response = request.send().await.ok()?;
-                if !response.status().is_success() {
-                    return None;
-                }
-                let body = collect_limited(response, MAX_MODELS_BODY_BYTES)
-                    .await
-                    .ok()?;
-                let value = serde_json::from_slice::<Value>(&body).ok()?;
-                self.remember_codex_model_manifest(&candidate_id, value.clone(), now_ms);
-                Some((configured_models, value))
+                    Some(value)
+                } else {
+                    let request = self
+                        .discovery_client
+                        .get(models_url)
+                        .headers(protocol_headers)
+                        .header(authorization_name, authorization)
+                        .timeout(Duration::from_secs(10));
+                    let Some(response) = request.send().await.ok() else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    if !response.status().is_success() {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    }
+                    let Some(body) = collect_limited(response, MAX_MODELS_BODY_BYTES).await.ok()
+                    else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    let Some(value) = serde_json::from_slice::<Value>(&body).ok() else {
+                        return (configured_models, adapter, reasoning_mode, None);
+                    };
+                    self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
+                    Some(value)
+                };
+                (configured_models, adapter, reasoning_mode, manifest)
             },
         ))
         .await;
 
-        let mut windows: BTreeMap<String, u64> = BTreeMap::new();
-        for (configured_models, manifest) in manifests.into_iter().flatten() {
-            for (model, context_window) in source_context_windows(&manifest, &configured_models) {
-                windows
-                    .entry(model)
-                    .and_modify(|existing| *existing = (*existing).min(context_window))
-                    .or_insert(context_window);
+        let mut metadata = CodexSourceModelMetadata::default();
+        let mut reasoning_by_model =
+            BTreeMap::<String, Vec<Option<SourceReasoningCapabilities>>>::new();
+        for (configured_models, adapter, reasoning_mode, manifest) in manifests {
+            let reasoning = manifest
+                .as_ref()
+                .map(|manifest| source_reasoning_capabilities(manifest, &configured_models))
+                .unwrap_or_default();
+            if let Some(manifest) = manifest.as_ref() {
+                for (model, context_window) in source_context_windows(manifest, &configured_models)
+                {
+                    metadata
+                        .context_windows
+                        .entry(model)
+                        .and_modify(|existing| *existing = (*existing).min(context_window))
+                        .or_insert(context_window);
+                }
+            }
+            for model in &configured_models {
+                let model_key = model.to_ascii_lowercase();
+                let capabilities = apply_manual_reasoning_capability_overrides(
+                    model,
+                    reasoning.get(&model_key).cloned(),
+                )
+                .and_then(|capabilities| {
+                    source_reasoning_for_route(capabilities, adapter, reasoning_mode)
+                });
+                reasoning_by_model
+                    .entry(model_key)
+                    .or_default()
+                    .push(capabilities);
             }
         }
-        windows
+        for (model, capabilities) in reasoning_by_model {
+            let Some(capabilities) = capabilities.into_iter().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let Some(capabilities) = intersect_source_reasoning_capabilities(capabilities) else {
+                continue;
+            };
+            metadata
+                .reasoning_catalog_templates
+                .insert(model, capabilities.codex_catalog_template());
+        }
+        metadata
     }
 
     pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
@@ -1095,20 +1244,42 @@ impl GatewayRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 candidate_id.to_string(),
-                CachedCodexManifest {
+                CachedModelManifest {
                     value,
                     observed_at_ms,
                 },
             );
     }
 
-    fn fresh_codex_model_manifest(
+    fn remember_source_model_manifest(
+        &self,
+        candidate_id: &str,
+        value: Value,
+        observed_at_ms: u64,
+    ) {
+        let scheduler = self.lock_scheduler();
+        if scheduler.candidate(candidate_id).is_none() {
+            return;
+        }
+        self.source_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                candidate_id.to_string(),
+                CachedModelManifest {
+                    value,
+                    observed_at_ms,
+                },
+            );
+    }
+
+    fn fresh_source_model_manifest(
         &self,
         candidate_id: &str,
         now_ms: u64,
         ttl_ms: u64,
     ) -> Option<Value> {
-        self.codex_model_manifests
+        self.source_model_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(candidate_id)
@@ -1250,6 +1421,10 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
+        self.source_model_manifests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(candidate_id);
         self.passive_quotas
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1304,7 +1479,7 @@ impl GatewayRuntime {
         self.lock_scheduler().reset_failures(candidate_id)
     }
 
-    pub(crate) fn select_and_reserve(
+    pub(crate) async fn select_and_reserve(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -1314,16 +1489,30 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
         let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        self.select_and_reserve_for(
-            key,
-            model,
-            allowed_protocols,
-            tried,
-            response_affinity_key,
-            prompt_affinity_key,
-            now_ms,
-            CandidateLeaseLane::Text,
-        )
+        let mut selection_now_ms = now_ms;
+        loop {
+            // Register before evaluating candidates so a completed request cannot
+            // release the only OAuth account between the failed selection and wait.
+            let notified = self.candidate_availability.notified();
+            let (reserved, wait_for_release) = self.try_select_and_reserve_for(
+                key,
+                model,
+                allowed_protocols,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                selection_now_ms,
+                CandidateLeaseLane::Text,
+            );
+            if let Some(reserved) = reserved {
+                return Some(reserved);
+            }
+            if !wait_for_release {
+                return None;
+            }
+            notified.await;
+            selection_now_ms = runtime_now_ms();
+        }
     }
 
     pub(crate) fn select_and_reserve_image(
@@ -1334,7 +1523,7 @@ impl GatewayRuntime {
         tried: &HashSet<String>,
         now_ms: u64,
     ) -> Option<(Selection, CandidateLease)> {
-        self.select_and_reserve_for(
+        self.try_select_and_reserve_for(
             key,
             model,
             allowed_protocols,
@@ -1344,10 +1533,11 @@ impl GatewayRuntime {
             now_ms,
             CandidateLeaseLane::Image,
         )
+        .0
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn select_and_reserve_for(
+    fn try_select_and_reserve_for(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -1357,7 +1547,7 @@ impl GatewayRuntime {
         prompt_affinity_key: Option<&str>,
         now_ms: u64,
         lane: CandidateLeaseLane,
-    ) -> Option<(Selection, CandidateLease)> {
+    ) -> (Option<(Selection, CandidateLease)>, bool) {
         if let (Some(key), Some(store)) =
             (response_affinity_key, self.response_affinity_store.as_ref())
         {
@@ -1374,44 +1564,65 @@ impl GatewayRuntime {
             }
         }
         let mut scheduler = self.lock_scheduler();
-        let request = SelectionRequest {
-            model,
-            allowed_protocols,
-            scope: &key.scope,
-            tried,
-            response_affinity_key,
-            prompt_affinity_key,
-            now_ms,
-        };
         let selection = match lane {
-            CandidateLeaseLane::Text => scheduler.select(request),
-            CandidateLeaseLane::Image => scheduler.select_image(request),
-        }?;
-        let reserved = match lane {
-            CandidateLeaseLane::Text => {
-                scheduler.reserve_for(&selection.candidate_id, model, now_ms)
-            }
-            CandidateLeaseLane::Image => {
-                scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
-            }
-        }
-        .then(|| {
-            let lease = CandidateLease {
-                scheduler: self.scheduler.clone(),
-                candidate_id: selection.candidate_id.clone(),
-                model: model.to_string(),
-                lane,
-                released: AtomicBool::new(false),
+            CandidateLeaseLane::Text => scheduler.select(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            }),
+            CandidateLeaseLane::Image => scheduler.select_image(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            }),
+        };
+        let reserved = selection.and_then(|selection| {
+            let reserved = match lane {
+                CandidateLeaseLane::Text => {
+                    scheduler.reserve_for(&selection.candidate_id, model, now_ms)
+                }
+                CandidateLeaseLane::Image => {
+                    scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
+                }
             };
-            (selection, lease)
+            reserved.then(|| {
+                let lease = CandidateLease {
+                    scheduler: self.scheduler.clone(),
+                    availability: self.candidate_availability.clone(),
+                    candidate_id: selection.candidate_id.clone(),
+                    model: model.to_string(),
+                    lane,
+                    released: AtomicBool::new(false),
+                };
+                (selection, lease)
+            })
         });
+        let wait_for_release = matches!(lane, CandidateLeaseLane::Text)
+            && reserved.is_none()
+            && scheduler.has_waitable_text_candidate(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key,
+                now_ms,
+            });
         drop(scheduler);
         if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
             if selection.response_affinity_hit {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);
             }
         }
-        reserved
+        (reserved, wait_for_release)
     }
 
     pub(crate) fn earliest_retry_at(
@@ -1966,6 +2177,26 @@ impl GatewayRuntime {
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
         self.source_recovery_delays_ms.get(candidate_id).copied()
+    }
+
+    /// Keeps a retry from fanning an endpoint-wide failure out to every
+    /// credential configured for that same source endpoint. Only the failed
+    /// candidate receives a cooldown; another credential remains eligible for
+    /// later requests in case the failure was credential-specific.
+    pub(crate) fn exclude_same_source_endpoint(
+        &self,
+        candidate_id: &str,
+        tried: &mut HashSet<String>,
+    ) {
+        let Some(endpoint) = self.source_endpoint_domains.get(candidate_id) else {
+            return;
+        };
+        tried.extend(
+            self.source_endpoint_domains
+                .iter()
+                .filter(|(_, candidate_endpoint)| *candidate_endpoint == endpoint)
+                .map(|(candidate_id, _)| candidate_id.clone()),
+        );
     }
 
     pub fn set_default_service_tier(&self, tier: DefaultServiceTier) {
@@ -2857,6 +3088,161 @@ mod tests {
             .is_none());
     }
 
+    #[tokio::test]
+    async fn generic_source_reasoning_metadata_survives_a_codex_catalog_cache_update() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["provider/fable"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "context_window": 1_000_000,
+                    "reasoningEffortModes": ["low", "high"],
+                    "defaultReasoningLevel": "high"
+                }]
+            }),
+            now_ms,
+        );
+        // Codex asks the same source for a different payload shape. It must
+        // not overwrite the generic source metadata that powers the selector.
+        runtime.remember_codex_model_manifest(
+            "source-1",
+            serde_json::json!({"models": [{"slug": "provider/fable"}]}),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert_eq!(
+            metadata.context_windows,
+            BTreeMap::from([("provider/fable".to_string(), 1_000_000)])
+        );
+        assert_eq!(
+            metadata.reasoning_catalog_templates["provider/fable"],
+            serde_json::json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "low"},
+                    {"effort": "high", "description": "high"}
+                ],
+                "default_reasoning_level": "high"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_claude_effort_levels_are_published_when_provider_metadata_is_sparse() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["vendor/claude-fable-5"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{"id": "vendor/claude-fable-5"}]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert_eq!(
+            metadata.reasoning_catalog_templates["vendor/claude-fable-5"],
+            serde_json::json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "xhigh", "description": "Extra high"},
+                    {"effort": "max", "description": "Maximum"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ],
+                "default_reasoning_level": "medium"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[test]
+    fn messages_bridge_hides_provider_efforts_it_cannot_translate() {
+        let configured_models = ["provider/fable"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let manifest = serde_json::json!({
+            "data": [{
+                "id": "provider/fable",
+                "reasoningEffortModes": ["low", "provider-defined"],
+                "supportsReasoningSummaryParameter": true,
+                "supportsReasoningSummaries": true,
+                "defaultReasoningSummary": "detailed"
+            }]
+        });
+        let capabilities = source_reasoning_capabilities(&manifest, &configured_models)
+            .remove("provider/fable")
+            .unwrap();
+
+        for reasoning_mode in [
+            MessagesReasoningMode::Budget,
+            MessagesReasoningMode::Adaptive,
+        ] {
+            let template = source_reasoning_for_route(
+                capabilities.clone(),
+                SourceAdapter::ResponsesToMessages,
+                reasoning_mode,
+            )
+            .unwrap()
+            .codex_catalog_template();
+
+            assert_eq!(
+                template,
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"}
+                    ]
+                })
+                .as_object()
+                .unwrap()
+                .clone()
+            );
+        }
+    }
+
     #[test]
     fn image_main_model_prefers_cheapest_tier_without_model_name_allowlist() {
         let models = normalized_set(
@@ -3055,6 +3441,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("no enabled local key"));
+    }
+
+    #[test]
+    fn transition_runtime_allows_an_explicitly_empty_scope() {
+        let runtime = GatewayRuntime::build(
+            vec![RuntimeSource::unrestricted(source(
+                "source-a",
+                "a",
+                &["gpt-a"],
+            ))],
+            Vec::new(),
+            vec![RuntimeMixedLocalKey {
+                key: key("key", "secret"),
+                enabled: true,
+                source_ids: Some(Vec::new()),
+                account_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
+                wire_apis: None,
+            }],
+            None,
+            ReachabilityRequirement::AllowUnroutable,
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        assert!(runtime
+            .visible_models_for_secret("secret", &[WireApi::Responses], current_time_ms())
+            .is_empty());
     }
 
     #[test]

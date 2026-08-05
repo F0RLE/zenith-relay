@@ -266,17 +266,17 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
             <td><SourceProtocolBindingsSummary source={source} /></td>
             <td>{source.models.length}</td>
             <td className="row-actions-cell"><div className="row-actions">
-              <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => {
-                void activateCodexProfile(`launch-source-${source.id}`, () => relayCommands.launchCodexSource(source.id), true)
-                  .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", source.id); });
-              }} />
-              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
               <ActionMenu>
                 <ActionMenuItem icon={busy === `source-models-${source.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={busy === `source-models-${source.id}`} onClick={() => void refreshModels(source)}>{t("sources.refreshModels")}</ActionMenuItem>
                 {mode !== "zenith" ? <ActionMenuItem icon={source.inPool ? <ListMinus aria-hidden /> : <ListPlus aria-hidden />} disabled={busy === `source-pool-${source.id}` || (!source.inPool && !supportsResponses)} title={!source.inPool && !supportsResponses ? t("sources.poolResponsesOnly") : undefined} onClick={() => void updateParticipation(source, !source.inPool)}>{t(source.inPool ? "sources.removeFromPoolAction" : "sources.addToPoolAction")}</ActionMenuItem> : null}
                 <ActionMenuItem icon={<Power aria-hidden />} onClick={() => perform(`toggle-${source.id}`, () => localSource ? relayCommands.setSourceEnabled(source.id, !source.enabled) : relayCommands.remoteAction({ type: "update_source", id: source.id }, { enabled: !source.enabled }), "feedback.saved")}>{source.enabled ? t("common.disable") : t("common.enable")}</ActionMenuItem>
                 <ActionMenuItem danger icon={<Trash2 aria-hidden />} onClick={() => void confirm(t("sources.deleteConfirm"), { danger: true }).then((accepted) => accepted && perform(`delete-${source.id}`, () => localSource ? relayCommands.deleteSource(source.id) : relayCommands.remoteAction({ type: "delete_source", id: source.id }), "feedback.deleted"))}>{t("common.delete")}</ActionMenuItem>
               </ActionMenu>
+              <IconButton label={t("common.edit")} icon={<Pencil aria-hidden />} onClick={() => onEdit(source)} />
+              <IconButton label={t("sources.launch")} icon={launchBusy ? <Loader2 className="spin" aria-hidden /> : <Play aria-hidden />} disabled={launchDisabled} title={launchTitle} onClick={() => {
+                void activateCodexProfile(`launch-source-${source.id}`, () => relayCommands.launchCodexSource(source.id), true)
+                  .then((activated) => { if (activated) localStorage.setItem("relay.directSourceId", source.id); });
+              }} />
             </div></td>
           </tr>;
         })}</tbody>

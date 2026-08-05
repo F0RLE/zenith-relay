@@ -294,6 +294,11 @@ export type CandidateRuntimeSnapshot = {
   kind: "api_source" | "oauth_account";
   available: boolean;
   inFlight: number;
+  activeRequestCount?: number;
+  activeModels?: Array<{
+    model: string;
+    requestCount: number;
+  }>;
   lastUsedAtMs: number | null;
   nextRetryAtMs: number | null;
   halfOpen: boolean;

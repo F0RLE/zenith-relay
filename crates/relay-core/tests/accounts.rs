@@ -74,6 +74,12 @@ struct HeldStreamState {
 }
 
 #[derive(Clone, Default)]
+struct HeldThenJsonState {
+    requests: Arc<Mutex<Vec<ObservedRequest>>>,
+    release: Arc<Notify>,
+}
+
+#[derive(Clone, Default)]
 struct ConnectionAffinityState {
     owners: Arc<Mutex<HashMap<SocketAddr, String>>>,
     account_ids: Arc<Mutex<Vec<String>>>,
@@ -222,6 +228,88 @@ async fn account_headers_use_provider_id_but_usage_keeps_only_local_identity() {
     let serialized = serde_json::to_string(&events[0]).unwrap();
     assert!(!serialized.contains("provider-account-private"));
     assert!(!serialized.contains("account-access"));
+}
+
+#[tokio::test]
+async fn chatgpt_account_retries_foreign_message_item_id_after_native_rejection() {
+    let (upstream, state) = spawn_upstream(vec![
+        Reply::Json(
+            StatusCode::BAD_REQUEST,
+            json!({"error": {
+                "message": "Invalid 'input[151].id': 'item_foreign_user_01'. Expected an ID that begins with 'msg'."
+            }}),
+        ),
+        success_reply("message-id-repaired"),
+    ])
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": MODEL,
+            "input": [
+                {
+                    "type": "message",
+                    "id": "item_foreign_user_01",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+                },
+                {
+                    "id": "item_foreign_assistant_01",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will inspect it."}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_native_01",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Keep changes scoped."}]
+                },
+                {
+                    "type": "function_call",
+                    "id": "item_function_01",
+                    "call_id": "call_function_01",
+                    "name": "run_command",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["id"], "message-id-repaired");
+
+    let requests = state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["input"][0]["id"], "item_foreign_user_01");
+    assert_eq!(
+        requests[0].body["input"][1]["id"],
+        "item_foreign_assistant_01"
+    );
+    assert!(requests[1].body["input"][0].get("id").is_none());
+    assert!(requests[1].body["input"][1].get("id").is_none());
+    assert_eq!(requests[1].body["input"][2]["id"], "msg_native_01");
+    assert_eq!(requests[1].body["input"][3]["id"], "item_function_01");
+    assert_eq!(requests[1].body["input"][3]["call_id"], "call_function_01");
+    drop(requests);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
 }
 
 #[tokio::test]
@@ -2130,8 +2218,12 @@ async fn assert_websocket_concurrency(requests: usize) {
 
     let client = reqwest::Client::new();
     let url = format!("{}/v1/responses", gateway.base_url);
+    // OAuth accounts serialize text chats, so a large connection burst can wait
+    // behind the accounts already serving a response.
+    let queue_timeout =
+        Duration::from_secs((u64::try_from(requests).unwrap_or(u64::MAX) / 10).saturating_add(5));
     let completed = tokio::time::timeout(
-        Duration::from_secs(20),
+        queue_timeout,
         join_all((0..requests).map(|index| {
             let client = client.clone();
             let url = url.clone();
@@ -2156,7 +2248,8 @@ async fn assert_websocket_concurrency(requests: usize) {
                     ))
                     .await
                     .unwrap();
-                receive_websocket_completion(&mut socket).await["type"] == "response.completed"
+                receive_websocket_completion_with_timeout(&mut socket, queue_timeout).await["type"]
+                    == "response.completed"
             }
         })),
     )
@@ -3413,18 +3506,20 @@ async fn concurrent_new_chats_are_balanced_across_equal_accounts() {
 }
 
 #[tokio::test]
-async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_is_open() {
+async fn independent_chat_uses_an_api_source_while_an_oauth_account_is_streaming() {
     let (stream_upstream, stream_state) = spawn_held_stream_upstream().await;
-    let (free_upstream, free_state) = spawn_upstream(vec![success_reply("free-response")]).await;
+    let (source_upstream, source_state) =
+        spawn_upstream(vec![success_reply("source-response")]).await;
     let authority = Arc::new(TokenAuthority::new(4).unwrap());
     register_ready(&authority, "stream-account", "stream-access").await;
-    register_ready(&authority, "free-account", "free-access").await;
     let (gateway, events, _, _) = spawn_mixed_gateway(
-        Vec::new(),
-        vec![
-            account("stream-account", "provider-stream", &stream_upstream, 10),
-            account("free-account", "provider-free", &free_upstream, 0),
-        ],
+        vec![source("api-source", &source_upstream, "source-key", 0)],
+        vec![account(
+            "stream-account",
+            "provider-stream",
+            &stream_upstream,
+            10,
+        )],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
@@ -3436,21 +3531,16 @@ async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_i
     assert_eq!(open_stream.status(), StatusCode::OK);
     assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
 
-    let independent = request(&gateway, false);
-    let release = async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while stream_state.requests.lock().unwrap().len() != 2 {
-                tokio::task::yield_now().await;
-            }
-        })
+    let independent = tokio::time::timeout(Duration::from_secs(2), request(&gateway, false))
         .await
-        .expect("the second chat did not reach the highest-quota account");
-        stream_state.release.notify_waiters();
-    };
-    let (independent, ()) = tokio::join!(independent, release);
+        .expect("the independent chat did not use the available API source");
     assert_eq!(independent.status(), StatusCode::OK);
-    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
-    assert!(free_state.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        independent.json::<Value>().await.unwrap()["id"],
+        "source-response"
+    );
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(source_state.requests.lock().unwrap().len(), 1);
 
     stream_state.release.notify_one();
     let _ = open_stream.bytes().await.unwrap();
@@ -3459,7 +3549,56 @@ async fn independent_chat_shares_the_highest_quota_account_while_an_sse_stream_i
     assert_eq!(events.len(), 2);
     assert!(events
         .iter()
-        .all(|event| event.account_id.as_deref() == Some("stream-account")));
+        .any(|event| event.account_id.as_deref() == Some("stream-account")));
+    assert!(events.iter().any(|event| event.source_id == "api-source"));
+}
+
+#[tokio::test]
+async fn independent_chat_waits_for_the_only_oauth_account_to_finish() {
+    let (stream_upstream, stream_state) = spawn_held_then_json_upstream().await;
+    let authority = ready_authority("stream-account", "stream-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account(
+            "stream-account",
+            "provider-stream",
+            &stream_upstream,
+            10,
+        )],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let open_stream = request(&gateway, true).await;
+    assert_eq!(open_stream.status(), StatusCode::OK);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+
+    let queued = request(&gateway, false);
+    tokio::pin!(queued);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut queued)
+            .await
+            .is_err(),
+        "a second chat must wait while the only OAuth account is occupied"
+    );
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 1);
+
+    stream_state.release.notify_one();
+    let (stream, independent) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(open_stream.bytes(), queued)
+    })
+    .await
+    .expect("the queued chat did not resume after the account was released");
+    let _ = stream.unwrap();
+    assert_eq!(independent.status(), StatusCode::OK);
+    assert_eq!(stream_state.requests.lock().unwrap().len(), 2);
+    drop(independent);
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(events.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -3894,6 +4033,14 @@ async fn spawn_held_stream_upstream() -> (TestServer, HeldStreamState) {
     (spawn(app).await, state)
 }
 
+async fn spawn_held_then_json_upstream() -> (TestServer, HeldThenJsonState) {
+    let state = HeldThenJsonState::default();
+    let app = Router::new()
+        .route("/v1/responses", post(held_then_json_upstream))
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
 async fn spawn_connection_affinity_upstream() -> (TestServer, ConnectionAffinityState) {
     let state = ConnectionAffinityState::default();
     let app = Router::new()
@@ -4004,7 +4151,50 @@ async fn held_stream_upstream(
         session_id: header(&headers, "x-session-id"),
         body: serde_json::from_slice(&body).unwrap_or(Value::Null),
     });
-    let release = state.release.clone();
+    held_stream_response(state.release)
+}
+
+async fn held_then_json_upstream(
+    State(state): State<HeldThenJsonState>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response<Body> {
+    let request_count = {
+        let mut requests = state.requests.lock().unwrap();
+        requests.push(ObservedRequest {
+            path: uri.path().to_string(),
+            authorization: header(&headers, AUTHORIZATION.as_str()),
+            chatgpt_account_id: header(&headers, "chatgpt-account-id"),
+            originator: header(&headers, "originator"),
+            responses_lite: header(&headers, "x-openai-internal-codex-responses-lite"),
+            session_id: header(&headers, "x-session-id"),
+            body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+        });
+        requests.len()
+    };
+
+    if request_count == 1 {
+        held_stream_response(state.release)
+    } else {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({
+                    "id": "queued-response",
+                    "object": "response",
+                    "model": MODEL,
+                    "output": [],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+}
+
+fn held_stream_response(release: Arc<Notify>) -> Response<Body> {
     let chunks = stream::unfold(0_u8, move |step| {
         let release = release.clone();
         async move {
@@ -4174,8 +4364,15 @@ async fn upstream_websocket(
 }
 
 async fn receive_websocket_json(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    receive_websocket_json_with_timeout(socket, Duration::from_secs(2)).await
+}
+
+async fn receive_websocket_json_with_timeout(
+    socket: &mut reqwest_websocket::WebSocket,
+    timeout_duration: Duration,
+) -> Value {
     loop {
-        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        let message = tokio::time::timeout(timeout_duration, socket.next())
             .await
             .unwrap()
             .unwrap()
@@ -4187,8 +4384,15 @@ async fn receive_websocket_json(socket: &mut reqwest_websocket::WebSocket) -> Va
 }
 
 async fn receive_websocket_completion(socket: &mut reqwest_websocket::WebSocket) -> Value {
+    receive_websocket_completion_with_timeout(socket, Duration::from_secs(2)).await
+}
+
+async fn receive_websocket_completion_with_timeout(
+    socket: &mut reqwest_websocket::WebSocket,
+    timeout_duration: Duration,
+) -> Value {
     loop {
-        let value = receive_websocket_json(socket).await;
+        let value = receive_websocket_json_with_timeout(socket, timeout_duration).await;
         if value["type"] == "response.completed" {
             return value;
         }

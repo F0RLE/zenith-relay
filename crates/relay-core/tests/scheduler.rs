@@ -41,6 +41,10 @@ enum Reply {
         cache_control: &'static str,
         retry_after: Option<&'static str>,
     },
+    Oversized {
+        status: StatusCode,
+        cache_control: &'static str,
+    },
     Stream {
         chunks: Vec<StreamChunk>,
         cache_control: &'static str,
@@ -283,6 +287,153 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
         ),
         (1, "source-b", true)
     );
+}
+
+#[tokio::test]
+async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_cooling_them() {
+    let (shared_endpoint, shared_state) = spawn_upstream(
+        "shared-key",
+        vec![status_reply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shared-endpoint-down",
+            None,
+        )],
+    )
+    .await;
+    let (independent_endpoint, independent_state) = spawn_upstream(
+        "independent-key",
+        vec![response_reply("independent-response", "independent")],
+    )
+    .await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured_events = events.clone();
+    let runtime = Arc::new(
+        GatewayRuntime::from_pool(
+            vec![
+                source("source-a", &shared_endpoint, "shared-key", &[MODEL], 0),
+                source("source-a-copy", &shared_endpoint, "shared-key", &[MODEL], 0),
+                source(
+                    "source-independent",
+                    &independent_endpoint,
+                    "independent-key",
+                    &[MODEL],
+                    0,
+                ),
+            ],
+            vec![local_key("key", LOCAL_KEY, None)],
+            GatewayRuntimeOptions {
+                max_retry_candidates: 3,
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(move |event| captured_events.lock().unwrap().push(event)),
+        )
+        .unwrap(),
+    );
+    let gateway = spawn(gateway::router(runtime.clone())).await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "independent");
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "independent-response"
+    );
+    assert_eq!(shared_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(independent_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap().len(), 2);
+
+    let runtime_order = runtime.candidate_runtime_order();
+    let shared = ["source-a", "source-a-copy"]
+        .into_iter()
+        .map(|candidate_id| {
+            runtime_order
+                .iter()
+                .find(|candidate| candidate.candidate_id == candidate_id)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shared
+            .iter()
+            .filter(|candidate| !candidate.available)
+            .count(),
+        1
+    );
+    assert_eq!(
+        shared
+            .iter()
+            .filter(|candidate| candidate.next_retry_at_ms.is_none())
+            .count(),
+        1
+    );
+    assert!(
+        runtime_order
+            .iter()
+            .find(|candidate| candidate.candidate_id == "source-independent")
+            .unwrap()
+            .available
+    );
+}
+
+#[tokio::test]
+async fn oversized_five_xx_body_skips_duplicate_source_credentials_and_uses_an_independent_endpoint(
+) {
+    let (shared_endpoint, shared_state) = spawn_upstream(
+        "shared-key-a",
+        vec![Reply::Oversized {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            cache_control: "shared-endpoint-down",
+        }],
+    )
+    .await;
+    let (independent_endpoint, independent_state) = spawn_upstream(
+        "independent-key",
+        vec![response_reply("independent-response", "independent")],
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(
+        vec![
+            source("source-a", &shared_endpoint, "shared-key-a", &[MODEL], 10),
+            source(
+                "source-a-copy",
+                &shared_endpoint,
+                "shared-key-b",
+                &[MODEL],
+                0,
+            ),
+            source(
+                "source-independent",
+                &independent_endpoint,
+                "independent-key",
+                &[MODEL],
+                -10,
+            ),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[CACHE_CONTROL], "independent");
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["id"],
+        "independent-response"
+    );
+
+    let shared_requests = shared_state.requests.lock().unwrap();
+    assert_eq!(
+        shared_requests.len(),
+        1,
+        "a retry must not spend another credential at the failed endpoint"
+    );
+    assert_eq!(
+        shared_requests[0].authorization.as_deref(),
+        Some("Bearer shared-key-a")
+    );
+    assert_eq!(independent_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -1554,6 +1705,16 @@ async fn upstream(
             }
             response.body(Body::from(body.to_string())).unwrap()
         }
+        Reply::Oversized {
+            status,
+            cache_control,
+        } => Response::builder()
+            .status(status)
+            .header(CONTENT_TYPE, "application/json")
+            .header(CACHE_CONTROL, cache_control)
+            .header("content-length", "16777217")
+            .body(Body::empty())
+            .unwrap(),
         Reply::Stream {
             chunks,
             cache_control,

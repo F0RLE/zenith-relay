@@ -908,6 +908,53 @@ fn call_prefixed_function_item_id_repair_keeps_the_tool_result_link() {
 }
 
 #[test]
+fn item_prefixed_message_id_repair_preserves_native_and_tool_item_ids() {
+    let mut request = json!({
+        "input": [
+            {
+                "type": "message",
+                "id": "item_user_01",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+            },
+            {
+                "id": "item_assistant_01",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "I will inspect it."}]
+            },
+            {
+                "type": "message",
+                "id": "msg_native_01",
+                "role": "developer",
+                "content": [{"type": "input_text", "text": "Keep changes scoped."}]
+            },
+            {
+                "type": "function_call",
+                "id": "item_function_01",
+                "call_id": "call_function_01",
+                "name": "run_command",
+                "arguments": "{\"command\":\"pwd\"}"
+            },
+            {
+                "type": "reasoning",
+                "id": "item_reasoning_01",
+                "encrypted_content": "signed-reasoning"
+            }
+        ]
+    });
+
+    assert!(remove_item_prefixed_message_ids(&mut request));
+    let input = request["input"].as_array().expect("input is an array");
+    assert!(input[0].get("id").is_none());
+    assert!(input[1].get("id").is_none());
+    assert_eq!(input[2]["id"], "msg_native_01");
+    assert_eq!(input[3]["id"], "item_function_01");
+    assert_eq!(input[3]["call_id"], "call_function_01");
+    assert_eq!(input[4]["id"], "item_reasoning_01");
+    assert!(!remove_item_prefixed_message_ids(&mut request));
+}
+
+#[test]
 fn native_responses_replay_rejects_model_mismatch() {
     let initial = json!({"model": "alias", "input": "inspect"});
     let upstream = json!({"id": "resp_model_01", "output": []});

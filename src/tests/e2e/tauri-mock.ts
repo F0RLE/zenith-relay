@@ -20,6 +20,7 @@ export type MockOptions = {
   usageCandidateKind?: "account" | "source";
   usageRequestedModel?: string;
   usageResolvedModel?: string;
+  activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
   planBenchmark?: boolean;
@@ -61,6 +62,7 @@ export type MockOptions = {
   updateCheckError?: boolean;
   bundleType?: "nsis" | "msi" | null;
   profileSwitchBackupPrompt?: boolean;
+  profileSnapshotBackupBeforeRestore?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
   sourceProtocolBindings?: Array<{
@@ -90,6 +92,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     // persisted WebView value just like the packaged desktop application.
     if (localStorage.getItem("relay.profileSwitchBackupPrompt") === null) {
       localStorage.setItem("relay.profileSwitchBackupPrompt", input.profileSwitchBackupPrompt ? "1" : "0");
+    }
+    if (localStorage.getItem("relay.profileSnapshotBackupBeforeRestore") === null) {
+      localStorage.setItem("relay.profileSnapshotBackupBeforeRestore", input.profileSnapshotBackupBeforeRestore === false ? "0" : "1");
     }
 
     type MockQuotaWindow = { kind: "primary" | "secondary"; availableBasisPoints: number; explicitlyFull: boolean; resetAtMs: number; windowMinutes: number; observedAtMs: number };
@@ -310,7 +315,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       authAvailable: true,
     }];
     type MockModelSummary = { id: string; enabled: boolean; memberCount: number; codexVisible: boolean; codexDisplayName: string; catalogRank: number | null; inputMicroUsdPerMillion: number | null; cachedInputMicroUsdPerMillion: number | null; cacheWrite5mMicroUsdPerMillion?: number | null; cacheWrite1hMicroUsdPerMillion?: number | null; outputMicroUsdPerMillion: number | null; customPrice: boolean };
-    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
+    type MockCandidateRuntime = { candidateId: string; kind: "api_source" | "oauth_account"; available: boolean; inFlight: number; activeRequestCount: number; activeModels: Array<{ model: string; requestCount: number }>; lastUsedAtMs: number | null; nextRetryAtMs: number | null; halfOpen: boolean; dispatches: number };
     const modelPrices: Record<string, Pick<MockModelSummary, "catalogRank" | "inputMicroUsdPerMillion" | "cachedInputMicroUsdPerMillion" | "outputMicroUsdPerMillion">> = {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { catalogRank: 6, inputMicroUsdPerMillion: 750_000, cachedInputMicroUsdPerMillion: 75_000, outputMicroUsdPerMillion: 4_500_000 },
@@ -378,6 +383,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       return systemKey;
     };
     const usageAccount = accounts[Math.max(0, Math.min(input.usageAccountIndex ?? 0, accounts.length - 1))];
+    const activeModelCounts = usagePresent && input.usageActive !== false
+      ? input.activeModelCounts ?? [{ model: input.usageResolvedModel ?? input.usageRequestedModel ?? "gpt-5.4", requestCount: 1 }]
+      : [];
+    const activeRequestCount = activeModelCounts.reduce((count, item) => count + item.requestCount, 0);
     const orderedMembers = [
       usageAccount,
       accounts.find((item) => item.label === "Business Workspace"),
@@ -390,7 +399,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         candidateId: item.id,
         kind: "baseUrl" in item ? "api_source" as const : "oauth_account" as const,
         available: false,
-        inFlight: usagePresent && input.usageActive !== false && item.id === usageAccount.id ? 1 : 0,
+        inFlight: item.id === usageAccount.id ? activeRequestCount : 0,
+        activeRequestCount: item.id === usageAccount.id ? activeRequestCount : 0,
+        activeModels: item.id === usageAccount.id ? structuredClone(activeModelCounts) : [],
         lastUsedAtMs: usagePresent && item.id === usageAccount.id ? Date.now() - 1_000 : null,
         nextRetryAtMs: input.accountCooldown && item.id === account.id ? Date.now() + 30 * 60_000 : null,
         halfOpen: false,
@@ -979,9 +990,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(snapshot);
           }
           case "restore_codex_profile_snapshot": {
-            const safety = { id: `33333333-3333-4333-8333-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: String(args.safetyName), profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
-            profileSnapshots = [safety, ...profileSnapshots];
-            return structuredClone(safety);
+            const safetyName = typeof args.safetyName === "string" ? args.safetyName.trim() : "";
+            if (safetyName) {
+              const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: safetyName, profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
+              profileSnapshots = [snapshot, ...profileSnapshots];
+            }
+            return null;
           }
           case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
           case "stop_managed_codex_profile": return true;
@@ -1100,11 +1114,15 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         .sort((left, right) => (previousRank.get(left.id) ?? Number.MAX_SAFE_INTEGER) - (previousRank.get(right.id) ?? Number.MAX_SAFE_INTEGER))
         .map((member, index) => {
           const previous = previousOrder.get(member.id);
+          const memberActiveModels = member.id === usageAccount.id ? activeModelCounts : [];
+          const memberActiveRequestCount = memberActiveModels.reduce((count, item) => count + item.requestCount, 0);
           return {
             candidateId: member.id,
             kind: "baseUrl" in member ? "api_source" as const : "oauth_account" as const,
             available: member.operationalStatus === "rotation",
-            inFlight: previous?.inFlight ?? (usagePresent && input.usageActive !== false && member.id === usageAccount.id ? 1 : 0),
+            inFlight: previous?.inFlight ?? memberActiveRequestCount,
+            activeRequestCount: previous?.activeRequestCount ?? memberActiveRequestCount,
+            activeModels: previous?.activeModels ?? structuredClone(memberActiveModels),
             lastUsedAtMs: previous?.lastUsedAtMs ?? (usagePresent && member.id === usageAccount.id ? Date.now() - 1_000 : null),
             nextRetryAtMs: previous?.nextRetryAtMs ?? (input.accountCooldown && member.id === account.id ? Date.now() + 30 * 60_000 : null),
             halfOpen: previous?.halfOpen ?? false,

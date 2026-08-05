@@ -304,7 +304,8 @@ test("API source routing editor stays readable in the standard window", async ({
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-840x560.png" });
   await page.setViewportSize({ width: 1024, height: 681 });
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-1024x681.png" });
-  await dialog.locator(".member-model-rules > summary").click();
+  await dialog.locator(".source-model-configuration > summary").click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await dialog.locator('[data-member-model-id="gpt-5.4"]').scrollIntoViewIfNeeded();
   await expect(dialog.locator('[data-member-model-id="gpt-5.4"]')).toBeVisible();
   await page.screenshot({ path: "output/playwright/api-source-models-ru-dark-1024x681.png" });
@@ -1006,7 +1007,7 @@ for (const viewport of viewports) {
 
     await page.getByRole("tab", { name: "Sources" }).click();
     const sourceActions = page.locator(".relay-table .row-actions");
-    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Launch in ChatGPT", "Edit", "Actions"]);
+    expect(await sourceActions.locator(":scope > *").evaluateAll((items) => items.map((item) => item.tagName === "DETAILS" ? item.querySelector("summary")?.getAttribute("aria-label") : item.getAttribute("aria-label")))).toEqual(["Actions", "Edit", "Launch in ChatGPT"]);
     await sourceActions.locator("summary").click();
     const sourceMenu = page.getByRole("menu");
     await expect(sourceMenu.getByRole("menuitem")).toHaveCount(4);

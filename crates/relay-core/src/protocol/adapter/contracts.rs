@@ -128,6 +128,28 @@ pub enum MessagesReasoningMode {
     Adaptive,
 }
 
+impl MessagesReasoningMode {
+    /// Returns whether the Responses-to-Messages bridge can represent the
+    /// requested Codex effort on this upstream route.
+    ///
+    /// The bridge may advertise only efforts it can actually translate. Native
+    /// Responses routes do not use this list: they preserve a provider's
+    /// confirmed effort value verbatim.
+    pub(crate) fn supports_effort(self, effort: &str) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Budget => matches!(
+                effort,
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            ),
+            Self::Adaptive => matches!(
+                effort,
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            ),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdapterError {
     code: &'static str,
@@ -511,6 +533,39 @@ pub(crate) fn repair_call_prefixed_function_item_ids(request: &mut Value) -> boo
             continue;
         };
         item.insert("id".to_string(), Value::String(format!("fc_{suffix}")));
+        repaired = true;
+    }
+    repaired
+}
+
+/// Drops only foreign `item_` identifiers from message inputs after a strict
+/// native Responses endpoint rejects them. Message item IDs are opaque and
+/// server-owned, so Relay must not fabricate a `msg_` replacement. Preserve
+/// native `msg_` IDs and every non-message item (especially reasoning and
+/// tool-call links) exactly as the client supplied them.
+pub(crate) fn remove_item_prefixed_message_ids(request: &mut Value) -> bool {
+    let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut repaired = false;
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        let is_message = item.get("type").and_then(Value::as_str) == Some("message")
+            || matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("user" | "assistant" | "developer" | "system")
+            );
+        if !is_message
+            || !item
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("item_"))
+        {
+            continue;
+        }
+        item.remove("id");
         repaired = true;
     }
     repaired

@@ -16,6 +16,7 @@ export type ApiProviderValue = {
 };
 
 type ApiProviderDefinition = Omit<ApiProviderValue, "apiKey">;
+type ApiProviderFormVariant = "source" | "onboarding";
 
 const providerOrder: ApiProviderKind[] = ["openai", "openrouter", "zenith", "custom"];
 
@@ -105,8 +106,17 @@ export function apiProviderSourceInput(value: ApiProviderValue) {
   };
 }
 
-export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; onChange: (value: ApiProviderValue) => void }) {
+export function ApiProviderForm({
+  value,
+  onChange,
+  variant = "source",
+}: {
+  value: ApiProviderValue;
+  onChange: (value: ApiProviderValue) => void;
+  variant?: ApiProviderFormVariant;
+}) {
   const { t } = useTranslation();
+  const onboarding = variant === "onboarding";
   const select = (kind: ApiProviderKind) => onChange({
     ...providerDefaults[kind],
     protocolBindings: providerDefaults[kind].protocolBindings.map((binding) => ({
@@ -133,7 +143,7 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
   const selectedProvider = value.kind ? providerDefaults[value.kind] : null;
   const SelectedProviderIcon = value.kind ? providerIcons[value.kind] : null;
 
-  return <div className={`api-provider-setup ${value.kind ? "has-selection" : "selection-only"}`}>
+  return <div className={`api-provider-setup ${value.kind ? "has-selection" : "selection-only"}${onboarding ? " onboarding-api-provider" : ""}`}>
     {selectedProvider && SelectedProviderIcon
       ? <div className="api-provider-selected">
         <span className="api-provider-title">
@@ -147,16 +157,16 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         <button type="button" className="api-provider-change" onClick={clearSelection}>{t("common.edit")}</button>
       </div>
       : <>
-        <header className="api-provider-intro">
+        {!onboarding ? <header className="api-provider-intro">
           <strong>{t("apiProviders.choose")}</strong>
           <p>{t("apiProviders.hint")}</p>
-        </header>
+        </header> : null}
         <div className="api-provider-options" role="radiogroup" aria-label={t("apiProviders.choose")}>
           {providerOrder.map((kind) => {
             const Icon = providerIcons[kind];
             return <button key={kind} type="button" role="radio" aria-checked={false} onClick={() => select(kind)}>
               <span className="api-provider-title"><Icon aria-hidden /><strong>{providerDefaults[kind].name || t("apiProviders.custom")}</strong></span>
-              <small>{t(`apiProviders.descriptions.${kind}`)}</small>
+              <small>{t(`apiProviders.${onboarding ? "onboardingDescriptions" : "descriptions"}.${kind}`)}</small>
             </button>;
           })}
         </div>
@@ -166,14 +176,14 @@ export function ApiProviderForm({ value, onChange }: { value: ApiProviderValue; 
         <label className="relay-field"><span>{t("common.name")}</span><input value={value.name} onChange={(event) => onChange({ ...value, name: event.target.value })} required /></label>
         <label className="relay-field"><span>{t("sources.address")}</span><input type="url" value={value.baseUrl} onChange={(event) => onChange({ ...value, baseUrl: event.target.value })} placeholder="https://api.example.com/v1" required /></label>
       </div> : null}
-      <SourceProtocolRoutingDisclosure
+      {!onboarding ? <SourceProtocolRoutingDisclosure
         models={[]}
         value={value.protocolBindings}
         onChange={setProtocolBindings}
-      />
+      /> : null}
       <div className="api-provider-key-field">
         <SecretField
-          label={t("sources.apiKey")}
+          label={t(onboarding ? "apiKey.label" : "sources.apiKey")}
           value={value.apiKey}
           onChange={(apiKey) => onChange({ ...value, apiKey })}
           labelAction={value.kind !== "custom"

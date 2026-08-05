@@ -935,6 +935,67 @@ async fn native_responses_repair_call_prefixed_function_item_ids_after_strict_re
 }
 
 #[tokio::test]
+async fn native_responses_remove_item_prefixed_message_ids_after_strict_rejection() {
+    let (upstream, state) = spawn_strict_message_item_id_upstream().await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "message",
+                    "id": "item_foreign_user_01",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect the workspace"}]
+                },
+                {
+                    "id": "item_foreign_assistant_01",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will inspect it."}]
+                },
+                {
+                    "type": "message",
+                    "id": "msg_native_01",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Keep changes scoped."}]
+                },
+                {
+                    "type": "function_call",
+                    "id": "item_function_01",
+                    "call_id": "call_function_01",
+                    "name": "run_command",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["id"], "resp_strict_message_id");
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["input"][0]["id"], "item_foreign_user_01");
+    assert_eq!(bodies[0]["input"][1]["id"], "item_foreign_assistant_01");
+    assert!(bodies[1]["input"][0].get("id").is_none());
+    assert!(bodies[1]["input"][1].get("id").is_none());
+    assert_eq!(bodies[1]["input"][2]["id"], "msg_native_01");
+    assert_eq!(bodies[1]["input"][3]["id"], "item_function_01");
+    assert_eq!(bodies[1]["input"][3]["call_id"], "call_function_01");
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(events[0].success);
+}
+
+#[tokio::test]
 async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continuation() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
@@ -1550,6 +1611,17 @@ async fn spawn_strict_function_item_id_upstream() -> (TestServer, UpstreamState)
     (spawn(app).await, state)
 }
 
+async fn spawn_strict_message_item_id_upstream() -> (TestServer, UpstreamState) {
+    let state = UpstreamState::default();
+    let app = Router::new()
+        .route(
+            "/v1/responses",
+            post(strict_message_item_id_upstream_responses),
+        )
+        .with_state(state.clone());
+    (spawn(app).await, state)
+}
+
 async fn spawn(app: Router) -> TestServer {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1827,6 +1899,49 @@ async fn strict_function_item_id_upstream_responses(
 
     Json(json!({
         "id": "resp_strict_function_id",
+        "object": "response",
+        "model": request["model"],
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "History accepted"}]
+        }]
+    }))
+    .into_response()
+}
+
+async fn strict_message_item_id_upstream_responses(
+    State(state): State<UpstreamState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response<Body> {
+    if !has_source_key(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let request: Value = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    state.bodies.lock().unwrap().push(request.clone());
+
+    if request
+        .pointer("/input/0/id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("item_"))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "message": "Invalid 'input[151].id': 'item_foreign_user_01'. Expected an ID that begins with 'msg'."
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "id": "resp_strict_message_id",
         "object": "response",
         "model": request["model"],
         "output": [{

@@ -6,9 +6,11 @@ mod normalization;
 #[cfg(test)]
 use super::now_ms;
 pub(super) use account::{account_endpoint_url, alpha_search, responses_compact, AccountEndpoint};
-#[cfg(test)]
-use codex_models::build_codex_models_response;
 pub(super) use codex_models::models;
+#[cfg(test)]
+use codex_models::{
+    build_codex_models_response, build_codex_models_response_with_source_reasoning,
+};
 pub(super) use headers::{
     forwarded_bridge_messages_headers, forwarded_codex_headers, forwarded_messages_headers,
 };
@@ -607,6 +609,77 @@ mod tests {
         assert!(models
             .iter()
             .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));
+    }
+
+    #[test]
+    fn api_source_reasoning_metadata_is_visible_to_codex_without_native_model_identity() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["vendor/claude-fable-5".into()],
+            })],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "key".into(),
+                secret: "secret".into(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer secret")))
+            .unwrap();
+        let visible = runtime.visible_models(&key, &[WireApi::Responses], now_ms());
+        let source_reasoning = std::collections::BTreeMap::from([(
+            "vendor/claude-fable-5".to_string(),
+            json!({
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ],
+                "default_reasoning_level": "high",
+                "supports_reasoning_summary_parameter": true,
+                "supports_reasoning_summaries": true,
+                "default_reasoning_summary": "detailed"
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )]);
+
+        let response = build_codex_models_response_with_source_reasoning(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            &source_reasoning,
+            None,
+        )
+        .expect("coding model catalog");
+        let model = &response["models"][0];
+
+        assert_eq!(
+            model["slug"],
+            crate::codex_model_alias("vendor/claude-fable-5")
+        );
+        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "ultra", "description": "Ultra"}
+            ])
+        );
+        assert_eq!(model["supports_reasoning_summary_parameter"], true);
+        assert_eq!(model["supports_reasoning_summaries"], true);
+        assert_eq!(model["default_reasoning_summary"], "detailed");
+        assert!(codex_catalog_entry_is_compatible(model));
     }
 
     #[test]

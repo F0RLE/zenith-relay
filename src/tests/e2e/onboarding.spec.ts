@@ -21,10 +21,23 @@ test("local quick setup verifies runtime and applies ChatGPT only after explicit
   await page.goto("/");
   await page.getByRole("button", { name: "Get started" }).click();
   await page.getByRole("button", { name: "Continue" }).click();
+  await page.setViewportSize({ width: 840, height: 560 });
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByText("Waiting for sign-in", { exact: true })).toBeVisible();
+  await expect(page.locator(".setup-connect-options")).toHaveCount(0);
+  await expect(page.locator(".setup-oauth-pending")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open in browser" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Continue" })).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  expect(await page.locator(".setup-oauth-pending").evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  await page.screenshot({ path: "output/playwright/onboarding-oauth-pending-840x560.png" });
   await emitTauriEvent(page, "relay-oauth-status", { loginId: "oauth_synthetic", status: "callback_received" });
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "complete_codex_oauth"))).toBe(true);
+  await expect(page.getByRole("button", { name: "Continue" })).toBeEnabled();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
   await page.getByRole("button", { name: "ChatGPT" }).click();
@@ -125,7 +138,7 @@ test("Choose API setup saves and launches an OpenRouter source directly", async 
   await page.getByRole("button", { name: /Choose API/ }).click();
   await page.getByRole("button", { name: "Continue" }).click();
   await page.getByRole("radio", { name: /OpenRouter/ }).click();
-  await page.getByLabel("Upstream API key").fill("sk-or-synthetic");
+  await page.getByLabel("API key").fill("sk-or-synthetic");
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("heading", { name: "What should use this endpoint?" })).toBeVisible();
   await page.getByRole("button", { name: "ChatGPT", exact: true }).click();
@@ -138,6 +151,27 @@ test("Choose API setup saves and launches an OpenRouter source directly", async 
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.directSourceId"))).toBe("source_created_2");
   await page.getByRole("button", { name: "Open application" }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("zenith");
+});
+
+test("Choose API quick setup focuses on the selected service and its key", async ({ page }) => {
+  await installTauriMock(page, { onboarding: false, locale: "en", populated: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Get started" }).click();
+  await page.getByRole("button", { name: /Choose API/ }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+
+  await expect(page.getByRole("heading", { name: "Choose an API" })).toHaveCount(1);
+  await expect(page.locator(".api-provider-intro")).toHaveCount(0);
+  await expect(page.getByRole("radiogroup", { name: "API provider" })).toBeVisible();
+
+  await page.getByRole("radio", { name: /Zenith API/ }).click();
+  await expect(page.getByRole("heading", { name: "Connect Zenith API" })).toBeVisible();
+  await expect(page.locator(".source-routing-disclosure")).toHaveCount(0);
+  await expect(page.getByLabel("API key")).toBeVisible();
+
+  await page.getByRole("button", { name: "Edit" }).click();
+  await page.getByRole("radio", { name: /Custom API/ }).click();
+  await expect(page.getByText("Enter a name, endpoint, and API key.")).toBeVisible();
 });
 
 test("remote quick setup requires explicit consent for plain HTTP", async ({ page }) => {

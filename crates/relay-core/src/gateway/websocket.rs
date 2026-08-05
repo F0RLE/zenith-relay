@@ -1,7 +1,8 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
-    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state, rate_limit_body_hint,
-    rate_limit_body_hint_value, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
+    failure_requires_independent_source_endpoint, rate_limit_body_hint, rate_limit_body_hint_value,
+    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{
@@ -283,17 +284,19 @@ async fn connect_upstream(
             owner_recovery_confirmed,
         ) + usize::from(encrypted_content_recovered)
     {
-        let selected = runtime.select_and_reserve(
-            key,
-            &request.resolved_model,
-            WEBSOCKET_PROTOCOLS,
-            &tried,
-            (
-                request.response_affinity_key.as_deref(),
-                request.prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &tried,
+                (
+                    request.response_affinity_key.as_deref(),
+                    request.prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             break;
         };
@@ -353,6 +356,7 @@ async fn connect_upstream(
                     record_connect_failure(
                         runtime, key, &route, &request, attempt, started, &failure, None,
                     );
+                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     last_failure = Some(failure);
                     continue 'candidates;
                 }
@@ -455,6 +459,7 @@ async fn connect_upstream(
                         .map(rate_limit_body_hint)
                         .unwrap_or_default(),
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -468,6 +473,7 @@ async fn connect_upstream(
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -477,6 +483,7 @@ async fn connect_upstream(
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
+            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
             last_failure = Some(failure);
             continue;
         }
@@ -494,6 +501,7 @@ async fn connect_upstream(
                     &failure,
                     Some(&response_headers),
                 );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                 last_failure = Some(failure);
                 continue;
             }
@@ -558,6 +566,7 @@ async fn connect_upstream(
                             Some(&terminal.headers),
                             terminal.body_hint,
                         );
+                        exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
                     }
                     last_failure = Some(failure);
                     if affinity_miss
@@ -692,6 +701,17 @@ fn initial_message_state(message: &UpstreamMessage) -> Option<(bool, EventTermin
     let value = serde_json::from_slice::<Value>(payload).ok()?;
     let event_type = value.get("type").and_then(Value::as_str);
     Some((has_output_delta(&value, event_type), event_terminal(&value)))
+}
+
+fn exclude_correlated_source_endpoint(
+    runtime: &GatewayRuntime,
+    route: &ExecutorRoute,
+    failure: &GatewayFailure,
+    tried: &mut HashSet<String>,
+) {
+    if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+        runtime.exclude_same_source_endpoint(&route.candidate_id, tried);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1093,17 +1113,19 @@ async fn start_next_request(
         .is_some_and(|response_id| Some(response_id) == state.last_response_id.as_deref())
     {
         let tried = HashSet::new();
-        let selected = runtime.select_and_reserve(
-            key,
-            &request.resolved_model,
-            WEBSOCKET_PROTOCOLS,
-            &tried,
-            (
-                request.response_affinity_key.as_deref(),
-                request.prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                key,
+                &request.resolved_model,
+                WEBSOCKET_PROTOCOLS,
+                &tried,
+                (
+                    request.response_affinity_key.as_deref(),
+                    request.prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             if let Some(retry_at_ms) = runtime.earliest_retry_at(
                 key,

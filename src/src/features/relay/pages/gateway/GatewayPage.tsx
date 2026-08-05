@@ -43,13 +43,12 @@ function ClientSetup() {
     const ids = eligibleAccountIds ? eligibleAccountIds.split("\0") : [];
     if (!ids.includes(codexPoolOauthSelection)) setCodexPoolOauthSelection("auto");
   }, [codexPoolOauthSelection, eligibleAccountIds, mode, runtime, setCodexPoolOauthSelection]);
-  const poolReady = Boolean(runtime?.gateway.candidateCount && runtime.gateway.visibleModelIds.length);
   if (mode === "remote") {
     const canAttach = Boolean(runtime?.capabilities.features.includes("profile_attach"));
     const switchRemote = () => activateCodexProfile("gateway-client-switch", relayCommands.attachCodexRemoteGateway, true);
     return <section className="gateway-setting-row client-setup codex-client-setup client-oauth-binding remote-client-setup">
       <header><span className="gateway-config-icon"><UserRound aria-hidden /></span><div><h2>{t("gateway.clientSetup")}</h2><p>{t("gateway.remoteClientHint")}</p></div></header>
-      <Button variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running || !poolReady || !canAttach} title={!canAttach ? t("remote.capabilityUnavailable") : !poolReady ? t("pool.startUnavailable") : !runtime?.gateway.running ? t("pool.start") : t("gateway.remoteClientSwitchHint")} onClick={() => void switchRemote()}>{t("gateway.remoteClientSwitch")}</Button>
+      <Button variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running || !canAttach} title={!canAttach ? t("remote.capabilityUnavailable") : !runtime?.gateway.running ? t("pool.start") : t("gateway.remoteClientSwitchHint")} onClick={() => void switchRemote()}>{t("gateway.remoteClientSwitch")}</Button>
     </section>;
   }
   if (mode !== "local") return null;
@@ -72,7 +71,7 @@ function ClientSetup() {
     <header><span className="gateway-config-icon"><UserRound aria-hidden /></span><div><h2>{t("gateway.oauthBinding")}</h2><p>{t("gateway.oauthBindingHint")}</p></div></header>
     <div className="oauth-binding-settings">
       <div className="relay-field oauth-binding-account-control"><span>{t("gateway.oauthBindingAccount")}</span><OptionMenu className="field-option-menu" label={t("gateway.oauthBindingAccount")} value={codexPoolOauthSelection} onChange={setCodexPoolOauthSelection} options={accountOptions} /></div>
-      <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running || !poolReady} title={!poolReady ? t("pool.startUnavailable") : !runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
+      <Button className="oauth-binding-switch" variant="secondary" icon={<ArrowRightLeft aria-hidden />} busy={busy === "gateway-client-switch"} disabled={!runtime?.gateway.running} title={!runtime?.gateway.running ? t("pool.start") : t("gateway.oauthBindingSwitchHint")} onClick={() => void switchNow()}>{t("gateway.oauthBindingSwitch")}</Button>
       {automaticUnavailable ? <small className="oauth-binding-selection-hint warning"><CircleAlert aria-hidden /><span>{t("gateway.oauthBindingUnavailable")}</span></small> : null}
       {codexPoolOauthSelection !== "none" ? <SettingToggle className="oauth-binding-reserve-toggle" label={t("gateway.oauthBindingReserve")} description={t("gateway.oauthBindingReserveHint")} checked={reserveEnabled} disabled={busy === "chatgpt-quota-reserve"} onChange={(checked) => void perform("chatgpt-quota-reserve", () => relayCommands.updateChatgptQuotaReserve(checked ? 100 : 0), "feedback.saved")} /> : null}
     </div>

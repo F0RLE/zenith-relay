@@ -320,6 +320,37 @@
     justify-self: center;
   }
 
+  .onboarding-api-provider.has-selection .api-provider-selected {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .onboarding-api-provider .api-provider-selected-endpoint {
+    grid-column: 1;
+  }
+
+  .onboarding-api-provider .api-provider-change {
+    grid-column: 1;
+    grid-row: 3;
+    justify-self: start;
+  }
+
+  .setup-oauth-pending-actions {
+    grid-column: 1 / -1;
+    width: 100%;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 36px;
+  }
+
+  .setup-oauth-pending-actions > * {
+    width: 100%;
+  }
+
+  .setup-oauth-pending {
+    grid-template-columns: 40px minmax(0, 1fr);
+    justify-items: initial;
+    text-align: left;
+  }
+
   .api-provider-key-field .relay-field-label-row {
     align-items: flex-start;
     flex-wrap: wrap;

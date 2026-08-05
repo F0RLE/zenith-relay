@@ -185,15 +185,7 @@ pub fn normalize_upstream_codex_catalog_entry(
     priority: u64,
     advertised_context_window: Option<u64>,
 ) -> Option<Value> {
-    let mut entry = routed_codex_catalog_entry(
-        None,
-        model,
-        priority,
-        advertised_context_window
-            .or_else(|| template.get("context_window").and_then(context_window)),
-    )
-    .as_object()
-    .cloned()?;
+    let mut entry = catalog_entry_base(template, model, priority, advertised_context_window)?;
 
     for key in [
         "additional_speed_tiers",
@@ -264,7 +256,7 @@ pub fn normalize_upstream_codex_catalog_entry(
     if let Some(value) = template.get("input_modalities") {
         let mut candidate = Map::new();
         candidate.insert("input_modalities".into(), value.clone());
-        if default_input_modalities(&candidate) {
+        if valid_input_modalities(&candidate) {
             entry.insert("input_modalities".into(), value.clone());
         }
     }
@@ -313,15 +305,7 @@ pub fn normalize_native_codex_catalog_entry(
     priority: u64,
     advertised_context_window: Option<u64>,
 ) -> Option<Value> {
-    let mut entry = routed_codex_catalog_entry(
-        None,
-        model,
-        priority,
-        advertised_context_window
-            .or_else(|| template.get("context_window").and_then(context_window)),
-    )
-    .as_object()
-    .cloned()?;
+    let mut entry = catalog_entry_base(template, model, priority, advertised_context_window)?;
     // Start from a known-compatible native-shaped row so partial manifests
     // cannot make the whole pool catalog row disappear, then overlay every
     // upstream field to retain native capabilities verbatim.
@@ -409,7 +393,7 @@ pub fn codex_catalog_entry_is_compatible(value: &Value) -> bool {
             .get("experimental_supported_tools")
             .and_then(Value::as_array)
             .is_some_and(|tools| tools.iter().all(Value::is_string))
-        && default_input_modalities(entry)
+        && valid_input_modalities(entry)
         && default_bool(entry, "supports_search_tool")
         && default_bool(entry, "use_responses_lite")
         && optional_string(entry, "auto_review_model_override")
@@ -608,8 +592,21 @@ fn valid_input_modalities(entry: &Map<String, Value>) -> bool {
     })
 }
 
-fn default_input_modalities(entry: &Map<String, Value>) -> bool {
-    valid_input_modalities(entry)
+fn catalog_entry_base(
+    template: &Map<String, Value>,
+    model: &str,
+    priority: u64,
+    advertised_context_window: Option<u64>,
+) -> Option<Map<String, Value>> {
+    routed_codex_catalog_entry(
+        None,
+        model,
+        priority,
+        advertised_context_window
+            .or_else(|| template.get("context_window").and_then(context_window)),
+    )
+    .as_object()
+    .cloned()
 }
 
 fn valid_model_id(model: &str) -> bool {

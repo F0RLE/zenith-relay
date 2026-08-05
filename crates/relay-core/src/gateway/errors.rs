@@ -736,6 +736,20 @@ pub(super) fn retryable_failure(
         )
 }
 
+/// A shared endpoint is unlikely to recover by retrying an equivalent API
+/// credential in the same request. Keep that retry budget for an independent
+/// endpoint and avoid cooling credentials that were never attempted.
+pub(super) fn failure_requires_independent_source_endpoint(
+    status: StatusCode,
+    category: &str,
+) -> bool {
+    status.is_server_error()
+        || matches!(
+            category,
+            "upstream_request_timeout" | "upstream_transport_timeout"
+        )
+}
+
 pub(super) fn failure_category_requires_cooldown(category: &str) -> bool {
     !matches!(
         category,
@@ -819,6 +833,16 @@ pub(super) fn previous_response_requires_websocket(payload: &[u8]) -> bool {
 pub(super) fn responses_function_item_id_requires_fc_prefix(payload: &[u8]) -> bool {
     let text = normalized_error_text(payload);
     text.contains("input") && text.contains("expected an id that begins with 'fc'")
+}
+
+/// Strict Responses endpoints require server-owned `msg_` item identifiers on
+/// message inputs. This only identifies the precise upstream validation error;
+/// the repair still verifies the foreign `item_` identifier before retrying.
+pub(super) fn responses_message_item_id_requires_msg_prefix(payload: &[u8]) -> bool {
+    let text = normalized_error_text(payload);
+    text.contains("input[")
+        && text.contains(".id")
+        && text.contains("expected an id that begins with 'msg'")
 }
 
 pub(super) fn previous_response_not_found_value(value: &Value) -> bool {
@@ -1355,6 +1379,19 @@ mod tests {
         ));
         assert!(!responses_function_item_id_requires_fc_prefix(
             br#"{"error":{"message":"Expected an ID that begins with 'fc'."}}"#,
+        ));
+    }
+
+    #[test]
+    fn strict_responses_message_item_id_error_is_detected_without_matching_other_item_errors() {
+        assert!(responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Invalid 'input[151].id': 'item_abc'. Expected an ID that begins with 'msg'."}}"#,
+        ));
+        assert!(!responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Invalid 'input[7].id': 'call_abc'. Expected an ID that begins with 'fc'."}}"#,
+        ));
+        assert!(!responses_message_item_id_requires_msg_prefix(
+            br#"{"error":{"message":"Expected an ID that begins with 'msg'."}}"#,
         ));
     }
 

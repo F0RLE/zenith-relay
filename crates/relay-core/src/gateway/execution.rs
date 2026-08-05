@@ -3,8 +3,9 @@ use super::errors::{
     api_error, apply_attempt_failure_cooldown, apply_cooldown, apply_failure_cooldown_with_body,
     apply_failure_cooldown_with_hint, apply_failure_state, cooldown_error,
     failure_category_is_request_terminal, failure_category_requires_cooldown,
-    previous_response_not_found, previous_response_requires_websocket,
-    recoverable_response_affinity_miss, responses_function_item_id_requires_fc_prefix,
+    failure_requires_independent_source_endpoint, previous_response_not_found,
+    previous_response_requires_websocket, recoverable_response_affinity_miss,
+    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure,
     TRANSIENT_COOLDOWN_MS,
 };
@@ -25,8 +26,8 @@ use super::response::{
 use super::streaming::{bootstrap_stream, bridge_messages_stream, UsageStream};
 use crate::protocol::ClientWireApi;
 use crate::protocol::{
-    repair_call_prefixed_function_item_ids, AdapterError, AdapterRequestContext,
-    MessagesBridgeResponse,
+    remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids, AdapterError,
+    AdapterRequestContext, MessagesBridgeResponse,
 };
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
 use crate::{Error, GatewayRuntime, WireApi};
@@ -71,23 +72,27 @@ pub(super) async fn execute_account_endpoint(
     let mut owner_recovery_confirmed = false;
     let mut encrypted_content_recovered = false;
     let mut function_item_id_repair_attempted = false;
+    let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
 
     while usize::from(attempt)
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
             + usize::from(encrypted_content_recovered)
     {
-        let Some((selected, lease)) = runtime.select_and_reserve(
-            &key,
-            &resolved_model,
-            &[WireApi::Responses],
-            &tried,
-            (
-                response_affinity_key.as_deref(),
-                prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        ) else {
+        let Some((selected, lease)) = runtime
+            .select_and_reserve(
+                &key,
+                &resolved_model,
+                &[WireApi::Responses],
+                &tried,
+                (
+                    response_affinity_key.as_deref(),
+                    prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await
+        else {
             break;
         };
         tried.insert(selected.candidate_id.clone());
@@ -213,6 +218,15 @@ pub(super) async fn execute_account_endpoint(
                 && repair_call_prefixed_function_item_ids(&mut request)
             {
                 function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if !message_item_id_repair_attempted
+                && responses_message_item_id_requires_msg_prefix(&bytes)
+                && remove_item_prefixed_message_ids(&mut request)
+            {
+                message_item_id_repair_attempted = true;
                 attempt = attempt.saturating_sub(1);
                 tried.remove(&route.candidate_id);
                 continue;
@@ -492,6 +506,7 @@ async fn execute_request(
     let mut encrypted_content_recovered = false;
     let mut native_replay_attempted = false;
     let mut function_item_id_repair_attempted = false;
+    let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
     let has_previous_response_id = wire_api == WireApi::Responses
         && request
@@ -512,17 +527,19 @@ async fn execute_request(
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
             + usize::from(encrypted_content_recovered)
     {
-        let selected = runtime.select_and_reserve(
-            &key,
-            &resolved_model,
-            candidate_protocols(wire_api),
-            &tried,
-            (
-                response_affinity_key.as_deref(),
-                prompt_affinity_key.as_deref(),
-            ),
-            now_ms(),
-        );
+        let selected = runtime
+            .select_and_reserve(
+                &key,
+                &resolved_model,
+                candidate_protocols(wire_api),
+                &tried,
+                (
+                    response_affinity_key.as_deref(),
+                    prompt_affinity_key.as_deref(),
+                ),
+                now_ms(),
+            )
+            .await;
         let Some((selected, lease)) = selected else {
             if attempt == 0 {
                 if let Some(retry_at) = runtime.earliest_retry_at(
@@ -648,6 +665,9 @@ async fn execute_request(
                     failure.cooldown_ms,
                     route.half_open_probe,
                 );
+                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                }
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -703,6 +723,12 @@ async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
                     continue;
@@ -716,6 +742,18 @@ async fn execute_request(
                 && repair_call_prefixed_function_item_ids(&mut request)
             {
                 function_item_id_repair_attempted = true;
+                attempt = attempt.saturating_sub(1);
+                attempts_this_run = attempts_this_run.saturating_sub(1);
+                tried.remove(&route.candidate_id);
+                continue;
+            }
+            if wire_api == WireApi::Responses
+                && adapter_is_passthrough
+                && !message_item_id_repair_attempted
+                && responses_message_item_id_requires_msg_prefix(&bytes)
+                && remove_item_prefixed_message_ids(&mut request)
+            {
+                message_item_id_repair_attempted = true;
                 attempt = attempt.saturating_sub(1);
                 attempts_this_run = attempts_this_run.saturating_sub(1);
                 tried.remove(&route.candidate_id);
@@ -789,6 +827,12 @@ async fn execute_request(
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                 }
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
@@ -821,6 +865,7 @@ async fn execute_request(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
+                    let failure = AttemptFailure::body();
                     let state = apply_cooldown(
                         &runtime,
                         &route.candidate_id,
@@ -828,6 +873,12 @@ async fn execute_request(
                         TRANSIENT_COOLDOWN_MS,
                         route.half_open_probe,
                     );
+                    if failure_requires_independent_source_endpoint(
+                        failure.status,
+                        failure.category,
+                    ) {
+                        runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
+                    }
                     let mut event = usage_event(
                         &request_id,
                         attempt,
@@ -846,7 +897,7 @@ async fn execute_request(
                     );
                     apply_failure_state(&mut event, state);
                     emit_usage(&runtime, event);
-                    last_failure = Some(AttemptFailure::body());
+                    last_failure = Some(failure);
                     continue;
                 }
             };

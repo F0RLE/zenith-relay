@@ -76,6 +76,24 @@ where
     ordered.into_iter().map(|model| model.id).collect()
 }
 
+/// Trim and de-duplicate model IDs while preserving the first spelling and
+/// source order. This is the storage-normalization step shared by source
+/// bindings and the runtime registry; it deliberately does not apply picker
+/// grouping.
+pub(crate) fn normalize_model_ids<I, S>(models: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .map(|model| model.as_ref().trim().to_string())
+        .filter(|model| !model.is_empty())
+        .filter(|model| seen.insert(model.to_ascii_lowercase()))
+        .collect()
+}
+
 fn model_group_rank(model: &str) -> u8 {
     let model = model_leaf(model).to_ascii_lowercase();
     if is_openai_model(&model) {
@@ -176,6 +194,20 @@ mod tests {
                 "source-b/claude-opus-4-8",
                 "source-c/unknown",
             ]
+        );
+    }
+
+    #[test]
+    fn model_id_normalization_preserves_first_spelling_and_source_order() {
+        assert_eq!(
+            normalize_model_ids([
+                " GPT-5 ".to_string(),
+                "gpt-5".to_string(),
+                "claude-sonnet".to_string(),
+                "".to_string(),
+                "CLAUDE-SONNET".to_string(),
+            ]),
+            ["GPT-5", "claude-sonnet"]
         );
     }
 }

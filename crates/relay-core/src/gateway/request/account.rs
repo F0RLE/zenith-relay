@@ -7,7 +7,6 @@ use super::{
     MAX_CLIENT_REQUEST_BODY_ERROR,
 };
 use crate::protocol::ClientWireApi;
-use crate::runtime::AuthenticatedKey;
 use crate::GatewayRuntime;
 use axum::body::Body;
 use axum::extract::State;
@@ -54,8 +53,7 @@ pub(in crate::gateway) async fn responses_compact(
             "invalid_request",
         );
     };
-    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
-    else {
+    let Some(resolved_model) = runtime.resolve_visible_account_model(&key, &requested_model) else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this local key",
@@ -125,8 +123,7 @@ pub(in crate::gateway) async fn alpha_search(
             "no_eligible_source",
         );
     };
-    let Some(resolved_model) = resolve_visible_account_model(&runtime, &key, &requested_model)
-    else {
+    let Some(resolved_model) = runtime.resolve_visible_account_model(&key, &requested_model) else {
         return api_error(
             StatusCode::NOT_FOUND,
             "model is not available for this local key",
@@ -200,14 +197,6 @@ async fn read_json_object(body: Body) -> Result<Map<String, Value>, Response<Bod
             "invalid_request",
         )),
     }
-}
-
-fn resolve_visible_account_model(
-    runtime: &GatewayRuntime,
-    key: &AuthenticatedKey,
-    requested_model: &str,
-) -> Option<String> {
-    runtime.resolve_visible_account_model(key, requested_model)
 }
 
 pub(in crate::gateway) fn account_endpoint_url(

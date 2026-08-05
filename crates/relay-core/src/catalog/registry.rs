@@ -1,3 +1,4 @@
+use super::normalize_model_ids;
 use crate::scheduler::{CandidateScope, PoolScheduler};
 use crate::WireApi;
 use std::collections::HashSet;
@@ -20,7 +21,7 @@ impl ModelRegistry {
         S: AsRef<str>,
     {
         let candidate_id = candidate_id.into();
-        let models = normalized_models(models);
+        let models = normalize_model_ids(models);
         if models.is_empty() {
             self.remove(&candidate_id);
             return;
@@ -92,22 +93,6 @@ impl ModelRegistry {
         }
         visible
     }
-}
-
-fn normalized_models<I, S>(models: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for model in models {
-        let model = model.as_ref().trim();
-        if !model.is_empty() && seen.insert(model.to_ascii_lowercase()) {
-            normalized.push(model.to_string());
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]

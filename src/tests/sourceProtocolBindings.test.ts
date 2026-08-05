@@ -111,6 +111,31 @@ describe("source protocol bindings", () => {
     expect(sourceSupportsNativeResponses(source)).toBe(true);
   });
 
+  test("does not expand an empty binding in a multi-route source", () => {
+    const source = {
+      wireApi: "responses",
+      models: ["gpt-native", "claude-messages"],
+      protocolBindings: [
+        {
+          wireApi: "responses",
+          adapter: "native",
+          reasoningMode: "disabled",
+          modelIds: [],
+        },
+        {
+          wireApi: "messages",
+          adapter: "native",
+          reasoningMode: "disabled",
+          modelIds: ["claude-messages"],
+        },
+      ],
+    } satisfies Pick<SourceSummary, "wireApi" | "models" | "protocolBindings">;
+
+    expect(sourceModelsForWireApi(source, "responses")).toEqual([]);
+    expect(sourceSupportsNativeResponses(source)).toBe(false);
+    expect(sourceModelsForWireApi(source, "messages")).toEqual(["claude-messages"]);
+  });
+
   test("advanced bindings remain provider-neutral after normalization", () => {
     const value = {
       kind: "openai",

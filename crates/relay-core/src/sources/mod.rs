@@ -81,7 +81,7 @@ pub fn normalize_source_protocol_bindings(
     fallback_wire_api: WireApi,
     models: &[String],
 ) -> Result<Vec<SourceProtocolBinding>> {
-    let models = normalize_model_ids(models.iter().cloned());
+    let models = crate::catalog::normalize_model_ids(models);
     let known_models = models
         .iter()
         .map(|model| model.to_ascii_lowercase())
@@ -111,7 +111,7 @@ pub fn normalize_source_protocol_bindings(
                 "each client protocol and adapter route may be configured only once".to_string(),
             ));
         }
-        let mut model_ids = normalize_model_ids(binding.model_ids);
+        let mut model_ids = crate::catalog::normalize_model_ids(binding.model_ids);
         if model_ids.is_empty() && expand_empty_models {
             model_ids = models.clone();
         }
@@ -290,16 +290,6 @@ fn require_value(name: &str, value: &str) -> Result<()> {
         return Err(Error::Validation(format!("{name} must not be empty")));
     }
     Ok(())
-}
-
-fn normalize_model_ids(values: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert(value.to_ascii_lowercase()))
-        .collect()
 }
 
 #[cfg(test)]

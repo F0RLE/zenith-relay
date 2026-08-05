@@ -163,6 +163,15 @@ model assignment to that route. A <code>/models</code> response alone does not
 prove that a provider accepts a completion on every protocol; when one source
 has multiple routes, the binding assignment is the capability declaration and
 must be verified against the provider's documentation or a safe operator test.
+The same generic source catalog may optionally declare reasoning through
+<code>capabilities.reasoning</code>, <code>reasoning</code>,
+Codex-compatible fields, or <code>reasoningEffortModes</code>. Relay does not
+infer reasoning from a provider or model name. It advertises an effort to
+Codex only when every eligible Responses route for that model explicitly
+confirms it; a Responses-to-Messages bridge further removes efforts it cannot
+translate and never advertises reasoning summaries. The generic source catalog
+is cached separately from the provider's Codex-specific catalog, so refreshing
+one endpoint cannot erase the other endpoint's confirmed capabilities.
 The native Messages route preserves successful JSON/SSE bodies verbatim. Chat
 Completions rejects tool definitions and tool-call history instead of
 pretending to translate them. Responses WebSocket remains native-only until a

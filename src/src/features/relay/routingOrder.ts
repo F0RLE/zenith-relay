@@ -13,6 +13,26 @@ export function compareRoutingOrder(leftId: string, rightId: string, order: Map<
   return (fallback?.get(leftId) ?? Number.MAX_SAFE_INTEGER) - (fallback?.get(rightId) ?? Number.MAX_SAFE_INTEGER);
 }
 
+export function activeRequestCount(candidate: CandidateRuntimeSnapshot | undefined) {
+  return candidate?.activeRequestCount ?? candidate?.inFlight ?? 0;
+}
+
+export function activeModelCounts(candidates: Iterable<CandidateRuntimeSnapshot>) {
+  const counts = new Map<string, { model: string; requestCount: number }>();
+  for (const candidate of candidates) {
+    for (const activeModel of candidate.activeModels ?? []) {
+      if (!activeModel.model || activeModel.requestCount <= 0) continue;
+      const key = activeModel.model.toLowerCase();
+      const current = counts.get(key);
+      if (current) current.requestCount += activeModel.requestCount;
+      else counts.set(key, { model: activeModel.model, requestCount: activeModel.requestCount });
+    }
+  }
+  return [...counts.values()].sort((left, right) =>
+    right.requestCount - left.requestCount || left.model.localeCompare(right.model),
+  );
+}
+
 export function compareSubscriptionPlanPriority(left: { id: string; label: string }, right: { id: string; label: string }) {
   const leftRank = subscriptionPlanPriority.indexOf(left.id);
   const rightRank = subscriptionPlanPriority.indexOf(right.id);
