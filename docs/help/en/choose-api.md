@@ -29,6 +29,9 @@ Direct ChatGPT/Codex profile attachment currently requires a **Responses API**
 source. A Chat Completions source can be saved, but its **Connect ChatGPT**
 action remains unavailable.
 
+Relay lets routed models receive image attachments without guessing support
+from their names. The selected provider and model make the final decision.
+
 This mode has no **Pool**, **API & ChatGPT**, or **Usage** pages. The provider
 owns routing, availability, and request logs. **Overview** displays only the
 balance and counters exposed by the selected provider.

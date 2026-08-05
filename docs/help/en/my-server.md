@@ -36,6 +36,10 @@ The server owns participants, quota state, routing, usage logs, and client keys.
 The desktop application renders server snapshots and sends confirmed management
 operations.
 
+Relay lets routed models receive image attachments without guessing support
+from their names. The selected model makes the final decision; native ChatGPT
+model capabilities remain unchanged.
+
 ## Prepare the server
 
 - A compatible Relay Server version runs as a persistent service.

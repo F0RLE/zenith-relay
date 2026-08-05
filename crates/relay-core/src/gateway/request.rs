@@ -607,6 +607,7 @@ mod tests {
             .expect("routed Claude model");
         assert_eq!(claude["display_name"], "Claude Opus 4.8");
         assert_eq!(claude["supported_reasoning_levels"], json!([]));
+        assert_eq!(claude["input_modalities"], json!(["text", "image"]));
         assert!(models
             .iter()
             .any(|model| { model["slug"] == crate::codex_model_alias("disabled-code") }));

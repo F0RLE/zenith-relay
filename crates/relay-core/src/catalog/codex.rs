@@ -138,7 +138,11 @@ pub fn routed_codex_catalog_entry(
     entry.insert("supports_search_tool".into(), Value::Bool(false));
     entry.insert("web_search_tool_type".into(), Value::String("text".into()));
     entry.insert("supports_image_detail_original".into(), Value::Bool(false));
-    entry.insert("input_modalities".into(), json!(["text"]));
+    // Codex uses this field as a client-side attachment gate. Routed sources
+    // may omit or under-report vision metadata, so let the selected upstream
+    // model make the final capability decision instead of blocking the image
+    // before Relay receives it.
+    entry.insert("input_modalities".into(), json!(["text", "image"]));
     entry.insert("experimental_supported_tools".into(), json!([]));
     entry.insert(
         "apply_patch_tool_type".into(),
@@ -253,13 +257,6 @@ pub fn normalize_upstream_codex_catalog_entry(
         }
     }
 
-    if let Some(value) = template.get("input_modalities") {
-        let mut candidate = Map::new();
-        candidate.insert("input_modalities".into(), value.clone());
-        if valid_input_modalities(&candidate) {
-            entry.insert("input_modalities".into(), value.clone());
-        }
-    }
     if let Some(value) = template.get("experimental_supported_tools") {
         let mut candidate = Map::new();
         candidate.insert("experimental_supported_tools".into(), value.clone());
@@ -316,6 +313,9 @@ pub fn normalize_native_codex_catalog_entry(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone())),
     );
+    if !template.contains_key("input_modalities") {
+        entry.remove("input_modalities");
+    }
     let context_window = entry.get("context_window").and_then(context_window);
     entry.insert("slug".into(), Value::String(model.to_string()));
     entry.insert(
@@ -725,6 +725,7 @@ mod tests {
         assert!(entry.get("service_tiers").is_none());
         assert_eq!(entry["supports_reasoning_summaries"], false);
         assert_eq!(entry["supports_parallel_tool_calls"], false);
+        assert_eq!(entry["input_modalities"], json!(["text", "image"]));
     }
 
     #[test]
@@ -782,6 +783,24 @@ mod tests {
         assert_eq!(entry["max_context_window"], 120_000);
         assert_eq!(entry["auto_compact_token_limit"], 110_000);
         assert_eq!(entry["native_setting"], "keep-me");
+    }
+
+    #[test]
+    fn native_models_do_not_inherit_routed_image_defaults() {
+        let template = json!({
+            "slug": "gpt-native",
+            "display_name": "GPT Native",
+        });
+
+        let entry = normalize_native_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "gpt-native",
+            1_000,
+            None,
+        )
+        .unwrap();
+
+        assert!(entry.get("input_modalities").is_none());
     }
 
     #[test]

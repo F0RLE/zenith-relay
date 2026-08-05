@@ -1528,22 +1528,24 @@ test("pool summary shows routing states and current errors", async ({ page }) =>
 });
 
 for (const mode of ["local", "remote"] as const) {
-  test(`${mode} pool displays the resolved model instead of a Codex routing alias`, async ({ page }) => {
+  test(`${mode} pool stays off Usage and uses the lightweight runtime snapshot`, async ({ page }) => {
     await installTauriMock(page, {
       mode,
       locale: "en",
       populated: true,
-      usageRequestedModel: "zenith/Z3B0LTUuNA",
-      usageResolvedModel: "gpt-5.4",
       usageActive: false,
     });
     await page.goto("/");
+    const usageCommand = mode === "local" ? "get_local_usage_page" : "get_remote_server_usage";
+    const usageReads = () => page.evaluate((command) => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === command).length, usageCommand);
+    const before = await usageReads();
     await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.waitForTimeout(300);
 
     const routing = page.locator(".pool-priority-label");
     const member = page.locator('[data-member-label="Personal Plus"]');
-    await expect(routing.getByText("Latest model: gpt-5.4", { exact: true })).toBeVisible();
-    await expect(routing.locator("[data-latest-model]")).toHaveAttribute("data-latest-model", "gpt-5.4");
+    await expect(routing.locator('[data-ready-route="source_synthetic"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
+    expect(await usageReads()).toBe(before);
     await expect(member.locator(".pool-member-kind-icon")).toHaveAttribute("aria-label", "Waiting for quota");
   });
 }
@@ -1737,7 +1739,7 @@ test("pool reflects active models from the live runtime order", async ({ page })
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator(".pool-priority-label [data-latest-model]")).toHaveText("Latest model: gpt-5.4");
+  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveText("Available now via Example compatible API: gpt-5.4, gpt-5.4-mini");
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -1776,7 +1778,7 @@ test("pool keeps the last completed route visible after its lease is released", 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Usage order");
   await expect(priority).toContainText("Last request: Pro account");
-  await expect(priority.locator("[data-latest-model]")).toHaveText("Latest model: gpt-5.4");
+  await expect(priority.locator('[data-ready-route="account_synthetic_4"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini,o3");
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
@@ -1796,8 +1798,6 @@ test("pool shows the next route's actual Responses models before any request", a
 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Next choice: Personal Plus");
-  await expect(priority.locator("[data-latest-model]")).toHaveCount(0);
-  await expect(priority).not.toContainText("No request has selected a model yet");
   const readyModels = priority.locator('[data-ready-route="account_synthetic"]');
   await expect(readyModels).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
   await expect(readyModels).toHaveText("Available now via Personal Plus: gpt-5.4, gpt-5.4-mini");
@@ -1860,10 +1860,7 @@ test("local pool refreshes all account quotas without an interval setting", asyn
   await page.getByRole("button", { name: "Refresh quotas", exact: true }).click();
   await expect(page.getByText("Updated: 3 · Errors: 0", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Quota refresh settings", exact: true })).toHaveCount(0);
-  await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute(
-    "aria-label",
-    "In rotation · The latest requested model gpt-5.4 is unavailable on this member.",
-  );
+  await expect(freeMember.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "refresh_all_local_account_quotas")).toBe(true);

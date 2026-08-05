@@ -943,8 +943,6 @@ const relayRu = {
     recoveryProbe: "Проверка восстановления",
     retryAt: "Повтор после {{time}}",
     priorityEmpty: "Нет доступного маршрута",
-    latestModel: "Последняя модель: {{model}}",
-    latestModelUnknown: "Ни один запрос ещё не выбрал модель",
     readyModels: "Доступно сейчас через {{member}}: {{models}}",
     memberStatus: {
       rotation: "В ротации",
@@ -952,7 +950,6 @@ const relayRu = {
       unavailable: "Недоступен",
       disabled: "Отключён",
     },
-    latestModelUnsupported: "Последняя запрошенная модель {{model}} недоступна этому участнику.",
     codexInterface: "Интерфейс ChatGPT",
     codexInterfaceHint: "Этот аккаунт применяется только к интерфейсу ChatGPT. Запросы по-прежнему распределяются по всему доступному пулу.",
     refreshQuotas: "Обновить квоты",
