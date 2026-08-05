@@ -472,6 +472,40 @@ async fn rate_limit_retry_after_cools_source_before_the_next_request() {
 }
 
 #[tokio::test]
+async fn bounded_retry_does_not_report_an_untried_regular_source_as_cooled() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "a", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
+    )
+    .await;
+    let (source_c, state_c) =
+        spawn_upstream("source-c-key", vec![response_reply("must-not-run", "c")]).await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 20),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 10),
+            source("source-c", &source_c, "source-c-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        2,
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+    assert_eq!(state_a.requests.lock().unwrap().len(), 1);
+    assert_eq!(state_b.requests.lock().unwrap().len(), 1);
+    assert!(state_c.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn all_cooled_sources_keep_model_visible_and_return_local_retry_after() {
     let (source_a, state_a) = spawn_upstream(
         "source-a-key",
@@ -521,6 +555,59 @@ async fn all_cooled_sources_keep_model_visible_and_return_local_retry_after() {
     );
     let body: Value = second.json().await.unwrap();
     assert_eq!(body["error"]["code"], "all_sources_cooling_down");
+    assert_eq!(
+        before,
+        (
+            state_a.requests.lock().unwrap().len(),
+            state_b.requests.lock().unwrap().len(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
+    let (source_a, state_a) = spawn_upstream(
+        "source-a-key",
+        vec![status_reply(StatusCode::SERVICE_UNAVAILABLE, "a", None)],
+    )
+    .await;
+    let (source_b, state_b) = spawn_upstream(
+        "source-b-key",
+        vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![
+            source("source-a", &source_a, "source-a-key", &[MODEL], 10),
+            source("source-b", &source_b, "source-b-key", &[MODEL], 0),
+        ],
+        vec![local_key("key", LOCAL_KEY, None)],
+        3,
+    )
+    .await;
+
+    let first = request(&gateway, false).await;
+    assert_eq!(first.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        first.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            >= 1
+    );
+    let body: Value = first.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "all_sources_temporarily_unavailable");
+    assert_eq!(models(&gateway, LOCAL_KEY).await, [MODEL]);
+    let before = (
+        state_a.requests.lock().unwrap().len(),
+        state_b.requests.lock().unwrap().len(),
+    );
+
+    let second = request(&gateway, false).await;
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = second.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "all_sources_temporarily_unavailable");
     assert_eq!(
         before,
         (

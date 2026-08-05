@@ -3,7 +3,7 @@ mod routing_policy;
 use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
-use super::cooldown::has_expired_cooldown;
+use super::cooldown::{has_expired_cooldown, CooldownReason};
 use crate::WireApi;
 pub use routing_policy::RoutingStrategy;
 use routing_policy::{candidate_kind_preference, routing_tier};
@@ -104,6 +104,7 @@ pub struct RoutingDiagnostics {
 #[derive(Clone, Debug)]
 pub struct PoolScheduler {
     candidates: BTreeMap<String, RuntimeCandidate>,
+    cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
     in_flight: BTreeMap<String, u32>,
@@ -140,6 +141,7 @@ impl PoolScheduler {
     pub fn new() -> Self {
         Self {
             candidates: BTreeMap::new(),
+            cooldown_reasons: BTreeMap::new(),
             response_affinity: AffinityCache::new(
                 RESPONSE_AFFINITY_MAX_ENTRIES,
                 RESPONSE_AFFINITY_TTL_MS,
@@ -228,6 +230,10 @@ impl PoolScheduler {
     }
 
     pub fn upsert(&mut self, candidate: RuntimeCandidate) {
+        let candidate_id = candidate.id.clone();
+        self.cooldown_reasons.retain(|(id, model), _| {
+            id != &candidate_id || candidate.cooldowns.contains_key(model)
+        });
         self.candidates.insert(candidate.id.clone(), candidate);
     }
 
@@ -246,6 +252,8 @@ impl PoolScheduler {
         self.execution_fences.remove(candidate_id);
         self.capability_blocks
             .retain(|(blocked_candidate, _)| blocked_candidate != candidate_id);
+        self.cooldown_reasons
+            .retain(|(cooled_candidate, _), _| cooled_candidate != candidate_id);
         let source_id = self
             .candidates
             .get(candidate_id)
@@ -716,6 +724,99 @@ impl PoolScheduler {
             .min()
     }
 
+    pub(crate) fn all_applicable_cooldown(
+        &mut self,
+        request: SelectionRequest<'_>,
+    ) -> Option<(u64, CooldownReason)> {
+        if let Some(key) = request.response_affinity_key {
+            let candidate_id = self
+                .response_affinity
+                .get(key, request.now_ms)
+                .map(str::to_string)?;
+            if request.tried.contains(&candidate_id) {
+                return None;
+            }
+            let candidate = self.candidates.get(&candidate_id)?;
+            if !self.quota_reserve_allows(candidate, request.now_ms) {
+                return None;
+            }
+            let retry_at = candidate.retry_at_if_configured(
+                request.model,
+                request.allowed_protocols,
+                request.scope,
+                request.now_ms,
+            )?;
+            return Some((
+                retry_at,
+                self.cooldown_reason_for(candidate, request.model, request.now_ms),
+            ));
+        }
+
+        let mut retry_at: Option<u64> = None;
+        let mut reason = CooldownReason::RateLimit;
+        for candidate in self.candidates.values() {
+            if request.tried.contains(&candidate.id)
+                || !self.quota_reserve_allows(candidate, request.now_ms)
+                || !candidate.is_catalog_visible(
+                    request.model,
+                    request.allowed_protocols,
+                    request.scope,
+                )
+            {
+                continue;
+            }
+            let Some(candidate_retry_at) = candidate.retry_at_if_configured(
+                request.model,
+                request.allowed_protocols,
+                request.scope,
+                request.now_ms,
+            ) else {
+                // A visible candidate without an active cooldown is still
+                // available after the bounded retry set.
+                return None;
+            };
+            retry_at = Some(retry_at.map_or(candidate_retry_at, |current| {
+                current.min(candidate_retry_at)
+            }));
+            if self.cooldown_reason_for(candidate, request.model, request.now_ms)
+                == CooldownReason::Transient
+            {
+                reason = CooldownReason::Transient;
+            }
+        }
+        retry_at.map(|retry_at| (retry_at, reason))
+    }
+
+    fn cooldown_reason_for(
+        &self,
+        candidate: &RuntimeCandidate,
+        model: &str,
+        now_ms: u64,
+    ) -> CooldownReason {
+        let mut found = false;
+        for (candidate_model, retry_at) in &candidate.cooldowns {
+            if *retry_at <= now_ms
+                || (candidate_model.as_str() != "*" && !candidate_model.eq_ignore_ascii_case(model))
+            {
+                continue;
+            }
+            found = true;
+            let reason = self
+                .cooldown_reasons
+                .get(&(candidate.id.clone(), candidate_model.clone()))
+                .copied()
+                .unwrap_or(CooldownReason::Transient);
+            if reason == CooldownReason::Transient {
+                return reason;
+            }
+        }
+        if found {
+            CooldownReason::RateLimit
+        } else {
+            CooldownReason::Transient
+        }
+    }
+
     pub(crate) fn is_eligible(
         &self,
         candidate: &RuntimeCandidate,
@@ -898,24 +999,33 @@ impl PoolScheduler {
         _output_tokens: Option<u64>,
         _latency_ms: u64,
     ) -> bool {
-        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
-            return false;
+        let (provider_key, recovered) = {
+            let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+                return false;
+            };
+            let provider_key = (candidate.source_id.clone(), model.to_ascii_lowercase());
+            self.half_open
+                .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
+            candidate.cooldowns.retain(|candidate_model, retry_at_ms| {
+                let applies = candidate_model == "*" || candidate_model.eq_ignore_ascii_case(model);
+                !applies || *retry_at_ms > now_ms
+            });
+            candidate.last_used_at = Some(now_ms);
+            let recovered = !candidate
+                .cooldowns
+                .values()
+                .any(|retry_at_ms| *retry_at_ms > now_ms);
+            if recovered {
+                candidate.health = CandidateHealth::Healthy;
+                candidate.consecutive_failures = 0;
+            }
+            (provider_key, recovered)
         };
-        let provider_key = (candidate.source_id.clone(), model.to_ascii_lowercase());
-        self.half_open
-            .remove(&(candidate_id.to_string(), model.to_ascii_lowercase()));
-        candidate.cooldowns.retain(|candidate_model, retry_at_ms| {
-            let applies = candidate_model == "*" || candidate_model.eq_ignore_ascii_case(model);
-            !applies || *retry_at_ms > now_ms
-        });
-        candidate.last_used_at = Some(now_ms);
-        let recovered = !candidate
-            .cooldowns
-            .values()
-            .any(|retry_at_ms| *retry_at_ms > now_ms);
-        if recovered {
-            candidate.health = CandidateHealth::Healthy;
-            candidate.consecutive_failures = 0;
+        if let Some(candidate) = self.candidates.get(candidate_id) {
+            self.cooldown_reasons
+                .retain(|(cooled_candidate, scope), _| {
+                    cooled_candidate != candidate_id || candidate.cooldowns.contains_key(scope)
+                });
         }
         self.provider_storm_breakers.remove(&provider_key);
         recovered
@@ -936,19 +1046,41 @@ impl PoolScheduler {
     }
 
     pub fn set_cooldown(&mut self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
-        let Some(candidate) = self.candidates.get_mut(candidate_id) else {
-            return false;
+        self.set_cooldown_with_reason(candidate_id, model, retry_at_ms, CooldownReason::Transient)
+    }
+
+    pub(crate) fn set_cooldown_with_reason(
+        &mut self,
+        candidate_id: &str,
+        model: &str,
+        retry_at_ms: u64,
+        reason: CooldownReason,
+    ) -> bool {
+        let (scope, should_store_reason) = {
+            let Some(candidate) = self.candidates.get_mut(candidate_id) else {
+                return false;
+            };
+            let scope = if model == "*" {
+                "*".to_string()
+            } else {
+                model.to_ascii_lowercase()
+            };
+            let previous = candidate.cooldowns.get(&scope).copied();
+            candidate
+                .cooldowns
+                .entry(scope.clone())
+                .and_modify(|current| *current = (*current).max(retry_at_ms))
+                .or_insert(retry_at_ms);
+            let should_store_reason = previous.is_none_or(|current| {
+                retry_at_ms > current
+                    || (retry_at_ms == current && reason == CooldownReason::RateLimit)
+            });
+            (scope, should_store_reason)
         };
-        let scope = if model == "*" {
-            "*".to_string()
-        } else {
-            model.to_ascii_lowercase()
-        };
-        candidate
-            .cooldowns
-            .entry(scope.clone())
-            .and_modify(|current| *current = (*current).max(retry_at_ms))
-            .or_insert(retry_at_ms);
+        if should_store_reason {
+            self.cooldown_reasons
+                .insert((candidate_id.to_string(), scope.clone()), reason);
+        }
         if scope == "*" {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
@@ -959,15 +1091,24 @@ impl PoolScheduler {
     }
 
     pub fn clear_cooldown(&mut self, candidate_id: &str, model: &str) -> bool {
-        self.candidates
+        let removed = self
+            .candidates
             .get_mut(candidate_id)
-            .is_some_and(|candidate| {
+            .map(|candidate| {
                 let previous_len = candidate.cooldowns.len();
                 candidate
                     .cooldowns
                     .retain(|candidate_model, _| !candidate_model.eq_ignore_ascii_case(model));
                 candidate.cooldowns.len() != previous_len
             })
+            .unwrap_or(false);
+        if removed {
+            self.cooldown_reasons
+                .retain(|(cooled_candidate, scope), _| {
+                    cooled_candidate != candidate_id || !scope.eq_ignore_ascii_case(model)
+                });
+        }
+        removed
     }
 
     fn prompt_affinity_allows(
@@ -2228,6 +2369,66 @@ mod tests {
                 .consecutive_failures,
             0
         );
+    }
+
+    #[test]
+    fn cooldown_classification_requires_every_source_to_be_cooled() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("first"));
+        scheduler.upsert(candidate("second"));
+        assert!(scheduler.set_cooldown_with_reason(
+            "first",
+            "gpt-5",
+            10_000,
+            CooldownReason::RateLimit,
+        ));
+        assert!(scheduler.set_cooldown_with_reason(
+            "second",
+            "gpt-5",
+            10_000,
+            CooldownReason::RateLimit,
+        ));
+
+        let scope = CandidateScope::default();
+        let tried = HashSet::new();
+        let allowed_protocols = [WireApi::Responses];
+        let request = || SelectionRequest {
+            model: "gpt-5",
+            allowed_protocols: &allowed_protocols,
+            scope: &scope,
+            tried: &tried,
+            response_affinity_key: None,
+            prompt_affinity_key: None,
+            now_ms: 100,
+        };
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::RateLimit))
+        );
+
+        assert!(scheduler.set_cooldown_with_reason("first", "*", 5_000, CooldownReason::Transient,));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::Transient))
+        );
+        assert!(scheduler.clear_cooldown("first", "*"));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::RateLimit))
+        );
+
+        assert!(scheduler.set_cooldown_with_reason(
+            "second",
+            "gpt-5",
+            20_000,
+            CooldownReason::Transient,
+        ));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::Transient))
+        );
+        assert!(scheduler.clear_cooldown("second", "gpt-5"));
+        assert_eq!(scheduler.all_applicable_cooldown(request()), None);
     }
 
     #[test]

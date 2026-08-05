@@ -1,5 +1,6 @@
 use super::now_ms;
 use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
+use crate::scheduler::CooldownReason;
 use crate::{GatewayRuntime, UsageEvent};
 use axum::body::Body;
 use axum::http::header::RETRY_AFTER;
@@ -975,7 +976,12 @@ fn apply_status_cooldown_with_hint(
     );
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now.saturating_add(duration_ms);
-    let applied = runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    let reason = if status == StatusCode::TOO_MANY_REQUESTS {
+        CooldownReason::RateLimit
+    } else {
+        CooldownReason::Transient
+    };
+    let applied = runtime.set_cooldown_with_reason(candidate_id, scope, retry_at_ms, reason);
     FailureState {
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
@@ -1235,25 +1241,38 @@ fn half_open_backoff_ms(duration_ms: u64, consecutive_failures: u32, half_open_p
         .min(duration_ms.max(MAX_RATE_LIMIT_COOLDOWN_MS))
 }
 
-pub(super) fn cooldown_error(retry_at_ms: u64, failure: Option<&AttemptFailure>) -> Response<Body> {
+pub(super) fn cooldown_error(
+    retry_at_ms: u64,
+    failure: Option<&AttemptFailure>,
+    all_sources_rate_limited: bool,
+) -> Response<Body> {
     let seconds = retry_at_ms
         .saturating_sub(now_ms())
         .saturating_add(999)
         .checked_div(1_000)
         .unwrap_or_default()
         .max(1);
-    let mut response = failure
-        .filter(|failure| failure.category == "upstream_quota_exhausted")
-        .map_or_else(
-            || {
-                api_error(
-                    StatusCode::TOO_MANY_REQUESTS,
-                    "all eligible sources are cooling down",
-                    "all_sources_cooling_down",
-                )
-            },
-            |failure| api_error(failure.status, failure.message, failure.category),
-        );
+    let rate_limited = all_sources_rate_limited;
+    let mut response = if rate_limited {
+        failure
+            .filter(|failure| failure.category == "upstream_quota_exhausted")
+            .map_or_else(
+                || {
+                    api_error(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "all eligible sources are rate limited",
+                        "all_sources_cooling_down",
+                    )
+                },
+                |failure| api_error(failure.status, failure.message, failure.category),
+            )
+    } else {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "all eligible sources are temporarily unavailable",
+            "all_sources_temporarily_unavailable",
+        )
+    };
     if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
         response.headers_mut().insert(RETRY_AFTER, value);
     }
@@ -1681,7 +1700,7 @@ mod tests {
             StatusCode::TOO_MANY_REQUESTS,
             Some(br#"{"error":{"type":"insufficient_quota"}}"#),
         );
-        let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure));
+        let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), true);
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().contains_key(RETRY_AFTER));
 
@@ -1692,6 +1711,42 @@ mod tests {
         assert_eq!(value.pointer("/error/type").unwrap(), "insufficient_quota");
         assert_eq!(value.pointer("/error/code").unwrap(), "insufficient_quota");
         assert!(value.pointer("/error/param").unwrap().is_null());
+    }
+
+    #[tokio::test]
+    async fn transient_cooldown_is_not_reported_as_rate_limit() {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::BAD_GATEWAY,
+            Some(br#"{"error":{"message":"upstream unavailable"}}"#),
+        );
+        let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[RETRY_AFTER], "60");
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value.pointer("/error/code").unwrap(),
+            "all_sources_temporarily_unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_cooldowns_are_not_reported_as_rate_limit() {
+        let failure = AttemptFailure::status_with_body(StatusCode::TOO_MANY_REQUESTS, None);
+        let response = cooldown_error(now_ms().saturating_add(60_000), Some(&failure), false);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value.pointer("/error/code").unwrap(),
+            "all_sources_temporarily_unavailable"
+        );
     }
 
     #[test]

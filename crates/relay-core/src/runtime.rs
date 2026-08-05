@@ -13,6 +13,7 @@ use crate::providers::chatgpt::{
     CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
+use crate::scheduler::CooldownReason;
 use crate::ProxyConfig;
 use crate::{
     api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
@@ -1666,6 +1667,27 @@ impl GatewayRuntime {
         })
     }
 
+    pub(crate) fn all_applicable_cooldown(
+        &self,
+        key: &AuthenticatedKey,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        tried: &HashSet<String>,
+        response_affinity_key: Option<&str>,
+        now_ms: u64,
+    ) -> Option<(u64, CooldownReason)> {
+        self.lock_scheduler()
+            .all_applicable_cooldown(SelectionRequest {
+                model,
+                allowed_protocols,
+                scope: &key.scope,
+                tried,
+                response_affinity_key,
+                prompt_affinity_key: None,
+                now_ms,
+            })
+    }
+
     pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             let source = self.sources.get(&binding.source_id)?;
@@ -2395,6 +2417,17 @@ impl GatewayRuntime {
     pub(crate) fn set_cooldown(&self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
         self.lock_scheduler()
             .set_cooldown(candidate_id, model, retry_at_ms)
+    }
+
+    pub(crate) fn set_cooldown_with_reason(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        retry_at_ms: u64,
+        reason: CooldownReason,
+    ) -> bool {
+        self.lock_scheduler()
+            .set_cooldown_with_reason(candidate_id, model, retry_at_ms, reason)
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
