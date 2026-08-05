@@ -590,6 +590,51 @@ async fn image_generation_uses_cheapest_account_model_and_translates_response() 
 }
 
 #[tokio::test]
+async fn bounded_image_retry_does_not_report_an_untried_account_as_cooled() {
+    let (limited_upstream, limited_state) = spawn_upstream(vec![Reply::Json(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"error": {"code": "rate_limit_exceeded"}}),
+    )])
+    .await;
+    let (ready_upstream, ready_state) = spawn_upstream(Vec::new()).await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "limited-image", "limited-image-access").await;
+    register_ready(&authority, "ready-image", "ready-image-access").await;
+    let mut limited_account = account("limited-image", "provider-limited", &limited_upstream, 200);
+    limited_account.models.push("gpt-5.6-terra".to_string());
+    let mut ready_account = account("ready-image", "provider-ready", &ready_upstream, 100);
+    ready_account.models.push("gpt-5.6-terra".to_string());
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
+        Vec::new(),
+        vec![limited_account, ready_account],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            max_retry_candidates: 1,
+            ..GatewayRuntimeOptions::default()
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/images/generations", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({"model":"gpt-image-2","prompt":"draw a test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "rate_limit_exceeded"
+    );
+    assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
+    assert!(ready_state.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in_pool() {
     let mut upstream_catalog = default_upstream_model_catalog();
     upstream_catalog["models"][0]["slug"] = Value::String(OFFICIAL_CODEX_MODEL.to_string());
@@ -1744,6 +1789,107 @@ async fn account_websocket_preserves_codex_headers_and_reports_usage() {
     assert!(events.iter().all(|event| event.reasoning_tokens == Some(2)));
     assert!(events.iter().all(|event| event.total_tokens == Some(16)));
     assert!(events.iter().all(|event| event.ttft_ms.is_some()));
+}
+
+#[tokio::test]
+async fn account_websocket_keeps_connection_after_max_output_incomplete() {
+    let responses = VecDeque::from(vec![
+        vec![
+            json!({"type": "response.output_text.delta", "delta": "partial"}),
+            json!({
+                "type": "response.incomplete",
+                "response": {
+                    "id": "ws-incomplete",
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "max_output_tokens"},
+                    "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+                }
+            }),
+        ],
+        vec![
+            json!({"type": "response.output_text.delta", "delta": "continued"}),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "ws-completed",
+                    "usage": {"input_tokens": 5, "output_tokens": 6, "total_tokens": 11}
+                }
+            }),
+        ],
+    ]);
+    let (upstream, state) = spawn_websocket_upstream_with_behavior(WebSocketBehavior::Sequence(
+        Arc::new(Mutex::new(responses)),
+    ))
+    .await;
+    let authority = ready_authority("relay-account", "account-access").await;
+    let (gateway, events, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![account("relay-account", "provider-account", &upstream, 10)],
+        vec![mixed_key(None, None)],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+
+    let upgraded = reqwest::Client::new()
+        .get(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .upgrade()
+        .send()
+        .await
+        .unwrap();
+    let mut socket = upgraded.into_websocket().await.unwrap();
+    socket
+        .send(ClientWsMessage::Text(
+            json!({"type": "response.create", "model": MODEL, "input": "start"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["delta"],
+        "partial"
+    );
+    let incomplete = receive_websocket_json(&mut socket).await;
+    assert_eq!(incomplete["type"], "response.incomplete");
+    assert_eq!(
+        incomplete["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+
+    socket
+        .send(ClientWsMessage::Text(
+            json!({
+                "type": "response.create",
+                "model": MODEL,
+                "input": "continue",
+                "previous_response_id": incomplete["response"]["id"]
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        receive_websocket_json(&mut socket).await["delta"],
+        "continued"
+    );
+    assert_eq!(
+        receive_websocket_completion(&mut socket).await["response"]["id"],
+        "ws-completed"
+    );
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(state.requests.lock().unwrap().len(), 2);
+    assert_eq!(state.headers.lock().unwrap().len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(!events[0].success);
+    assert_eq!(events[0].http_status, StatusCode::OK.as_u16());
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("response_incomplete")
+    );
+    assert!(events[1].success);
 }
 
 #[tokio::test]
@@ -3377,6 +3523,10 @@ async fn retry_cap_stops_account_rotation_after_429() {
 
     let response = request(&gateway, false).await;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "rate_limit_exceeded"
+    );
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
     assert!(ready_state.requests.lock().unwrap().is_empty());
 }
@@ -3427,6 +3577,10 @@ async fn retry_cap_stops_compact_account_rotation_after_429() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["error"]["code"],
+        "rate_limit_exceeded"
+    );
     assert_eq!(limited_state.requests.lock().unwrap().len(), 1);
     assert!(ready_state.requests.lock().unwrap().is_empty());
 }

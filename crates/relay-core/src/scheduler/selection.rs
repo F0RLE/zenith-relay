@@ -724,63 +724,67 @@ impl PoolScheduler {
             .min()
     }
 
-    pub(crate) fn cooldowns_are_rate_limited(&mut self, request: SelectionRequest<'_>) -> bool {
+    pub(crate) fn all_applicable_cooldown(
+        &mut self,
+        request: SelectionRequest<'_>,
+    ) -> Option<(u64, CooldownReason)> {
         if let Some(key) = request.response_affinity_key {
-            let Some(candidate_id) = self
+            let candidate_id = self
                 .response_affinity
                 .get(key, request.now_ms)
-                .map(str::to_string)
-            else {
-                return false;
-            };
+                .map(str::to_string)?;
             if request.tried.contains(&candidate_id) {
-                return false;
+                return None;
             }
-            let Some(candidate) = self.candidates.get(&candidate_id) else {
-                return false;
-            };
+            let candidate = self.candidates.get(&candidate_id)?;
             if !self.quota_reserve_allows(candidate, request.now_ms) {
-                return false;
+                return None;
             }
-            return candidate
-                .retry_at_if_configured(
-                    request.model,
-                    request.allowed_protocols,
-                    request.scope,
-                    request.now_ms,
-                )
-                .is_some_and(|_| {
-                    self.cooldown_reason_for(candidate, request.model, request.now_ms)
-                        == CooldownReason::RateLimit
-                });
+            let retry_at = candidate.retry_at_if_configured(
+                request.model,
+                request.allowed_protocols,
+                request.scope,
+                request.now_ms,
+            )?;
+            return Some((
+                retry_at,
+                self.cooldown_reason_for(candidate, request.model, request.now_ms),
+            ));
         }
 
-        let mut found = false;
+        let mut retry_at: Option<u64> = None;
+        let mut reason = CooldownReason::RateLimit;
         for candidate in self.candidates.values() {
             if request.tried.contains(&candidate.id)
                 || !self.quota_reserve_allows(candidate, request.now_ms)
-            {
-                continue;
-            }
-            if candidate
-                .retry_at_if_configured(
+                || !candidate.is_catalog_visible(
                     request.model,
                     request.allowed_protocols,
                     request.scope,
-                    request.now_ms,
                 )
-                .is_none()
             {
                 continue;
             }
-            found = true;
+            let Some(candidate_retry_at) = candidate.retry_at_if_configured(
+                request.model,
+                request.allowed_protocols,
+                request.scope,
+                request.now_ms,
+            ) else {
+                // A visible candidate without an active cooldown is still
+                // available after the bounded retry set.
+                return None;
+            };
+            retry_at = Some(retry_at.map_or(candidate_retry_at, |current| {
+                current.min(candidate_retry_at)
+            }));
             if self.cooldown_reason_for(candidate, request.model, request.now_ms)
-                != CooldownReason::RateLimit
+                == CooldownReason::Transient
             {
-                return false;
+                reason = CooldownReason::Transient;
             }
         }
-        found
+        retry_at.map(|retry_at| (retry_at, reason))
     }
 
     fn cooldown_reason_for(
@@ -2368,7 +2372,7 @@ mod tests {
     }
 
     #[test]
-    fn cooldown_classification_requires_every_source_to_be_rate_limited() {
+    fn cooldown_classification_requires_every_source_to_be_cooled() {
         let mut scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("first"));
         scheduler.upsert(candidate("second"));
@@ -2397,12 +2401,21 @@ mod tests {
             prompt_affinity_key: None,
             now_ms: 100,
         };
-        assert!(scheduler.cooldowns_are_rate_limited(request()));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::RateLimit))
+        );
 
         assert!(scheduler.set_cooldown_with_reason("first", "*", 5_000, CooldownReason::Transient,));
-        assert!(!scheduler.cooldowns_are_rate_limited(request()));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::Transient))
+        );
         assert!(scheduler.clear_cooldown("first", "*"));
-        assert!(scheduler.cooldowns_are_rate_limited(request()));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::RateLimit))
+        );
 
         assert!(scheduler.set_cooldown_with_reason(
             "second",
@@ -2410,7 +2423,12 @@ mod tests {
             20_000,
             CooldownReason::Transient,
         ));
-        assert!(!scheduler.cooldowns_are_rate_limited(request()));
+        assert_eq!(
+            scheduler.all_applicable_cooldown(request()),
+            Some((10_000, CooldownReason::Transient))
+        );
+        assert!(scheduler.clear_cooldown("second", "gpt-5"));
+        assert_eq!(scheduler.all_applicable_cooldown(request()), None);
     }
 
     #[test]

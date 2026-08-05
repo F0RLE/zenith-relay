@@ -224,7 +224,7 @@ pub(super) fn completed_account_response(bytes: &[u8]) -> Result<Vec<u8>, Attemp
                     terminal.cooldown_hint,
                 ));
             }
-            Some(TerminalOutcome::Success) => {
+            Some(TerminalOutcome::Success | TerminalOutcome::Incomplete) => {
                 if let Some(mut response) = terminal.response {
                     if response
                         .get("output")

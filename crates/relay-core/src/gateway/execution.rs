@@ -320,7 +320,7 @@ pub(super) async fn execute_account_endpoint(
 
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(retry_at) = runtime.earliest_retry_at(
+        if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             &key,
             &resolved_model,
             &[WireApi::Responses],
@@ -331,14 +331,7 @@ pub(super) async fn execute_account_endpoint(
             return cooldown_error(
                 retry_at,
                 Some(&failure),
-                runtime.cooldowns_are_rate_limited(
-                    &key,
-                    &resolved_model,
-                    &[WireApi::Responses],
-                    &account_only_exclusions,
-                    response_affinity_key.as_deref(),
-                    now_ms(),
-                ),
+                reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
     }
@@ -555,7 +548,7 @@ async fn execute_request(
             .await;
         let Some((selected, lease)) = selected else {
             if attempt == 0 {
-                if let Some(retry_at) = runtime.earliest_retry_at(
+                if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
                     &key,
                     &resolved_model,
                     candidate_protocols(wire_api),
@@ -566,14 +559,7 @@ async fn execute_request(
                     return cooldown_error(
                         retry_at,
                         None,
-                        runtime.cooldowns_are_rate_limited(
-                            &key,
-                            &resolved_model,
-                            candidate_protocols(wire_api),
-                            &tried,
-                            response_affinity_key.as_deref(),
-                            now_ms(),
-                        ),
+                        reason == crate::scheduler::CooldownReason::RateLimit,
                     );
                 }
             }
@@ -1116,7 +1102,9 @@ async fn execute_request(
                 let completion_local_key = key.id.clone();
                 let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
                     lease.release();
-                    if event.success {
+                    let response_delivered = event.success
+                        || event.error_category.as_deref() == Some("response_incomplete");
+                    if response_delivered {
                         let recovered = completion_runtime.record_success_with_metrics(
                             &completion_source,
                             &completion_model,
@@ -1300,7 +1288,7 @@ async fn execute_request(
 
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(retry_at) = runtime.earliest_retry_at(
+        if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             &key,
             &resolved_model,
             candidate_protocols(wire_api),
@@ -1311,14 +1299,7 @@ async fn execute_request(
             return cooldown_error(
                 retry_at,
                 Some(&failure),
-                runtime.cooldowns_are_rate_limited(
-                    &key,
-                    &resolved_model,
-                    candidate_protocols(wire_api),
-                    &HashSet::new(),
-                    response_affinity_key.as_deref(),
-                    now_ms(),
-                ),
+                reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
     }

@@ -768,7 +768,7 @@ async fn execute_prepared(
 
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(retry_at) = runtime.earliest_retry_at(
+        if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
             &key,
             &prepared.resolved_model,
             IMAGE_PROTOCOLS,
@@ -779,14 +779,7 @@ async fn execute_prepared(
             return cooldown_error(
                 retry_at,
                 Some(&failure),
-                runtime.cooldowns_are_rate_limited(
-                    &key,
-                    &prepared.resolved_model,
-                    IMAGE_PROTOCOLS,
-                    &HashSet::new(),
-                    None,
-                    now_ms(),
-                ),
+                reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
     }

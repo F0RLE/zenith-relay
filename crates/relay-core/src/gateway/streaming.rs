@@ -225,7 +225,10 @@ impl<S> UsageStream<S> {
         if event.success {
             event.tool_use.finish();
         }
-        if !event.success && event.http_status < 400 {
+        if !event.success
+            && event.http_status < 400
+            && event.error_category.as_deref() != Some("response_incomplete")
+        {
             event.http_status = event
                 .error_category
                 .as_deref()
@@ -357,33 +360,17 @@ impl<S> UsageStream<S> {
             }
             match terminal.outcome {
                 Some(TerminalOutcome::Success) => {
-                    if let Some(shared) = self.native_response.as_ref() {
-                        let mut response = terminal.response.unwrap_or_else(|| {
-                            json!({
-                                "id": self.response_id,
-                                "output": self.native_output_items,
-                            })
-                        });
-                        if let Some(object) = response.as_object_mut() {
-                            object
-                                .entry("id")
-                                .or_insert_with(|| json!(self.response_id));
-                            let output_is_empty = object
-                                .get("output")
-                                .and_then(Value::as_array)
-                                .is_none_or(Vec::is_empty);
-                            if output_is_empty {
-                                object.insert(
-                                    "output".to_string(),
-                                    Value::Array(self.native_output_items.clone()),
-                                );
-                            }
-                        }
-                        *shared
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
-                    }
+                    self.capture_native_response(terminal.response);
                     self.finish(None, None);
+                    self.terminated = true;
+                    return;
+                }
+                Some(TerminalOutcome::Incomplete) => {
+                    self.capture_native_response(terminal.response);
+                    self.finish(
+                        Some(false),
+                        Some(terminal.error_category.unwrap_or("response_incomplete")),
+                    );
                     self.terminated = true;
                     return;
                 }
@@ -403,6 +390,36 @@ impl<S> UsageStream<S> {
             self.sse_pending.clear();
             self.fail_stream("stream_event_too_large");
         }
+    }
+
+    fn capture_native_response(&mut self, response: Option<Value>) {
+        let Some(shared) = self.native_response.as_ref() else {
+            return;
+        };
+        let mut response = response.unwrap_or_else(|| {
+            json!({
+                "id": self.response_id,
+                "output": self.native_output_items.clone(),
+            })
+        });
+        if let Some(object) = response.as_object_mut() {
+            object
+                .entry("id")
+                .or_insert_with(|| json!(self.response_id));
+            let output_is_empty = object
+                .get("output")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty);
+            if output_is_empty {
+                object.insert(
+                    "output".to_string(),
+                    Value::Array(self.native_output_items.clone()),
+                );
+            }
+        }
+        *shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(response);
     }
 }
 
@@ -490,6 +507,7 @@ pub(super) struct TerminalEvent {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum TerminalOutcome {
     Success,
+    Incomplete,
     Failure,
 }
 
@@ -549,13 +567,10 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         Some("response.completed" | "response.done" | "message_stop") => {
             Some(TerminalOutcome::Success)
         }
-        Some(
-            "response.failed"
-            | "response.incomplete"
-            | "response.cancelled"
-            | "response.canceled"
-            | "error",
-        ) => Some(TerminalOutcome::Failure),
+        Some("response.failed" | "response.cancelled" | "response.canceled" | "error") => {
+            Some(TerminalOutcome::Failure)
+        }
+        Some("response.incomplete") => Some(TerminalOutcome::Incomplete),
         _ => None,
     };
     let error_category = upstream_event_failure_category(event_type, &value);
@@ -827,6 +842,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incomplete_native_response_is_captured_without_gateway_failure_status() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured_events = events.clone();
+        let captured_response = Arc::new(Mutex::new(None));
+        let mut stream = UsageStream::new(
+            futures_util::stream::empty::<std::result::Result<Bytes, Infallible>>(),
+            Arc::new(move |event| captured_events.lock().unwrap().push(event)),
+            test_usage_event(),
+            Instant::now(),
+            Arc::new(|_, _, _| {}),
+        );
+        stream.native_response = Some(captured_response.clone());
+        stream.ingest_sse(
+            br#"data: {"type":"response.incomplete","response":{"id":"resp_incomplete","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":3,"output_tokens":4}}}
+
+"#,
+        );
+
+        let response = captured_response
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("incomplete native stream is captured");
+        assert_eq!(response["id"], "resp_incomplete");
+        assert_eq!(
+            response["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(!events[0].success);
+        assert_eq!(events[0].http_status, StatusCode::OK.as_u16());
+        assert_eq!(
+            events[0].error_category.as_deref(),
+            Some("response_incomplete")
+        );
+        assert_eq!(events[0].output_tokens, Some(4));
+    }
+
+    #[tokio::test]
     async fn streaming_chat_usage_captures_cached_prompt_tokens() {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
@@ -856,10 +911,20 @@ mod tests {
     }
 
     #[test]
+    fn response_incomplete_is_a_terminal_non_failure_outcome() {
+        let event = parse_sse_event(
+            br#"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}
+
+"#,
+        );
+        assert_eq!(event.outcome, Some(TerminalOutcome::Incomplete));
+        assert_eq!(event.error_category, Some("response_incomplete"));
+    }
+
+    #[test]
     fn all_responses_error_terminal_types_are_failures() {
         for event_type in [
             "response.failed",
-            "response.incomplete",
             "response.cancelled",
             "response.canceled",
             "error",

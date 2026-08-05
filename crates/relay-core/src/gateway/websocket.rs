@@ -507,7 +507,7 @@ async fn connect_upstream(
             }
         };
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
-            if terminal.outcome == Some(false) {
+            if terminal.outcome == Some(EventTerminalOutcome::Failure) {
                 let category = terminal.error_category.unwrap_or_else(|| {
                     super::errors::classify_upstream_error(
                         terminal_failure_status(terminal.status),
@@ -1274,12 +1274,19 @@ async fn handle_upstream_message(
 
 #[derive(Default)]
 struct EventTerminal {
-    outcome: Option<bool>,
+    outcome: Option<EventTerminalOutcome>,
     status: Option<StatusCode>,
     error_category: Option<&'static str>,
     headers: HeaderMap,
     body_hint: RateLimitBodyHint,
     previous_response_not_found: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventTerminalOutcome {
+    Success,
+    Incomplete,
+    Failure,
 }
 
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
@@ -1304,14 +1311,11 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
 
 fn event_terminal(value: &Value) -> EventTerminal {
     let outcome = match value.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => Some(true),
-        Some(
-            "response.failed"
-            | "response.incomplete"
-            | "response.cancelled"
-            | "response.canceled"
-            | "error",
-        ) => Some(false),
+        Some("response.completed" | "response.done") => Some(EventTerminalOutcome::Success),
+        Some("response.incomplete") => Some(EventTerminalOutcome::Incomplete),
+        Some("response.failed" | "response.cancelled" | "response.canceled" | "error") => {
+            Some(EventTerminalOutcome::Failure)
+        }
         _ => None,
     };
     let status = super::errors::upstream_status_from_value(value);
@@ -1333,12 +1337,17 @@ fn finish_terminal(
     state: &mut BridgeState,
     terminal: EventTerminal,
 ) -> bool {
-    let Some(success) = terminal.outcome else {
+    let Some(outcome) = terminal.outcome else {
         return true;
     };
     let Some(mut in_flight) = state.in_flight.take() else {
         return true;
     };
+    let delivered = matches!(
+        outcome,
+        EventTerminalOutcome::Success | EventTerminalOutcome::Incomplete
+    );
+    let success = matches!(outcome, EventTerminalOutcome::Success);
     in_flight.event.latency_ms = in_flight.started.elapsed().as_millis() as u64;
     in_flight.event.generation_ms = in_flight
         .event
@@ -1349,17 +1358,20 @@ fn finish_terminal(
     if success {
         in_flight.event.tool_use.finish();
     }
+    if matches!(outcome, EventTerminalOutcome::Incomplete) {
+        in_flight.event.error_category = Some("response_incomplete".to_string());
+    }
     runtime.observe_codex_quota_headers(
         &in_flight.route.candidate_id,
-        terminal.status.unwrap_or(if success {
-            StatusCode::OK
-        } else {
-            StatusCode::BAD_GATEWAY
-        }),
+        match outcome {
+            EventTerminalOutcome::Success => terminal.status.unwrap_or(StatusCode::OK),
+            EventTerminalOutcome::Incomplete => StatusCode::OK,
+            EventTerminalOutcome::Failure => terminal.status.unwrap_or(StatusCode::BAD_GATEWAY),
+        },
         &terminal.headers,
         now_ms(),
     );
-    if success {
+    if delivered {
         state.last_response_id = in_flight.response_id.clone();
         let recovered = runtime.record_success_with_metrics(
             &in_flight.route.candidate_id,
@@ -1410,7 +1422,7 @@ fn finish_terminal(
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
-    success
+    delivered
 }
 
 fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category: &str) {
@@ -1747,7 +1759,8 @@ impl GatewayFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        incomplete_requires_cooldown, terminal_failure_status, websocket_reset_delay_seconds,
+        event_terminal, incomplete_requires_cooldown, terminal_failure_status,
+        websocket_reset_delay_seconds, EventTerminalOutcome,
     };
     use reqwest::StatusCode;
     use serde_json::json;
@@ -1758,6 +1771,22 @@ mod tests {
         assert!(incomplete_requires_cooldown("websocket_idle_timeout"));
         assert!(!incomplete_requires_cooldown("client_cancelled"));
         assert!(!incomplete_requires_cooldown("invalid_request"));
+    }
+
+    #[test]
+    fn response_incomplete_is_delivered_without_failure_outcome() {
+        let terminal = event_terminal(&json!({
+            "type": "response.incomplete",
+            "response": {
+                "id": "resp_incomplete",
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"}
+            }
+        }));
+
+        assert_eq!(terminal.outcome, Some(EventTerminalOutcome::Incomplete));
+        assert_eq!(terminal.error_category, Some("response_incomplete"));
+        assert!(!incomplete_requires_cooldown("response_incomplete"));
     }
 
     #[test]

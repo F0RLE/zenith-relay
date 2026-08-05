@@ -1667,7 +1667,7 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn cooldowns_are_rate_limited(
+    pub(crate) fn all_applicable_cooldown(
         &self,
         key: &AuthenticatedKey,
         model: &str,
@@ -1675,9 +1675,9 @@ impl GatewayRuntime {
         tried: &HashSet<String>,
         response_affinity_key: Option<&str>,
         now_ms: u64,
-    ) -> bool {
+    ) -> Option<(u64, CooldownReason)> {
         self.lock_scheduler()
-            .cooldowns_are_rate_limited(SelectionRequest {
+            .all_applicable_cooldown(SelectionRequest {
                 model,
                 allowed_protocols,
                 scope: &key.scope,
