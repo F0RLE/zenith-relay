@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CooldownReason {
+    Transient,
+    RateLimit,
+}
+
 pub(super) fn active_retry_at(
     cooldowns: &BTreeMap<String, u64>,
     model: &str,

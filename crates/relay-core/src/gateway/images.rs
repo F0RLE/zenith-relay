@@ -776,7 +776,18 @@ async fn execute_prepared(
             None,
             now_ms(),
         ) {
-            return cooldown_error(retry_at, Some(&failure));
+            return cooldown_error(
+                retry_at,
+                Some(&failure),
+                runtime.cooldowns_are_rate_limited(
+                    &key,
+                    &prepared.resolved_model,
+                    IMAGE_PROTOCOLS,
+                    &HashSet::new(),
+                    None,
+                    now_ms(),
+                ),
+            );
         }
     }
     api_error(failure.status, failure.message, failure.category)

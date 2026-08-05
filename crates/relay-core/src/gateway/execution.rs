@@ -328,7 +328,18 @@ pub(super) async fn execute_account_endpoint(
             response_affinity_key.as_deref(),
             now_ms(),
         ) {
-            return cooldown_error(retry_at, Some(&failure));
+            return cooldown_error(
+                retry_at,
+                Some(&failure),
+                runtime.cooldowns_are_rate_limited(
+                    &key,
+                    &resolved_model,
+                    &[WireApi::Responses],
+                    &account_only_exclusions,
+                    response_affinity_key.as_deref(),
+                    now_ms(),
+                ),
+            );
         }
     }
     api_error(failure.status, failure.message, failure.category)
@@ -552,7 +563,18 @@ async fn execute_request(
                     response_affinity_key.as_deref(),
                     now_ms(),
                 ) {
-                    return cooldown_error(retry_at, None);
+                    return cooldown_error(
+                        retry_at,
+                        None,
+                        runtime.cooldowns_are_rate_limited(
+                            &key,
+                            &resolved_model,
+                            candidate_protocols(wire_api),
+                            &tried,
+                            response_affinity_key.as_deref(),
+                            now_ms(),
+                        ),
+                    );
                 }
             }
             break;
@@ -1286,7 +1308,18 @@ async fn execute_request(
             response_affinity_key.as_deref(),
             now_ms(),
         ) {
-            return cooldown_error(retry_at, Some(&failure));
+            return cooldown_error(
+                retry_at,
+                Some(&failure),
+                runtime.cooldowns_are_rate_limited(
+                    &key,
+                    &resolved_model,
+                    candidate_protocols(wire_api),
+                    &HashSet::new(),
+                    response_affinity_key.as_deref(),
+                    now_ms(),
+                ),
+            );
         }
     }
     api_error(failure.status, failure.message, failure.category)
