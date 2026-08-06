@@ -3,7 +3,7 @@ use crate::accounts::{
     TokenRefreshAdapter,
 };
 use crate::catalog::{
-    apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
+    apply_claude_reasoning_capability_fallback, intersect_source_reasoning_capabilities,
     source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
     SourceReasoningCapabilities,
 };
@@ -1200,7 +1200,7 @@ impl GatewayRuntime {
                     .entry(model_key.clone())
                     .or_default()
                     .push(supports_image);
-                let capabilities = apply_manual_reasoning_capability_overrides(
+                let capabilities = apply_claude_reasoning_capability_fallback(
                     model,
                     reasoning.get(&model_key).cloned(),
                 )
@@ -3201,6 +3201,128 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[tokio::test]
+    async fn non_claude_source_catalog_preserves_source_declared_efforts() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["grok-4.5", "glm-5.2"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "grok-4.5",
+                        "reasoningEffortModes": [
+                            "low", "medium", "high", "xhigh", "max", "very_high"
+                        ],
+                        "defaultReasoningLevel": "very_high"
+                    },
+                    {
+                        "id": "glm-5.2",
+                        "reasoningEffortModes": ["low", "medium", "high", "xhigh", "max"],
+                        "defaultReasoningLevel": "max"
+                    }
+                ]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        for (model_id, expected) in [
+            (
+                "grok-4.5",
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"},
+                        {"effort": "medium", "description": "medium"},
+                        {"effort": "high", "description": "high"},
+                        {"effort": "xhigh", "description": "xhigh"},
+                        {"effort": "max", "description": "max"},
+                        {"effort": "very_high", "description": "very_high"}
+                    ],
+                    "default_reasoning_level": "very_high"
+                }),
+            ),
+            (
+                "glm-5.2",
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"},
+                        {"effort": "medium", "description": "medium"},
+                        {"effort": "high", "description": "high"},
+                        {"effort": "xhigh", "description": "xhigh"},
+                        {"effort": "max", "description": "max"}
+                    ],
+                    "default_reasoning_level": "max"
+                }),
+            ),
+        ] {
+            assert_eq!(
+                metadata.reasoning_catalog_templates[model_id],
+                expected.as_object().unwrap().clone()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_catalog_does_not_cross_model_reasoning_metadata() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["grok-4.5", "glm-5.2"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "grok-4.5",
+                        "reasoningEffortModes": ["low", "very_high"],
+                        "defaultReasoningLevel": "very_high"
+                    },
+                    {"id": "glm-5.2"}
+                ]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert!(metadata
+            .reasoning_catalog_templates
+            .contains_key("grok-4.5"));
+        assert!(!metadata.reasoning_catalog_templates.contains_key("glm-5.2"));
     }
 
     #[tokio::test]

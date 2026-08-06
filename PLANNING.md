@@ -180,6 +180,15 @@ Completions rejects tool definitions and tool-call history instead of
 pretending to translate them. Responses WebSocket remains native-only until a
 separate bidirectional bridge is designed and tested.
 
+For routed API-source rows, Relay does not infer or blacklist reasoning effort
+names from a provider or model name. Native Responses routes preserve the
+current per-model source declaration, including effort names Relay did not
+know in advance; when a route does not explicitly confirm reasoning metadata,
+Relay does not advertise a selector for that model. Claude's separate
+compatibility fallback remains limited to the previously documented sparse
+Claude metadata case. Native ChatGPT catalog rows remain authoritative and are
+not rewritten by this policy.
+
 ## Usage and economics
 
 Usage records safe operational metadata: request id, selected candidate, model,

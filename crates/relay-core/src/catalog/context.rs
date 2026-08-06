@@ -242,14 +242,15 @@ pub(crate) fn source_reasoning_capabilities(
         .collect()
 }
 
-/// Applies narrow hand-maintained capability additions for model families whose
-/// OpenAI-compatible `/models` rows omit their usable reasoning controls.
+/// Applies the explicit Claude compatibility fallback for source catalogs
+/// that omit some of Claude's known Codex effort levels.
 ///
-/// Claude-compatible models deliberately receive the Codex effort set that
-/// Relay can forward through either a native Responses route or its Messages
-/// bridge. Provider-declared descriptions and a declared default remain
-/// authoritative; only missing canonical levels are supplied here.
-pub(crate) fn apply_manual_reasoning_capability_overrides(
+/// Provider-declared capabilities remain authoritative for every other model:
+/// Relay must not infer a model's effort vocabulary from its name or maintain a
+/// blacklist of levels that might become valid later.
+///
+/// Native ChatGPT rows do not use this function and remain untouched.
+pub(crate) fn apply_claude_reasoning_capability_fallback(
     model_id: &str,
     capabilities: Option<SourceReasoningCapabilities>,
 ) -> Option<SourceReasoningCapabilities> {
@@ -651,7 +652,7 @@ mod tests {
         );
 
         let capabilities =
-            apply_manual_reasoning_capability_overrides("vendor/claude-fable-5", declared).unwrap();
+            apply_claude_reasoning_capability_fallback("vendor/claude-fable-5", declared).unwrap();
 
         assert_eq!(
             capabilities.codex_catalog_template(),
@@ -673,10 +674,56 @@ mod tests {
     }
 
     #[test]
-    fn manual_reasoning_exception_does_not_change_other_model_families() {
+    fn non_claude_models_do_not_receive_manual_efforts_without_metadata() {
         assert!(
-            apply_manual_reasoning_capability_overrides("gpt-5.6-sol", None).is_none(),
+            apply_claude_reasoning_capability_fallback("gpt-5.6-sol", None).is_none(),
             "only Claude model IDs receive the manual effort set"
         );
+    }
+
+    #[test]
+    fn non_claude_models_preserve_every_source_declared_effort() {
+        let declared = parse_reasoning_object(
+            json!({
+                "reasoningEffortModes": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max",
+                    "ultra",
+                    "very_high"
+                ],
+                "default_effort": "very_high"
+            })
+            .as_object()
+            .unwrap(),
+        );
+
+        for model_id in ["grok-4.5", "glm-5.2"] {
+            let capabilities =
+                apply_claude_reasoning_capability_fallback(model_id, declared.clone())
+                    .expect("baseline reasoning levels remain available");
+
+            assert_eq!(
+                capabilities.codex_catalog_template(),
+                json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"},
+                        {"effort": "medium", "description": "medium"},
+                        {"effort": "high", "description": "high"},
+                        {"effort": "xhigh", "description": "xhigh"},
+                        {"effort": "max", "description": "max"},
+                        {"effort": "ultra", "description": "ultra"},
+                        {"effort": "very_high", "description": "very_high"}
+                    ],
+                    "default_reasoning_level": "very_high"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+                "source-declared effort was rewritten for {model_id}"
+            );
+        }
     }
 }
