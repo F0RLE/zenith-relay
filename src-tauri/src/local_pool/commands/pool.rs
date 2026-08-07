@@ -109,6 +109,8 @@ pub fn export_local_configuration_preset(
             accounts,
             routing: PresetRoutingPolicy {
                 max_retry_candidates: gateway.max_retry_candidates,
+                cooldown_after_failures: gateway.cooldown_after_failures,
+                keep_last_candidate_available: gateway.keep_last_candidate_available,
                 routing_strategy: gateway.routing_strategy,
                 subscription_plan_order: gateway.subscription_plan_order,
                 default_service_tier: gateway.default_service_tier,
@@ -365,6 +367,10 @@ fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResu
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRoutingInput {
     max_retry_candidates: u8,
+    #[serde(default)]
+    cooldown_after_failures: Option<u8>,
+    #[serde(default)]
+    keep_last_candidate_available: Option<bool>,
     routing_strategy: RoutingStrategy,
     subscription_plan_order: Option<Vec<String>>,
     #[serde(default)]
@@ -586,6 +592,12 @@ pub async fn update_local_routing(
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();
     gateway.max_retry_candidates = input.max_retry_candidates;
+    if let Some(value) = input.cooldown_after_failures {
+        gateway.cooldown_after_failures = value;
+    }
+    if let Some(value) = input.keep_last_candidate_available {
+        gateway.keep_last_candidate_available = value;
+    }
     gateway.routing_strategy = input.routing_strategy;
     if let Some(subscription_plan_order) = input.subscription_plan_order {
         gateway.subscription_plan_order = subscription_plan_order;
@@ -595,6 +607,8 @@ pub async fn update_local_routing(
         return state.snapshot().await.map_err(Into::into);
     }
     let service_tier_only = gateway.max_retry_candidates == old_gateway.max_retry_candidates
+        && gateway.cooldown_after_failures == old_gateway.cooldown_after_failures
+        && gateway.keep_last_candidate_available == old_gateway.keep_last_candidate_available
         && gateway.routing_strategy == old_gateway.routing_strategy
         && gateway.subscription_plan_order == old_gateway.subscription_plan_order;
     let default_service_tier = gateway.default_service_tier;

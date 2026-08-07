@@ -1902,7 +1902,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 3, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
 });
 
 test("pool card grid preserves scheduler order at every width", async ({ page }) => {
@@ -1951,7 +1951,7 @@ test("subscription group routing saves, reorders, and restores the default order
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, defaultServiceTier: "standard", subscriptionPlanOrder: ["free", "team", "pro", "plus"] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["free", "team", "pro", "plus"] } });
 
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   dialog = page.getByRole("dialog", { name: "Distribution" });
@@ -1959,7 +1959,7 @@ test("subscription group routing saves, reorders, and restores the default order
   await expect(dialog.getByRole("button", { name: /^Distribution strategy:/ })).toHaveAttribute("data-value", "subscription_plan");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, defaultServiceTier: "standard", subscriptionPlanOrder: ["team", "pro", "plus", "free"] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["team", "pro", "plus", "free"] } });
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
@@ -1979,7 +1979,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 3, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
+    payload: { maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
   });
   expect(calls.some((call) => call.command === "sync_codex_default_service_tier")).toBe(false);
 });

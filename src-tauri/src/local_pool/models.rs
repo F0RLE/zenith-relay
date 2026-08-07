@@ -9,6 +9,7 @@ use zenith_relay_core::{
     protocol::RemoteAccountLocation,
     quota::QuotaEconomicsState,
     ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, SourceProtocolBinding, WireApi,
+    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
@@ -37,6 +38,10 @@ pub struct GatewaySettings {
     pub client_host: String,
     #[serde(default = "default_max_retry_candidates")]
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     #[serde(default)]
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
@@ -301,6 +306,8 @@ impl Default for GatewaySettings {
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
+            cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
@@ -326,6 +333,9 @@ impl GatewaySettings {
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
+        }
+        if !(1..=8).contains(&self.cooldown_after_failures) {
+            return Err("cooldown after failures must be between 1 and 8");
         }
         normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
         if self
@@ -354,6 +364,14 @@ impl GatewaySettings {
 
 fn default_quota_request_timeout_seconds() -> u64 {
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
+}
+
+fn default_cooldown_after_failures() -> u8 {
+    DEFAULT_COOLDOWN_AFTER_FAILURES
+}
+
+fn default_keep_last_candidate_available() -> bool {
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {

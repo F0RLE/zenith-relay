@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 pub(crate) enum CooldownReason {
     Transient,
     RateLimit,
+    Mandatory,
 }
 
 pub(super) fn active_retry_at(

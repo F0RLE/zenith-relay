@@ -288,6 +288,8 @@ export type RuntimeSnapshot = {
     candidateCount: number;
     visibleModelIds: string[];
     maxRetryCandidates: number;
+    cooldownAfterFailures?: number;
+    keepLastCandidateAvailable?: boolean;
     routingStrategy: RoutingStrategy;
     subscriptionPlanOrder?: string[];
     defaultServiceTier: DefaultServiceTier;
@@ -347,6 +349,8 @@ export type ConfigurationPreset = {
     accounts: ConfigurationPresetAccountRule[];
     routing: {
       maxRetryCandidates: number;
+      cooldownAfterFailures?: number;
+      keepLastCandidateAvailable?: boolean;
       routingStrategy: RoutingStrategy;
       subscriptionPlanOrder: string[];
       defaultServiceTier: DefaultServiceTier;

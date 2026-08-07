@@ -1,7 +1,7 @@
 use super::now_ms;
 use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
-use crate::scheduler::CooldownReason;
-use crate::{GatewayRuntime, UsageEvent};
+use crate::scheduler::{CandidateScope, CooldownReason, CooldownRequest};
+use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, Response, StatusCode};
@@ -12,8 +12,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 
-const TRANSPORT_COOLDOWN_MS: u64 = 5_000;
-
 const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 
 const MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_024;
@@ -21,6 +19,11 @@ const MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_024;
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
+
+pub(super) struct CooldownContext<'a> {
+    pub(super) scope: &'a CandidateScope,
+    pub(super) allowed_protocols: &'a [WireApi],
+}
 
 /// Marks an error body constructed by Relay itself. Native protocol handlers
 /// use this marker to normalize only local errors without rewriting an
@@ -33,7 +36,6 @@ pub(super) struct AttemptFailure {
     pub(super) status: StatusCode,
     pub(super) category: &'static str,
     pub(super) message: &'static str,
-    pub(super) cooldown_ms: u64,
     pub(super) cooldown_hint: RateLimitBodyHint,
 }
 
@@ -724,7 +726,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message,
-            cooldown_ms: TRANSPORT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -734,7 +735,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_error",
             message: "upstream response failed",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -744,7 +744,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message: "request cannot be translated for an eligible source",
-            cooldown_ms: 0,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -755,7 +754,6 @@ impl AttemptFailure {
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
         }
     }
@@ -769,7 +767,6 @@ impl AttemptFailure {
             status: canonical_upstream_status(status, category),
             category,
             message: upstream_failure_message(category),
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint,
         }
     }
@@ -779,7 +776,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message: "upstream stream failed before the first event",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -789,7 +785,6 @@ impl AttemptFailure {
             status: StatusCode::SERVICE_UNAVAILABLE,
             category: "no_eligible_source",
             message: "no eligible source is available for this model",
-            cooldown_ms: 0,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -801,7 +796,6 @@ impl AttemptFailure {
                     status: StatusCode::UNAUTHORIZED,
                     category: "account_auth",
                     message: "account authorization is unavailable",
-                    cooldown_ms: 30 * 60_000,
                     cooldown_hint: RateLimitBodyHint::default(),
                 }
             }
@@ -809,14 +803,12 @@ impl AttemptFailure {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 category: "account_token_persistence",
                 message: "refreshed account authorization could not be persisted",
-                cooldown_ms: TRANSIENT_COOLDOWN_MS,
                 cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
                 status: StatusCode::BAD_GATEWAY,
                 category: "account_refresh",
                 message: "account authorization refresh failed",
-                cooldown_ms: TRANSIENT_COOLDOWN_MS,
                 cooldown_hint: RateLimitBodyHint::default(),
             },
         }
@@ -1025,6 +1017,7 @@ pub(super) fn apply_failure_cooldown_with_body(
     category: &str,
     headers: &reqwest::header::HeaderMap,
     body: Option<&[u8]>,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let hint = body.map(rate_limit_body_hint).unwrap_or_default();
@@ -1036,6 +1029,7 @@ pub(super) fn apply_failure_cooldown_with_body(
         category,
         headers,
         hint,
+        context,
         half_open_probe,
     )
 }
@@ -1046,6 +1040,7 @@ pub(super) fn apply_attempt_failure_cooldown(
     model: &str,
     failure: &AttemptFailure,
     headers: &reqwest::header::HeaderMap,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     apply_failure_cooldown_with_hint(
@@ -1056,6 +1051,7 @@ pub(super) fn apply_attempt_failure_cooldown(
         failure.category,
         headers,
         failure.cooldown_hint,
+        context,
         half_open_probe,
     )
 }
@@ -1066,13 +1062,16 @@ pub(super) struct RateLimitBodyHint {
     pub(super) global: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_status_cooldown_with_hint(
     runtime: &GatewayRuntime,
     candidate_id: &str,
     model: &str,
     status: StatusCode,
+    category: &str,
     headers: &reqwest::header::HeaderMap,
     hint: RateLimitBodyHint,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
@@ -1106,12 +1105,19 @@ fn apply_status_cooldown_with_hint(
     );
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now.saturating_add(duration_ms);
-    let reason = if status == StatusCode::TOO_MANY_REQUESTS {
-        CooldownReason::RateLimit
-    } else {
-        CooldownReason::Transient
-    };
-    let applied = runtime.set_cooldown_with_reason(candidate_id, scope, retry_at_ms, reason);
+    let reason = failure_cooldown_reason(status, category, has_explicit_retry_after);
+    let applied = runtime.set_cooldown_with_reason_for_model_at(
+        candidate_id,
+        CooldownRequest {
+            scope,
+            policy_model: model,
+            allowed_protocols: context.allowed_protocols,
+            request_scope: context.scope,
+            retry_at_ms,
+            reason,
+            now_ms: now,
+        },
+    );
     FailureState {
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
@@ -1128,6 +1134,7 @@ pub(super) fn apply_failure_cooldown_with_hint(
     category: &str,
     headers: &reqwest::header::HeaderMap,
     hint: RateLimitBodyHint,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let status = canonical_upstream_status(status, category);
@@ -1138,12 +1145,16 @@ pub(super) fn apply_failure_cooldown_with_hint(
             | "upstream_model_capacity"
             | "upstream_overloaded"
     ) {
-        return apply_cooldown(
+        let has_explicit_retry_after =
+            retry_after_ms(headers, SystemTime::now()).is_some() || hint.retry_after_ms.is_some();
+        return apply_cooldown_with_reason(
             runtime,
             candidate_id,
             model,
             TRANSIENT_COOLDOWN_MS,
+            context,
             half_open_probe,
+            failure_cooldown_reason(status, category, has_explicit_retry_after),
         );
     }
     apply_status_cooldown_with_hint(
@@ -1151,10 +1162,44 @@ pub(super) fn apply_failure_cooldown_with_hint(
         candidate_id,
         model,
         status,
+        category,
         headers,
         hint,
+        context,
         half_open_probe,
     )
+}
+
+fn failure_cooldown_reason(
+    status: StatusCode,
+    category: &str,
+    explicit_retry_after: bool,
+) -> CooldownReason {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return CooldownReason::RateLimit;
+    }
+    if explicit_retry_after
+        || matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN
+        )
+        || matches!(
+            category,
+            "upstream_unauthorized"
+                | "upstream_account_disabled"
+                | "upstream_usage_not_included"
+                | "upstream_quota_exhausted"
+                | "upstream_region_unsupported"
+                | "upstream_model_not_found"
+                | "upstream_model_unsupported"
+                | "upstream_model_capacity"
+                | "upstream_websocket_connection_limit"
+        )
+    {
+        CooldownReason::Mandatory
+    } else {
+        CooldownReason::Transient
+    }
 }
 
 pub(super) fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
@@ -1314,7 +1359,72 @@ pub(super) fn apply_cooldown(
     candidate_id: &str,
     scope: &str,
     duration_ms: u64,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason(
+        runtime,
+        candidate_id,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Transient,
+    )
+}
+
+pub(super) fn apply_cooldown_for_model(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    policy_model: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason_for_model(
+        runtime,
+        candidate_id,
+        scope,
+        policy_model,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Transient,
+    )
+}
+
+pub(super) fn apply_cooldown_with_reason(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+    reason: CooldownReason,
+) -> FailureState {
+    apply_cooldown_with_reason_for_model(
+        runtime,
+        candidate_id,
+        scope,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_cooldown_with_reason_for_model(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    policy_model: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+    reason: CooldownReason,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
     let duration_ms = source_cooldown_ms(
@@ -1323,13 +1433,44 @@ pub(super) fn apply_cooldown(
         false,
     );
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
-    let retry_at_ms = now_ms().saturating_add(duration_ms);
-    let applied = runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    let now = now_ms();
+    let retry_at_ms = now.saturating_add(duration_ms);
+    let applied = runtime.set_cooldown_with_reason_for_model_at(
+        candidate_id,
+        CooldownRequest {
+            scope,
+            policy_model,
+            allowed_protocols: context.allowed_protocols,
+            request_scope: context.scope,
+            retry_at_ms,
+            reason,
+            now_ms: now,
+        },
+    );
     FailureState {
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
         consecutive_failures,
     }
+}
+
+pub(super) fn apply_mandatory_cooldown(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason(
+        runtime,
+        candidate_id,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Mandatory,
+    )
 }
 
 pub(super) fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {

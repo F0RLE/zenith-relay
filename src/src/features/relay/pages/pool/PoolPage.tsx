@@ -221,6 +221,8 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     if (defaultServiceTier === serviceTier) return;
     void perform("pool-service-tier", () => persistRoutingPolicy(mode, {
       maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
+      cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
+      keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
       routingStrategy,
       defaultServiceTier,
       subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
@@ -375,7 +377,9 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const defaultServiceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const [subscriptionPlanOrder, setSubscriptionPlanOrder] = useState(initialPlanOrder);
   const [draggedPlan, setDraggedPlan] = useState<string | null>(null);
-  const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
+  const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
+  const [cooldownAfterFailures, setCooldownAfterFailures] = useState(runtime?.gateway.cooldownAfterFailures ?? 3);
+  const [keepLastCandidateAvailable, setKeepLastCandidateAvailable] = useState(runtime?.gateway.keepLastCandidateAvailable ?? true);
   const hasCustomPlanOrder = subscriptionPlanOrder.length !== defaultPlanOrder.length || subscriptionPlanOrder.some((plan, index) => plan !== defaultPlanOrder[index]);
   const movePlan = (plan: string, target: string, after = false) => {
     if (plan === target) return;
@@ -402,6 +406,8 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const savedPlanOrder = routingStrategy === "subscription_plan" ? subscriptionPlanOrder : [];
     const payload = {
       maxRetryCandidates,
+      cooldownAfterFailures,
+      keepLastCandidateAvailable,
       routingStrategy,
       defaultServiceTier,
       subscriptionPlanOrder: savedPlanOrder,
@@ -415,6 +421,15 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
         <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{t(`pool.routingStrategyHints.${routingStrategy}`)}</small></div>
         <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} onChange={chooseStrategy} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "quota_highest", label: t("pool.routingStrategies.quotaHighest") }, { value: "subscription_expiry", label: t("pool.routingStrategies.subscriptionExpiry") }, { value: "subscription_plan", label: t("pool.routingStrategies.subscriptionPlan") }]} />
       </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.maxRetryCandidates")}</strong><small>{t("pool.maxRetryCandidatesHint")}</small></div>
+        <input className="pool-policy-control" aria-label={t("pool.maxRetryCandidates")} type="number" min={1} max={8} value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(Number(event.target.value) || 1)} />
+      </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.cooldownAfterFailures")}</strong><small>{t("pool.cooldownAfterFailuresHint")}</small></div>
+        <input className="pool-policy-control" aria-label={t("pool.cooldownAfterFailures")} type="number" min={1} max={8} value={cooldownAfterFailures} onChange={(event) => setCooldownAfterFailures(Number(event.target.value) || 1)} />
+      </div>
+      <label className="pool-policy-toggle toggle-row"><input type="checkbox" checked={keepLastCandidateAvailable} onChange={(event) => setKeepLastCandidateAvailable(event.target.checked)} /><span>{t("pool.keepLastCandidateAvailable")}</span></label>
       {routingStrategy === "subscription_plan" ? <div className="subscription-plan-policy">
         <div className="subscription-plan-policy-heading"><div><strong>{t("pool.subscriptionPlanOrder")}</strong><small>{t("pool.subscriptionPlanOrderHint")}</small></div>{hasCustomPlanOrder ? <IconButton label={t("pool.resetSubscriptionPlanOrder")} icon={<RotateCcw aria-hidden />} onClick={resetPlanOrder} /> : null}</div>
         {subscriptionPlanOrder.length ? <div className="subscription-plan-order" role="list" aria-label={t("pool.subscriptionPlanOrder")}>{subscriptionPlanOrder.map((plan, index) => {
@@ -772,6 +787,8 @@ function poolVisibleModels(runtime: NonNullable<ReturnType<typeof useRelayState>
 
 type RoutingPolicyPayload = {
   maxRetryCandidates: number;
+  cooldownAfterFailures: number;
+  keepLastCandidateAvailable: boolean;
   routingStrategy: RoutingStrategy;
   defaultServiceTier: DefaultServiceTier;
   subscriptionPlanOrder: string[];
@@ -779,6 +796,6 @@ type RoutingPolicyPayload = {
 
 function persistRoutingPolicy(mode: RelayMode, payload: RoutingPolicyPayload) {
   return mode === "local"
-    ? relayCommands.updateRouting(payload.routingStrategy, payload.maxRetryCandidates, payload.defaultServiceTier, payload.subscriptionPlanOrder)
+    ? relayCommands.updateRouting(payload.routingStrategy, payload.maxRetryCandidates, payload.cooldownAfterFailures, payload.keepLastCandidateAvailable, payload.defaultServiceTier, payload.subscriptionPlanOrder)
     : relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
 }

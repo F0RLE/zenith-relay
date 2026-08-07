@@ -13,7 +13,7 @@ use crate::providers::chatgpt::{
     CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
-use crate::scheduler::CooldownReason;
+use crate::scheduler::{CooldownReason, CooldownRequest};
 use crate::ProxyConfig;
 use crate::{
     api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
@@ -197,6 +197,8 @@ pub trait ResponseAffinityStore: Send + Sync {
 #[derive(Clone)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
+    pub cooldown_after_failures: u8,
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
     pub hidden_models: Vec<String>,
@@ -214,6 +216,11 @@ impl fmt::Debug for GatewayRuntimeOptions {
         formatter
             .debug_struct("GatewayRuntimeOptions")
             .field("max_retry_candidates", &self.max_retry_candidates)
+            .field("cooldown_after_failures", &self.cooldown_after_failures)
+            .field(
+                "keep_last_candidate_available",
+                &self.keep_last_candidate_available,
+            )
             .field("routing_strategy", &self.routing_strategy)
             .field("subscription_plan_order", &self.subscription_plan_order)
             .field("hidden_models", &self.hidden_models)
@@ -233,6 +240,8 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             max_retry_candidates: 3,
+            cooldown_after_failures: crate::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
@@ -388,6 +397,8 @@ pub(crate) struct ExecutorRoute {
     pub(crate) candidate_id: String,
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
+    pub(crate) scope: CandidateScope,
+    pub(crate) allowed_protocols: Vec<WireApi>,
     pub(crate) wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
@@ -539,6 +550,11 @@ impl GatewayRuntime {
                 "max retry candidates must be between 1 and 8".to_string(),
             ));
         }
+        if !(1..=8).contains(&options.cooldown_after_failures) {
+            return Err(Error::Validation(
+                "cooldown after failures must be between 1 and 8".to_string(),
+            ));
+        }
 
         let client = runtime_client(None, false)?;
         let bounded_client = runtime_client(None, true)?;
@@ -550,6 +566,10 @@ impl GatewayRuntime {
             .build()?;
 
         let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(
+            options.cooldown_after_failures,
+            options.keep_last_candidate_available,
+        );
         scheduler.set_routing_strategy(options.routing_strategy);
         let subscription_plan_order =
             normalize_subscription_plan_order(options.subscription_plan_order.clone())
@@ -1689,7 +1709,13 @@ impl GatewayRuntime {
             })
     }
 
-    pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
+    pub(crate) fn executor_route(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             let source = self.sources.get(&binding.source_id)?;
             let source_binding = source.binding_for(binding.binding_key)?;
@@ -1698,6 +1724,8 @@ impl GatewayRuntime {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                scope: scope.clone(),
+                allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
@@ -1715,6 +1743,8 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            scope: scope.clone(),
+            allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
@@ -1727,7 +1757,12 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn image_executor_route(&self, candidate_id: &str) -> Option<ExecutorRoute> {
+    pub(crate) fn image_executor_route(
+        &self,
+        candidate_id: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             if !binding.adapter.is_passthrough() {
                 return None;
@@ -1739,6 +1774,8 @@ impl GatewayRuntime {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                scope: scope.clone(),
+                allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
@@ -1755,6 +1792,8 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            scope: scope.clone(),
+            allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
@@ -2421,20 +2460,13 @@ impl GatewayRuntime {
             .unwrap_or(1)
     }
 
-    pub(crate) fn set_cooldown(&self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
-        self.lock_scheduler()
-            .set_cooldown(candidate_id, model, retry_at_ms)
-    }
-
-    pub(crate) fn set_cooldown_with_reason(
+    pub(crate) fn set_cooldown_with_reason_for_model_at(
         &self,
         candidate_id: &str,
-        model: &str,
-        retry_at_ms: u64,
-        reason: CooldownReason,
+        request: CooldownRequest<'_>,
     ) -> bool {
         self.lock_scheduler()
-            .set_cooldown_with_reason(candidate_id, model, retry_at_ms, reason)
+            .set_cooldown_with_reason_for_model_at(candidate_id, request)
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {

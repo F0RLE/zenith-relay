@@ -12,6 +12,9 @@ pub mod scheduler;
 pub mod sources;
 pub mod usage;
 
+pub const DEFAULT_COOLDOWN_AFTER_FAILURES: u8 = 3;
+pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
+
 pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,

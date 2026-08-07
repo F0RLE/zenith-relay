@@ -178,6 +178,8 @@ pub async fn get_local_runtime_state(
             candidate_count,
             visible_model_ids,
             max_retry_candidates: snapshot.gateway.max_retry_candidates,
+            cooldown_after_failures: snapshot.gateway.cooldown_after_failures,
+            keep_last_candidate_available: snapshot.gateway.keep_last_candidate_available,
             routing_strategy: snapshot.gateway.routing_strategy,
             subscription_plan_order: snapshot.gateway.subscription_plan_order.clone(),
             default_service_tier: snapshot.gateway.default_service_tier,
@@ -391,6 +393,9 @@ mod parity_tests {
                 candidate_count: 0,
                 visible_model_ids: Vec::new(),
                 max_retry_candidates: 3,
+                cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
+                keep_last_candidate_available:
+                    zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
                 routing_strategy: Default::default(),
                 subscription_plan_order: Vec::new(),
                 default_service_tier: Default::default(),

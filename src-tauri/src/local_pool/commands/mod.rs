@@ -199,6 +199,8 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     };
     let options = GatewayRuntimeOptions {
         max_retry_candidates: usize::from(settings.max_retry_candidates),
+        cooldown_after_failures: settings.cooldown_after_failures,
+        keep_last_candidate_available: settings.keep_last_candidate_available,
         routing_strategy: settings.routing_strategy,
         subscription_plan_order: settings.subscription_plan_order,
         hidden_models: settings.hidden_models,

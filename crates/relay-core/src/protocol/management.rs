@@ -44,6 +44,10 @@ pub struct GatewaySummary {
     pub candidate_count: usize,
     pub visible_model_ids: Vec<String>,
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
     pub subscription_plan_order: Vec<String>,
@@ -506,10 +510,22 @@ pub struct AccountPresetRule {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PresetRoutingPolicy {
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub image_base_model: Option<String>,
+}
+
+fn default_cooldown_after_failures() -> u8 {
+    crate::DEFAULT_COOLDOWN_AFTER_FAILURES
+}
+
+fn default_keep_last_candidate_available() -> bool {
+    crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1031,6 +1047,23 @@ mod tests {
             .models_for_wire_api(WireApi::Messages)
             .is_empty());
         assert!(!unconfirmed.supports_wire_api(WireApi::Messages));
+    }
+
+    #[test]
+    fn legacy_preset_routing_defaults_new_cooldown_policy() {
+        let policy: PresetRoutingPolicy = serde_json::from_str(
+            r#"{"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":[],"defaultServiceTier":"standard","imageBaseModel":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy.cooldown_after_failures,
+            crate::DEFAULT_COOLDOWN_AFTER_FAILURES
+        );
+        assert_eq!(
+            policy.keep_last_candidate_available,
+            crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
+        );
     }
 
     #[test]

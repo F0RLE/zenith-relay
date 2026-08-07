@@ -193,6 +193,8 @@ impl AppState {
             default_service_tier,
             _,
             subscription_plan_order,
+            cooldown_after_failures,
+            keep_last_candidate_available,
         ) = self.store.routing_policy()?;
         // Candidate state remains available to management, while the internal
         // profile credential derives its request scope solely from pool membership.
@@ -325,6 +327,8 @@ impl AppState {
             },
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
+                cooldown_after_failures,
+                keep_last_candidate_available,
                 routing_strategy,
                 subscription_plan_order,
                 hidden_models,
@@ -382,6 +386,8 @@ impl AppState {
             default_service_tier,
             image_base_model,
             subscription_plan_order,
+            cooldown_after_failures,
+            keep_last_candidate_available,
         ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let model_price_overrides = self.store.model_price_overrides()?;
@@ -535,6 +541,8 @@ impl AppState {
                         .count(),
                 visible_model_ids,
                 max_retry_candidates,
+                cooldown_after_failures,
+                keep_last_candidate_available,
                 routing_strategy,
                 subscription_plan_order,
                 default_service_tier,

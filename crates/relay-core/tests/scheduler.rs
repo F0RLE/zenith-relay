@@ -228,13 +228,17 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
         ],
     )
     .await;
-    let (gateway, events) = spawn_gateway(
+    let (gateway, events) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -323,6 +327,7 @@ async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_coolin
             vec![local_key("key", LOCAL_KEY, None)],
             GatewayRuntimeOptions {
                 max_retry_candidates: 3,
+                cooldown_after_failures: 1,
                 ..GatewayRuntimeOptions::default()
             },
             Arc::new(move |event| captured_events.lock().unwrap().push(event)),
@@ -576,13 +581,17 @@ async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
         vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
     )
     .await;
-    let (gateway, _) = spawn_gateway(
+    let (gateway, _) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -671,13 +680,17 @@ async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
         vec![response_reply("fallback-response", "fallback")],
     )
     .await;
-    let (gateway, events) = spawn_gateway(
+    let (gateway, events) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -1663,6 +1676,8 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             image_base_model: None,
             response_affinity_store: None,
             provider_storm_breaker: false,
+            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await;
@@ -1764,6 +1779,8 @@ async fn spawn_gateway(
             image_base_model: None,
             response_affinity_store: None,
             provider_storm_breaker: false,
+            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await
