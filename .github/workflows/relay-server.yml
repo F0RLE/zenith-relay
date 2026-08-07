@@ -37,35 +37,6 @@ jobs:
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
       - run: cargo audit --file relay-server/Cargo.lock
 
-  binary:
-    needs: check
-    if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: linux-x64
-            os: ubuntu-latest
-          - name: linux-arm64
-            os: ubuntu-24.04-arm
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --manifest-path relay-server/Cargo.toml --release --locked
-      - run: |
-          mkdir -p artifacts
-          cp relay-server/target/release/zenith-relay-server artifacts/zenith-relay-server-${{ matrix.name }}
-          sha256sum artifacts/zenith-relay-server-${{ matrix.name }} > artifacts/zenith-relay-server-${{ matrix.name }}.sha256
-      - uses: actions/upload-artifact@v7
-        with:
-          name: zenith-relay-server-${{ matrix.name }}
-          path: artifacts/*
-          if-no-files-found: error
-
   container:
     needs: check
     runs-on: ubuntu-latest
