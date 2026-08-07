@@ -1,14 +1,15 @@
 use crate::platform::PlatformCapabilities;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
     normalize_model_price_overrides, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
-    protocol::{ClientWireApi, RemoteAccountLocation},
+    protocol::RemoteAccountLocation,
     quota::QuotaEconomicsState,
     ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, SourceProtocolBinding, WireApi,
+    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
@@ -37,6 +38,10 @@ pub struct GatewaySettings {
     pub client_host: String,
     #[serde(default = "default_max_retry_candidates")]
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     #[serde(default)]
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
@@ -234,21 +239,6 @@ pub struct LocalGatewayKeyRecord {
     #[serde(default)]
     pub system: bool,
     pub secret_ref: String,
-    #[serde(default)]
-    pub source_ids: Option<Vec<String>>,
-    #[serde(default)]
-    pub account_ids: Option<Vec<String>>,
-    #[serde(default)]
-    pub allowed_models: Vec<String>,
-    #[serde(default)]
-    pub excluded_models: Vec<String>,
-    #[serde(default)]
-    pub model_prefix: Option<String>,
-    /// `None` preserves a legacy unrestricted protocol scope. New keys always
-    /// persist an explicit non-empty set, so a client key cannot accidentally
-    /// expose a native endpoint the user did not choose.
-    #[serde(default)]
-    pub wire_apis: Option<Vec<ClientWireApi>>,
     pub created_at: String,
     pub last_used_at: Option<String>,
 }
@@ -316,6 +306,8 @@ impl Default for GatewaySettings {
             port: DEFAULT_GATEWAY_PORT,
             client_host: "127.0.0.1".to_string(),
             max_retry_candidates: DEFAULT_MAX_RETRY_CANDIDATES,
+            cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
             default_service_tier: DefaultServiceTier::Standard,
@@ -341,6 +333,9 @@ impl GatewaySettings {
         }
         if !(1..=8).contains(&self.max_retry_candidates) {
             return Err("max retry candidates must be between 1 and 8");
+        }
+        if !(1..=8).contains(&self.cooldown_after_failures) {
+            return Err("cooldown after failures must be between 1 and 8");
         }
         normalize_subscription_plan_order(self.subscription_plan_order.clone())?;
         if self
@@ -369,6 +364,14 @@ impl GatewaySettings {
 
 fn default_quota_request_timeout_seconds() -> u64 {
     DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS
+}
+
+fn default_cooldown_after_failures() -> u8 {
+    DEFAULT_COOLDOWN_AFTER_FAILURES
+}
+
+fn default_keep_last_candidate_available() -> bool {
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 fn default_chatgpt_interface_quota_reserve_basis_points() -> u64 {
@@ -450,39 +453,6 @@ fn validate_model_price_overrides(
     normalize_model_price_overrides(overrides.clone()).map(drop)
 }
 
-impl LocalGatewayKeyRecord {
-    pub fn normalize(&mut self) {
-        self.label = self.label.trim().to_string();
-        self.source_ids = self.source_ids.take().map(normalized_values);
-        self.account_ids = self.account_ids.take().map(normalized_values);
-        self.allowed_models = normalized_values(std::mem::take(&mut self.allowed_models));
-        self.excluded_models = normalized_values(std::mem::take(&mut self.excluded_models));
-        self.model_prefix = self
-            .model_prefix
-            .take()
-            .map(|prefix| prefix.trim().trim_matches('/').to_string())
-            .filter(|prefix| !prefix.is_empty());
-        self.wire_apis = self.wire_apis.take().map(|wire_apis| {
-            wire_apis
-                .into_iter()
-                .map(normalize_client_wire_api)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        });
-    }
-}
-
-fn normalize_client_wire_api(wire_api: ClientWireApi) -> ClientWireApi {
-    // Images are served through the Chat Completions-compatible surface. Keep
-    // old persisted values readable but never retain a misleading standalone
-    // image protocol scope.
-    match wire_api {
-        ClientWireApi::Images => ClientWireApi::ChatCompletions,
-        other => other,
-    }
-}
-
 pub(crate) fn normalized_values(values: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     values
@@ -518,7 +488,6 @@ pub struct LocalPoolSnapshot {
     pub capabilities: PlatformCapabilities,
     pub sources: Vec<ProviderSourceRecord>,
     pub accounts: Vec<LocalAccountRecord>,
-    pub keys: Vec<LocalGatewayKeyRecord>,
     pub automations: Vec<WakeTask>,
     pub wake_history: Vec<WakeHistory>,
     pub warnings: Vec<String>,
@@ -563,46 +532,5 @@ mod tests {
         settings.chatgpt_interface_quota_reserve_basis_points =
             MAX_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS;
         assert!(settings.validate().is_ok());
-    }
-
-    #[test]
-    fn record_normalization_preserves_explicit_empty_key_scope() {
-        let mut key = LocalGatewayKeyRecord {
-            id: "key_1".into(),
-            label: "  Scoped  ".into(),
-            enabled: true,
-            system: false,
-            secret_ref: "key:key_1".into(),
-            source_ids: Some(vec![" source_1 ".into(), "SOURCE_1".into()]),
-            account_ids: Some(vec![" account_1 ".into(), "ACCOUNT_1".into()]),
-            allowed_models: vec![" gpt-test ".into()],
-            excluded_models: Vec::new(),
-            model_prefix: Some(" /team/ ".into()),
-            wire_apis: Some(vec![
-                ClientWireApi::Images,
-                ClientWireApi::ChatCompletions,
-                ClientWireApi::Messages,
-            ]),
-            created_at: "2026-07-10T00:00:00Z".into(),
-            last_used_at: None,
-        };
-        key.normalize();
-        assert_eq!(key.label, "Scoped");
-        assert_eq!(key.source_ids, Some(vec!["source_1".into()]));
-        assert_eq!(key.account_ids, Some(vec!["account_1".into()]));
-        assert_eq!(key.model_prefix.as_deref(), Some("team"));
-        assert_eq!(
-            key.wire_apis,
-            Some(vec![
-                ClientWireApi::ChatCompletions,
-                ClientWireApi::Messages
-            ])
-        );
-
-        key.source_ids = Some(Vec::new());
-        key.account_ids = Some(Vec::new());
-        key.normalize();
-        assert_eq!(key.source_ids, Some(Vec::new()));
-        assert_eq!(key.account_ids, Some(Vec::new()));
     }
 }

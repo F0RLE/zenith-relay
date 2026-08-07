@@ -184,22 +184,19 @@ pub async fn diagnose_local_gateway(
         .address()
         .await
         .ok_or_else(gateway_not_running)?;
-    let keys = state.store()?.keys().to_vec();
-    let mut key = None;
-    for candidate in &keys {
-        if candidate.enabled && super::pool::has_usable_source(&state, candidate)? {
-            key = Some(candidate);
-            break;
-        }
-    }
-    let key = key.ok_or_else(|| {
-        LocalPoolError::new(
+    if !super::pool::has_usable_pool_candidate(&state)? {
+        return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "no usable local gateway key is available",
+            "no usable internal profile credential is available",
         )
-    })?;
+        .into());
+    }
+    let key = super::pool::ensure_system_gateway_key(&state)?;
     let secret = secret_store::load(&key.secret_ref)?.ok_or_else(|| {
-        LocalPoolError::new(ErrorCode::NotFound, "local gateway key secret is missing")
+        LocalPoolError::new(
+            ErrorCode::NotFound,
+            "internal profile credential is missing",
+        )
     })?;
     let client = reqwest::Client::builder()
         .redirect(Policy::none())

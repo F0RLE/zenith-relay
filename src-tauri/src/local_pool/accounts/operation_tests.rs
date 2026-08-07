@@ -7,9 +7,7 @@ use crate::local_pool::accounts::models::{ModelDiscoveryFailure, ModelDiscoveryF
 use crate::local_pool::accounts::{records, NativeSecretBackend};
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
-use crate::local_pool::models::{
-    AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord,
-};
+use crate::local_pool::models::{AutomationRecords, LocalAccountRecord, ProviderSourceRecord};
 use crate::local_pool::profiles::codex;
 use crate::local_pool::state::DesktopState;
 use crate::local_pool::store::secret_store;
@@ -1027,26 +1025,6 @@ fn failed_account_without_models_remains_manageable() {
 
     account.account.health = zenith_relay_core::accounts::AccountHealthState::Healthy;
     assert!(!account_model_state_is_valid(&account));
-}
-#[test]
-fn deleting_account_preserves_explicit_empty_key_scope() {
-    let mut keys = [LocalGatewayKeyRecord {
-        id: "key_1".into(),
-        label: "Scoped".into(),
-        enabled: true,
-        system: false,
-        secret_ref: "key:key_1".into(),
-        source_ids: None,
-        account_ids: Some(vec!["account_1".into()]),
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        model_prefix: None,
-        wire_apis: None,
-        created_at: "2026-07-10T00:00:00Z".into(),
-        last_used_at: None,
-    }];
-    prune_key_account_scopes(&mut keys, &[]);
-    assert_eq!(keys[0].account_ids, Some(Vec::new()));
 }
 #[test]
 fn deleting_account_prunes_explicit_selectors_without_rewriting_wake_state() {

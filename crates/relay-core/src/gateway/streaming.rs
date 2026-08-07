@@ -1,6 +1,7 @@
 use super::errors::{
-    canonical_upstream_status, rate_limit_body_hint_value, upstream_event_failure_category,
-    upstream_failure_status, upstream_status_from_value, AttemptFailure, RateLimitBodyHint,
+    api_error_type, canonical_upstream_status, preserved_upstream_error_value,
+    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
+    upstream_status_from_value, AttemptFailure, PreservedUpstreamError, RateLimitBodyHint,
 };
 use super::response::{
     apply_usage, emit_callback, emit_usage, find_usage, response_id, response_service_tier,
@@ -32,33 +33,51 @@ const SSE_HEARTBEAT: &[u8] = b": keep-alive\n\n";
 
 type UpstreamStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
+pub(super) struct StreamBootstrapFailure {
+    pub(super) failure: AttemptFailure,
+    pub(super) preserved: Option<PreservedUpstreamError>,
+}
+
+impl From<AttemptFailure> for StreamBootstrapFailure {
+    fn from(failure: AttemptFailure) -> Self {
+        Self {
+            failure,
+            preserved: None,
+        }
+    }
+}
+
 pub(super) async fn bootstrap_stream(
     upstream: reqwest::Response,
-) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), AttemptFailure> {
+) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
     match tokio::time::timeout(SSE_FIRST_BYTE_TIMEOUT, stream.next()).await {
-        Err(_) => Err(AttemptFailure::stream("stream_first_byte_timeout")),
+        Err(_) => Err(AttemptFailure::stream("stream_first_byte_timeout").into()),
         Ok(Some(Ok(chunk))) => {
             if chunk.len() > MAX_SSE_EVENT_BYTES {
-                return Err(AttemptFailure::stream("stream_event_too_large"));
+                return Err(AttemptFailure::stream("stream_event_too_large").into());
             }
             let mut inspected = 0;
             while let Some(end) = sse_event_end(&chunk[inspected..]) {
                 let absolute_end = inspected + end;
                 let event = parse_sse_event(&chunk[inspected..absolute_end]);
                 if event.has_data && !event.valid {
-                    return Err(AttemptFailure::stream("stream_invalid"));
+                    return Err(AttemptFailure::stream("stream_invalid").into());
                 }
                 if event.outcome == Some(TerminalOutcome::Failure) {
                     let category = event.error_category.unwrap_or("upstream_terminal");
-                    return Err(AttemptFailure::classified_with_hint(
+                    let failure = AttemptFailure::classified_with_hint(
                         event
                             .error_status
                             .unwrap_or_else(|| upstream_failure_status(category)),
                         category,
                         event.cooldown_hint,
-                    ));
+                    );
+                    return Err(StreamBootstrapFailure {
+                        failure,
+                        preserved: event.preserved_error,
+                    });
                 }
                 inspected = absolute_end;
             }
@@ -70,8 +89,8 @@ pub(super) async fn bootstrap_stream(
             // during one model turn.
             Ok((headers, chunk, stream))
         }
-        Ok(Some(Err(error))) => Err(AttemptFailure::transport(&error)),
-        Ok(None) => Err(AttemptFailure::stream("stream_incomplete")),
+        Ok(Some(Err(error))) => Err(AttemptFailure::transport(&error).into()),
+        Ok(None) => Err(AttemptFailure::stream("stream_incomplete").into()),
     }
 }
 
@@ -111,9 +130,14 @@ pub(super) fn bridge_messages_stream(
                     return None;
                 }
 
+                let mut preserved_error = None;
                 match state.inner.next().await {
                     Some(Ok(bytes)) => {
                         state.bridge.push(&bytes);
+                        preserved_error = state
+                            .bridge
+                            .take_upstream_error()
+                            .and_then(|error| preserved_stream_error(&error));
                     }
                     Some(Err(_)) | None => {
                         state.bridge.finish();
@@ -122,7 +146,10 @@ pub(super) fn bridge_messages_stream(
                 }
 
                 while let Some(bytes) = state.bridge.pop_output() {
-                    state.pending.push_back(Bytes::from(bytes));
+                    state.pending.push_back(Bytes::from(rewrite_bridge_failure(
+                        bytes,
+                        preserved_error.as_ref(),
+                    )));
                 }
                 if let Some(response) = state.bridge.completed().cloned() {
                     *state
@@ -136,6 +163,64 @@ pub(super) fn bridge_messages_stream(
             }
         },
     )
+}
+
+fn preserved_stream_error(value: &Value) -> Option<PreservedUpstreamError> {
+    let event_type = value.get("type").and_then(Value::as_str);
+    let category = upstream_event_failure_category(event_type, value)?;
+    let status = upstream_status_from_value(value)
+        .filter(|status| !status.is_success())
+        .unwrap_or_else(|| upstream_failure_status(category));
+    let failure = AttemptFailure::classified_with_hint(
+        canonical_upstream_status(status, category),
+        category,
+        rate_limit_body_hint_value(value, SystemTime::now()),
+    );
+    preserved_upstream_error_value(&failure, value)
+}
+
+fn rewrite_bridge_failure(bytes: Vec<u8>, preserved: Option<&PreservedUpstreamError>) -> Vec<u8> {
+    let Some(preserved) = preserved else {
+        return bytes;
+    };
+    let mut terminal = parse_sse_event(&bytes);
+    if terminal.outcome != Some(TerminalOutcome::Failure) {
+        return bytes;
+    }
+    let Some(error) = terminal
+        .payload
+        .as_mut()
+        .and_then(|payload| payload.pointer_mut("/response/error"))
+        .and_then(Value::as_object_mut)
+    else {
+        return bytes;
+    };
+    error.insert("code".to_string(), Value::String(preserved.code.clone()));
+    error.insert(
+        "message".to_string(),
+        Value::String(preserved.message.clone()),
+    );
+    error.insert(
+        "type".to_string(),
+        Value::String(api_error_type(preserved.status, &preserved.code).to_string()),
+    );
+    let Some(payload) = terminal.payload else {
+        return bytes;
+    };
+    let event_name = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("response.failed");
+    let Ok(payload) = serde_json::to_vec(&payload) else {
+        return bytes;
+    };
+    let mut frame = Vec::with_capacity(payload.len() + event_name.len() + 16);
+    frame.extend_from_slice(b"event: ");
+    frame.extend_from_slice(event_name.as_bytes());
+    frame.extend_from_slice(b"\ndata: ");
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(b"\n\n");
+    frame
 }
 
 pub(super) struct UsageStream<S> {
@@ -495,6 +580,7 @@ pub(super) struct TerminalEvent {
     pub(super) outcome: Option<TerminalOutcome>,
     pub(super) error_status: Option<StatusCode>,
     pub(super) error_category: Option<&'static str>,
+    pub(super) preserved_error: Option<PreservedUpstreamError>,
     pub(super) cooldown_hint: RateLimitBodyHint,
     pub(super) usage: Option<Value>,
     pub(super) applied_service_tier: Option<DefaultServiceTier>,
@@ -547,6 +633,7 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
             outcome: Some(TerminalOutcome::Success),
             error_status: None,
             error_category: None,
+            preserved_error: None,
             cooldown_hint: RateLimitBodyHint::default(),
             usage: None,
             applied_service_tier: None,
@@ -581,6 +668,7 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         canonical_upstream_status(status, category)
     });
     let cooldown_hint = rate_limit_body_hint_value(&value, SystemTime::now());
+    let preserved_error = preserved_stream_error(&value);
     let has_output_delta = has_output_delta(&value, event_type);
     let usage = find_usage(&value).cloned();
     let applied_service_tier = response_service_tier(&value);
@@ -597,6 +685,7 @@ pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {
         outcome,
         error_status,
         error_category,
+        preserved_error,
         cooldown_hint,
         usage,
         applied_service_tier,
@@ -719,6 +808,19 @@ mod tests {
         assert_eq!(terminal.error_status, Some(StatusCode::TOO_MANY_REQUESTS));
         assert_eq!(terminal.cooldown_hint.retry_after_ms, Some(7_000));
         assert!(terminal.cooldown_hint.global);
+    }
+
+    #[test]
+    fn delayed_gateway_invalid_request_sse_keeps_request_status() {
+        let terminal = parse_sse_event(
+            br#"event: error
+data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}
+
+"#,
+        );
+
+        assert_eq!(terminal.error_category, Some("upstream_invalid_request"));
+        assert_eq!(terminal.error_status, Some(StatusCode::BAD_REQUEST));
     }
 
     #[test]
@@ -935,6 +1037,30 @@ mod tests {
                 Some(TerminalOutcome::Failure)
             );
         }
+    }
+
+    #[test]
+    fn bridge_failure_rewrite_preserves_the_upstream_type_and_event_name() {
+        let preserved = PreservedUpstreamError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            category: "upstream_unavailable",
+            code: "service_unavailable".into(),
+            message: "safe upstream message".into(),
+        };
+        let rewritten = String::from_utf8(rewrite_bridge_failure(
+            br#"event: response.cancelled
+data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_error","code":"adapter_upstream_stream_invalid","message":"adapter message"}}}
+
+"#
+            .to_vec(),
+            Some(&preserved),
+        ))
+        .unwrap();
+
+        assert!(rewritten.starts_with("event: response.cancelled\ndata: "));
+        assert!(rewritten.contains("\"type\":\"server_error\""));
+        assert!(rewritten.contains("\"code\":\"service_unavailable\""));
+        assert!(rewritten.contains("\"message\":\"safe upstream message\""));
     }
 
     #[test]

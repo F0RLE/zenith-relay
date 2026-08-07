@@ -126,7 +126,30 @@ pub fn restore(
     id: &str,
     safety_name: Option<&str>,
 ) -> Result<()> {
-    restore_with(codex_home, backup_root, id, safety_name, &OsSnapshotSecrets)
+    restore_with_mode(
+        codex_home,
+        backup_root,
+        id,
+        safety_name,
+        RestoreMode::Managed,
+        &OsSnapshotSecrets,
+    )
+}
+
+pub fn restore_full(
+    codex_home: &Path,
+    backup_root: &Path,
+    id: &str,
+    safety_name: Option<&str>,
+) -> Result<()> {
+    restore_with_mode(
+        codex_home,
+        backup_root,
+        id,
+        safety_name,
+        RestoreMode::Full,
+        &OsSnapshotSecrets,
+    )
 }
 
 pub fn delete(backup_root: &Path, id: &str) -> Result<()> {
@@ -174,11 +197,36 @@ fn create_with(
     Ok(summary(&record))
 }
 
-fn restore_with(
+#[cfg(test)]
+fn restore_full_with(
     codex_home: &Path,
     backup_root: &Path,
     id: &str,
     safety_name: Option<&str>,
+    secrets: &impl SnapshotSecrets,
+) -> Result<()> {
+    restore_with_mode(
+        codex_home,
+        backup_root,
+        id,
+        safety_name,
+        RestoreMode::Full,
+        secrets,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum RestoreMode {
+    Managed,
+    Full,
+}
+
+fn restore_with_mode(
+    codex_home: &Path,
+    backup_root: &Path,
+    id: &str,
+    safety_name: Option<&str>,
+    mode: RestoreMode,
     secrets: &impl SnapshotSecrets,
 ) -> Result<()> {
     let path = metadata_path(backup_root, id)?;
@@ -195,14 +243,18 @@ fn restore_with(
     if let Some(safety_name) = safety_name {
         create_with(&profile_dir, backup_root, safety_name, secrets)?;
     }
-    codex::restore_user_profile_snapshot(
-        &profile_dir,
-        backup_root,
-        &UserProfileSnapshot {
-            config: payload.config,
-            auth: payload.auth,
-        },
-    )
+    let snapshot = UserProfileSnapshot {
+        config: payload.config,
+        auth: payload.auth,
+    };
+    match mode {
+        RestoreMode::Managed => {
+            codex::restore_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
+        }
+        RestoreMode::Full => {
+            codex::restore_full_user_profile_snapshot(&profile_dir, backup_root, &snapshot)
+        }
+    }
 }
 
 fn delete_with(backup_root: &Path, id: &str, secrets: &impl SnapshotSecrets) -> Result<()> {
@@ -477,7 +529,7 @@ mod tests {
 
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
         fs::write(profile.join("auth.json"), "{\"token\":\"changed\"}").unwrap();
-        restore_with(
+        restore_full_with(
             &profile,
             &backups,
             &first.id,
@@ -500,7 +552,7 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.name == "Before restoring Original")
             .unwrap();
-        restore_with(&profile, &backups, &safety_copy.id, None, &secrets).unwrap();
+        restore_full_with(&profile, &backups, &safety_copy.id, None, &secrets).unwrap();
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),
             "model = \"changed\"\n"
@@ -525,7 +577,7 @@ mod tests {
 
         let original = create_with(&profile, &backups, "Original", &secrets).unwrap();
         fs::write(profile.join("config.toml"), "model = \"changed\"\n").unwrap();
-        restore_with(&profile, &backups, &original.id, None, &secrets).unwrap();
+        restore_full_with(&profile, &backups, &original.id, None, &secrets).unwrap();
 
         assert_eq!(
             fs::read_to_string(profile.join("config.toml")).unwrap(),

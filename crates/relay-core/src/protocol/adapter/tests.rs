@@ -660,20 +660,22 @@ fn messages_bridge_maps_case_insensitive_reasoning_only_when_binding_supports_it
 }
 
 #[test]
-fn messages_bridge_rejects_hosted_tools_instead_of_lying_about_support() {
-    let error = prepare_responses_to_messages(
+fn messages_bridge_omits_hosted_tools_without_rejecting_the_request() {
+    let prepared = prepare_responses_to_messages(
         &json!({
             "model": "claude-test",
             "input": "hello",
-            "tools": [{"type": "web_search"}]
+            "tools": [{"type": "web_search"}],
+            "tool_choice": {"type": "function", "name": "missing"}
         }),
         "claude-test",
         false,
         MessagesReasoningMode::Disabled,
         None,
     )
-    .unwrap_err();
-    assert_eq!(error.code(), "adapter_tool_unsupported");
+    .unwrap();
+    assert!(prepared.upstream_body().get("tools").is_none());
+    assert!(prepared.upstream_body().get("tool_choice").is_none());
 }
 
 #[test]

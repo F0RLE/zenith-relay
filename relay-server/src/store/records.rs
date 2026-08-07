@@ -12,7 +12,8 @@ use zenith_relay_core::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, DEFAULT_COOLDOWN_AFTER_FAILURES,
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
 
 pub const DEFAULT_QUOTA_REQUEST_TIMEOUT_SECONDS: u64 = 20;
@@ -31,6 +32,8 @@ pub type RoutingPolicy = (
     DefaultServiceTier,
     Option<String>,
     Vec<String>,
+    u8,
+    bool,
 );
 
 #[derive(Debug)]
@@ -155,30 +158,39 @@ impl Store {
                 })?;
         let subscription_plan_order =
             normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
-        validate_routing_policy(max_retry_candidates)?;
+        let cooldown_after_failures = self.metadata("cooldown_after_failures")?.map_or(
+            Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
+            |value| {
+                value
+                    .parse::<u8>()
+                    .map_err(|_| "cooldown after failures is invalid".to_string())
+            },
+        )?;
+        let keep_last_candidate_available = self
+            .metadata("keep_last_candidate_available")?
+            .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
+                value == "true"
+            });
+        validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
         Ok((
             max_retry_candidates,
             routing_strategy,
             default_service_tier,
             image_base_model,
             subscription_plan_order,
+            cooldown_after_failures,
+            keep_last_candidate_available,
         ))
     }
 
-    pub fn set_routing_policy(
-        &self,
-        max_retry_candidates: u8,
-        routing_strategy: RoutingStrategy,
-        default_service_tier: DefaultServiceTier,
-        image_base_model: Option<String>,
-        subscription_plan_order: Vec<String>,
-    ) -> Result<(), String> {
-        validate_routing_policy(max_retry_candidates)?;
-        let image_base_model = normalize_image_base_model(image_base_model)
+    pub fn set_routing_policy(&self, policy: &PresetRoutingPolicy) -> Result<(), String> {
+        validate_routing_policy(policy.max_retry_candidates, policy.cooldown_after_failures)?;
+        let image_base_model = normalize_image_base_model(policy.image_base_model.clone())
             .map_err(|error| error.to_string())?
             .unwrap_or_default();
         let subscription_plan_order =
-            normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
+            normalize_subscription_plan_order(policy.subscription_plan_order.clone())
+                .map_err(str::to_string)?;
         let subscription_plan_order = serde_json::to_string(&subscription_plan_order)
             .map_err(|_| "subscription plan order is invalid".to_string())?;
         let mut connection = self.lock()?;
@@ -186,10 +198,13 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(db_error)?;
         for (key, value) in [
-            ("max_retry_candidates", max_retry_candidates.to_string()),
+            (
+                "max_retry_candidates",
+                policy.max_retry_candidates.to_string(),
+            ),
             (
                 "routing_strategy",
-                match routing_strategy {
+                match policy.routing_strategy {
                     RoutingStrategy::Adaptive => "adaptive".to_string(),
                     RoutingStrategy::QuotaHighest => "quota_highest".to_string(),
                     RoutingStrategy::SubscriptionExpiry => "subscription_expiry".to_string(),
@@ -198,13 +213,21 @@ impl Store {
             ),
             (
                 "default_service_tier",
-                match default_service_tier {
+                match policy.default_service_tier {
                     DefaultServiceTier::Standard => "standard".to_string(),
                     DefaultServiceTier::Fast => "fast".to_string(),
                 },
             ),
             ("image_base_model", image_base_model),
             ("subscription_plan_order", subscription_plan_order),
+            (
+                "cooldown_after_failures",
+                policy.cooldown_after_failures.to_string(),
+            ),
+            (
+                "keep_last_candidate_available",
+                policy.keep_last_candidate_available.to_string(),
+            ),
         ] {
             transaction
                 .execute(
@@ -502,6 +525,22 @@ impl Store {
     pub fn delete_key(&self, id: &str) -> Result<Option<GatewayKeyRecord>, String> {
         self.delete_record("gateway_keys", id)
     }
+
+    pub fn delete_keys(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for id in ids {
+            transaction
+                .execute("DELETE FROM gateway_keys WHERE id = ?1", [id])
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
+    }
 }
 
 pub fn configuration_revision(settings: &ConfigurationPresetSettings) -> Result<String, String> {
@@ -561,7 +600,19 @@ fn configuration_settings_from_connection(
                 .map_err(|_| "max retry candidates is invalid".to_string())
         },
     )?;
-    validate_routing_policy(max_retry_candidates)?;
+    let cooldown_after_failures = metadata_from(connection, "cooldown_after_failures")?.map_or(
+        Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
+        |value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| "cooldown after failures is invalid".to_string())
+        },
+    )?;
+    let keep_last_candidate_available = metadata_from(connection, "keep_last_candidate_available")?
+        .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
+            value == "true"
+        });
+    validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
     let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
         None | Some("adaptive") => RoutingStrategy::Adaptive,
         Some("quota_highest") => RoutingStrategy::QuotaHighest,
@@ -603,6 +654,8 @@ fn configuration_settings_from_connection(
         accounts,
         routing: PresetRoutingPolicy {
             max_retry_candidates,
+            cooldown_after_failures,
+            keep_last_candidate_available,
             routing_strategy,
             subscription_plan_order,
             default_service_tier,
@@ -744,6 +797,14 @@ fn write_configuration(
                 .map_err(ConfigurationReplaceError::Store)?,
         ),
         (
+            "cooldown_after_failures",
+            settings.routing.cooldown_after_failures.to_string(),
+        ),
+        (
+            "keep_last_candidate_available",
+            settings.routing.keep_last_candidate_available.to_string(),
+        ),
+        (
             "hidden_model_ids",
             to_json(&settings.hidden_models).map_err(ConfigurationReplaceError::Store)?,
         ),
@@ -766,7 +827,10 @@ fn write_configuration(
 
 fn validate_configuration_settings(settings: &ConfigurationPresetSettings) -> Result<(), String> {
     validate_quota_request_timeout(settings.quota.request_timeout_seconds)?;
-    validate_routing_policy(settings.routing.max_retry_candidates)?;
+    validate_routing_policy(
+        settings.routing.max_retry_candidates,
+        settings.routing.cooldown_after_failures,
+    )?;
     if normalize_subscription_plan_order(settings.routing.subscription_plan_order.clone())
         .map_err(str::to_string)?
         != settings.routing.subscription_plan_order
@@ -879,9 +943,15 @@ fn validate_quota_request_timeout(request_timeout_seconds: u64) -> Result<(), St
     Ok(())
 }
 
-fn validate_routing_policy(max_retry_candidates: u8) -> Result<(), String> {
+fn validate_routing_policy(
+    max_retry_candidates: u8,
+    cooldown_after_failures: u8,
+) -> Result<(), String> {
     if !(1..=8).contains(&max_retry_candidates) {
         return Err("max retry candidates is invalid".to_string());
+    }
+    if !(1..=8).contains(&cooldown_after_failures) {
+        return Err("cooldown after failures is invalid".to_string());
     }
     Ok(())
 }
@@ -983,26 +1053,32 @@ mod tests {
                 RoutingStrategy::Adaptive,
                 DefaultServiceTier::Standard,
                 None,
-                Vec::new()
+                Vec::new(),
+                DEFAULT_COOLDOWN_AFTER_FAILURES,
+                DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             )
         );
         assert!(store
-            .set_routing_policy(
-                0,
-                RoutingStrategy::Adaptive,
-                DefaultServiceTier::Standard,
-                None,
-                Vec::new(),
-            )
+            .set_routing_policy(&PresetRoutingPolicy {
+                max_retry_candidates: 0,
+                cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
+                keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+                routing_strategy: RoutingStrategy::Adaptive,
+                subscription_plan_order: Vec::new(),
+                default_service_tier: DefaultServiceTier::Standard,
+                image_base_model: None,
+            })
             .is_err());
         store
-            .set_routing_policy(
-                5,
-                RoutingStrategy::SubscriptionPlan,
-                DefaultServiceTier::Fast,
-                Some("gpt-5.4-mini".into()),
-                vec!["business".into(), "plus".into()],
-            )
+            .set_routing_policy(&PresetRoutingPolicy {
+                max_retry_candidates: 5,
+                cooldown_after_failures: 5,
+                keep_last_candidate_available: false,
+                routing_strategy: RoutingStrategy::SubscriptionPlan,
+                subscription_plan_order: vec!["business".into(), "plus".into()],
+                default_service_tier: DefaultServiceTier::Fast,
+                image_base_model: Some("gpt-5.4-mini".into()),
+            })
             .unwrap();
         drop(store);
 
@@ -1014,7 +1090,9 @@ mod tests {
                 RoutingStrategy::SubscriptionPlan,
                 DefaultServiceTier::Fast,
                 Some("gpt-5.4-mini".into()),
-                vec!["business".into(), "plus".into()]
+                vec!["business".into(), "plus".into()],
+                5,
+                false,
             )
         );
         drop(reopened);

@@ -31,7 +31,8 @@ the Help Center and GitHub navigation do not depend on one long page.
 - Local personal pool with quota/health checks, model rules, proxies, routing,
   response affinity, and redacted usage history.
 - Optional user-managed Relay Server with encrypted vault, SQLite state,
-  management API, scoped client keys, backup/restore, and append-only migrations.
+  management API, managed ChatGPT/Codex profile attachment, backup/restore, and
+  append-only migrations.
 - Live model catalogs and reversible ChatGPT/Codex profile attachment with
   automatic snapshots.
 - Signed in-app updates, including in-place replacement and rollback for the

@@ -12,7 +12,7 @@ pub use codex::{
 };
 pub use context::source_model_declares_image_input;
 pub(crate) use context::{
-    apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
+    apply_claude_reasoning_capability_fallback, intersect_source_reasoning_capabilities,
     source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
     SourceReasoningCapabilities,
 };

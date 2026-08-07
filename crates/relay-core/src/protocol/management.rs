@@ -44,6 +44,10 @@ pub struct GatewaySummary {
     pub candidate_count: usize,
     pub visible_model_ids: Vec<String>,
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     #[serde(default)]
     pub subscription_plan_order: Vec<String>,
@@ -409,30 +413,6 @@ impl fmt::Debug for RevealedAccountIdentity {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeySummary {
-    pub id: String,
-    pub label: String,
-    pub enabled: bool,
-    #[serde(default)]
-    pub system: bool,
-    pub source_ids: Option<Vec<String>>,
-    pub account_ids: Option<Vec<String>>,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub model_prefix: Option<String>,
-    #[serde(default)]
-    pub wire_apis: Option<Vec<ClientWireApi>>,
-    #[serde(default)]
-    pub soft_budget_micro_usd: Option<u64>,
-    #[serde(default)]
-    pub usage_totals: UsageTotals,
-    pub created_at_ms: u64,
-    pub last_used_at_ms: Option<u64>,
-}
-
-pub const CLIENT_ACCESS_SCHEMA_VERSION: u16 = 1;
 pub const PROFILE_KEY_ROTATION_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -442,55 +422,6 @@ pub enum ClientWireApi {
     ChatCompletions,
     Messages,
     Images,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClientKeyCreateInput {
-    pub schema_version: u16,
-    pub label: String,
-    pub source_ids: Option<Vec<String>>,
-    pub account_ids: Option<Vec<String>>,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub model_prefix: Option<String>,
-    pub wire_apis: Option<Vec<ClientWireApi>>,
-    #[serde(default)]
-    pub soft_budget_micro_usd: Option<u64>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClientKeyPatch {
-    pub schema_version: u16,
-    pub label: Option<String>,
-    pub enabled: Option<bool>,
-    pub source_ids: Option<Option<Vec<String>>>,
-    pub account_ids: Option<Option<Vec<String>>>,
-    pub allowed_models: Option<Vec<String>>,
-    pub excluded_models: Option<Vec<String>>,
-    pub model_prefix: Option<Option<String>>,
-    pub wire_apis: Option<Option<Vec<ClientWireApi>>>,
-    pub soft_budget_micro_usd: Option<Option<u64>>,
-}
-
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GeneratedClientKey {
-    pub schema_version: u16,
-    pub key: KeySummary,
-    pub secret: String,
-}
-
-impl fmt::Debug for GeneratedClientKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GeneratedClientKey")
-            .field("schema_version", &self.schema_version)
-            .field("key", &self.key)
-            .field("secret", &"[redacted]")
-            .finish()
-    }
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -514,13 +445,6 @@ impl fmt::Debug for ProfileKeyRotation {
             .field("secret", &"[redacted]")
             .finish()
     }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ClientAccessDocument {
-    pub schema_version: u16,
-    pub keys: Vec<KeySummary>,
 }
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
@@ -586,10 +510,22 @@ pub struct AccountPresetRule {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PresetRoutingPolicy {
     pub max_retry_candidates: u8,
+    #[serde(default = "default_cooldown_after_failures")]
+    pub cooldown_after_failures: u8,
+    #[serde(default = "default_keep_last_candidate_available")]
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
     pub default_service_tier: DefaultServiceTier,
     pub image_base_model: Option<String>,
+}
+
+fn default_cooldown_after_failures() -> u8 {
+    crate::DEFAULT_COOLDOWN_AFTER_FAILURES
+}
+
+fn default_keep_last_candidate_available() -> bool {
+    crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -656,7 +592,6 @@ pub struct RuntimeStateSnapshot {
     pub capabilities: Capabilities,
     pub sources: Vec<SourceSummary>,
     pub accounts: Vec<AccountSummary>,
-    pub keys: Vec<KeySummary>,
     pub automations: Vec<WakeTask>,
     pub wake_history: Vec<WakeHistory>,
     pub warnings: Vec<String>,
@@ -774,7 +709,6 @@ fn add_member_models(
 pub struct UsageSummary {
     pub id: i64,
     pub request_id: String,
-    pub local_key_id: String,
     pub candidate_kind: String,
     pub candidate_hint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -893,7 +827,6 @@ pub struct UsageQuery {
     pub bucket_ms: Option<u64>,
     pub model_query: Option<String>,
     pub source_or_account_query: Option<String>,
-    pub local_key_query: Option<String>,
     pub wire_api: Option<WireApi>,
     pub success: Option<bool>,
     pub error_category: Option<String>,
@@ -1117,6 +1050,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preset_routing_defaults_new_cooldown_policy() {
+        let policy: PresetRoutingPolicy = serde_json::from_str(
+            r#"{"maxRetryCandidates":3,"routingStrategy":"adaptive","subscriptionPlanOrder":[],"defaultServiceTier":"standard","imageBaseModel":null}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            policy.cooldown_after_failures,
+            crate::DEFAULT_COOLDOWN_AFTER_FAILURES
+        );
+        assert_eq!(
+            policy.keep_last_candidate_available,
+            crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE
+        );
+    }
+
+    #[test]
     fn usage_summary_accepts_servers_without_reasoning_telemetry() {
         let summary: UsageSummary = serde_json::from_str(
             r#"{"id":1,"requestId":"req","localKeyId":"key","candidateKind":"source","candidateHint":"abc","requestedModel":null,"resolvedModel":null,"wireApi":"responses","success":true,"httpStatus":200,"errorCategory":null,"latencyMs":1,"inputTokens":2,"cachedInputTokens":null,"outputTokens":3,"totalTokens":5,"createdAtMs":1}"#,
@@ -1125,6 +1075,11 @@ mod tests {
 
         assert_eq!(summary.reasoning_tokens, None);
         assert_eq!(summary.ttft_ms, None);
+        assert!(!serde_json::to_value(&summary)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("localKeyId"));
 
         let mut legacy_totals = serde_json::to_value(UsageTotals::default()).unwrap();
         let fields = legacy_totals.as_object_mut().unwrap();

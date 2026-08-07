@@ -221,59 +221,6 @@ export type RevealedAccountIdentity = {
   identity: string;
 };
 
-export type KeySummary = {
-  id: string;
-  label: string;
-  enabled: boolean;
-  system: boolean;
-  sourceIds: string[] | null;
-  accountIds: string[] | null;
-  allowedModels: string[];
-  excludedModels: string[];
-  modelPrefix: string | null;
-  wireApis: ClientWireApi[] | null;
-  softBudgetMicroUsd?: number | null;
-  usageTotals?: UsageTotals;
-  createdAtMs: number;
-  lastUsedAtMs: number | null;
-};
-
-export type ClientWireApi = "responses" | "chat_completions" | "messages" | "images";
-
-export type ClientKeyCreateInput = {
-  schemaVersion: 1;
-  label: string;
-  sourceIds: string[] | null;
-  accountIds: string[] | null;
-  allowedModels: string[];
-  excludedModels: string[];
-  modelPrefix: string | null;
-  wireApis: ClientWireApi[] | null;
-  softBudgetMicroUsd?: number | null;
-};
-
-export type LocalGatewayKeyInput = Omit<ClientKeyCreateInput, "schemaVersion" | "softBudgetMicroUsd">;
-
-export type LocalGatewayKeyUpdateInput = LocalGatewayKeyInput & {
-  keyId: string;
-};
-
-export type ClientKeyPatch = Partial<Omit<ClientKeyCreateInput, "schemaVersion">> & {
-  schemaVersion: 1;
-  enabled?: boolean;
-};
-
-export type GeneratedClientKey = {
-  schemaVersion: 1;
-  key: KeySummary;
-  secret: string;
-};
-
-export type GeneratedLocalKey = {
-  key: KeySummary;
-  secret: string;
-};
-
 export type ModelSummary = {
   id: string;
   enabled: boolean;
@@ -341,6 +288,8 @@ export type RuntimeSnapshot = {
     candidateCount: number;
     visibleModelIds: string[];
     maxRetryCandidates: number;
+    cooldownAfterFailures?: number;
+    keepLastCandidateAvailable?: boolean;
     routingStrategy: RoutingStrategy;
     subscriptionPlanOrder?: string[];
     defaultServiceTier: DefaultServiceTier;
@@ -361,7 +310,6 @@ export type RuntimeSnapshot = {
   };
   sources: SourceSummary[];
   accounts: AccountSummary[];
-  keys: KeySummary[];
   automations: WakeTask[];
   wakeHistory: WakeHistory[];
   warnings: string[];
@@ -401,6 +349,8 @@ export type ConfigurationPreset = {
     accounts: ConfigurationPresetAccountRule[];
     routing: {
       maxRetryCandidates: number;
+      cooldownAfterFailures?: number;
+      keepLastCandidateAvailable?: boolean;
       routingStrategy: RoutingStrategy;
       subscriptionPlanOrder: string[];
       defaultServiceTier: DefaultServiceTier;
@@ -514,7 +464,6 @@ export type LocalUsage = {
   createdAt: string;
   requestId: string;
   attempt: number;
-  localKeyId: string;
   sourceId: string;
   accountId?: string | null;
   routing?: RoutingDiagnostics | null;
@@ -610,7 +559,6 @@ export type SupportExportContext = {
   gatewayRunning: boolean;
   sourceCount: number;
   accountCount: number;
-  keyCount: number;
   automationCount: number;
   usageCount: number;
   warningCount: number;
@@ -619,7 +567,6 @@ export type SupportExportContext = {
 export type RemoteUsage = {
   id: number;
   requestId: string;
-  localKeyId: string;
   candidateKind: "account" | "source";
   candidateHint: string;
   candidateLabel?: string | null;
@@ -655,7 +602,6 @@ export type RemoteUsageQuery = {
   bucketMs?: number;
   modelQuery?: string;
   sourceOrAccountQuery?: string;
-  localKeyQuery?: string;
   wireApi?: "responses" | "chat_completions" | "messages";
   success?: boolean;
   errorCategory?: string;
@@ -789,7 +735,6 @@ export type SupportBundlePreview = {
     gatewayRunning: boolean;
     sourceCount: number;
     accountCount: number;
-    keyCount: number;
     automationCount: number;
     usageCount: number;
     warningCount: number;

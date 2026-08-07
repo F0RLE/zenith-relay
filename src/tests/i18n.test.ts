@@ -3,11 +3,32 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { en } from "../src/i18n/locales/en";
 import { ru } from "../src/i18n/locales/ru";
-import type { AccountSummary } from "../src/features/relay/api/types";
-import { currentAccountErrorCode, formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../src/features/relay/components/Ui";
+import type { AccountSummary, CandidateRuntimeSnapshot } from "../src/features/relay/api/types";
+import { currentAccountErrorCode, formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel, transientCandidateTone } from "../src/features/relay/components/Ui";
 import { sanitizeFeedbackError } from "../src/features/relay/state/feedback";
 
 describe("Relay translations", () => {
+  test("live routing status distinguishes cooldown and recovery probes", () => {
+    const candidate = (overrides: Partial<CandidateRuntimeSnapshot> = {}) => ({
+      candidateId: "source_1",
+      kind: "api_source" as const,
+      available: false,
+      inFlight: 0,
+      activeModels: [],
+      lastUsedAtMs: null,
+      nextRetryAtMs: null,
+      halfOpen: false,
+      dispatches: 0,
+      ...overrides,
+    });
+    const nowMs = 1_000;
+
+    expect(transientCandidateTone(candidate({ nextRetryAtMs: nowMs + 1 }), nowMs, true)).toBe("warning");
+    expect(transientCandidateTone(candidate({ nextRetryAtMs: nowMs + 1 }), nowMs, false)).toBeNull();
+    expect(transientCandidateTone(candidate({ halfOpen: true }), nowMs, true)).toBe("info");
+    expect(transientCandidateTone(candidate({ nextRetryAtMs: nowMs - 1 }), nowMs, true)).toBeNull();
+  });
+
   test("account cards prefer the latest quota refresh error in every view", () => {
     const account = {
       operationalStatus: "quotaWait",

@@ -3,7 +3,7 @@ use crate::accounts::{
     TokenRefreshAdapter,
 };
 use crate::catalog::{
-    apply_manual_reasoning_capability_overrides, intersect_source_reasoning_capabilities,
+    apply_claude_reasoning_capability_fallback, intersect_source_reasoning_capabilities,
     source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
     SourceReasoningCapabilities,
 };
@@ -13,7 +13,7 @@ use crate::providers::chatgpt::{
     CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
-use crate::scheduler::CooldownReason;
+use crate::scheduler::{CooldownReason, CooldownRequest};
 use crate::ProxyConfig;
 use crate::{
     api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
@@ -197,6 +197,8 @@ pub trait ResponseAffinityStore: Send + Sync {
 #[derive(Clone)]
 pub struct GatewayRuntimeOptions {
     pub max_retry_candidates: usize,
+    pub cooldown_after_failures: u8,
+    pub keep_last_candidate_available: bool,
     pub routing_strategy: RoutingStrategy,
     pub subscription_plan_order: Vec<String>,
     pub hidden_models: Vec<String>,
@@ -214,6 +216,11 @@ impl fmt::Debug for GatewayRuntimeOptions {
         formatter
             .debug_struct("GatewayRuntimeOptions")
             .field("max_retry_candidates", &self.max_retry_candidates)
+            .field("cooldown_after_failures", &self.cooldown_after_failures)
+            .field(
+                "keep_last_candidate_available",
+                &self.keep_last_candidate_available,
+            )
             .field("routing_strategy", &self.routing_strategy)
             .field("subscription_plan_order", &self.subscription_plan_order)
             .field("hidden_models", &self.hidden_models)
@@ -233,6 +240,8 @@ impl Default for GatewayRuntimeOptions {
     fn default() -> Self {
         Self {
             max_retry_candidates: 3,
+            cooldown_after_failures: crate::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: crate::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
             routing_strategy: RoutingStrategy::Adaptive,
             subscription_plan_order: Vec::new(),
             hidden_models: Vec::new(),
@@ -388,6 +397,8 @@ pub(crate) struct ExecutorRoute {
     pub(crate) candidate_id: String,
     pub(crate) source_id: String,
     pub(crate) account_id: Option<String>,
+    pub(crate) scope: CandidateScope,
+    pub(crate) allowed_protocols: Vec<WireApi>,
     pub(crate) wire_api: WireApi,
     pub(crate) adapter: SourceAdapter,
     pub(crate) reasoning_mode: MessagesReasoningMode,
@@ -502,7 +513,7 @@ impl GatewayRuntime {
     ///
     /// Desktop source and pool mutations can validly remove the final
     /// candidate. In that state the gateway must keep authenticating its
-    /// local keys and return an empty catalog instead of preventing the
+    /// gateway credentials and return an empty catalog instead of preventing the
     /// mutation from committing. Authentication, catalog visibility, and
     /// per-request candidate selection remain unchanged; callers validating a
     /// new configuration must use [`Self::from_mixed_pool`] instead.
@@ -539,6 +550,11 @@ impl GatewayRuntime {
                 "max retry candidates must be between 1 and 8".to_string(),
             ));
         }
+        if !(1..=8).contains(&options.cooldown_after_failures) {
+            return Err(Error::Validation(
+                "cooldown after failures must be between 1 and 8".to_string(),
+            ));
+        }
 
         let client = runtime_client(None, false)?;
         let bounded_client = runtime_client(None, true)?;
@@ -550,6 +566,10 @@ impl GatewayRuntime {
             .build()?;
 
         let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(
+            options.cooldown_after_failures,
+            options.keep_last_candidate_available,
+        );
         scheduler.set_routing_strategy(options.routing_strategy);
         let subscription_plan_order =
             normalize_subscription_plan_order(options.subscription_plan_order.clone())
@@ -759,7 +779,7 @@ impl GatewayRuntime {
             key.key.validate()?;
             if !key_ids.insert(key.key.id.clone()) {
                 return Err(Error::Validation(
-                    "local gateway key ids must be unique".to_string(),
+                    "gateway credential ids must be unique".to_string(),
                 ));
             }
             let scope = CandidateScope {
@@ -783,7 +803,7 @@ impl GatewayRuntime {
             });
             if client_wire_apis.as_ref().is_some_and(Vec::is_empty) {
                 return Err(Error::Validation(
-                    "client key wire scope must not be empty".to_string(),
+                    "gateway credential protocol scope must not be empty".to_string(),
                 ));
             }
             configured_key_rules.push((
@@ -814,7 +834,7 @@ impl GatewayRuntime {
             }
             if !runtime_keys.iter().any(|key| key.enabled) {
                 return Err(Error::Validation(
-                    "at least one enabled local gateway key is required".to_string(),
+                    "at least one enabled gateway credential is required".to_string(),
                 ));
             }
             let has_usable_key = configured_key_rules
@@ -833,7 +853,8 @@ impl GatewayRuntime {
                 });
             if !has_usable_key {
                 return Err(Error::Validation(
-                    "no enabled local key can reach a configured source candidate".to_string(),
+                    "no enabled gateway credential can reach a configured source candidate"
+                        .to_string(),
                 ));
             }
         }
@@ -1200,7 +1221,7 @@ impl GatewayRuntime {
                     .entry(model_key.clone())
                     .or_default()
                     .push(supports_image);
-                let capabilities = apply_manual_reasoning_capability_overrides(
+                let capabilities = apply_claude_reasoning_capability_fallback(
                     model,
                     reasoning.get(&model_key).cloned(),
                 )
@@ -1688,7 +1709,13 @@ impl GatewayRuntime {
             })
     }
 
-    pub(crate) fn executor_route(&self, candidate_id: &str, model: &str) -> Option<ExecutorRoute> {
+    pub(crate) fn executor_route(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             let source = self.sources.get(&binding.source_id)?;
             let source_binding = source.binding_for(binding.binding_key)?;
@@ -1697,6 +1724,8 @@ impl GatewayRuntime {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                scope: scope.clone(),
+                allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
@@ -1714,6 +1743,8 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            scope: scope.clone(),
+            allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
@@ -1726,7 +1757,12 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn image_executor_route(&self, candidate_id: &str) -> Option<ExecutorRoute> {
+    pub(crate) fn image_executor_route(
+        &self,
+        candidate_id: &str,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Option<ExecutorRoute> {
         if let Some(binding) = self.source_candidate_bindings.get(candidate_id) {
             if !binding.adapter.is_passthrough() {
                 return None;
@@ -1738,6 +1774,8 @@ impl GatewayRuntime {
                 candidate_id: candidate_id.to_string(),
                 source_id: binding.source_id.clone(),
                 account_id: None,
+                scope: scope.clone(),
+                allowed_protocols: allowed_protocols.to_vec(),
                 wire_api: binding.wire_api,
                 adapter: binding.adapter,
                 reasoning_mode: binding.reasoning_mode,
@@ -1754,6 +1792,8 @@ impl GatewayRuntime {
             candidate_id: account.id.clone(),
             source_id: account.source_id.clone(),
             account_id: Some(account.id.clone()),
+            scope: scope.clone(),
+            allowed_protocols: allowed_protocols.to_vec(),
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::Native,
             reasoning_mode: MessagesReasoningMode::Disabled,
@@ -2141,7 +2181,13 @@ impl GatewayRuntime {
                 .or(event.requested_model.as_deref())
         }
         .unwrap_or("*");
-        if is_model_capability_failure(category) {
+        // A direct API source may advertise a model while its upstream is
+        // being replaced or temporarily unable to serve it. The request path
+        // already applies a model-scoped cooldown for that failure; turning it
+        // into a permanent capability block makes every later retry look like
+        // there is no route at all. Native account capabilities are stable
+        // enough to retain the explicit block until their catalog is refreshed.
+        if event.account_id.is_some() && is_model_capability_failure(category) {
             self.block_candidate_capability(candidate_id, model);
             return;
         }
@@ -2414,20 +2460,13 @@ impl GatewayRuntime {
             .unwrap_or(1)
     }
 
-    pub(crate) fn set_cooldown(&self, candidate_id: &str, model: &str, retry_at_ms: u64) -> bool {
-        self.lock_scheduler()
-            .set_cooldown(candidate_id, model, retry_at_ms)
-    }
-
-    pub(crate) fn set_cooldown_with_reason(
+    pub(crate) fn set_cooldown_with_reason_for_model_at(
         &self,
         candidate_id: &str,
-        model: &str,
-        retry_at_ms: u64,
-        reason: CooldownReason,
+        request: CooldownRequest<'_>,
     ) -> bool {
         self.lock_scheduler()
-            .set_cooldown_with_reason(candidate_id, model, retry_at_ms, reason)
+            .set_cooldown_with_reason_for_model_at(candidate_id, request)
     }
 
     fn lock_scheduler(&self) -> MutexGuard<'_, PoolScheduler> {
@@ -3054,6 +3093,7 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolUseDiagnostics;
 
     fn source(id: &str, key: &str, models: &[&str]) -> ProviderSource {
         ProviderSource {
@@ -3092,6 +3132,71 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_capability_failure_does_not_permanently_hide_a_declared_model() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+        runtime.apply_usage_event(
+            &UsageEvent {
+                request_id: "request".into(),
+                attempt: 1,
+                local_key_id: "key-1".into(),
+                source_id: "source-1".into(),
+                candidate_id: Some("source-1".into()),
+                account_id: None,
+                routing: None,
+                requested_model: Some("gpt-test".into()),
+                resolved_model: Some("gpt-test".into()),
+                wire_api: WireApi::Responses,
+                service_tier: DefaultServiceTier::Standard,
+                applied_service_tier: None,
+                success: false,
+                http_status: StatusCode::BAD_REQUEST.as_u16(),
+                error_category: Some("upstream_model_not_found".into()),
+                tool_use: ToolUseDiagnostics::default(),
+                cooldown_scope: Some("gpt-test".into()),
+                retry_at_ms: Some(now_ms.saturating_add(60_000)),
+                consecutive_failures: Some(1),
+                latency_ms: 1,
+                ttft_ms: None,
+                generation_ms: None,
+                input_tokens: None,
+                cached_input_tokens: None,
+                cache_write_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                quota_snapshot: None,
+            },
+            now_ms,
+        );
+
+        let selection = runtime
+            .select_and_reserve(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                now_ms,
+            )
+            .await;
+        assert!(selection.is_some());
     }
 
     #[test]
@@ -3201,6 +3306,128 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[tokio::test]
+    async fn non_claude_source_catalog_preserves_source_declared_efforts() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["grok-4.5", "glm-5.2"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "grok-4.5",
+                        "reasoningEffortModes": [
+                            "low", "medium", "high", "xhigh", "max", "very_high"
+                        ],
+                        "defaultReasoningLevel": "very_high"
+                    },
+                    {
+                        "id": "glm-5.2",
+                        "reasoningEffortModes": ["low", "medium", "high", "xhigh", "max"],
+                        "defaultReasoningLevel": "max"
+                    }
+                ]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        for (model_id, expected) in [
+            (
+                "grok-4.5",
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"},
+                        {"effort": "medium", "description": "medium"},
+                        {"effort": "high", "description": "high"},
+                        {"effort": "xhigh", "description": "xhigh"},
+                        {"effort": "max", "description": "max"},
+                        {"effort": "very_high", "description": "very_high"}
+                    ],
+                    "default_reasoning_level": "very_high"
+                }),
+            ),
+            (
+                "glm-5.2",
+                serde_json::json!({
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "low"},
+                        {"effort": "medium", "description": "medium"},
+                        {"effort": "high", "description": "high"},
+                        {"effort": "xhigh", "description": "xhigh"},
+                        {"effort": "max", "description": "max"}
+                    ],
+                    "default_reasoning_level": "max"
+                }),
+            ),
+        ] {
+            assert_eq!(
+                metadata.reasoning_catalog_templates[model_id],
+                expected.as_object().unwrap().clone()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn source_catalog_does_not_cross_model_reasoning_metadata() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["grok-4.5", "glm-5.2"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "grok-4.5",
+                        "reasoningEffortModes": ["low", "very_high"],
+                        "defaultReasoningLevel": "very_high"
+                    },
+                    {"id": "glm-5.2"}
+                ]
+            }),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert!(metadata
+            .reasoning_catalog_templates
+            .contains_key("grok-4.5"));
+        assert!(!metadata.reasoning_catalog_templates.contains_key("glm-5.2"));
     }
 
     #[tokio::test]
@@ -3551,7 +3778,7 @@ mod tests {
             Arc::new(|_| {}),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("no enabled local key"));
+        assert!(error.to_string().contains("no enabled gateway credential"));
     }
 
     #[test]

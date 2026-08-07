@@ -195,7 +195,6 @@ impl Store {
                 Ok(UsageSummary {
                     id: row.get(0)?,
                     request_id: row.get(1)?,
-                    local_key_id: row.get(2)?,
                     candidate_kind: row.get(3)?,
                     candidate_hint: row.get(4)?,
                     candidate_label: None,
@@ -344,120 +343,6 @@ impl Store {
                 .merge(estimate);
         }
         Ok(equivalents)
-    }
-
-    pub fn key_usage_totals(&self, local_key_id: &str) -> Result<UsageTotals, String> {
-        let price_overrides = self.model_price_overrides()?;
-        let source_price_overrides = self.source_price_overrides()?;
-        let connection = self.lock()?;
-        let mut totals = connection
-            .query_row(
-                &format!(
-                    "SELECT {ROLLUP_TOTAL_COLUMNS} FROM usage_key_rollups \
-                     WHERE local_key_id = ?1 AND period_start_ms = -1"
-                ),
-                [local_key_id],
-                |row| usage_totals_from_row(row, 0),
-            )
-            .map_err(db_error)?;
-        merge_usage_totals(
-            &mut totals,
-            usage_totals(
-                &connection,
-                " WHERE local_key_id = ?",
-                &[SqlValue::Text(local_key_id.to_string())],
-            )?,
-        );
-
-        let sql = "SELECT candidate_kind, candidate_id, model,
-                SUM(input_tokens), SUM(cached_input_tokens),
-                SUM(cache_write_input_tokens), SUM(output_tokens), SUM(total_tokens),
-                SUM(input_samples), SUM(cached_input_samples),
-                SUM(cache_write_input_samples), SUM(output_samples), SUM(total_samples)
-            FROM (
-                SELECT candidate_kind, candidate_id, model, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, output_tokens, total_tokens,
-                    input_samples, cached_input_samples, cache_write_input_samples,
-                    output_samples, total_samples
-                FROM usage_key_rollups
-                WHERE local_key_id = ?1 AND period_start_ms = -1
-                UNION ALL
-                SELECT candidate_kind, candidate_hint,
-                    COALESCE(resolved_model, requested_model, ''),
-                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
-                    COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                    COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
-                    COUNT(cached_input_tokens), COUNT(cache_write_input_tokens),
-                    COUNT(output_tokens), COUNT(total_tokens)
-                FROM usage_events
-                WHERE local_key_id = ?2
-                GROUP BY 1, 2, 3
-            )
-            GROUP BY candidate_kind, candidate_id, model";
-        let mut statement = connection.prepare(sql).map_err(db_error)?;
-        let rows = statement
-            .query_map(params![local_key_id, local_key_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    nonnegative_u64(row.get(3)?),
-                    nonnegative_u64(row.get(4)?),
-                    nonnegative_u64(row.get(5)?),
-                    nonnegative_u64(row.get(6)?),
-                    nonnegative_u64(row.get(7)?),
-                    nonnegative_u64(row.get(8)?),
-                    nonnegative_u64(row.get(9)?),
-                    nonnegative_u64(row.get(10)?),
-                    nonnegative_u64(row.get(11)?),
-                    nonnegative_u64(row.get(12)?),
-                ))
-            })
-            .map_err(db_error)?;
-        for row in rows {
-            let (
-                candidate_kind,
-                candidate_id,
-                model,
-                input_tokens,
-                cached_input_tokens,
-                cache_write_input_tokens,
-                output_tokens,
-                total_tokens,
-                input_samples,
-                cached_input_samples,
-                cache_write_input_samples,
-                output_samples,
-                total_samples,
-            ) = row.map_err(db_error)?;
-            let model = (!model.is_empty()).then_some(model.as_str());
-            let input_tokens = (input_samples > 0).then_some(input_tokens);
-            let cached_input_tokens = (input_samples > 0 && cached_input_samples == input_samples)
-                .then_some(cached_input_tokens);
-            let cache_write_input_tokens = (input_samples > 0
-                && cache_write_input_samples == input_samples)
-                .then_some(cache_write_input_tokens);
-            let output_tokens = (output_samples > 0).then_some(output_tokens);
-            let total_tokens = (total_samples > 0).then_some(total_tokens);
-            totals
-                .api_equivalent
-                .merge(estimate_api_equivalent_with_price_override(
-                    model,
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_write_input_tokens,
-                    output_tokens,
-                    total_tokens,
-                    configured_model_price(
-                        &price_overrides,
-                        &source_price_overrides,
-                        &candidate_kind,
-                        &candidate_id,
-                        model,
-                    ),
-                ));
-        }
-        Ok(totals)
     }
 
     pub fn prune_usage_history(&self, now_ms: u64) -> Result<usize, String> {
@@ -622,10 +507,6 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
         clauses.push("candidate_hint LIKE ? ESCAPE '\\'");
         values.push(SqlValue::Text(like_pattern(value)));
     }
-    if let Some(value) = query.local_key_query.as_deref() {
-        clauses.push("local_key_id LIKE ? ESCAPE '\\'");
-        values.push(SqlValue::Text(like_pattern(value)));
-    }
     if let Some(value) = query.wire_api {
         clauses.push("wire_api = ?");
         values.push(SqlValue::Text(wire_api_name(value).to_string()));
@@ -660,17 +541,6 @@ const ROLLUP_USAGE_COLUMNS: &str = "requests, successful_requests, latency_ms,
     cached_input_samples, cache_write_input_tokens, cache_write_input_samples,
     reasoning_tokens, output_tokens, total_tokens, speed_output_tokens,
     speed_duration_ms, input_samples, output_samples, total_samples";
-
-const ROLLUP_TOTAL_COLUMNS: &str = "COALESCE(SUM(requests), 0),
-    COALESCE(SUM(successful_requests), 0), COALESCE(SUM(latency_ms), 0),
-    COALESCE(SUM(ttft_ms), 0), COALESCE(SUM(ttft_samples), 0),
-    COALESCE(SUM(generation_ms), 0), COALESCE(SUM(generation_samples), 0),
-    COALESCE(SUM(generation_output_tokens), 0), COALESCE(SUM(input_tokens), 0),
-    COALESCE(SUM(cached_input_tokens), 0), COALESCE(SUM(cached_input_samples), 0),
-    COALESCE(SUM(cache_write_input_tokens), 0),
-    COALESCE(SUM(cache_write_input_samples), 0), COALESCE(SUM(reasoning_tokens), 0),
-    COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0),
-    COALESCE(SUM(speed_output_tokens), 0), COALESCE(SUM(speed_duration_ms), 0)";
 
 const ROLLUP_UPDATE_COLUMNS: &str = "requests = usage_key_rollups.requests + excluded.requests,
     successful_requests = usage_key_rollups.successful_requests + excluded.successful_requests,
@@ -936,48 +806,6 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
         speed_duration_ms: nonnegative_u64(row.get(offset + 17)?),
         api_equivalent: ApiEquivalentSummary::default(),
     })
-}
-
-fn merge_usage_totals(target: &mut UsageTotals, value: UsageTotals) {
-    target.requests = target.requests.saturating_add(value.requests);
-    target.successful_requests = target
-        .successful_requests
-        .saturating_add(value.successful_requests);
-    target.latency_ms = target.latency_ms.saturating_add(value.latency_ms);
-    target.ttft_ms = target.ttft_ms.saturating_add(value.ttft_ms);
-    target.ttft_samples = target.ttft_samples.saturating_add(value.ttft_samples);
-    target.generation_ms = target.generation_ms.saturating_add(value.generation_ms);
-    target.generation_samples = target
-        .generation_samples
-        .saturating_add(value.generation_samples);
-    target.generation_output_tokens = target
-        .generation_output_tokens
-        .saturating_add(value.generation_output_tokens);
-    target.input_tokens = target.input_tokens.saturating_add(value.input_tokens);
-    target.cached_input_tokens = target
-        .cached_input_tokens
-        .saturating_add(value.cached_input_tokens);
-    target.cached_input_samples = target
-        .cached_input_samples
-        .saturating_add(value.cached_input_samples);
-    target.cache_write_input_tokens = target
-        .cache_write_input_tokens
-        .saturating_add(value.cache_write_input_tokens);
-    target.cache_write_input_samples = target
-        .cache_write_input_samples
-        .saturating_add(value.cache_write_input_samples);
-    target.reasoning_tokens = target
-        .reasoning_tokens
-        .saturating_add(value.reasoning_tokens);
-    target.output_tokens = target.output_tokens.saturating_add(value.output_tokens);
-    target.total_tokens = target.total_tokens.saturating_add(value.total_tokens);
-    target.speed_output_tokens = target
-        .speed_output_tokens
-        .saturating_add(value.speed_output_tokens);
-    target.speed_duration_ms = target
-        .speed_duration_ms
-        .saturating_add(value.speed_duration_ms);
-    target.api_equivalent.merge(value.api_equivalent);
 }
 
 fn service_tier_name(value: DefaultServiceTier) -> &'static str {
@@ -1267,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn retention_archives_key_totals_and_rejects_late_duplicate_rows() {
+    fn retention_archives_metrics_and_rejects_late_duplicate_rows() {
         let root = test_root("usage-retention");
         let path = root.join("relay.sqlite");
         let store = Store::open(path.clone()).unwrap();
@@ -1317,23 +1145,19 @@ mod tests {
             1
         );
         assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
-        let totals = store.key_usage_totals("key_alpha").unwrap();
-        assert_eq!(totals.requests, 2);
-        assert_eq!(totals.input_tokens, 1_000_010);
-        assert_eq!(totals.total_tokens, 1_100_010);
-        assert_eq!(totals.api_equivalent.micro_usd, 3_100_025);
         let candidate_hint = hex::encode(Sha256::digest(b"source_alpha"))[..12].to_string();
         assert_eq!(
-            store.api_equivalents().unwrap().get(&candidate_hint),
-            Some(&totals.api_equivalent)
+            store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
+            3_100_025
         );
 
         event.request_id = "req_newest".into();
         store.record_usage(&event, 102 * DAY_MS).unwrap();
         assert_eq!(store.prune_usage_history_with_limits(0, 1, 0).unwrap(), 1);
-        let totals = store.key_usage_totals("key_alpha").unwrap();
-        assert_eq!(totals.requests, 3);
-        assert_eq!(totals.api_equivalent.micro_usd, 3_100_050);
+        assert_eq!(
+            store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
+            3_100_050
+        );
         let archived_daily_requests = store
             .lock()
             .unwrap()
@@ -1350,16 +1174,18 @@ mod tests {
         event.input_tokens = Some(9_000_000);
         store.record_usage(&event, 101 * DAY_MS).unwrap();
         assert_eq!(store.usage_page(&UsageQuery::default()).unwrap().total, 1);
-        assert_eq!(store.key_usage_totals("key_alpha").unwrap().requests, 3);
+        assert_eq!(
+            store.api_equivalents().unwrap()[&candidate_hint].micro_usd,
+            3_100_050
+        );
         drop(store);
 
         let reopened = Store::open(path).unwrap();
-        assert_eq!(reopened.key_usage_totals("key_alpha").unwrap(), totals);
-        assert_eq!(reopened.clear_usage().unwrap(), 1);
         assert_eq!(
-            reopened.key_usage_totals("key_alpha").unwrap(),
-            UsageTotals::default()
+            reopened.api_equivalents().unwrap()[&candidate_hint].micro_usd,
+            3_100_050
         );
+        assert_eq!(reopened.clear_usage().unwrap(), 1);
         assert!(reopened.api_equivalents().unwrap().is_empty());
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
@@ -1461,14 +1287,6 @@ mod tests {
         );
 
         assert_eq!(store.prune_usage_history_with_limits(2, 100, 0).unwrap(), 2);
-        assert_eq!(
-            store
-                .key_usage_totals("key")
-                .unwrap()
-                .api_equivalent
-                .micro_usd,
-            3_600_000
-        );
         assert_eq!(
             store
                 .api_equivalents()

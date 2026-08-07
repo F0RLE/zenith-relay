@@ -2,7 +2,7 @@ use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
     apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
     failure_requires_independent_source_endpoint, rate_limit_body_hint, rate_limit_body_hint_value,
-    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{
@@ -302,9 +302,12 @@ async fn connect_upstream(
         };
         tried.insert(selected.candidate_id.clone());
         let response_affinity_hit = selected.response_affinity_hit;
-        let Some(mut route) =
-            runtime.executor_route(&selected.candidate_id, &request.resolved_model)
-        else {
+        let Some(mut route) = runtime.executor_route(
+            &selected.candidate_id,
+            &request.resolved_model,
+            &key.scope,
+            WEBSOCKET_PROTOCOLS,
+        ) else {
             continue;
         };
         route.half_open_probe = selected.half_open_probe;
@@ -750,6 +753,10 @@ fn record_connect_failure_with_hint(
     headers: Option<&HeaderMap>,
     hint: RateLimitBodyHint,
 ) {
+    let cooldown_context = CooldownContext {
+        scope: &route.scope,
+        allowed_protocols: &route.allowed_protocols,
+    };
     let state = match headers {
         Some(headers) => apply_failure_cooldown_with_hint(
             runtime,
@@ -759,13 +766,18 @@ fn record_connect_failure_with_hint(
             failure.category,
             headers,
             hint,
+            &cooldown_context,
             route.half_open_probe,
         ),
-        None => apply_cooldown(
+        None => apply_failure_cooldown_with_hint(
             runtime,
             &route.candidate_id,
-            "*",
-            failure.cooldown_ms,
+            &route.source_model,
+            failure.status,
+            failure.category,
+            &HeaderMap::new(),
+            hint,
+            &cooldown_context,
             route.half_open_probe,
         ),
     };
@@ -1143,7 +1155,12 @@ async fn start_next_request(
             return Err(GatewayFailure::unavailable());
         }
         let mut route = runtime
-            .executor_route(&selected.candidate_id, &request.resolved_model)
+            .executor_route(
+                &selected.candidate_id,
+                &request.resolved_model,
+                &key.scope,
+                WEBSOCKET_PROTOCOLS,
+            )
             .ok_or_else(GatewayFailure::unavailable)?;
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
@@ -1407,6 +1424,10 @@ fn finish_terminal(
         in_flight.event.http_status = status.as_u16();
         in_flight.event.error_category = Some(category.to_string());
         if super::errors::retryable_failure(status, category, false) {
+            let cooldown_context = CooldownContext {
+                scope: &in_flight.route.scope,
+                allowed_protocols: &in_flight.route.allowed_protocols,
+            };
             let failure_state = apply_failure_cooldown_with_hint(
                 runtime,
                 &in_flight.route.candidate_id,
@@ -1415,6 +1436,7 @@ fn finish_terminal(
                 category,
                 &terminal.headers,
                 terminal.body_hint,
+                &cooldown_context,
                 in_flight.route.half_open_probe,
             );
             apply_failure_state(&mut in_flight.event, failure_state);
@@ -1442,11 +1464,16 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
         .map(|ttft_ms| in_flight.event.latency_ms.saturating_sub(ttft_ms))
         .filter(|duration| *duration > 0);
     if incomplete_requires_cooldown(category) {
+        let cooldown_context = CooldownContext {
+            scope: &in_flight.route.scope,
+            allowed_protocols: &in_flight.route.allowed_protocols,
+        };
         let failure_state = apply_cooldown(
             runtime,
             &in_flight.route.candidate_id,
             &in_flight.route.source_model,
             TRANSIENT_COOLDOWN_MS,
+            &cooldown_context,
             in_flight.route.half_open_probe,
         );
         apply_failure_state(&mut in_flight.event, failure_state);
@@ -1604,7 +1631,6 @@ struct GatewayFailure {
     status: StatusCode,
     category: &'static str,
     message: &'static str,
-    cooldown_ms: u64,
     retry_at_ms: Option<u64>,
 }
 
@@ -1614,7 +1640,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message,
-            cooldown_ms: 0,
             retry_at_ms: None,
         }
     }
@@ -1624,7 +1649,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: "adapter_websocket_not_supported",
             message: "the selected source adapter does not support Responses WebSocket transport",
-            cooldown_ms: 0,
             retry_at_ms: None,
         }
     }
@@ -1633,8 +1657,7 @@ impl GatewayFailure {
         Self {
             status: StatusCode::NOT_FOUND,
             category: "model_not_found",
-            message: "model is not available for this local key",
-            cooldown_ms: 0,
+            message: "model is not available in this managed pool",
             retry_at_ms: None,
         }
     }
@@ -1644,7 +1667,6 @@ impl GatewayFailure {
             status: StatusCode::REQUEST_TIMEOUT,
             category: "request_timeout",
             message: "response.create was not received in time",
-            cooldown_ms: 0,
             retry_at_ms: None,
         }
     }
@@ -1654,7 +1676,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_REQUEST,
             category: "client_cancelled",
             message: "client closed the WebSocket connection",
-            cooldown_ms: 0,
             retry_at_ms: None,
         }
     }
@@ -1665,7 +1686,6 @@ impl GatewayFailure {
             status: failure.status,
             category: failure.category,
             message: failure.message,
-            cooldown_ms: failure.cooldown_ms,
             retry_at_ms: None,
         }
     }
@@ -1675,7 +1695,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_transport",
             message: "upstream WebSocket connection failed",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1685,7 +1704,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_websocket_closed",
             message: "upstream WebSocket closed before the response completed",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1695,7 +1713,6 @@ impl GatewayFailure {
             status: StatusCode::GATEWAY_TIMEOUT,
             category: "websocket_idle_timeout",
             message: "upstream WebSocket produced no event before the idle timeout",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1705,7 +1722,6 @@ impl GatewayFailure {
             status: StatusCode::GATEWAY_TIMEOUT,
             category: "stream_semantic_timeout",
             message: "upstream produced no semantic output before the watchdog timeout",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1715,7 +1731,6 @@ impl GatewayFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "stream_event_too_large",
             message: "upstream WebSocket bootstrap is too large",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1730,7 +1745,6 @@ impl GatewayFailure {
             status: super::errors::canonical_upstream_status(status, category),
             category,
             message: super::errors::upstream_failure_message(category),
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             retry_at_ms: None,
         }
     }
@@ -1740,7 +1754,6 @@ impl GatewayFailure {
             status: StatusCode::SERVICE_UNAVAILABLE,
             category: "no_eligible_source",
             message: "no eligible WebSocket source is available",
-            cooldown_ms: 0,
             retry_at_ms: None,
         }
     }
@@ -1750,7 +1763,6 @@ impl GatewayFailure {
             status: StatusCode::TOO_MANY_REQUESTS,
             category: "all_candidates_cooling_down",
             message: "all eligible sources are cooling down",
-            cooldown_ms: 0,
             retry_at_ms: Some(retry_at_ms),
         }
     }

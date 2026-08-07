@@ -1,6 +1,6 @@
 use crate::state::{
-    identity_hint, now_ms, AccountCredential, AppState, GatewayKeyRecord, ServerAccountRecord,
-    SourceRecord, COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
+    identity_hint, is_internal_gateway_key, now_ms, AccountCredential, AppState, GatewayKeyRecord,
+    ServerAccountRecord, SourceRecord, COMMON_PROXY_SECRET_REF, SERVER_SCHEMA_VERSION,
 };
 use crate::store::configuration_revision;
 use futures_util::future::BoxFuture;
@@ -21,8 +21,8 @@ use zenith_relay_core::{
     },
     protocol::{
         account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
-        ClientWireApi, GatewaySummary, KeySummary, OperationalStatus, ProxyMode,
-        RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary, UsageTotals,
+        GatewaySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
+        SourceSummary,
     },
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
@@ -183,7 +183,7 @@ impl AppState {
             .store
             .keys()?
             .into_iter()
-            .filter(|key| key.enabled)
+            .filter(|key| key.enabled && is_internal_gateway_key(key))
             .collect::<Vec<_>>();
         let hidden_models = self.store.hidden_models()?;
         let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
@@ -193,11 +193,11 @@ impl AppState {
             default_service_tier,
             _,
             subscription_plan_order,
+            cooldown_after_failures,
+            keep_last_candidate_available,
         ) = self.store.routing_policy()?;
-        // Keep every enabled source/account in the runtime so explicitly
-        // scoped private keys can use native Messages or Chat Completions.
-        // `in_pool` only defines membership of the managed ChatGPT/Codex
-        // Responses key.
+        // Candidate state remains available to management, while the internal
+        // profile credential derives its request scope solely from pool membership.
         let mut pool_source_ids = source_records
             .iter()
             .filter(|record| {
@@ -291,7 +291,7 @@ impl AppState {
             let Some(secret) = self.vault.load(&record.secret_ref)? else {
                 continue;
             };
-            if record.system && pool_source_ids.is_empty() && pool_account_ids.is_empty() {
+            if pool_source_ids.is_empty() && pool_account_ids.is_empty() {
                 continue;
             }
             keys.push(runtime_key(
@@ -327,6 +327,8 @@ impl AppState {
             },
             GatewayRuntimeOptions {
                 max_retry_candidates: usize::from(max_retry_candidates),
+                cooldown_after_failures,
+                keep_last_candidate_available,
                 routing_strategy,
                 subscription_plan_order,
                 hidden_models,
@@ -373,7 +375,6 @@ impl AppState {
     pub fn snapshot(&self) -> Result<RuntimeStateSnapshot, String> {
         let sources = self.store.sources()?;
         let accounts = self.store.accounts()?;
-        let keys = self.store.keys()?;
         let common_proxy_configured = self.store.common_proxy_configured()?;
         let common_proxy_id = self.store.common_proxy_id()?;
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
@@ -385,6 +386,8 @@ impl AppState {
             default_service_tier,
             image_base_model,
             subscription_plan_order,
+            cooldown_after_failures,
+            keep_last_candidate_available,
         ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let model_price_overrides = self.store.model_price_overrides()?;
@@ -479,16 +482,6 @@ impl AppState {
                 &plan_benchmarks,
             );
         }
-        let key_summaries = keys
-            .iter()
-            .filter(|record| !record.system)
-            .map(|record| {
-                Ok(key_summary(
-                    record,
-                    self.store.key_usage_totals(&record.id)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
         let mut models = zenith_relay_core::protocol::pool_model_summaries(
             &source_summaries,
             &account_summaries,
@@ -548,6 +541,8 @@ impl AppState {
                         .count(),
                 visible_model_ids,
                 max_retry_candidates,
+                cooldown_after_failures,
+                keep_last_candidate_available,
                 routing_strategy,
                 subscription_plan_order,
                 default_service_tier,
@@ -565,7 +560,6 @@ impl AppState {
             capabilities: self.capabilities.clone(),
             sources: source_summaries,
             accounts: account_summaries,
-            keys: key_summaries,
             automations: self.store.wake_tasks()?,
             wake_history: self.store.wake_state()?.history().iter().cloned().collect(),
             warnings,
@@ -922,9 +916,7 @@ fn runtime_account(
 ) -> RuntimeChatGptAccount {
     let operational = account_operational_state(AccountOperationalInput {
         enabled: record.enabled,
-        // Runtime eligibility is independent from managed pool membership;
-        // the latter is applied only to the system key scope.
-        in_pool: true,
+        in_pool: record.in_pool,
         draining: record.draining,
         secret_available: true,
         proxy_available: true,
@@ -967,26 +959,18 @@ fn runtime_key(
     pool_source_ids: &[String],
     pool_account_ids: &[String],
 ) -> RuntimeMixedLocalKey {
-    let system = record.system;
     RuntimeMixedLocalKey {
         key: LocalGatewayKey {
             id: record.id,
             secret,
         },
         enabled: record.enabled,
-        source_ids: system
-            .then(|| pool_source_ids.to_vec())
-            .or(record.source_ids),
-        account_ids: system
-            .then(|| pool_account_ids.to_vec())
-            .or(record.account_ids),
-        allowed_models: record.allowed_models,
-        excluded_models: record.excluded_models,
-        model_prefix: record.model_prefix,
-        wire_apis: system
-            .then(|| Some(vec![ClientWireApi::Responses]))
-            .flatten()
-            .or(record.wire_apis),
+        source_ids: Some(pool_source_ids.to_vec()),
+        account_ids: Some(pool_account_ids.to_vec()),
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        model_prefix: None,
+        wire_apis: Some(vec![zenith_relay_core::protocol::ClientWireApi::Responses]),
     }
 }
 
@@ -1085,25 +1069,6 @@ fn account_summary(
         proxy_id: record.proxy_id.clone(),
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.last_error_code.clone(),
-    }
-}
-
-fn key_summary(record: &GatewayKeyRecord, usage_totals: UsageTotals) -> KeySummary {
-    KeySummary {
-        id: record.id.clone(),
-        label: record.label.clone(),
-        enabled: record.enabled,
-        system: record.system,
-        source_ids: record.source_ids.clone(),
-        account_ids: record.account_ids.clone(),
-        allowed_models: record.allowed_models.clone(),
-        excluded_models: record.excluded_models.clone(),
-        model_prefix: record.model_prefix.clone(),
-        wire_apis: record.wire_apis.clone(),
-        soft_budget_micro_usd: record.soft_budget_micro_usd,
-        usage_totals,
-        created_at_ms: record.created_at_ms,
-        last_used_at_ms: record.last_used_at_ms,
     }
 }
 

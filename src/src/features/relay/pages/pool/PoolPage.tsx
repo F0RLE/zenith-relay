@@ -6,7 +6,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
 import { effectiveSourceProtocolBindings, sourceModelsForWireApi } from "../../sourceProtocolBindings";
-import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, useConfirm } from "../../components/Ui";
+import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { groupModels, sortModelIdsForLauncher, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
@@ -141,9 +141,10 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     for (const sourceId of sourceIds.split("\n")) void refreshSourceStats(sourceId);
     return () => { sourceStatsGeneration.current += 1; };
   }, [mode, refreshSourceStats, sourceIds]);
-  const upcomingTimes = members.flatMap((member) => member.kind === "account"
-    ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)].filter((value): value is number => value != null && value > nowMs)
-    : []);
+  const upcomingTimes = members.flatMap((member) => [
+    ...(member.kind === "account" ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)] : []),
+    runtimeByMember.get(member.id)?.nextRetryAtMs,
+  ].filter((value): value is number => value != null && value > nowMs));
   const showSeconds = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
   useEffect(() => {
     const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
@@ -221,6 +222,8 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     if (defaultServiceTier === serviceTier) return;
     void perform("pool-service-tier", () => persistRoutingPolicy(mode, {
       maxRetryCandidates: runtime?.gateway.maxRetryCandidates ?? 3,
+      cooldownAfterFailures: runtime?.gateway.cooldownAfterFailures ?? 3,
+      keepLastCandidateAvailable: runtime?.gateway.keepLastCandidateAvailable ?? true,
       routingStrategy,
       defaultServiceTier,
       subscriptionPlanOrder: runtime?.gateway.subscriptionPlanOrder ?? [],
@@ -263,10 +266,21 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
         const runtimeState = runtimeByMember.get(member.id);
         const statusKey = member.operationalStatus;
         const statusTone = operationalStatusTone(statusKey);
+        const runtimeTone = statusKey === "rotation"
+          ? transientCandidateTone(runtimeState, nowMs, member.kind === "source")
+          : null;
         const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
         const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-        const indicatorTone = statusKey === "unavailable" ? statusTone : quotaStatus === "refreshing" ? "disabled" : quotaStatus === "failed" || quotaStatus === "requires_reauth" ? "error" : quotaStatus === "pending" ? "disabled" : statusTone;
+        const indicatorTone = statusKey === "unavailable" || statusKey === "disabled"
+          ? statusTone
+          : quotaStatus === "refreshing"
+            ? "disabled"
+            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
+              ? "error"
+              : quotaStatus === "pending"
+                ? "disabled"
+                : runtimeTone ?? statusTone;
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
@@ -281,7 +295,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
         const runtimeHint = runtimeState?.halfOpen
           ? t("pool.recoveryProbe")
-          : member.kind === "source" && runtimeState?.nextRetryAtMs
+          : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
             ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
             : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;
@@ -364,7 +378,9 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   const defaultServiceTier = runtime?.gateway.defaultServiceTier ?? "standard";
   const [subscriptionPlanOrder, setSubscriptionPlanOrder] = useState(initialPlanOrder);
   const [draggedPlan, setDraggedPlan] = useState<string | null>(null);
-  const maxRetryCandidates = runtime?.gateway.maxRetryCandidates ?? 3;
+  const [maxRetryCandidates, setMaxRetryCandidates] = useState(runtime?.gateway.maxRetryCandidates ?? 3);
+  const [cooldownAfterFailures, setCooldownAfterFailures] = useState(runtime?.gateway.cooldownAfterFailures ?? 3);
+  const [keepLastCandidateAvailable, setKeepLastCandidateAvailable] = useState(runtime?.gateway.keepLastCandidateAvailable ?? true);
   const hasCustomPlanOrder = subscriptionPlanOrder.length !== defaultPlanOrder.length || subscriptionPlanOrder.some((plan, index) => plan !== defaultPlanOrder[index]);
   const movePlan = (plan: string, target: string, after = false) => {
     if (plan === target) return;
@@ -391,6 +407,8 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
     const savedPlanOrder = routingStrategy === "subscription_plan" ? subscriptionPlanOrder : [];
     const payload = {
       maxRetryCandidates,
+      cooldownAfterFailures,
+      keepLastCandidateAvailable,
       routingStrategy,
       defaultServiceTier,
       subscriptionPlanOrder: savedPlanOrder,
@@ -404,6 +422,15 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
         <div className="pool-policy-copy"><strong>{t("pool.routingStrategy")}</strong><small>{t(`pool.routingStrategyHints.${routingStrategy}`)}</small></div>
         <OptionMenu className="field-option-menu pool-policy-control" label={t("pool.routingStrategy")} value={routingStrategy} onChange={chooseStrategy} options={[{ value: "adaptive", label: t("pool.routingStrategies.adaptive") }, { value: "quota_highest", label: t("pool.routingStrategies.quotaHighest") }, { value: "subscription_expiry", label: t("pool.routingStrategies.subscriptionExpiry") }, { value: "subscription_plan", label: t("pool.routingStrategies.subscriptionPlan") }]} />
       </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.maxRetryCandidates")}</strong><small>{t("pool.maxRetryCandidatesHint")}</small></div>
+        <input className="pool-policy-control" aria-label={t("pool.maxRetryCandidates")} type="number" min={1} max={8} value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(clampRoutingCount(event.target.value))} />
+      </div>
+      <div className="pool-policy-row">
+        <div className="pool-policy-copy"><strong>{t("pool.cooldownAfterFailures")}</strong><small>{t("pool.cooldownAfterFailuresHint")}</small></div>
+        <input className="pool-policy-control" aria-label={t("pool.cooldownAfterFailures")} type="number" min={1} max={8} value={cooldownAfterFailures} onChange={(event) => setCooldownAfterFailures(clampRoutingCount(event.target.value))} />
+      </div>
+      <label className="pool-policy-toggle toggle-row"><input type="checkbox" checked={keepLastCandidateAvailable} onChange={(event) => setKeepLastCandidateAvailable(event.target.checked)} /><span>{t("pool.keepLastCandidateAvailable")}</span></label>
       {routingStrategy === "subscription_plan" ? <div className="subscription-plan-policy">
         <div className="subscription-plan-policy-heading"><div><strong>{t("pool.subscriptionPlanOrder")}</strong><small>{t("pool.subscriptionPlanOrderHint")}</small></div>{hasCustomPlanOrder ? <IconButton label={t("pool.resetSubscriptionPlanOrder")} icon={<RotateCcw aria-hidden />} onClick={resetPlanOrder} /> : null}</div>
         {subscriptionPlanOrder.length ? <div className="subscription-plan-order" role="list" aria-label={t("pool.subscriptionPlanOrder")}>{subscriptionPlanOrder.map((plan, index) => {
@@ -761,13 +788,19 @@ function poolVisibleModels(runtime: NonNullable<ReturnType<typeof useRelayState>
 
 type RoutingPolicyPayload = {
   maxRetryCandidates: number;
+  cooldownAfterFailures: number;
+  keepLastCandidateAvailable: boolean;
   routingStrategy: RoutingStrategy;
   defaultServiceTier: DefaultServiceTier;
   subscriptionPlanOrder: string[];
 };
 
+function clampRoutingCount(value: string) {
+  return Math.min(8, Math.max(1, Math.trunc(Number(value)) || 1));
+}
+
 function persistRoutingPolicy(mode: RelayMode, payload: RoutingPolicyPayload) {
   return mode === "local"
-    ? relayCommands.updateRouting(payload.routingStrategy, payload.maxRetryCandidates, payload.defaultServiceTier, payload.subscriptionPlanOrder)
+    ? relayCommands.updateRouting(payload.routingStrategy, payload.maxRetryCandidates, payload.cooldownAfterFailures, payload.keepLastCandidateAvailable, payload.defaultServiceTier, payload.subscriptionPlanOrder)
     : relayCommands.remoteAction({ type: "set_routing_policy" }, payload);
 }

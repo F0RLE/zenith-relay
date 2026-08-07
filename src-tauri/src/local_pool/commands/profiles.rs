@@ -379,10 +379,10 @@ pub async fn attach_codex_to_local_gateway(
             store.gateway().chatgpt_interface_quota_reserve_basis_points,
         )
     };
-    if !key.enabled || !super::pool::has_usable_source(&state, &key)? {
+    if !key.enabled || !super::pool::has_usable_pool_candidate(&state)? {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "local key is not available for any enabled candidate",
+            "managed pool is not available for any enabled candidate",
         )
         .into());
     }
@@ -395,7 +395,7 @@ pub async fn attach_codex_to_local_gateway(
             bound_oauth_account_id.as_deref(),
         )?;
         let bound_oauth =
-            resolve_gateway_oauth_binding(&state, &key, binding_request, &profile_dir).await?;
+            resolve_gateway_oauth_binding(&state, binding_request, &profile_dir).await?;
         let history_backup = synchronize_history_for_command(
             &state,
             &profile_dir,
@@ -625,7 +625,6 @@ fn gateway_oauth_binding_request(
 
 async fn resolve_gateway_oauth_binding(
     state: &DesktopState,
-    key: &LocalGatewayKeyRecord,
     request: GatewayOAuthBindingRequest<'_>,
     profile_dir: &std::path::Path,
 ) -> LocalResult<Option<(String, PreparedAccountCredentials)>> {
@@ -647,12 +646,7 @@ async fn resolve_gateway_oauth_binding(
         let mut candidates = Vec::new();
         for account in store.accounts() {
             let explicitly_requested = requested_account_id == Some(account.account.id.as_str());
-            let scoped = key
-                .account_ids
-                .as_ref()
-                .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id));
-            if !scoped
-                || !account.account.enabled
+            if !account.account.enabled
                 || !account.account.in_pool
                 || account.account.draining
                 || account.account.auth_state
@@ -696,7 +690,7 @@ async fn resolve_gateway_oauth_binding(
     {
         return Err(LocalPoolError::new(
             ErrorCode::Conflict,
-            "selected OAuth account is not available to this local pool key",
+            "selected OAuth account is not available to the local pool",
         ));
     }
 
@@ -958,6 +952,24 @@ pub async fn restore_codex_profile_snapshot(
     let _mutation = state.setup_guard().await;
     let stopped = stop_codex_and_sync_account(&state).await?;
     let result = snapshots::restore(
+        &default_codex_home(),
+        &state.profile_backup_root(),
+        &snapshot_id,
+        safety_name.as_deref(),
+    )
+    .map_err(Into::into);
+    restart_codex_after_restore(stopped, result, launch_codex_with_profile)
+}
+
+#[tauri::command]
+pub async fn restore_full_codex_profile_snapshot(
+    snapshot_id: String,
+    safety_name: Option<String>,
+    state: State<'_, DesktopState>,
+) -> Result<(), CommandError> {
+    let _mutation = state.setup_guard().await;
+    let stopped = stop_codex_and_sync_account(&state).await?;
+    let result = snapshots::restore_full(
         &default_codex_home(),
         &state.profile_backup_root(),
         &snapshot_id,
@@ -1404,12 +1416,6 @@ mod tests {
             enabled: true,
             system: true,
             secret_ref: "key:source".into(),
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: Some(vec![zenith_relay_core::protocol::ClientWireApi::Responses]),
             created_at: "2026-08-01T00:00:00Z".into(),
             last_used_at: None,
         };
@@ -1421,15 +1427,16 @@ mod tests {
 
     #[test]
     fn lost_profile_rotation_commit_response_is_reconciled_without_a_blind_rollback() {
+        let system_credential_id = "key_system";
         let current = RemoteProfileCredential {
-            key_id: "key_system".into(),
+            key_id: system_credential_id.into(),
             base_url: "https://relay.example/v1".into(),
             secret: "zrs_current_secret_value_000000".into(),
         };
         let rotation = ProfileKeyRotation {
             schema_version: 1,
             rotation_id: "key_profile_rotation_test".into(),
-            key_id: "key_system".into(),
+            key_id: system_credential_id.into(),
             base_url: current.base_url.clone(),
             secret: "zrs_rotated_secret_value_000000".into(),
         };

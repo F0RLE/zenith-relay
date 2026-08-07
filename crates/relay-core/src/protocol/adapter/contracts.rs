@@ -169,6 +169,13 @@ impl AdapterError {
         )
     }
 
+    pub(crate) fn is_route_incompatible(self) -> bool {
+        matches!(
+            self.code,
+            "adapter_tool_unsupported" | "adapter_reasoning_unsupported"
+        )
+    }
+
     pub(super) const fn invalid_request() -> Self {
         Self {
             code: "adapter_invalid_request",
@@ -266,6 +273,16 @@ impl ResponsesToolKind {
         match tool.get("type").and_then(Value::as_str) {
             Some("function") => Ok(Self::Function),
             Some("custom") => Ok(Self::Custom),
+            // Responses namespace children have historically omitted `type`
+            // for ordinary client functions. A named, untyped definition is
+            // still representable as a JSON-schema function for Messages.
+            None if tool
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.trim().is_empty()) =>
+            {
+                Ok(Self::Function)
+            }
             _ => Err(AdapterError::unsupported_tool()),
         }
     }

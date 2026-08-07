@@ -1211,6 +1211,77 @@ async fn responses_to_messages_bridge_translates_tool_turn_and_preserves_continu
 }
 
 #[tokio::test]
+async fn bridge_skips_incompatible_candidate_without_cooling_it() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let usage_events = events.clone();
+    let source = |id: &str, priority: i32, reasoning_mode| RuntimeSource {
+        source: ProviderSource {
+            id: id.to_string(),
+            name: format!("Synthetic {id}"),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.to_string(),
+            wire_api: WireApi::Responses,
+            models: vec!["claude-test".to_string()],
+        },
+        protocol_bindings: vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::ResponsesToMessages,
+            reasoning_mode,
+            model_ids: vec!["claude-test".to_string()],
+        }],
+        enabled: true,
+        draining: false,
+        priority,
+        weight: 1,
+        recovery_delay_seconds: 0,
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        last_used_at_ms: None,
+    };
+    let runtime = Arc::new(
+        GatewayRuntime::from_pool(
+            vec![
+                source("incompatible", 10, MessagesReasoningMode::Disabled),
+                source("compatible", 0, MessagesReasoningMode::Adaptive),
+            ],
+            vec![RuntimeLocalKey::unrestricted(LocalGatewayKey {
+                id: "local-key-1".to_string(),
+                secret: LOCAL_KEY.to_string(),
+            })],
+            GatewayRuntimeOptions::default(),
+            Arc::new(move |event| usage_events.lock().unwrap().push(event)),
+        )
+        .unwrap(),
+    );
+    let gateway = spawn(gateway::router(runtime.clone())).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "claude-test",
+            "input": "use reasoning",
+            "reasoning": {"effort": "high"}
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert!(events.lock().unwrap()[0].success);
+    let incompatible = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .find(|candidate| candidate.candidate_id.contains("incompatible"))
+        .unwrap();
+    assert!(incompatible.available);
+    assert_eq!(incompatible.next_retry_at_ms, None);
+}
+
+#[tokio::test]
 async fn responses_to_messages_bridge_translates_custom_tool_turn_and_continuation() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
@@ -1432,7 +1503,7 @@ async fn responses_to_messages_bridge_maps_adaptive_reasoning_without_temperatur
 }
 
 #[tokio::test]
-async fn disabled_reasoning_and_opaque_tools_fail_before_upstream_io() {
+async fn disabled_reasoning_fails_before_upstream_but_opaque_tools_are_omitted() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, _) =
         spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
@@ -1467,11 +1538,12 @@ async fn disabled_reasoning_and_opaque_tools_fail_before_upstream_io() {
         .send()
         .await
         .unwrap();
-    assert_eq!(opaque_tool.status(), StatusCode::BAD_REQUEST);
-    let tool_body: Value = opaque_tool.json().await.unwrap();
-    assert_eq!(tool_body["error"]["code"], "adapter_tool_unsupported");
-    assert!(state.requests.lock().unwrap().is_empty());
-    assert!(state.bodies.lock().unwrap().is_empty());
+    assert_eq!(opaque_tool.status(), StatusCode::OK);
+    let requests = state.requests.lock().unwrap();
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(bodies.len(), 1);
+    assert!(bodies[0].get("tools").is_none());
 }
 
 #[tokio::test]

@@ -1,7 +1,7 @@
 use super::now_ms;
 use crate::runtime::{AuthorizedRequestError, ExecutorPrepareError};
-use crate::scheduler::CooldownReason;
-use crate::{GatewayRuntime, UsageEvent};
+use crate::scheduler::{CandidateScope, CooldownReason, CooldownRequest};
+use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::http::header::RETRY_AFTER;
 use axum::http::{HeaderValue, Response, StatusCode};
@@ -12,13 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 
-const TRANSPORT_COOLDOWN_MS: u64 = 5_000;
-
 const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
+
+const MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_024;
 
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
+
+pub(super) struct CooldownContext<'a> {
+    pub(super) scope: &'a CandidateScope,
+    pub(super) allowed_protocols: &'a [WireApi],
+}
 
 /// Marks an error body constructed by Relay itself. Native protocol handlers
 /// use this marker to normalize only local errors without rewriting an
@@ -31,8 +36,127 @@ pub(super) struct AttemptFailure {
     pub(super) status: StatusCode,
     pub(super) category: &'static str,
     pub(super) message: &'static str,
-    pub(super) cooldown_ms: u64,
     pub(super) cooldown_hint: RateLimitBodyHint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PreservedUpstreamError {
+    pub(super) status: StatusCode,
+    pub(super) category: &'static str,
+    pub(super) code: String,
+    pub(super) message: String,
+}
+
+/// Extracts only a short, structured upstream error message for the final
+/// response after retries are exhausted. Raw upstream bodies are intentionally
+/// never forwarded because they may contain URLs, credentials, or diagnostics.
+pub(super) fn preserved_upstream_error(
+    failure: &AttemptFailure,
+    body: &[u8],
+) -> Option<PreservedUpstreamError> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    preserved_upstream_error_value(failure, &value)
+}
+
+pub(super) fn preserved_upstream_error_value(
+    failure: &AttemptFailure,
+    value: &Value,
+) -> Option<PreservedUpstreamError> {
+    let code = [
+        "/error/code",
+        "/response/error/code",
+        "/body/error/code",
+        "/code",
+        "/response/code",
+        "/body/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .find(|code| !code.is_empty() && code.len() <= 128 && !code.chars().any(char::is_control))?;
+    if !is_public_gateway_error_code(code) {
+        return None;
+    }
+    let message = [
+        "/error/message",
+        "/response/error/message",
+        "/body/error/message",
+        "/message",
+        "/response/message",
+        "/body/message",
+        "/error/detail",
+        "/response/error/detail",
+        "/body/error/detail",
+        "/detail",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .find(|message| {
+        !message.is_empty()
+            && message.chars().count() <= MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS
+            && !message.chars().any(char::is_control)
+            && !contains_sensitive_error_metadata(message)
+    })?;
+    Some(PreservedUpstreamError {
+        status: failure.status,
+        category: failure.category,
+        code: code.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn is_public_gateway_error_code(code: &str) -> bool {
+    matches!(
+        code.trim(),
+        "service_unavailable"
+            | "bad_request"
+            | "invalid_request"
+            | "invalid_prompt"
+            | "context_length_exceeded"
+            | "request_too_large"
+            | "content_policy_violation"
+            | "model_not_available"
+            | "model_not_found"
+            | "model_disabled"
+            | "invalid_image_size"
+            | "unauthorized"
+            | "forbidden"
+            | "insufficient_balance"
+            | "rate_limit_exceeded"
+            | "not_found"
+            | "service_timeout"
+            | "internal_error"
+            | "server_error"
+            | "no_eligible_source"
+            | "all_sources_temporarily_unavailable"
+            | "all_sources_cooling_down"
+            | "server_is_overloaded"
+            | "bad_gateway"
+            | "gateway_timeout"
+    )
+}
+
+fn contains_sensitive_error_metadata(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "url:",
+        "authorization",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "secret",
+        "cookie",
+        "token:",
+        "sk-",
+        "@",
+        "org-",
+        "user-",
+    ]
+    .into_iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 pub(super) struct FailureState {
@@ -335,6 +459,17 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         )
     {
         "upstream_edge_challenge"
+    } else if text_has_any(
+        text,
+        &[
+            "invalid_request",
+            "invalid request",
+            "request is invalid",
+            "bad_request",
+            "bad request",
+        ],
+    ) {
+        "upstream_invalid_request"
     } else if status == StatusCode::FORBIDDEN {
         "upstream_forbidden"
     } else if status == StatusCode::NOT_FOUND {
@@ -594,7 +729,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message,
-            cooldown_ms: TRANSPORT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -604,7 +738,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category: "upstream_error",
             message: "upstream response failed",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -614,7 +747,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_REQUEST,
             category: "invalid_request",
             message: "request cannot be translated for an eligible source",
-            cooldown_ms: 0,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -625,7 +757,6 @@ impl AttemptFailure {
             status: canonical_upstream_status(status, classification.category),
             category: classification.category,
             message: classification.message,
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: body.map(rate_limit_body_hint).unwrap_or_default(),
         }
     }
@@ -639,7 +770,6 @@ impl AttemptFailure {
             status: canonical_upstream_status(status, category),
             category,
             message: upstream_failure_message(category),
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint,
         }
     }
@@ -649,7 +779,6 @@ impl AttemptFailure {
             status: StatusCode::BAD_GATEWAY,
             category,
             message: "upstream stream failed before the first event",
-            cooldown_ms: TRANSIENT_COOLDOWN_MS,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -659,7 +788,6 @@ impl AttemptFailure {
             status: StatusCode::SERVICE_UNAVAILABLE,
             category: "no_eligible_source",
             message: "no eligible source is available for this model",
-            cooldown_ms: 0,
             cooldown_hint: RateLimitBodyHint::default(),
         }
     }
@@ -671,7 +799,6 @@ impl AttemptFailure {
                     status: StatusCode::UNAUTHORIZED,
                     category: "account_auth",
                     message: "account authorization is unavailable",
-                    cooldown_ms: 30 * 60_000,
                     cooldown_hint: RateLimitBodyHint::default(),
                 }
             }
@@ -679,14 +806,12 @@ impl AttemptFailure {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 category: "account_token_persistence",
                 message: "refreshed account authorization could not be persisted",
-                cooldown_ms: TRANSIENT_COOLDOWN_MS,
                 cooldown_hint: RateLimitBodyHint::default(),
             },
             ExecutorPrepareError::Transient => Self {
                 status: StatusCode::BAD_GATEWAY,
                 category: "account_refresh",
                 message: "account authorization refresh failed",
-                cooldown_ms: TRANSIENT_COOLDOWN_MS,
                 cooldown_hint: RateLimitBodyHint::default(),
             },
         }
@@ -895,6 +1020,7 @@ pub(super) fn apply_failure_cooldown_with_body(
     category: &str,
     headers: &reqwest::header::HeaderMap,
     body: Option<&[u8]>,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let hint = body.map(rate_limit_body_hint).unwrap_or_default();
@@ -906,6 +1032,7 @@ pub(super) fn apply_failure_cooldown_with_body(
         category,
         headers,
         hint,
+        context,
         half_open_probe,
     )
 }
@@ -916,6 +1043,7 @@ pub(super) fn apply_attempt_failure_cooldown(
     model: &str,
     failure: &AttemptFailure,
     headers: &reqwest::header::HeaderMap,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     apply_failure_cooldown_with_hint(
@@ -926,6 +1054,7 @@ pub(super) fn apply_attempt_failure_cooldown(
         failure.category,
         headers,
         failure.cooldown_hint,
+        context,
         half_open_probe,
     )
 }
@@ -936,13 +1065,16 @@ pub(super) struct RateLimitBodyHint {
     pub(super) global: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_status_cooldown_with_hint(
     runtime: &GatewayRuntime,
     candidate_id: &str,
     model: &str,
     status: StatusCode,
+    category: &str,
     headers: &reqwest::header::HeaderMap,
     hint: RateLimitBodyHint,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
@@ -976,12 +1108,19 @@ fn apply_status_cooldown_with_hint(
     );
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
     let retry_at_ms = now.saturating_add(duration_ms);
-    let reason = if status == StatusCode::TOO_MANY_REQUESTS {
-        CooldownReason::RateLimit
-    } else {
-        CooldownReason::Transient
-    };
-    let applied = runtime.set_cooldown_with_reason(candidate_id, scope, retry_at_ms, reason);
+    let reason = failure_cooldown_reason(status, category, has_explicit_retry_after);
+    let applied = runtime.set_cooldown_with_reason_for_model_at(
+        candidate_id,
+        CooldownRequest {
+            scope,
+            policy_model: model,
+            allowed_protocols: context.allowed_protocols,
+            request_scope: context.scope,
+            retry_at_ms,
+            reason,
+            now_ms: now,
+        },
+    );
     FailureState {
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
@@ -998,6 +1137,7 @@ pub(super) fn apply_failure_cooldown_with_hint(
     category: &str,
     headers: &reqwest::header::HeaderMap,
     hint: RateLimitBodyHint,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
 ) -> FailureState {
     let status = canonical_upstream_status(status, category);
@@ -1008,12 +1148,16 @@ pub(super) fn apply_failure_cooldown_with_hint(
             | "upstream_model_capacity"
             | "upstream_overloaded"
     ) {
-        return apply_cooldown(
+        let has_explicit_retry_after =
+            retry_after_ms(headers, SystemTime::now()).is_some() || hint.retry_after_ms.is_some();
+        return apply_cooldown_with_reason(
             runtime,
             candidate_id,
             model,
             TRANSIENT_COOLDOWN_MS,
+            context,
             half_open_probe,
+            failure_cooldown_reason(status, category, has_explicit_retry_after),
         );
     }
     apply_status_cooldown_with_hint(
@@ -1021,10 +1165,44 @@ pub(super) fn apply_failure_cooldown_with_hint(
         candidate_id,
         model,
         status,
+        category,
         headers,
         hint,
+        context,
         half_open_probe,
     )
+}
+
+fn failure_cooldown_reason(
+    status: StatusCode,
+    category: &str,
+    explicit_retry_after: bool,
+) -> CooldownReason {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return CooldownReason::RateLimit;
+    }
+    if explicit_retry_after
+        || matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::PAYMENT_REQUIRED | StatusCode::FORBIDDEN
+        )
+        || matches!(
+            category,
+            "upstream_unauthorized"
+                | "upstream_account_disabled"
+                | "upstream_usage_not_included"
+                | "upstream_quota_exhausted"
+                | "upstream_region_unsupported"
+                | "upstream_model_not_found"
+                | "upstream_model_unsupported"
+                | "upstream_model_capacity"
+                | "upstream_websocket_connection_limit"
+        )
+    {
+        CooldownReason::Mandatory
+    } else {
+        CooldownReason::Transient
+    }
 }
 
 pub(super) fn rate_limit_body_hint(body: &[u8]) -> RateLimitBodyHint {
@@ -1184,7 +1362,72 @@ pub(super) fn apply_cooldown(
     candidate_id: &str,
     scope: &str,
     duration_ms: u64,
+    context: &CooldownContext<'_>,
     half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason(
+        runtime,
+        candidate_id,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Transient,
+    )
+}
+
+pub(super) fn apply_cooldown_for_model(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    policy_model: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason_for_model(
+        runtime,
+        candidate_id,
+        scope,
+        policy_model,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Transient,
+    )
+}
+
+pub(super) fn apply_cooldown_with_reason(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+    reason: CooldownReason,
+) -> FailureState {
+    apply_cooldown_with_reason_for_model(
+        runtime,
+        candidate_id,
+        scope,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        reason,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_cooldown_with_reason_for_model(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    policy_model: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+    reason: CooldownReason,
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
     let duration_ms = source_cooldown_ms(
@@ -1193,13 +1436,44 @@ pub(super) fn apply_cooldown(
         false,
     );
     let duration_ms = half_open_backoff_ms(duration_ms, consecutive_failures, half_open_probe);
-    let retry_at_ms = now_ms().saturating_add(duration_ms);
-    let applied = runtime.set_cooldown(candidate_id, scope, retry_at_ms);
+    let now = now_ms();
+    let retry_at_ms = now.saturating_add(duration_ms);
+    let applied = runtime.set_cooldown_with_reason_for_model_at(
+        candidate_id,
+        CooldownRequest {
+            scope,
+            policy_model,
+            allowed_protocols: context.allowed_protocols,
+            request_scope: context.scope,
+            retry_at_ms,
+            reason,
+            now_ms: now,
+        },
+    );
     FailureState {
         cooldown_scope: applied.then(|| scope.to_string()),
         retry_at_ms: applied.then_some(retry_at_ms),
         consecutive_failures,
     }
+}
+
+pub(super) fn apply_mandatory_cooldown(
+    runtime: &GatewayRuntime,
+    candidate_id: &str,
+    scope: &str,
+    duration_ms: u64,
+    context: &CooldownContext<'_>,
+    half_open_probe: bool,
+) -> FailureState {
+    apply_cooldown_with_reason(
+        runtime,
+        candidate_id,
+        scope,
+        duration_ms,
+        context,
+        half_open_probe,
+        CooldownReason::Mandatory,
+    )
 }
 
 pub(super) fn apply_failure_state(event: &mut UsageEvent, state: FailureState) {
@@ -1597,6 +1871,72 @@ mod tests {
     }
 
     #[test]
+    fn delayed_gateway_invalid_request_event_does_not_cool_down_source() {
+        let value: Value = serde_json::from_slice(
+            br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
+        )
+        .unwrap();
+
+        let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
+        assert_eq!(classification.category, "upstream_invalid_request");
+        assert_eq!(
+            upstream_event_failure_category(Some("error"), &value),
+            Some("upstream_invalid_request")
+        );
+        assert!(!failure_category_requires_cooldown(classification.category));
+    }
+
+    #[test]
+    fn preserved_upstream_error_keeps_only_safe_structured_messages() {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(
+                br#"{"error":{"code":"service_unavailable","message":"no eligible source is available for this model"}}"#,
+            ),
+        );
+        let preserved = preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"service_unavailable","message":"no eligible source is available for this model"}}"#,
+        )
+        .expect("safe Gateway message is preserved");
+        assert_eq!(preserved.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(preserved.category, "upstream_unavailable");
+        assert_eq!(preserved.code, "service_unavailable");
+        assert_eq!(
+            preserved.message,
+            "no eligible source is available for this model"
+        );
+
+        let nested = preserved_upstream_error(
+            &AttemptFailure::classified_with_hint(
+                StatusCode::BAD_REQUEST,
+                "upstream_invalid_request",
+                RateLimitBodyHint::default(),
+            ),
+            br#"{"type":"error","response":{"error":{"code":"bad_request","message":"Zenith AI request is invalid."}}}"#,
+        )
+        .expect("safe nested Gateway message is preserved");
+        assert_eq!(nested.code, "bad_request");
+        assert_eq!(nested.message, "Zenith AI request is invalid.");
+
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"service_unavailable","message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
+        )
+        .is_none());
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"service_unavailable","message":"quota exceeded for org-acme; contact admin@acme.test"}}"#,
+        )
+        .is_none());
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"provider_error","message":"upstream diagnostic"}}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         assert!(retryable_status(StatusCode::UNAUTHORIZED, false));
         assert!(retryable_status(StatusCode::CONFLICT, false));
@@ -1632,6 +1972,7 @@ mod tests {
             "upstream_stream",
             "stream_incomplete",
             "stream_idle_timeout",
+            "upstream_invalid_request",
         ] {
             assert!(!failure_category_requires_cooldown(category));
         }

@@ -931,12 +931,6 @@ mod tests {
                 enabled: true,
                 system: false,
                 secret_ref: "key:key_1".into(),
-                source_ids: None,
-                account_ids: None,
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
                 created_at: "2026-07-10T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -952,64 +946,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!records.contains("upstream-secret"));
-        drop(reopened);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn source_and_key_scope_changes_are_written_together() {
-        let root = temp_root();
-        let mut store = LocalPoolStore::open(root.clone()).unwrap();
-        let source = ProviderSourceRecord {
-            id: "source_1".into(),
-            name: "Synthetic".into(),
-            enabled: true,
-            in_pool: true,
-            draining: false,
-            base_url: "https://example.test/v1".into(),
-            secret_ref: "source:source_1".into(),
-            wire_api: WireApi::Responses,
-            protocol_bindings: Vec::new(),
-            models: vec!["gpt-test".into()],
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            priority: 0,
-            weight: 1,
-            recovery_delay_seconds: 0,
-            model_price_overrides: Default::default(),
-            last_used_at: None,
-            last_test_at: None,
-            last_test_status: None,
-            last_error: None,
-        };
-        let key = LocalGatewayKeyRecord {
-            id: "key_1".into(),
-            label: "Scoped".into(),
-            enabled: true,
-            system: false,
-            secret_ref: "key:key_1".into(),
-            source_ids: Some(vec![source.id.clone()]),
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
-            created_at: "2026-07-10T00:00:00Z".into(),
-            last_used_at: None,
-        };
-        store
-            .replace_records(vec![source], vec![key.clone()])
-            .unwrap();
-        let mut unavailable_key = key;
-        unavailable_key.source_ids = Some(Vec::new());
-        store
-            .replace_records(Vec::new(), vec![unavailable_key])
-            .unwrap();
-        drop(store);
-
-        let reopened = LocalPoolStore::open(root.clone()).unwrap();
-        assert!(reopened.sources().is_empty());
-        assert_eq!(reopened.keys()[0].source_ids, Some(Vec::new()));
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
     }
@@ -1046,12 +982,6 @@ mod tests {
             enabled: true,
             system: false,
             secret_ref: "key:key_1".into(),
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         };

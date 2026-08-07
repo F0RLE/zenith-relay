@@ -25,8 +25,8 @@ replace the following acceptance gates.
 
 ### User-managed server acceptance
 
-1. Deploy the server behind HTTPS with a separate management token, vault key,
-   and a scoped client pool key.
+1. Deploy the server behind HTTPS with a separate management token and vault
+   key, then attach the managed ChatGPT/Codex profile.
 2. Transfer or create permitted test connections through the desktop
    management path and verify the server capability snapshot.
 3. Send a streaming <code>/v1</code> request through the server.
@@ -99,7 +99,7 @@ restores the previous profile catalog on recovery. Remaining release gates:
 1. Run attach, refresh, disabled-model, removed-model, and restore cycles
    against a real current Codex profile, including a model id containing `/`.
 2. Prove that the live `/v1/models` view and Codex-specific catalog make the
-   same model visible for each scoped client key.
+   same eligible model visible through the managed profile.
 3. Keep a failure during catalog refresh reversible: the previous verified
    profile must remain usable and native/user settings must not be overwritten.
 
@@ -107,7 +107,7 @@ restores the previous profile catalog on recovery. Remaining release gates:
 
 Add a client integration only where users need it and the program supports a
 safe reversible configuration path. Each integration must use the shared pool
-endpoint and existing client-key model policy; it must not fork routing or
+endpoint and server authentication boundary; it must not fork routing or
 secret storage.
 
 ## P4 - Additional subscription account connectors (deferred)

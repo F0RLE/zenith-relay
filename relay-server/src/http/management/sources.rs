@@ -211,14 +211,6 @@ pub async fn delete_source(
         .ok_or_else(|| {
             ManagementError::not_found("source_secret_missing", "source secret missing")
         })?;
-    let old_keys = state.store.keys().map_err(store_error)?;
-    let mut scoped_keys = old_keys.clone();
-    for key in &mut scoped_keys {
-        if let Some(ids) = &mut key.source_ids {
-            ids.retain(|value| value != &id);
-        }
-        state.store.save_key(key).map_err(store_error)?;
-    }
     state.store.delete_source(&id).map_err(store_error)?;
     state
         .vault
@@ -227,9 +219,6 @@ pub async fn delete_source(
     if let Err(error) = state.rebuild_runtime().await {
         let _ = state.vault.save(&record.secret_ref, &secret);
         let _ = state.store.save_source(&record);
-        for key in old_keys {
-            let _ = state.store.save_key(&key);
-        }
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }

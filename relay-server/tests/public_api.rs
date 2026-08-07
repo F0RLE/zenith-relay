@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zenith_relay_server::{
     config::Config,
     http,
-    state::AppState,
+    state::{AppState, GatewayKeyRecord},
     store::{Store, Vault},
 };
 
@@ -181,7 +181,7 @@ async fn source_creation_preserves_native_and_bridged_responses_routes() {
 }
 
 #[tokio::test]
-async fn scoped_native_messages_source_stays_outside_the_responses_system_pool() {
+async fn native_messages_source_stays_outside_the_responses_system_pool() {
     let root = TempDir::new().unwrap();
     let (responses_upstream, responses_task) = spawn_upstream().await;
     let (messages_upstream, messages_state, messages_task) = spawn_messages_upstream().await;
@@ -258,28 +258,6 @@ async fn scoped_native_messages_source_stays_outside_the_responses_system_pool()
         "source_pool_protocol_unsupported"
     );
 
-    let messages_key: Value = client
-        .post(format!("{}/keys", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Native Messages key",
-            "sourceIds": [messages_source_id],
-            "accountIds": [],
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": ["messages"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let messages_secret = messages_key["secret"].as_str().unwrap();
-    assert_eq!(messages_key["key"]["wireApis"], json!(["messages"]));
-
     let started = client
         .post(format!("{}/gateway/start", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -316,6 +294,10 @@ async fn scoped_native_messages_source_stays_outside_the_responses_system_pool()
     assert!(system_model_ids.contains(&"gpt-test"));
     assert!(!system_model_ids.contains(&"claude-native"));
 
+    // Source discovery is allowed during setup. The denied request below must
+    // not reach the native Messages endpoint.
+    messages_state.lock().unwrap().clear();
+
     let request = json!({
         "model": "claude-native",
         "max_tokens": 64,
@@ -331,20 +313,6 @@ async fn scoped_native_messages_source_stays_outside_the_responses_system_pool()
         }],
         "tool_choice": {"type": "auto"}
     });
-    let messages_response = client
-        .post(format!("{}/v1/messages", server.origin))
-        .header("x-api-key", messages_secret)
-        .header("anthropic-beta", "fine-grained-tool-streaming-2025-05-14")
-        .json(&request)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(messages_response.status(), StatusCode::OK);
-    assert_eq!(
-        messages_response.json::<Value>().await.unwrap()["type"],
-        "message"
-    );
-
     let denied = client
         .post(format!("{}/v1/messages", server.origin))
         .header("x-api-key", system_secret)
@@ -357,27 +325,8 @@ async fn scoped_native_messages_source_stays_outside_the_responses_system_pool()
     assert_eq!(denied["type"], "error");
     assert_eq!(denied["error"]["type"], "permission_error");
 
-    let denied = client
-        .post(format!("{}/v1/responses", server.origin))
-        .bearer_auth(messages_secret)
-        .json(&json!({"model": "claude-native", "input": "wrong endpoint"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-
     let observed = messages_state.lock().unwrap().clone();
-    assert_eq!(observed.len(), 2);
-    assert_eq!(
-        observed[0].x_api_key.as_deref(),
-        Some("messages-source-key")
-    );
-    assert_eq!(observed[0].anthropic_version.as_deref(), Some("2023-06-01"));
-    assert_eq!(
-        observed[1].anthropic_beta.as_deref(),
-        Some("fine-grained-tool-streaming-2025-05-14")
-    );
-    assert_eq!(observed[1].body, request);
+    assert!(observed.is_empty());
 
     server.task.abort();
     responses_task.abort();
@@ -492,27 +441,6 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         profile_credential["baseUrl"],
         format!("{}/v1", first.origin)
     );
-    let keys: Value = client
-        .get(format!("{}/keys", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(keys["schemaVersion"], 1);
-    assert!(keys["keys"].as_array().unwrap().is_empty());
-    assert_eq!(
-        client
-            .delete(format!("{}/keys/key_system", first.origin))
-            .bearer_auth("synthetic-management-token-value")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::CONFLICT
-    );
     assert_eq!(
         client
             .get(format!("{}/v1/models", first.origin))
@@ -619,42 +547,7 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         StatusCode::UNAUTHORIZED
     );
     profile_key = rotated_profile_key;
-    let hidden_keys: Value = client
-        .get(format!("{}/keys", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(hidden_keys["keys"].as_array().unwrap().is_empty());
-
-    let generated: Value = client
-        .post(format!("{}/keys", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Test client",
-            "sourceIds": null,
-            "accountIds": null,
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": ["responses"],
-            "softBudgetMicroUsd": 2
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(generated["schemaVersion"], 1);
-    assert_eq!(generated["key"]["wireApis"], json!(["responses"]));
-    assert_eq!(generated["key"]["softBudgetMicroUsd"], 2);
-    let client_key_id = generated["key"]["id"].as_str().unwrap().to_string();
-    let mut pool_key = generated["secret"].as_str().unwrap().to_string();
+    let pool_key = profile_key.clone();
 
     for path in ["/v1/chat/completions", "/v1/images/generations"] {
         let denied = client
@@ -680,55 +573,6 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert_eq!(models.status(), StatusCode::OK);
     assert!(models.text().await.unwrap().contains("gpt-test"));
     assert_websocket_upgrade(&first.origin, &pool_key).await;
-
-    let chat_only: Value = client
-        .post(format!("{}/keys", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Chat-only client",
-            "sourceIds": null,
-            "accountIds": null,
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": ["chat_completions"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let chat_only_key = chat_only["secret"].as_str().unwrap();
-    for path in ["/v1/responses", "/v1/responses/compact", "/v1/alpha/search"] {
-        assert_eq!(
-            client
-                .post(format!("{}{path}", first.origin))
-                .bearer_auth(chat_only_key)
-                .json(&json!({"model":"gpt-test"}))
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    assert_websocket_status(&first.origin, chat_only_key, "403").await;
-    assert_eq!(
-        client
-            .delete(format!(
-                "{}/keys/{}",
-                first.origin,
-                chat_only["key"]["id"].as_str().unwrap()
-            ))
-            .bearer_auth("synthetic-management-token-value")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
 
     let response = client
         .post(format!("{}/v1/responses", first.origin))
@@ -1161,55 +1005,6 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         repriced_usage["totals"]["apiEquivalent"]["unpricedTokens"],
         0
     );
-    let client_keys: Value = client
-        .get(format!("{}/keys", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let client_key = client_keys["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|key| key["id"] == client_key_id)
-        .unwrap();
-    assert!(client_key["usageTotals"]["requests"].as_u64().unwrap() > 0);
-    assert!(
-        client_key["usageTotals"]["apiEquivalent"]["microUsd"]
-            .as_u64()
-            .unwrap()
-            >= 3
-    );
-    let rotated_client_key: Value = client
-        .post(format!("{}/keys/{client_key_id}/rotate", first.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let replacement = rotated_client_key["secret"].as_str().unwrap().to_string();
-    assert_ne!(replacement, pool_key);
-    assert_eq!(
-        rotated_client_key["key"]["usageTotals"],
-        client_key["usageTotals"]
-    );
-    assert_eq!(
-        client
-            .get(format!("{}/v1/models", first.origin))
-            .bearer_auth(&pool_key)
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    pool_key = replacement;
-
     let disabled_response = client
         .post(format!("{}/models/rules", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -1367,45 +1162,6 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         assert!(Instant::now() < deadline, "stream usage was not persisted");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let usage_before_key_delete: Value = client
-        .get(format!(
-            "{}/usage?localKeyQuery={client_key_id}",
-            second.origin
-        ))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(usage_before_key_delete["total"].as_u64().unwrap() > 0);
-    assert_eq!(
-        client
-            .delete(format!("{}/keys/{client_key_id}", second.origin))
-            .bearer_auth("synthetic-management-token-value")
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    let usage_after_key_delete: Value = client
-        .get(format!(
-            "{}/usage?localKeyQuery={client_key_id}",
-            second.origin
-        ))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        usage_after_key_delete["totals"],
-        usage_before_key_delete["totals"]
-    );
     assert_eq!(
         client
             .delete(format!("{}/usage", second.origin))
@@ -1492,126 +1248,68 @@ async fn management_token_can_rotate_without_changing_server_identity() {
 }
 
 #[tokio::test]
-async fn client_key_lifecycle_is_versioned_and_secrets_are_one_time() {
+async fn legacy_user_gateway_routes_are_removed() {
     let root = TempDir::new().unwrap();
     let server = spawn_server(root.path()).await;
     let client = reqwest::Client::new();
-    let input = json!({
-        "schemaVersion": 1,
-        "label": "Phone",
-        "sourceIds": null,
-        "accountIds": null,
-        "allowedModels": [],
-        "excludedModels": [],
-        "modelPrefix": null,
-        "wireApis": ["responses", "images"]
-    });
-
-    let unsupported = client
-        .post(format!("{}/keys", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 2,
-            "label": "Phone",
-            "sourceIds": null,
-            "accountIds": null,
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": ["responses"]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unsupported.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        unsupported.json::<Value>().await.unwrap()["error"]["code"],
-        "client_access_schema_unsupported"
-    );
-
-    let created = client
-        .post(format!("{}/keys", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&input)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status(), StatusCode::CREATED);
-    assert_eq!(created.headers().get(CACHE_CONTROL).unwrap(), "no-store");
-    let created: Value = created.json().await.unwrap();
-    let key_id = created["key"]["id"].as_str().unwrap();
-    let first_secret = created["secret"].as_str().unwrap();
-    assert_eq!(created["schemaVersion"], 1);
-
-    let invalid_budget = client
-        .patch(format!("{}/keys/{key_id}", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({"schemaVersion":1,"softBudgetMicroUsd":0}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid_budget.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        invalid_budget.json::<Value>().await.unwrap()["error"]["code"],
-        "client_soft_budget_invalid"
-    );
-
-    let updated: Value = client
-        .patch(format!("{}/keys/{key_id}", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Tablet",
-            "enabled": false,
-            "wireApis": ["images"]
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(updated["label"], "Tablet");
-    assert_eq!(updated["enabled"], false);
-    assert_eq!(updated["wireApis"], json!(["chat_completions"]));
-
-    let rotated = client
-        .post(format!("{}/keys/{key_id}/rotate", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(rotated.headers().get(CACHE_CONTROL).unwrap(), "no-store");
-    let rotated: Value = rotated.json().await.unwrap();
-    assert_ne!(rotated["secret"].as_str().unwrap(), first_secret);
-
-    let listed: Value = client
-        .get(format!("{}/keys", server.origin))
-        .bearer_auth("synthetic-management-token-value")
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(listed["schemaVersion"], 1);
-    assert_eq!(listed["keys"][0]["id"], key_id);
-    assert!(!listed.to_string().contains(first_secret));
-    assert!(!listed
-        .to_string()
-        .contains(rotated["secret"].as_str().unwrap()));
-
-    assert_eq!(
-        client
-            .delete(format!("{}/keys/{key_id}", server.origin))
+    for method in ["GET", "POST", "PATCH", "DELETE"] {
+        let response = client
+            .request(method.parse().unwrap(), format!("{}/keys", server.origin))
             .bearer_auth("synthetic-management-token-value")
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} /keys");
+    }
     server.task.abort();
+}
+
+#[tokio::test]
+async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
+    let root = TempDir::new().unwrap();
+    let config = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        data_dir: root.path().to_path_buf(),
+        public_base_url: url::Url::parse("http://127.0.0.1:1").unwrap(),
+        management_token: "synthetic-management-token-value".to_string(),
+        vault_key: [9; 32],
+    };
+    let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+    let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+    let legacy = GatewayKeyRecord {
+        id: "key_legacy_user".to_string(),
+        label: "Legacy user key".to_string(),
+        enabled: true,
+        system: false,
+        secret_ref: "key:key_legacy_user".to_string(),
+        created_at_ms: 0,
+        last_used_at_ms: None,
+    };
+    let system_like = GatewayKeyRecord {
+        id: "key_system".to_string(),
+        label: "Legacy system key".to_string(),
+        enabled: true,
+        system: false,
+        secret_ref: "key:key_system".to_string(),
+        created_at_ms: 0,
+        last_used_at_ms: None,
+    };
+    vault.save(&legacy.secret_ref, "legacy-secret").unwrap();
+    vault
+        .save(&system_like.secret_ref, "system-secret")
+        .unwrap();
+    store.save_key(&legacy).unwrap();
+    store.save_key(&system_like).unwrap();
+
+    let _state = AppState::new(config, store.clone(), vault.clone()).unwrap();
+    let keys = store.keys().unwrap();
+    assert!(keys.iter().all(|key| key.system));
+    assert!(keys.iter().any(|key| key.id == "key_system"));
+    assert!(vault.load(&legacy.secret_ref).unwrap().is_none());
+    assert_eq!(
+        vault.load(&system_like.secret_ref).unwrap().as_deref(),
+        Some("system-secret")
+    );
 }
 
 #[tokio::test]
@@ -1822,26 +1520,16 @@ async fn remote_gateway_serves_two_hundred_concurrent_requests_and_flushes_usage
             .status(),
         StatusCode::OK
     );
-    let generated: Value = client
-        .post(format!("{}/keys", server.origin))
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
         .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Concurrent client",
-            "sourceIds": null,
-            "accountIds": null,
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": null
-        }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let pool_key = generated["secret"].as_str().unwrap().to_string();
+    let pool_key = profile["secret"].as_str().unwrap().to_string();
 
     let start = Arc::new(tokio::sync::Barrier::new(REQUESTS + 1));
     let tasks = (0..REQUESTS)
@@ -2658,26 +2346,16 @@ async fn server_account_proxies_support_common_override_bulk_and_redaction() {
         .unwrap();
     assert_eq!(membership.status(), StatusCode::OK);
 
-    let generated: Value = client
-        .post(format!("{}/keys", server.origin))
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
         .bearer_auth("synthetic-management-token-value")
-        .json(&json!({
-            "schemaVersion": 1,
-            "label": "Proxy test client",
-            "sourceIds": [],
-            "accountIds": [account_id],
-            "allowedModels": [],
-            "excludedModels": [],
-            "modelPrefix": null,
-            "wireApis": null
-        }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    let pool_key = generated["secret"].as_str().unwrap();
+    let pool_key = profile["secret"].as_str().unwrap();
 
     let first = client
         .post(format!("{}/v1/responses", server.origin))
@@ -2963,7 +2641,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
         "synthetic-preset-access-token",
         "preset-pass",
         "managementToken",
-        "clientKey",
+        "profileCredential",
         "vault",
         "usage",
         "publicBaseUrl",
@@ -3310,19 +2988,7 @@ async fn mixed_protocol_models(request: Request) -> impl IntoResponse {
     StatusCode::UNAUTHORIZED.into_response()
 }
 
-#[derive(Clone, Debug)]
-struct NativeMessagesRequest {
-    x_api_key: Option<String>,
-    anthropic_version: Option<String>,
-    anthropic_beta: Option<String>,
-    body: Value,
-}
-
-async fn spawn_messages_upstream() -> (
-    String,
-    Arc<Mutex<Vec<NativeMessagesRequest>>>,
-    tokio::task::JoinHandle<()>,
-) {
+async fn spawn_messages_upstream() -> (String, Arc<Mutex<Vec<()>>>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -3337,34 +3003,23 @@ async fn spawn_messages_upstream() -> (
 }
 
 async fn native_messages_models(
-    State(requests): State<Arc<Mutex<Vec<NativeMessagesRequest>>>>,
-    request: Request,
+    State(requests): State<Arc<Mutex<Vec<()>>>>,
+    _request: Request,
 ) -> impl IntoResponse {
-    let headers = request.headers();
-    requests.lock().unwrap().push(NativeMessagesRequest {
-        x_api_key: header_value(headers, "x-api-key"),
-        anthropic_version: header_value(headers, "anthropic-version"),
-        anthropic_beta: header_value(headers, "anthropic-beta"),
-        body: Value::Null,
-    });
+    requests.lock().unwrap().push(());
     Json(json!({"data":[{"id":"claude-native"}]}))
 }
 
 async fn native_messages_response(
-    State(requests): State<Arc<Mutex<Vec<NativeMessagesRequest>>>>,
+    State(requests): State<Arc<Mutex<Vec<()>>>>,
     request: Request,
 ) -> Response {
-    let (parts, body) = request.into_parts();
+    let (_parts, body) = request.into_parts();
     let body = to_bytes(body, 64 * 1024).await.unwrap();
     let body: Value = serde_json::from_slice(&body).unwrap();
     assert!(body["tools"].is_array());
     assert_eq!(body["tools"][0]["name"], "read_file");
-    requests.lock().unwrap().push(NativeMessagesRequest {
-        x_api_key: header_value(&parts.headers, "x-api-key"),
-        anthropic_version: header_value(&parts.headers, "anthropic-version"),
-        anthropic_beta: header_value(&parts.headers, "anthropic-beta"),
-        body,
-    });
+    requests.lock().unwrap().push(());
     (
         StatusCode::OK,
         Json(json!({
@@ -3383,13 +3038,6 @@ async fn native_messages_response(
         })),
     )
         .into_response()
-}
-
-fn header_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
 }
 
 async fn spawn_source_lifecycle_upstream(

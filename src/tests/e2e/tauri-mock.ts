@@ -41,7 +41,6 @@ export type MockOptions = {
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
   gatewayRunning?: boolean;
-  poolKeyPresent?: boolean;
   poolMembers?: boolean;
   proxyCount?: number;
   importResult?: "success" | "item_failure" | "not_found";
@@ -291,20 +290,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         });
       }
     }
-    const key = {
-      id: "key_synthetic",
-      label: "ChatGPT",
-      enabled: true,
-      system: (input.mode ?? "local") === "local" && input.codexBindings !== false,
-      sourceIds: null,
-      accountIds: null,
-      allowedModels: [],
-      excludedModels: [],
-      modelPrefix: null,
-      wireApis: ["responses"] as Array<"responses" | "chat_completions" | "messages" | "images">,
-      createdAtMs: Date.now() - 86_400_000,
-      lastUsedAtMs: usagePresent ? Date.now() - 60_000 : null,
-    };
+    const systemCredentialId = "key_system";
     const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
       id: "11111111-1111-4111-8111-111111111111",
@@ -363,24 +349,14 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       schemaVersion: 14,
       configurationRevision: null as string | null,
       runtimeTarget: { kind: "local", connected: true, origin: "http://127.0.0.1:14998", serverId: null, version: "1.1.0" },
-      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, routingOrder: [] as MockCandidateRuntime[] },
+      gateway: { running: input.gatewayRunning ?? true, baseUrl: "http://127.0.0.1:14998/v1", candidateCount: 0, visibleModelIds: [] as string[], maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "adaptive" as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan", subscriptionPlanOrder: [] as string[], defaultServiceTier: "standard" as "standard" | "fast", models: [] as MockModelSummary[], commonProxyConfigured: true, commonProxyAvailable: true, accountProxyRequired: false, quotaRequestTimeoutSeconds: 20, chatgptInterfaceQuotaReserveBasisPoints: 100, routingOrder: [] as MockCandidateRuntime[] },
       platform: "windows",
-      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing", "client_access"], supportedWireApis: ["responses", "chat_completions", "messages"] as Array<"responses" | "chat_completions" | "messages"> },
+      capabilities: { features: ["sources", "oauth_accounts", "quota_wake", "profiles", "account_proxies", "account_export", "account_identity_reveal", "runtime_routing"], supportedWireApis: ["responses", "chat_completions", "messages"] as Array<"responses" | "chat_completions" | "messages"> },
       sources: populated ? [source] : [],
       accounts: populated ? accounts : [],
-      keys: populated && input.poolKeyPresent !== false ? [key] : [],
       automations: populated ? [automation] : [],
       wakeHistory: populated ? [{ taskId: automation.id, accountId: account.id, windowKind: "primary", modelId: "gpt-5.4-mini", outcome: "confirmed", startedAtMs: Date.now() - 120_000, completedAtMs: Date.now() - 118_000, errorCode: null }] : [],
       warnings: [],
-    };
-    const ensureSystemKey = () => {
-      let systemKey = localRuntime.keys.find((candidate) => candidate.system);
-      if (!systemKey) {
-        systemKey = { ...key, id: "key_system_synthetic", label: "ChatGPT pool", enabled: true, system: true, wireApis: ["responses"] };
-        localRuntime.keys.push(systemKey);
-      }
-      systemKey.enabled = true;
-      return systemKey;
     };
     const usageAccount = accounts[Math.max(0, Math.min(input.usageAccountIndex ?? 0, accounts.length - 1))];
     const activeModelCounts = usagePresent && input.usageActive !== false
@@ -413,9 +389,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.runtimeTarget = { kind: "remote", connected: true, origin: "https://relay.example.invalid", serverId: "server_synthetic", version: "1.1.0" };
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
-    remoteRuntime.keys = [];
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "keys", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "client_access", "client_key_budgets", "images"], supportedWireApis: ["responses", "chat_completions", "messages"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages"] };
     const configurationPreset = {
       format: "zenith-relay-configuration",
       schemaVersion: 2,
@@ -513,8 +488,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       textOutput: true,
       terminalOutput: "text",
     } : undefined;
-    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, localKeyId: key.id, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
-    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", localKeyId: key.id, candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
+    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
+    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const visibleOutputTokens = Math.max(0, (item.outputTokens ?? 0) - (item.reasoningTokens ?? 0));
@@ -584,8 +559,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "apply_remote_configuration_preset": remoteRuntime.gateway.maxRetryCandidates = 4; remoteRuntime.configurationRevision = "cfg_synthetic_applied"; return { previousRevision: "cfg_synthetic_current", revision: remoteRuntime.configurationRevision, changes: [{ path: "/routing/maxRetryCandidates", before: 3, after: 4 }] };
           case "get_local_usage": return structuredClone(localUsage);
           case "get_local_usage_page": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
-            const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const events = localUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!query.sourceOrAccountQuery || item.accountId?.includes(query.sourceOrAccountQuery) || item.sourceId.includes(query.sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0] ? Date.parse(events[0].createdAt) : 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
@@ -593,9 +568,9 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return { events: structuredClone(events), total: events.length, page: query.page ?? 1, pageSize: query.pageSize ?? 50, totalPages: events.length ? input.usageTotalPages ?? 1 : 0, totals, buckets, models: events.length ? [{ key: "gpt-5.4", totals }] : [], poolMembers: events.length ? [{ key: sourceUsage ? source.id : account.id, label: sourceUsage ? source.name : account.label, totals }] : [] };
           }
           case "get_remote_server_usage": {
-            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; localKeyQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
+            const query = (args.input ?? {}) as { page?: number; pageSize?: number; fromMs?: number; bucketMs?: number; success?: boolean; modelQuery?: string; sourceOrAccountQuery?: string; wireApi?: string; errorCategory?: string; requestIdQuery?: string };
             const sourceOrAccountQuery = query.sourceOrAccountQuery === account.id ? "a1b2c3d4e5f6" : query.sourceOrAccountQuery;
-            const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!sourceOrAccountQuery || item.candidateHint.includes(sourceOrAccountQuery)) && (!query.localKeyQuery || item.localKeyId.includes(query.localKeyQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
+            const events = remoteUsage.filter((item) => (query.success === undefined || item.success === query.success) && (!query.modelQuery || item.resolvedModel.includes(query.modelQuery)) && (!sourceOrAccountQuery || item.candidateHint.includes(sourceOrAccountQuery)) && (!query.wireApi || item.wireApi === query.wireApi) && (!query.errorCategory || item.errorCategory === query.errorCategory) && (!query.requestIdQuery || item.requestId.includes(query.requestIdQuery)));
             const totals = usageTotals(events);
             const createdAtMs = events[0]?.createdAtMs ?? 0;
             const bucketStart = query.bucketMs && query.fromMs != null ? query.fromMs + Math.floor((createdAtMs - query.fromMs) / query.bucketMs) * query.bucketMs : null;
@@ -716,8 +691,10 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             return structuredClone(localRuntime);
           }
           case "update_local_routing": {
-            const request = args.input as { maxRetryCandidates: number; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" };
+            const request = args.input as { maxRetryCandidates: number; cooldownAfterFailures: number; keepLastCandidateAvailable: boolean; routingStrategy: "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan"; subscriptionPlanOrder: string[]; defaultServiceTier: "standard" | "fast" };
             localRuntime.gateway.maxRetryCandidates = request.maxRetryCandidates;
+            localRuntime.gateway.cooldownAfterFailures = request.cooldownAfterFailures;
+            localRuntime.gateway.keepLastCandidateAvailable = request.keepLastCandidateAvailable;
             localRuntime.gateway.routingStrategy = request.routingStrategy;
             localRuntime.gateway.subscriptionPlanOrder = [...request.subscriptionPlanOrder];
             localRuntime.gateway.defaultServiceTier = request.defaultServiceTier;
@@ -911,41 +888,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           case "submit_codex_oauth_callback":
           case "cancel_codex_oauth": return null;
           case "complete_codex_oauth": return { account: { id: "account_synthetic" } };
-          case "create_local_gateway_key": {
-            const request = args.input as Record<string, unknown>;
-            const created = {
-              ...key,
-              ...request,
-              id: `key_local_${localRuntime.keys.length + 1}`,
-              enabled: true,
-              system: false,
-              createdAtMs: Date.now(),
-              lastUsedAtMs: null,
-            };
-            localRuntime.keys.push(created);
-            return { key: structuredClone(created), secret: "zlr_synthetic_local_key" };
-          }
-          case "update_local_gateway_key": {
-            const request = args.input as Record<string, unknown> & { keyId?: string };
-            const target = localRuntime.keys.find((item) => item.id === request.keyId);
-            if (target) Object.assign(target, request);
-            return structuredClone(localRuntime);
-          }
-          case "rotate_local_gateway_key": {
-            const target = localRuntime.keys.find((item) => item.id === String(args.keyId));
-            if (!target) throw new Error("local key not found");
-            return { key: structuredClone(target), secret: "zlr_synthetic_rotated_key" };
-          }
-          case "set_local_gateway_key_enabled": {
-            const target = localRuntime.keys.find((item) => item.id === String(args.keyId));
-            if (target) target.enabled = Boolean(args.enabled);
-            return structuredClone(localRuntime);
-          }
-          case "delete_local_gateway_key": {
-            localRuntime.keys = localRuntime.keys.filter((item) => item.id !== String(args.keyId));
-            return structuredClone(localRuntime);
-          }
-          case "start_local_gateway": ensureSystemKey(); localRuntime.gateway.running = true; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
+          case "start_local_gateway": localRuntime.gateway.running = true; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "stop_local_gateway": localRuntime.gateway.running = false; refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "restart_local_gateway": refreshGatewayModels(localRuntime); return structuredClone(localRuntime);
           case "update_local_gateway_port": {
@@ -991,7 +934,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             profileSnapshots = [snapshot, ...profileSnapshots];
             return structuredClone(snapshot);
           }
-          case "restore_codex_profile_snapshot": {
+          case "restore_codex_profile_snapshot":
+          case "restore_full_codex_profile_snapshot": {
             const safetyName = typeof args.safetyName === "string" ? args.safetyName.trim() : "";
             if (safetyName) {
               const snapshot = { id: `22222222-2222-4222-8222-${String(profileSnapshots.length + 1).padStart(12, "0")}`, name: safetyName, profileDir, createdAtMs: Date.now(), configAvailable: true, authAvailable: true };
@@ -1001,40 +945,24 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
           }
           case "delete_codex_profile_snapshot": profileSnapshots = profileSnapshots.filter((snapshot) => snapshot.id !== String(args.snapshotId)); return null;
           case "stop_managed_codex_profile": return true;
-          case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: ensureSystemKey().id, boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null, active: true } };
+          case "attach_codex_to_local_gateway": if (input.profileSwitchError) throw { code: "profile_restore_blocked", message: "Synthetic profile conflict" }; return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: systemCredentialId, boundOauthAccountId: args.boundOauthAccountId ? String(args.boundOauthAccountId) : null, active: true } };
           case "attach_codex_to_account":
           case "launch_codex_account": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "oauth_account", credentialId: String(args.accountId), boundOauthAccountId: null, active: true } };
           case "launch_codex_source": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: String(args.sourceId), boundOauthAccountId: null, active: true } };
           case "attach_codex_to_remote_gateway": return { binding: { profileDir: "C:\\Users\\Test\\.codex", credentialKind: "local_gateway", credentialId: "key_system", boundOauthAccountId: null, active: true } };
           case "get_relay_storage_info": return { dataPath: "C:\\Users\\Test\\AppData\\Local\\Zenith Relay\\data" };
           case "open_relay_folder": return null;
-          case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.keys = []; localRuntime.automations = []; localUsage = []; return null;
+          case "reset_local_pool_data": localRuntime.sources = []; localRuntime.accounts = []; localRuntime.automations = []; localUsage = []; return null;
           case "clear_local_usage": localUsage = []; return null;
           case "export_usage": return "C:\\Temp\\usage.json";
-          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.1.0", platform: "windows", mode: "local", schemaVersion: 10, gatewayRunning: true, sourceCount: 1, accountCount: 1, keyCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
+          case "preview_support_bundle": return { bundle: { generatedAt: new Date().toISOString(), appVersion: "1.1.0", platform: "windows", mode: "local", schemaVersion: 10, gatewayRunning: true, sourceCount: 1, accountCount: 1, automationCount: 1, usageCount: localUsage.length, warningCount: 0 }, excluded: ["secrets", "prompts", "responses", "raw_identities", "raw_headers"] };
           case "export_support_bundle": return "C:\\Temp\\support.json";
-          case "list_codex_account_bindings": if (input.recoveryLoadError) throw { code: "recovery_required" }; return populated && input.codexBindings !== false ? [{ profileDir, credentialKind: input.codexBindingKind ?? "local_gateway", credentialId: key.id, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
+          case "list_codex_account_bindings": if (input.recoveryLoadError) throw { code: "recovery_required" }; return populated && input.codexBindings !== false ? [{ profileDir, credentialKind: input.codexBindingKind ?? "local_gateway", credentialId: systemCredentialId, boundOauthAccountId: input.codexBoundOauthAccountId ?? null, active: input.codexBindingActive ?? true }] : [];
           case "connect_remote_server": return { target: { origin: remoteRuntime.runtimeTarget.origin, serverId: remoteRuntime.runtimeTarget.serverId, identityFingerprint: "synthetic-fingerprint", serverVersion: "1.1.0", protocolVersion: 2, allowInsecureHttp: false, connectedAtMs: Date.now() } };
           case "get_remote_linked_account_count": return localRuntime.accounts.filter((account) => account.remoteLocation?.serverId === "server-synthetic").length;
           case "disconnect_remote_server": return null;
           case "refresh_remote_server_capabilities": return { target: remoteRuntime.runtimeTarget };
           case "prepare_remote_server_deployment": return { directory: "C:\\Temp\\zenith-relay-deploy", publicBaseUrl: "https://relay.example.invalid", managementToken: "synthetic-management-token-000000", vaultKey: "c3ludGhldGljLXZhdWx0LWtleS0wMDAwMDAwMDA=", composeCommand: "docker compose up -d" };
-          case "create_remote_client_key": {
-            const request = args.input as { label: string; sourceIds: string[] | null; accountIds: string[] | null; allowedModels: string[]; excludedModels: string[]; modelPrefix: string | null; wireApis: Array<"responses" | "chat_completions" | "messages" | "images"> | null };
-            const created = { ...key, ...request, id: `key_remote_${remoteRuntime.keys.length + 1}`, enabled: true, system: false, usageTotals: usageTotals([]), createdAtMs: Date.now(), lastUsedAtMs: null };
-            remoteRuntime.keys = [...remoteRuntime.keys, created];
-            return { schemaVersion: 1, key: structuredClone(created), secret: "zrs_synthetic_remote_client_key_000000000000" };
-          }
-          case "update_remote_client_key": {
-            const target = remoteRuntime.keys.find((item) => item.id === args.keyId);
-            if (target) Object.assign(target, args.input);
-            return structuredClone(target);
-          }
-          case "rotate_remote_client_key": {
-            const target = remoteRuntime.keys.find((item) => item.id === args.keyId);
-            return { schemaVersion: 1, key: structuredClone(target), secret: "zrs_synthetic_rotated_client_key_0000000000" };
-          }
-          case "revoke_remote_client_key": remoteRuntime.keys = remoteRuntime.keys.filter((item) => item.id !== args.keyId); return null;
           case "execute_remote_server_action": return remoteAction(args);
           case "plugin:event|listen": {
             const eventId = nextEventListener++;
@@ -1156,8 +1084,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     function remoteAction(args: Record<string, unknown>) {
       const input = args.input as { action?: { type?: string; id?: string }; payload?: Record<string, unknown> };
       const type = input?.action?.type;
-      if (type === "rotate_key") return { key, secret: "zlr_synthetic_remote_rotated_key" };
-      if (type === "create_key") return { key, secret: "zlr_synthetic_remote_key" };
       if (type === "create_source") {
         const created = sourceFromPayload(input.payload ?? {}, `source_remote_created_${remoteRuntime.sources.length + 1}`);
         remoteRuntime.sources = [...remoteRuntime.sources, created];
@@ -1168,15 +1094,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (target) Object.assign(target, input.payload);
         refreshGatewayModels(remoteRuntime);
         return structuredClone(target ?? null);
-      }
-      if (type === "update_key") {
-        const target = remoteRuntime.keys.find((item) => item.id === input.action?.id);
-        if (target) Object.assign(target, input.payload);
-        return structuredClone(target ?? null);
-      }
-      if (type === "delete_key") {
-        remoteRuntime.keys = remoteRuntime.keys.filter((item) => item.id !== input.action?.id);
-        return null;
       }
       if (type === "preview_account_batch_import") return importSession("remote_import");
       if (type === "confirm_account_batch_import") return importConfirmation("remote_import", input.payload?.selectedItemIds as string[] ?? []);
@@ -1268,6 +1185,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       }
       if (type === "set_routing_policy") {
         remoteRuntime.gateway.maxRetryCandidates = Number(input.payload?.maxRetryCandidates);
+        remoteRuntime.gateway.cooldownAfterFailures = Number(input.payload?.cooldownAfterFailures);
+        remoteRuntime.gateway.keepLastCandidateAvailable = Boolean(input.payload?.keepLastCandidateAvailable);
         if (input.payload?.routingStrategy) remoteRuntime.gateway.routingStrategy = input.payload.routingStrategy as "adaptive" | "quota_highest" | "subscription_expiry" | "subscription_plan";
         if (input.payload?.subscriptionPlanOrder) remoteRuntime.gateway.subscriptionPlanOrder = [...input.payload.subscriptionPlanOrder as string[]];
         if (input.payload?.defaultServiceTier) remoteRuntime.gateway.defaultServiceTier = input.payload.defaultServiceTier as "standard" | "fast";

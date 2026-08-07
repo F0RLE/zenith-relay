@@ -3,13 +3,19 @@ import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, OperationalStatus, QuotaSnapshot, QuotaWindow } from "../api/types";
+import type { AccountSummary, CandidateRuntimeSnapshot, OperationalStatus, QuotaSnapshot, QuotaWindow } from "../api/types";
 
 export function operationalStatusTone(status: OperationalStatus): "ready" | "warning" | "error" | "disabled" {
   if (status === "rotation") return "ready";
   if (status === "quotaWait") return "warning";
   if (status === "unavailable") return "error";
   return "disabled";
+}
+
+export function transientCandidateTone(candidate: CandidateRuntimeSnapshot | undefined, nowMs: number, includeCooldown: boolean): "warning" | "info" | null {
+  if (candidate?.halfOpen) return "info";
+  if (includeCooldown && candidate?.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs) return "warning";
+  return null;
 }
 
 export function isCodexOauthAccountEligible(account: AccountSummary) {

@@ -7,7 +7,7 @@ use crate::local_pool::{
 };
 use chrono::Utc;
 use serde::Deserialize;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use tauri::State;
 use uuid::Uuid;
 use zenith_relay_core::{
@@ -239,9 +239,7 @@ pub async fn delete_local_source(
         .filter(|candidate| candidate.id != source_id)
         .cloned()
         .collect::<Vec<_>>();
-    let mut keys = old_keys.clone();
-    prune_key_source_scopes(&mut keys, &sources);
-    state.store()?.replace_records(sources, keys)?;
+    state.store()?.replace_records(sources, old_keys.clone())?;
     sync_records_or_rollback(&state, old_sources.clone(), old_keys.clone()).await?;
 
     if let Err(cleanup) = secret_store::delete(&source.secret_ref) {
@@ -504,25 +502,9 @@ fn default_weight() -> u32 {
     1
 }
 
-fn prune_key_source_scopes(
-    keys: &mut [crate::local_pool::models::LocalGatewayKeyRecord],
-    sources: &[ProviderSourceRecord],
-) {
-    let valid_ids = sources
-        .iter()
-        .map(|source| source.id.as_str())
-        .collect::<HashSet<_>>();
-    for key in keys {
-        if let Some(source_ids) = &mut key.source_ids {
-            source_ids.retain(|id| valid_ids.contains(id.as_str()));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::local_pool::models::LocalGatewayKeyRecord;
 
     fn source_record() -> ProviderSourceRecord {
         ProviderSourceRecord {
@@ -547,27 +529,6 @@ mod tests {
             last_test_status: None,
             last_error: None,
         }
-    }
-
-    #[test]
-    fn deleting_source_keeps_explicit_empty_scope_unavailable() {
-        let mut keys = [LocalGatewayKeyRecord {
-            id: "key_1".into(),
-            label: "Scoped".into(),
-            enabled: true,
-            system: false,
-            secret_ref: "key:key_1".into(),
-            source_ids: Some(vec!["source_1".into()]),
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
-            created_at: "2026-07-10T00:00:00Z".into(),
-            last_used_at: None,
-        }];
-        prune_key_source_scopes(&mut keys, &[]);
-        assert_eq!(keys[0].source_ids, Some(Vec::new()));
     }
 
     #[test]

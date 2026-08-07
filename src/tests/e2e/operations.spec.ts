@@ -1897,12 +1897,22 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await chooseOption(page, dialog, "Distribution strategy", "subscription_expiry");
   await expect(dialog).not.toContainText("Minimum image model");
   await expect(dialog).toContainText("Uses the nearest known expiry first, then accounts without a date. Quota and load break ties.");
+  const retryCandidates = dialog.getByLabel("Retry candidates");
+  const cooldownAfterFailures = dialog.getByLabel("Failures before cooldown");
+  await retryCandidates.fill("20");
+  await cooldownAfterFailures.fill("20");
+  await expect(retryCandidates).toHaveValue("8");
+  await expect(cooldownAfterFailures).toHaveValue("8");
+  await retryCandidates.fill("0");
+  await cooldownAfterFailures.fill("0");
+  await expect(retryCandidates).toHaveValue("1");
+  await expect(cooldownAfterFailures).toHaveValue("1");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
   await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 3, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 1, cooldownAfterFailures: 1, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
 });
 
 test("pool card grid preserves scheduler order at every width", async ({ page }) => {
@@ -1951,7 +1961,7 @@ test("subscription group routing saves, reorders, and restores the default order
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
   let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, defaultServiceTier: "standard", subscriptionPlanOrder: ["free", "team", "pro", "plus"] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["free", "team", "pro", "plus"] } });
 
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   dialog = page.getByRole("dialog", { name: "Distribution" });
@@ -1959,7 +1969,7 @@ test("subscription group routing saves, reorders, and restores the default order
   await expect(dialog.getByRole("button", { name: /^Distribution strategy:/ })).toHaveAttribute("data-value", "subscription_plan");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, defaultServiceTier: "standard", subscriptionPlanOrder: ["team", "pro", "plus", "free"] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_plan", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "standard", subscriptionPlanOrder: ["team", "pro", "plus", "free"] } });
 });
 
 test("remote pool saves distribution settings on the connected runtime", async ({ page }) => {
@@ -1979,7 +1989,7 @@ test("remote pool saves distribution settings on the connected runtime", async (
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args.input).toEqual({
     action: { type: "set_routing_policy" },
-    payload: { maxRetryCandidates: 3, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
+    payload: { maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, routingStrategy: "subscription_expiry", defaultServiceTier: "fast", subscriptionPlanOrder: [] },
   });
   expect(calls.some((call) => call.command === "sync_codex_default_service_tier")).toBe(false);
 });
@@ -2509,7 +2519,7 @@ test("Help opens the current mode guide and keeps quick setup explicit", async (
   await expect(page.getByRole("heading", { name: "If requests fail", level: 2 })).toBeVisible();
   await page.getByRole("tab", { name: "My server" }).click();
   await expect(page.getByRole("heading", { name: "My server", level: 1 })).toBeVisible();
-  await expect(page.getByText("Never use the management token as a client API key.", { exact: false })).toBeVisible();
+  await expect(page.getByText("Never use the management token as a profile credential.", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Repeat quick setup" }).click();
   await expect(page.getByRole("button", { name: "Get started" })).toBeVisible();
 });
@@ -2631,6 +2641,7 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   await expect(page.getByRole("row").filter({ hasText: "Original profile" })).toBeVisible();
   await page.getByLabel("Snapshot name").fill("Before migration");
   await page.getByLabel("Snapshot name").press("Enter");
+  const createdSnapshotId = "22222222-2222-4222-8222-000000000002";
   const created = page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) });
   await expect(created).toBeVisible();
   const snapshotRows = page.locator(".profile-snapshot-table tbody tr");
@@ -2639,22 +2650,42 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   const restoreDialog = page.getByRole("dialog", { name: "Restore snapshot" });
   const backupChoice = restoreDialog.getByRole("checkbox", { name: "Save the current profile first" });
-  await expect(restoreDialog).toContainText("The current ChatGPT profile will be replaced with this snapshot.");
+  await expect(restoreDialog).toContainText("MCP connections, plugins, and unrelated settings stay untouched.");
+  await expect(restoreDialog.getByRole("button", { name: "Restore full profile" })).toBeVisible();
   await expect(backupChoice).toBeChecked();
   await page.screenshot({ path: "output/playwright/profile-restore-dialog-1160x760.png" });
-  await restoreDialog.getByRole("button", { name: "Cancel" }).click();
+  await restoreDialog.getByRole("button", { name: "Restore full profile" }).click();
+  const fullRestoreDialog = page.getByRole("dialog", { name: "Restore full ChatGPT profile" });
+  await expect(fullRestoreDialog).toContainText('Restore the full ChatGPT profile from "Before migration"?');
+  await expect(fullRestoreDialog).toContainText("replaces config.toml and auth.json completely");
+  await fullRestoreDialog.getByRole("button", { name: "Restore full profile" }).click();
+  await expect(fullRestoreDialog).toHaveCount(0);
+  await expect(snapshotRows).toHaveCount(3);
   let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.filter((call) => call.command === "restore_codex_profile_snapshot")).toHaveLength(0);
+  const fullRestoreCalls = calls.filter((call) => call.command === "restore_full_codex_profile_snapshot");
+  expect(fullRestoreCalls).toHaveLength(1);
+  expect(fullRestoreCalls[0]?.args).toEqual({
+    snapshotId: createdSnapshotId,
+    safetyName: "Before restoring Before migration",
+  });
 
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   await expect(backupChoice).toBeChecked();
-  await restoreDialog.getByRole("button", { name: "Restore" }).click();
-  await expect(snapshotRows).toHaveCount(3);
+  await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
+  await expect(snapshotRows).toHaveCount(4);
+  calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  let restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
+  expect(restoreCalls).toHaveLength(1);
+  expect(restoreCalls[0]?.args).toEqual({ snapshotId: createdSnapshotId, safetyName: "Before restoring Before migration" });
 
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   await backupChoice.uncheck();
-  await restoreDialog.getByRole("button", { name: "Restore" }).click();
-  await expect(snapshotRows).toHaveCount(3);
+  await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
+  await expect(snapshotRows).toHaveCount(4);
+  calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
+  expect(restoreCalls).toHaveLength(2);
+  expect(restoreCalls[1]?.args).toEqual({ snapshotId: createdSnapshotId, safetyName: null });
 
   await page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) }).getByRole("button", { name: "Delete Before migration", exact: true }).click();
   await settleConfirmation(page);
@@ -2662,16 +2693,7 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
 
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "restore_codex_profile")).toBe(true);
-  const restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
-  expect(restoreCalls).toHaveLength(2);
-  expect(restoreCalls[0]?.args).toEqual({
-    snapshotId: expect.any(String),
-    safetyName: "Before restoring Before migration",
-  });
-  expect(restoreCalls[1]?.args).toEqual({
-    snapshotId: expect.any(String),
-    safetyName: null,
-  });
+  expect(calls.filter((call) => call.command === "restore_codex_profile_snapshot")).toHaveLength(2);
   expect(calls.filter((call) => call.command === "create_codex_profile_snapshot")).toHaveLength(1);
   expect(calls.findLast((call) => call.command === "open_relay_folder")?.args).toEqual({ folder: "profile_backups" });
 });
@@ -2851,7 +2873,7 @@ test("quota cards name provider windows and make remaining percentages explicit"
 });
 
 test("pool toggle changes state without switching ChatGPT", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false, poolKeyPresent: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Start pool", exact: true }).click();
@@ -2864,7 +2886,7 @@ test("pool toggle changes state without switching ChatGPT", async ({ page }) => 
   await expect(page.getByText("Endpoint stopped.")).toBeVisible();
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "stop_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
+  const workflow = calls.filter((call) => ["start_local_gateway", "stop_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["start_local_gateway", "stop_local_gateway"]);
 });
 
@@ -2892,7 +2914,7 @@ test("pool controls delegate an exhausted OAuth account to the backend", async (
 });
 
 test("switch ChatGPT uses the backend system key and relaunches ChatGPT without starting the gateway", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: false });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
@@ -2904,7 +2926,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   expect(feedbackBox!.y + feedbackBox!.height).toBeGreaterThan(page.viewportSize()!.height - 64);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  const workflow = calls.filter((call) => ["create_local_gateway_key", "start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
+  const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
   expect(workflow.map((call) => call.command)).toEqual(["attach_codex_to_local_gateway", "launch_managed_codex_profile"]);
   expect(workflow[0].args).toEqual({ boundOauthAccountId: null });
   expect(calls.some((call) => call.command === "create_codex_profile_snapshot")).toBe(false);
@@ -2913,7 +2935,7 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
 });
 
 test("profile switch errors remain readable and then dismiss automatically", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, profileSwitchError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
@@ -2925,7 +2947,7 @@ test("profile switch errors remain readable and then dismiss automatically", asy
 
 test("global errors expose sanitized details and a copy confirmation", async ({ page }) => {
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://127.0.0.1:1420" });
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, poolKeyPresent: true, profileSwitchError: true });
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, profileSwitchError: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
@@ -3316,7 +3338,7 @@ test("remote server-side usage filters and clear logs use managed commands", asy
   await expect(page.getByRole("button", { name: /^Error category:/ })).toBeVisible();
   await page.getByRole("textbox", { name: "Request ID" }).fill("req_synthetic_remote");
   await expect(page.getByText("req_synthetic_remote")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelQuery?: string; sourceOrAccountQuery?: string; requestIdQuery?: string; localKeyQuery?: string } } }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "get_remote_server_usage" && call.args.input?.modelQuery === "gpt-5.4" && call.args.input?.sourceOrAccountQuery === "a1b2c3d4e5f6" && call.args.input?.requestIdQuery === "req_synthetic_remote" && call.args.input?.localKeyQuery === undefined))).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelQuery?: string; sourceOrAccountQuery?: string; requestIdQuery?: string } } }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "get_remote_server_usage" && call.args.input?.modelQuery === "gpt-5.4" && call.args.input?.sourceOrAccountQuery === "a1b2c3d4e5f6" && call.args.input?.requestIdQuery === "req_synthetic_remote"))).toBe(true);
   await page.getByLabel("Actions").click();
   await page.getByRole("menuitem", { name: "Clear logs" }).click();
   await settleConfirmation(page);
@@ -3349,76 +3371,6 @@ test("remote ChatGPT setup stays behind the managed profile command", async ({ p
 
   await page.getByRole("button", { name: "Connect ChatGPT", exact: true }).click();
   await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.some((call) => call.command === "attach_codex_to_remote_gateway"))).toBe(true);
-});
-
-test("remote client keys expose a scoped one-time-secret lifecycle", async ({ page }) => {
-  await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "API & ChatGPT", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Client API keys" })).toBeVisible();
-  await expect(page.getByText("No client keys yet", { exact: true })).toBeVisible();
-
-  await page.getByRole("button", { name: "Create key" }).click();
-  let dialog = page.getByRole("dialog", { name: "New client key" });
-  await dialog.getByLabel("Name").fill("Phone");
-  await dialog.getByLabel("Spending alert (USD)").fill("5.25");
-  await dialog.getByRole("checkbox", { name: /Chat Completions/ }).uncheck();
-  await dialog.getByLabel("Allow all sources").uncheck();
-  await dialog.getByRole("checkbox", { name: "Example compatible API" }).check();
-  await dialog.getByRole("button", { name: "Selected only" }).click();
-  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
-  await dialog.getByRole("checkbox", { name: "gpt-5.4", exact: true }).check();
-  await dialog.getByRole("button", { name: "Save" }).click();
-
-  let secret = page.getByRole("dialog", { name: "Client key created" });
-  await expect(secret.getByLabel("API key")).toHaveValue("zrs_synthetic_remote_client_key_000000000000");
-  await expect(secret).toContainText("https://relay.example.invalid/v1");
-  await secret.getByRole("button", { name: "Done" }).click();
-  await expect(page.getByText("zrs_synthetic_remote_client_key_000000000000")).toHaveCount(0);
-
-  let row = page.locator(".client-key-row").filter({ hasText: "Phone" });
-  await expect(row).toContainText("$0.00 / $5.25");
-  await row.getByRole("button", { name: "Edit" }).click();
-  dialog = page.getByRole("dialog", { name: "Client key settings" });
-  await dialog.getByLabel("Name").fill("Phone updated");
-  await dialog.getByRole("button", { name: "Save" }).click();
-  row = page.locator(".client-key-row").filter({ hasText: "Phone updated" });
-
-  await row.locator(".relay-action-menu summary").click();
-  await page.getByRole("menuitem", { name: "Rotate key" }).click();
-  let confirmation = page.getByRole("dialog", { name: "Rotate client key" });
-  await confirmation.getByRole("button", { name: "Rotate key" }).click();
-  secret = page.getByRole("dialog", { name: "Client key created" });
-  await expect(secret.getByLabel("API key")).toHaveValue("zrs_synthetic_rotated_client_key_0000000000");
-  await secret.getByRole("button", { name: "Done" }).click();
-
-  await row.locator(".relay-action-menu summary").click();
-  await page.getByRole("menuitem", { name: "Disable" }).click();
-  await expect(row.getByRole("img", { name: "Disabled" })).toBeVisible();
-  await row.locator(".relay-action-menu summary").click();
-  await page.getByRole("menuitem", { name: "Delete" }).click();
-  confirmation = page.getByRole("dialog", { name: "Delete client key" });
-  await confirmation.getByRole("button", { name: "Delete" }).click();
-  await expect(row).toHaveCount(0);
-
-  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.find((call) => call.command === "create_remote_client_key")?.args.input).toEqual({
-    schemaVersion: 1,
-    label: "Phone",
-    sourceIds: ["source_synthetic"],
-    accountIds: null,
-    allowedModels: ["gpt-5.4"],
-    excludedModels: [],
-    modelPrefix: null,
-    wireApis: ["responses", "messages"],
-    softBudgetMicroUsd: 5_250_000,
-  });
-  expect(calls.map((call) => call.command)).toEqual(expect.arrayContaining([
-    "create_remote_client_key",
-    "update_remote_client_key",
-    "rotate_remote_client_key",
-    "revoke_remote_client_key",
-  ]));
 });
 
 test("remote capability omissions disable or hide unsupported operations", async ({ page }) => {

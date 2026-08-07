@@ -228,13 +228,17 @@ async fn five_xx_falls_back_with_isolated_credentials_and_cools_the_failed_sourc
         ],
     )
     .await;
-    let (gateway, events) = spawn_gateway(
+    let (gateway, events) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -323,6 +327,7 @@ async fn endpoint_wide_failure_skips_duplicate_source_credentials_without_coolin
             vec![local_key("key", LOCAL_KEY, None)],
             GatewayRuntimeOptions {
                 max_retry_candidates: 3,
+                cooldown_after_failures: 1,
                 ..GatewayRuntimeOptions::default()
             },
             Arc::new(move |event| captured_events.lock().unwrap().push(event)),
@@ -576,13 +581,17 @@ async fn mixed_transient_and_rate_limit_cooldowns_return_service_unavailable() {
         vec![status_reply(StatusCode::TOO_MANY_REQUESTS, "b", None)],
     )
     .await;
-    let (gateway, _) = spawn_gateway(
+    let (gateway, _) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -671,13 +680,17 @@ async fn overloaded_bad_request_falls_back_and_cools_only_the_model() {
         vec![response_reply("fallback-response", "fallback")],
     )
     .await;
-    let (gateway, events) = spawn_gateway(
+    let (gateway, events) = spawn_gateway_with_options(
         vec![
             source("source-a", &source_a, "source-a-key", &[MODEL], 10),
             source("source-b", &source_b, "source-b-key", &[MODEL], 0),
         ],
         vec![local_key("key", LOCAL_KEY, None)],
-        3,
+        GatewayRuntimeOptions {
+            max_retry_candidates: 3,
+            cooldown_after_failures: 1,
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 
@@ -734,6 +747,42 @@ async fn retry_budget_counts_execution_attempts_and_stops_before_third_source() 
     assert_eq!(state_b.requests.lock().unwrap().len(), 1);
     assert!(state_c.requests.lock().unwrap().is_empty());
     assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn exhausted_retry_preserves_a_safe_gateway_error_message() {
+    let (upstream, state) = spawn_upstream(
+        "gateway-key",
+        vec![Reply::Json {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: json!({
+                "error": {
+                    "code": "service_unavailable",
+                    "message": "no eligible source is available for this model"
+                }
+            }),
+            cache_control: "gateway",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let (gateway, _) = spawn_gateway(
+        vec![source("gateway", &upstream, "gateway-key", &[MODEL], 0)],
+        vec![local_key("key", LOCAL_KEY, None)],
+        1,
+    )
+    .await;
+
+    let response = request(&gateway, false).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "service_unavailable");
+    assert_eq!(
+        body["error"]["message"],
+        "no eligible source is available for this model"
+    );
+    assert!(!body.to_string().contains(&upstream.base_url));
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -931,12 +980,12 @@ async fn streaming_plan_entitlement_failure_falls_back_without_blocking_the_acco
 }
 
 #[tokio::test]
-async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() {
+async fn streaming_gateway_bad_request_is_terminal_and_does_not_spend_the_fallback() {
     let (source_a, state_a) = spawn_upstream(
         "a-key",
         vec![Reply::Stream {
             chunks: vec![StreamChunk::Data(
-                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_prompt\",\"message\":\"Invalid prompt\"}}}\n\n",
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"bad_request\",\"message\":\"Zenith AI request is invalid. Check the model, messages, tools, and parameters.\"}}}\n\n",
             )],
             cache_control: "rejected",
         }],
@@ -964,7 +1013,13 @@ async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response.text().await.unwrap();
     assert!(body.contains("invalid_request_error"), "body={body}");
-    assert!(body.contains("invalid_request"), "body={body}");
+    assert!(body.contains("bad_request"), "body={body}");
+    assert!(
+        body.contains(
+            "Zenith AI request is invalid. Check the model, messages, tools, and parameters.",
+        ),
+        "body={body}"
+    );
     assert_eq!(state_a.requests.lock().unwrap().len(), 1);
     assert!(state_b.requests.lock().unwrap().is_empty());
 
@@ -975,6 +1030,57 @@ async fn streaming_invalid_prompt_is_terminal_and_does_not_spend_the_fallback() 
         Some("upstream_invalid_request")
     );
     assert!(events[0].cooldown_scope.is_none());
+}
+
+#[tokio::test]
+async fn bridged_messages_stream_preserves_safe_gateway_error() {
+    let (upstream, state) = spawn_upstream(
+        "messages-key",
+        vec![Reply::Stream {
+            chunks: vec![
+                StreamChunk::Data(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_gateway_error\",\"usage\":{\"input_tokens\":1}}}\n\n",
+                ),
+                StreamChunk::Data(
+                    "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"code\":\"service_unavailable\",\"message\":\"Zenith AI service is temporarily unavailable. Please retry later.\"}}\n\n",
+                ),
+            ],
+            cache_control: "messages",
+        }],
+    )
+    .await;
+    let mut messages = source("messages", &upstream, "messages-key", &[MODEL], 0);
+    messages.protocol_bindings = vec![SourceProtocolBinding {
+        wire_api: WireApi::Responses,
+        adapter: SourceAdapter::ResponsesToMessages,
+        reasoning_mode: MessagesReasoningMode::Adaptive,
+        model_ids: vec![MODEL.to_string()],
+    }];
+    let (gateway, events) =
+        spawn_gateway(vec![messages], vec![local_key("key", LOCAL_KEY, None)], 3).await;
+
+    let response = request(&gateway, true).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.text().await.unwrap();
+    assert!(body.contains("response.created"), "body={body}");
+    assert!(body.contains("service_unavailable"), "body={body}");
+    assert!(
+        body.contains("Zenith AI service is temporarily unavailable. Please retry later."),
+        "body={body}"
+    );
+    assert!(
+        !body.contains("adapter_upstream_stream_invalid"),
+        "body={body}"
+    );
+    assert_eq!(state.requests.lock().unwrap().len(), 1);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert!(!events[0].success);
+    assert_eq!(
+        events[0].error_category.as_deref(),
+        Some("upstream_unavailable")
+    );
 }
 
 #[tokio::test]
@@ -1570,6 +1676,8 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             image_base_model: None,
             response_affinity_store: None,
             provider_storm_breaker: false,
+            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await;
@@ -1671,6 +1779,8 @@ async fn spawn_gateway(
             image_base_model: None,
             response_affinity_store: None,
             provider_storm_breaker: false,
+            cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
+            keep_last_candidate_available: zenith_relay_core::DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
         },
     )
     .await

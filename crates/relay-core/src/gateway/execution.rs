@@ -1,14 +1,14 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::errors::{
-    api_error, apply_attempt_failure_cooldown, apply_cooldown, apply_failure_cooldown_with_body,
-    apply_failure_cooldown_with_hint, apply_failure_state, cooldown_error,
-    failure_category_is_request_terminal, failure_category_requires_cooldown,
-    failure_requires_independent_source_endpoint, previous_response_not_found,
-    previous_response_requires_websocket, recoverable_response_affinity_miss,
-    responses_function_call_output_has_invalid_call_id,
+    api_error, apply_attempt_failure_cooldown, apply_cooldown_for_model,
+    apply_failure_cooldown_with_body, apply_failure_cooldown_with_hint, apply_failure_state,
+    cooldown_error, failure_category_is_request_terminal, failure_category_requires_cooldown,
+    failure_requires_independent_source_endpoint, preserved_upstream_error,
+    previous_response_not_found, previous_response_requires_websocket,
+    recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure,
-    TRANSIENT_COOLDOWN_MS,
+    retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure, CooldownContext,
+    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{
@@ -75,6 +75,7 @@ pub(super) async fn execute_account_endpoint(
     let mut function_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
+    let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
 
     while usize::from(attempt)
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
@@ -98,8 +99,12 @@ pub(super) async fn execute_account_endpoint(
         };
         tried.insert(selected.candidate_id.clone());
         let response_affinity_hit = selected.response_affinity_hit;
-        let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
-        else {
+        let Some(mut route) = runtime.executor_route(
+            &selected.candidate_id,
+            &resolved_model,
+            &key.scope,
+            &[WireApi::Responses],
+        ) else {
             continue;
         };
         if route.account_id.is_none() {
@@ -108,6 +113,10 @@ pub(super) async fn execute_account_endpoint(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
+        let cooldown_context = CooldownContext {
+            scope: &route.scope,
+            allowed_protocols: &route.allowed_protocols,
+        };
         let Some(upstream_url) = account_endpoint_url(route.upstream_url.clone(), endpoint) else {
             last_failure = Some(AttemptFailure::invalid_request());
             continue;
@@ -156,11 +165,13 @@ pub(super) async fn execute_account_endpoint(
             Ok(upstream) => upstream,
             Err(error) => {
                 let failure = AttemptFailure::authorized_request(error);
-                let state = apply_cooldown(
+                let state = apply_attempt_failure_cooldown(
                     &runtime,
                     &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
+                    &route.source_model,
+                    &failure,
+                    &HeaderMap::new(),
+                    &cooldown_context,
                     route.half_open_probe,
                 );
                 let mut event = usage_event(
@@ -188,11 +199,13 @@ pub(super) async fn execute_account_endpoint(
             Ok(bytes) => bytes,
             Err(_) => {
                 let failure = AttemptFailure::body();
-                let state = apply_cooldown(
+                let state = apply_cooldown_for_model(
                     &runtime,
                     &route.candidate_id,
                     "*",
+                    &route.source_model,
                     TRANSIENT_COOLDOWN_MS,
+                    &cooldown_context,
                     route.half_open_probe,
                 );
                 let mut event = usage_event(
@@ -233,6 +246,7 @@ pub(super) async fn execute_account_endpoint(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -275,6 +289,7 @@ pub(super) async fn execute_account_endpoint(
                         failure.category,
                         &response_headers,
                         Some(&bytes),
+                        &cooldown_context,
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
@@ -334,6 +349,11 @@ pub(super) async fn execute_account_endpoint(
                 reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
+    }
+    if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
+        preserved.status == failure.status && preserved.category == failure.category
+    }) {
+        return api_error(preserved.status, &preserved.message, &preserved.code);
     }
     api_error(failure.status, failure.message, failure.category)
 }
@@ -434,7 +454,7 @@ pub(super) async fn execute_client_request(
     ) else {
         return api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         );
     };
@@ -513,6 +533,8 @@ async fn execute_request(
     let mut function_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
+    let mut last_adapter_error: Option<AdapterError> = None;
+    let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
     let has_previous_response_id = wire_api == WireApi::Responses
         && request
             .get("previous_response_id")
@@ -563,17 +585,31 @@ async fn execute_request(
                     );
                 }
             }
+            if last_failure.is_none() {
+                if let Some(error) = last_adapter_error {
+                    return adapter_error_response(error);
+                }
+            }
             break;
         };
         tried.insert(selected.candidate_id.clone());
         let response_affinity_hit = selected.response_affinity_hit;
-        let Some(mut route) = runtime.executor_route(&selected.candidate_id, &resolved_model)
-        else {
+        let allowed_protocols = candidate_protocols(wire_api);
+        let Some(mut route) = runtime.executor_route(
+            &selected.candidate_id,
+            &resolved_model,
+            &key.scope,
+            allowed_protocols,
+        ) else {
             continue;
         };
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
+        let cooldown_context = CooldownContext {
+            scope: &route.scope,
+            allowed_protocols: &route.allowed_protocols,
+        };
         let source_model = route.source_model.clone();
         debug_assert_eq!(wire_api, route.wire_api);
         let account_route = route.account_id.is_some();
@@ -608,6 +644,10 @@ async fn execute_request(
             response_scope: &route.candidate_id,
         }) {
             Ok(request) => request,
+            Err(error) if error.is_route_incompatible() => {
+                last_adapter_error = Some(error);
+                continue;
+            }
             Err(error) => return adapter_error_response(error),
         };
         if account_route {
@@ -668,11 +708,13 @@ async fn execute_request(
             Ok(upstream) => upstream,
             Err(error) => {
                 let failure = AttemptFailure::authorized_request(error);
-                let state = apply_cooldown(
+                let state = apply_attempt_failure_cooldown(
                     &runtime,
                     &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
+                    &source_model,
+                    &failure,
+                    &HeaderMap::new(),
+                    &cooldown_context,
                     route.half_open_probe,
                 );
                 if failure_requires_independent_source_endpoint(failure.status, failure.category) {
@@ -730,6 +772,7 @@ async fn execute_request(
                         failure.category,
                         &response_headers,
                         None,
+                        &cooldown_context,
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
@@ -770,6 +813,7 @@ async fn execute_request(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             event.error_category = Some(failure.category.to_string());
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
@@ -837,6 +881,7 @@ async fn execute_request(
                         failure.category,
                         &response_headers,
                         Some(&bytes),
+                        &cooldown_context,
                         route.half_open_probe,
                     );
                     apply_failure_state(&mut event, state);
@@ -879,11 +924,13 @@ async fn execute_request(
                 Err(error) => {
                     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
                     let failure = AttemptFailure::body();
-                    let state = apply_cooldown(
+                    let state = apply_cooldown_for_model(
                         &runtime,
                         &route.candidate_id,
                         "*",
+                        &source_model,
                         TRANSIENT_COOLDOWN_MS,
+                        &cooldown_context,
                         route.half_open_probe,
                     );
                     if failure_requires_independent_source_endpoint(
@@ -926,6 +973,7 @@ async fn execute_request(
                                     &source_model,
                                     &failure,
                                     &response_headers,
+                                    &cooldown_context,
                                     route.half_open_probe,
                                 )
                             });
@@ -958,6 +1006,18 @@ async fn execute_request(
                         }
                         emit_usage(&runtime, event);
                         if failure_category_is_request_terminal(failure.category) {
+                            if let Some(preserved) =
+                                last_preserved_upstream_error.as_ref().filter(|preserved| {
+                                    preserved.status == failure.status
+                                        && preserved.category == failure.category
+                                })
+                            {
+                                return api_error(
+                                    preserved.status,
+                                    &preserved.message,
+                                    &preserved.code,
+                                );
+                            }
                             return api_error(failure.status, failure.message, failure.category);
                         }
                         last_failure = Some(failure);
@@ -1100,6 +1160,8 @@ async fn execute_request(
                 let completion_native_response_for_callback = completion_native_response.clone();
                 let completion_native_template = request.clone();
                 let completion_local_key = key.id.clone();
+                let completion_scope = route.scope.clone();
+                let completion_allowed_protocols = route.allowed_protocols.clone();
                 let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
                     lease.release();
                     let response_delivered = event.success
@@ -1169,6 +1231,10 @@ async fn execute_request(
                     {
                         let status = StatusCode::from_u16(event.http_status)
                             .unwrap_or(StatusCode::BAD_GATEWAY);
+                        let cooldown_context = CooldownContext {
+                            scope: &completion_scope,
+                            allowed_protocols: &completion_allowed_protocols,
+                        };
                         let state = apply_failure_cooldown_with_hint(
                             &completion_runtime,
                             &completion_source,
@@ -1177,6 +1243,7 @@ async fn execute_request(
                             category,
                             &completion_headers,
                             hint,
+                            &cooldown_context,
                             completion_half_open_probe,
                         );
                         apply_failure_state(event, state);
@@ -1215,7 +1282,9 @@ async fn execute_request(
                 );
                 return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
-            Err(failure) => {
+            Err(bootstrap_failure) => {
+                let failure = bootstrap_failure.failure;
+                last_preserved_upstream_error = bootstrap_failure.preserved;
                 let state = failure_category_requires_cooldown(failure.category).then(|| {
                     apply_attempt_failure_cooldown(
                         &runtime,
@@ -1223,6 +1292,7 @@ async fn execute_request(
                         &source_model,
                         &failure,
                         &response_headers,
+                        &cooldown_context,
                         route.half_open_probe,
                     )
                 });
@@ -1252,6 +1322,14 @@ async fn execute_request(
                 }
                 emit_usage(&runtime, event);
                 if failure_category_is_request_terminal(failure.category) {
+                    if let Some(preserved) =
+                        last_preserved_upstream_error.as_ref().filter(|preserved| {
+                            preserved.status == failure.status
+                                && preserved.category == failure.category
+                        })
+                    {
+                        return api_error(preserved.status, &preserved.message, &preserved.code);
+                    }
                     return api_error(failure.status, failure.message, failure.category);
                 }
                 last_failure = Some(failure);
@@ -1286,6 +1364,11 @@ async fn execute_request(
         }
     }
 
+    if last_failure.is_none() {
+        if let Some(error) = last_adapter_error {
+            return adapter_error_response(error);
+        }
+    }
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(
@@ -1302,6 +1385,11 @@ async fn execute_request(
                 reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
+    }
+    if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
+        preserved.status == failure.status && preserved.category == failure.category
+    }) {
+        return api_error(preserved.status, &preserved.message, &preserved.code);
     }
     api_error(failure.status, failure.message, failure.category)
 }

@@ -1,10 +1,11 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized, valid_local_host};
 use super::errors::{
-    api_error, api_error_type, apply_cooldown, apply_failure_cooldown_with_body,
-    apply_failure_cooldown_with_hint, apply_failure_state, canonical_upstream_status,
-    classify_upstream_error_value, cooldown_error, failure_requires_independent_source_endpoint,
-    rate_limit_body_hint_value, retryable_failure, upstream_failure_status,
-    upstream_status_from_value, AttemptFailure, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    api_error, api_error_type, apply_attempt_failure_cooldown, apply_cooldown_for_model,
+    apply_failure_cooldown_with_body, apply_failure_cooldown_with_hint, apply_failure_state,
+    apply_mandatory_cooldown, canonical_upstream_status, classify_upstream_error_value,
+    cooldown_error, failure_requires_independent_source_endpoint, rate_limit_body_hint_value,
+    retryable_failure, upstream_failure_status, upstream_status_from_value, AttemptFailure,
+    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::request_id;
@@ -193,7 +194,7 @@ async fn prepare_request(
     else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         ));
     };
@@ -448,11 +449,17 @@ async fn execute_prepared(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(mut route) = runtime.image_executor_route(&selected.candidate_id) else {
+        let Some(mut route) =
+            runtime.image_executor_route(&selected.candidate_id, &key.scope, IMAGE_PROTOCOLS)
+        else {
             continue;
         };
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        let cooldown_context = CooldownContext {
+            scope: &route.scope,
+            allowed_protocols: &route.allowed_protocols,
+        };
         let account_route = route.account_id.is_some();
         let upstream_url = if account_route {
             Some(route.upstream_url.clone())
@@ -511,11 +518,13 @@ async fn execute_prepared(
             Ok(upstream) => upstream,
             Err(error) => {
                 let failure = AttemptFailure::authorized_request(error);
-                let state = apply_cooldown(
+                let state = apply_attempt_failure_cooldown(
                     &runtime,
                     &route.candidate_id,
-                    "*",
-                    failure.cooldown_ms,
+                    IMAGE_API_MODEL,
+                    &failure,
+                    &HeaderMap::new(),
+                    &cooldown_context,
                     route.half_open_probe,
                 );
                 if failure_requires_independent_source_endpoint(failure.status, failure.category) {
@@ -547,11 +556,13 @@ async fn execute_prepared(
             Ok(bytes) => bytes,
             Err(_) => {
                 let failure = AttemptFailure::body();
-                let state = apply_cooldown(
+                let state = apply_cooldown_for_model(
                     &runtime,
                     &route.candidate_id,
                     "*",
+                    IMAGE_API_MODEL,
                     TRANSIENT_COOLDOWN_MS,
+                    &cooldown_context,
                     route.half_open_probe,
                 );
                 if failure_requires_independent_source_endpoint(failure.status, failure.category) {
@@ -579,11 +590,12 @@ async fn execute_prepared(
             let capability_failure = image_capability_unavailable(&bytes);
             if retryable_failure(status, failure.category, false) || capability_failure {
                 let state = if capability_failure {
-                    apply_cooldown(
+                    apply_mandatory_cooldown(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         TRANSIENT_COOLDOWN_MS,
+                        &cooldown_context,
                         route.half_open_probe,
                     )
                 } else {
@@ -595,6 +607,7 @@ async fn execute_prepared(
                         failure.category,
                         &response_headers,
                         Some(&bytes),
+                        &cooldown_context,
                         route.half_open_probe,
                     )
                 };
@@ -680,11 +693,12 @@ async fn execute_prepared(
             Ok(translated) => translated,
             Err(failure) if failure.retryable => {
                 let state = if failure.category == "image_generation_not_enabled" {
-                    apply_cooldown(
+                    apply_mandatory_cooldown(
                         &runtime,
                         &route.candidate_id,
                         IMAGE_API_MODEL,
                         TRANSIENT_COOLDOWN_MS,
+                        &cooldown_context,
                         route.half_open_probe,
                     )
                 } else {
@@ -696,6 +710,7 @@ async fn execute_prepared(
                         failure.category,
                         &response_headers,
                         failure.cooldown_hint,
+                        &cooldown_context,
                         route.half_open_probe,
                     )
                 };

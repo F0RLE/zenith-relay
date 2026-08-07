@@ -297,6 +297,34 @@
   accent-color: var(--relay-accent);
 }
 
+.snapshot-restore-scope,
+.snapshot-restore-full-warning {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--relay-border);
+  border-radius: 6px;
+  background: var(--relay-subtle);
+}
+
+.snapshot-restore-scope strong {
+  font-size: 12px;
+}
+
+.snapshot-restore-scope span,
+.snapshot-restore-full-warning p {
+  color: var(--relay-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.snapshot-restore-scope .relay-button,
+.snapshot-restore-full-warning .relay-button {
+  justify-self: start;
+  margin-top: 4px;
+}
+
 .profile-snapshot-table-wrap {
   margin: 0;
 }

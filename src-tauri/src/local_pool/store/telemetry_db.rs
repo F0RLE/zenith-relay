@@ -315,7 +315,6 @@ pub struct UsageLog {
     pub created_at: String,
     pub request_id: String,
     pub attempt: u16,
-    pub local_key_id: String,
     pub source_id: String,
     pub candidate_id: Option<String>,
     pub account_id: Option<String>,
@@ -1119,10 +1118,6 @@ fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
         values.push(value.clone());
         values.push(value);
     }
-    if let Some(value) = query.local_key_query.as_deref() {
-        clauses.push("local_key_id LIKE ? ESCAPE '\\'");
-        values.push(SqlValue::Text(like_pattern(value)));
-    }
     if let Some(value) = query.wire_api {
         match value {
             WireApi::ChatCompletions => {
@@ -1424,7 +1419,6 @@ fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageLog> {
         created_at: row.get(1)?,
         request_id: row.get(2)?,
         attempt: row.get(3)?,
-        local_key_id: row.get(4)?,
         source_id: row.get(5)?,
         candidate_id: row.get(6)?,
         account_id: row.get(7)?,

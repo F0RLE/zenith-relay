@@ -106,6 +106,13 @@ pub(super) struct UserProfileSnapshot {
     pub auth: Option<String>,
 }
 
+#[derive(Clone, Copy)]
+enum ManagedSnapshotScope {
+    LocalGateway,
+    OAuthAccount,
+    NoBinding,
+}
+
 pub(crate) struct BoundOAuthProfile<'a> {
     pub account_id: &'a str,
     pub tokens: &'a TokenSet,
@@ -699,10 +706,92 @@ pub(super) fn restore_user_profile_snapshot(
     backup_root: &Path,
     snapshot: &UserProfileSnapshot,
 ) -> Result<()> {
-    restore_user_profile_snapshot_with(codex_home, backup_root, snapshot, &OsSecretBackend)
+    restore_user_profile_snapshot_managed_with(codex_home, backup_root, snapshot, &OsSecretBackend)
 }
 
-fn restore_user_profile_snapshot_with(
+pub(super) fn restore_full_user_profile_snapshot(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot: &UserProfileSnapshot,
+) -> Result<()> {
+    restore_user_profile_snapshot_full_with(codex_home, backup_root, snapshot, &OsSecretBackend)
+}
+
+fn restore_user_profile_snapshot_managed_with(
+    codex_home: &Path,
+    backup_root: &Path,
+    snapshot: &UserProfileSnapshot,
+    secrets: &impl SecretBackend,
+) -> Result<()> {
+    let _profile_guard = lock_codex_profile();
+    fs::create_dir_all(codex_home).map_err(io_error)?;
+    ensure_single_profile_backup(codex_home, backup_root)?;
+    let profile_dir = canonical_profile_dir(codex_home)?;
+    let config_path = profile_dir.join(CONFIG_FILE);
+    let auth_path = profile_dir.join(AUTH_FILE);
+    let original_config = read_optional_bytes(&config_path)?;
+    let original_auth = read_optional_bytes(&auth_path)?;
+
+    let current_config = snapshot_text(&original_config, &config_path)?;
+    let document = parse_config(current_config.unwrap_or_default())?;
+    validate_config_shape(&document)?;
+    let scope = managed_snapshot_scope(
+        &profile_dir,
+        backup_root,
+        &document,
+        &original_auth,
+        &auth_path,
+    )?;
+    let target_config =
+        merge_managed_snapshot_config(current_config, snapshot.config.as_deref(), scope)?;
+    let target_auth = merge_managed_snapshot_auth(
+        snapshot_text(&original_auth, &auth_path)?,
+        snapshot.auth.as_deref(),
+    )?;
+    let config_changed = target_config.as_deref().map(str::as_bytes) != original_config.as_deref();
+    let auth_changed = target_auth.as_deref().map(str::as_bytes) != original_auth.as_deref();
+    let attempted_config = target_config
+        .as_deref()
+        .map(|content| content.as_bytes().to_vec());
+    let attempted_auth = target_auth
+        .as_deref()
+        .map(|content| content.as_bytes().to_vec());
+
+    if config_changed {
+        replace_with_snapshot(&config_path, &original_config, target_config.as_deref())?;
+    }
+    if auth_changed {
+        if let Err(error) =
+            replace_with_snapshot(&auth_path, &original_auth, target_auth.as_deref())
+        {
+            let rollback = if config_changed {
+                restore_snapshot_if_unchanged(&config_path, &attempted_config, &original_config)
+            } else {
+                Ok(())
+            };
+            return Err(with_rollback(error, rollback));
+        }
+    }
+    if let Err(error) = discard_managed_binding_locked(&profile_dir, backup_root, secrets) {
+        let auth_rollback = if auth_changed {
+            restore_snapshot_if_unchanged(&auth_path, &attempted_auth, &original_auth)
+        } else {
+            Ok(())
+        };
+        let config_rollback = if config_changed {
+            restore_snapshot_if_unchanged(&config_path, &attempted_config, &original_config)
+        } else {
+            Ok(())
+        };
+        return Err(with_rollback(
+            error,
+            merge_rollbacks(auth_rollback, config_rollback),
+        ));
+    }
+    Ok(())
+}
+
+fn restore_user_profile_snapshot_full_with(
     codex_home: &Path,
     backup_root: &Path,
     snapshot: &UserProfileSnapshot,
@@ -1357,7 +1446,7 @@ fn attach_local_locked(
     if key_id.is_empty() || local_key.is_empty() || base_url.is_empty() {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "profile key ID, base URL, and local key are required",
+            "profile credential ID, base URL, and credential are required",
         ));
     }
     fs::create_dir_all(codex_home).map_err(io_error)?;
@@ -2412,6 +2501,161 @@ fn restore_config(
     remove_managed_provider(document);
     restore_root_string(document, "model_provider", previous_model_provider);
     restore_root_string(document, "model_catalog_json", previous_model_catalog);
+}
+
+const MANAGED_SNAPSHOT_AUTH_KEYS: &[&str] =
+    &["OPENAI_API_KEY", "auth_mode", "last_refresh", "tokens"];
+
+fn managed_snapshot_scope(
+    profile_dir: &Path,
+    backup_root: &Path,
+    document: &DocumentMut,
+    auth: &Option<Vec<u8>>,
+    auth_path: &Path,
+) -> Result<ManagedSnapshotScope> {
+    if let Some(path) = account_backup_for_profile(profile_dir, backup_root)? {
+        let bytes = read_optional_bytes(&path)?;
+        let backup = parse_account_backup_snapshot(&bytes, &path)?.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::RecoveryRequired,
+                "ChatGPT account profile backup disappeared during snapshot restore",
+            )
+        })?;
+        if backup.profile_dir != profile_dir.to_string_lossy()
+            || !account_managed_config_matches(document)
+            || !account_auth_matches_snapshot(auth, auth_path, &backup.managed_access_hash)?
+        {
+            return Err(profile_restore_blocked());
+        }
+        return Ok(ManagedSnapshotScope::OAuthAccount);
+    }
+
+    let Some(backup) = local_backup(profile_dir, backup_root)? else {
+        return Ok(ManagedSnapshotScope::NoBinding);
+    };
+    if !managed_config_matches(document, &backup)
+        || !managed_auth_matches_snapshot(auth, auth_path, &backup)?
+    {
+        return Err(profile_restore_blocked());
+    }
+    Ok(ManagedSnapshotScope::LocalGateway)
+}
+
+fn merge_managed_snapshot_config(
+    current: Option<&str>,
+    snapshot: Option<&str>,
+    scope: ManagedSnapshotScope,
+) -> Result<Option<String>> {
+    let mut document = parse_config(current.unwrap_or_default())?;
+    validate_config_shape(&document)?;
+    let snapshot = snapshot.map(parse_config).transpose()?;
+    if let Some(snapshot) = snapshot.as_ref() {
+        validate_config_shape(snapshot)?;
+    }
+    let before = document.to_string();
+
+    let model_provider = snapshot.as_ref().and_then(root_model_provider);
+    if model_provider.as_deref() == Some(PROVIDER_ID) {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "a Relay-managed snapshot cannot restore another Relay binding",
+        ));
+    }
+    restore_root_string(&mut document, "model_provider", model_provider.as_deref());
+    let snapshot_value = |key| {
+        snapshot
+            .as_ref()
+            .map(|snapshot| optional_root_string(snapshot, key))
+            .transpose()
+            .map(Option::flatten)
+    };
+    match scope {
+        ManagedSnapshotScope::LocalGateway => {
+            let catalog = snapshot_value("model_catalog_json")?;
+            restore_root_string(&mut document, "model_catalog_json", catalog.as_deref());
+        }
+        ManagedSnapshotScope::OAuthAccount => {
+            let base_url = snapshot_value("openai_base_url")?;
+            restore_root_string(&mut document, "openai_base_url", base_url.as_deref());
+        }
+        ManagedSnapshotScope::NoBinding => {}
+    }
+    // Snapshot recovery always detaches Relay. Re-creating its provider here
+    // would leave Codex pointed at a credential whose backup was discarded.
+    remove_managed_provider(&mut document);
+
+    let restored = document.to_string();
+    if restored == before {
+        return Ok(current.map(ToOwned::to_owned));
+    }
+    if restored.trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(restored))
+}
+
+fn optional_root_string(document: &DocumentMut, key: &str) -> Result<Option<String>> {
+    let Some(item) = document.get(key) else {
+        return Ok(None);
+    };
+    item.as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("ChatGPT {key} must be a string"),
+            )
+        })
+        .map(Some)
+}
+
+fn merge_managed_snapshot_auth(
+    current: Option<&str>,
+    snapshot: Option<&str>,
+) -> Result<Option<String>> {
+    let snapshot = snapshot
+        .map(parse_profile_auth)
+        .transpose()?
+        .unwrap_or_default();
+    let mut current_value = match current {
+        Some(content) => parse_profile_auth(content)?,
+        None => serde_json::Map::new(),
+    };
+    let before = current_value.clone();
+    for key in MANAGED_SNAPSHOT_AUTH_KEYS {
+        match snapshot.get(*key) {
+            Some(value) => {
+                current_value.insert((*key).to_string(), value.clone());
+            }
+            None => {
+                current_value.remove(*key);
+            }
+        }
+    }
+    if current_value == before {
+        return Ok(current.map(ToOwned::to_owned));
+    }
+    if current_value.is_empty() {
+        return Ok(None);
+    }
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(current_value))
+        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))?;
+    Ok(Some(format!("{content}\n")))
+}
+
+fn parse_profile_auth(content: &str) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let value = serde_json::from_str::<serde_json::Value>(content).map_err(|error| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!("ChatGPT auth is not valid JSON: {error}"),
+        )
+    })?;
+    value.as_object().cloned().ok_or_else(|| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            "ChatGPT auth must contain a JSON object",
+        )
+    })
 }
 
 fn restore_root_string(document: &mut DocumentMut, key: &str, previous: Option<&str>) {
@@ -3773,7 +4017,7 @@ mod tests {
         assert_eq!(snapshot.auth.as_deref(), Some(original_auth));
         assert!(!snapshot.config.as_deref().unwrap().contains(PROVIDER_ID));
 
-        restore_user_profile_snapshot_with(&home, &backups, &snapshot, &secrets).unwrap();
+        restore_user_profile_snapshot_full_with(&home, &backups, &snapshot, &secrets).unwrap();
         assert_eq!(
             fs::read_to_string(home.join(CONFIG_FILE)).unwrap(),
             original_config
@@ -3784,6 +4028,182 @@ mod tests {
         );
         assert_eq!(profile_backup_count(&backups), 0);
         assert!(secrets.load(BACKUP_SECRET_REF).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_restore_preserves_unmanaged_profile_data() {
+        let (root, home, backups) = profile_dirs("managed-snapshot-merge");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"custom\"\nmodel_catalog_json = \"before.json\"\nopenai_base_url = \"https://old.example/v1\"\n[mcp_servers.context7]\ncommand = \"old\"\n[plugins.example]\nenabled = true\n[features]\nexperimental = false\n[model_providers.external]\nbase_url = \"https://external.example/v1\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"OPENAI_API_KEY\":\"original-key\",\"last_refresh\":\"old\",\"tokens\":{\"access_token\":\"original\"},\"custom\":{\"keep\":true}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+
+        let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
+        let mut current =
+            parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        current["mcp_servers"]["context7"]["command"] = value("new");
+        current["plugins"]["example"]["enabled"] = value(false);
+        current["features"]["experimental"] = value(true);
+        current["openai_base_url"] = value("https://changed-openai.example/v1");
+        current["model_providers"]["external"]["base_url"] = value("https://changed.example/v1");
+        fs::write(home.join(CONFIG_FILE), current.to_string()).unwrap();
+        let mut current_auth: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        current_auth["custom"] = json!({"keep": "current"});
+        fs::write(
+            home.join(AUTH_FILE),
+            format!("{}\n", serde_json::to_string_pretty(&current_auth).unwrap()),
+        )
+        .unwrap();
+
+        restore_user_profile_snapshot_managed_with(&home, &backups, &snapshot, &secrets).unwrap();
+
+        let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(root_model_provider(&restored).as_deref(), Some("custom"));
+        assert_eq!(
+            root_model_catalog_json(&restored).as_deref(),
+            Some("before.json")
+        );
+        assert_eq!(
+            restored["openai_base_url"].as_str(),
+            Some("https://changed-openai.example/v1")
+        );
+        assert_eq!(
+            restored["mcp_servers"]["context7"]["command"].as_str(),
+            Some("new")
+        );
+        assert_eq!(
+            restored["plugins"]["example"]["enabled"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(restored["features"]["experimental"].as_bool(), Some(true));
+        assert_eq!(
+            restored["model_providers"]["external"]["base_url"].as_str(),
+            Some("https://changed.example/v1")
+        );
+        assert!(restored
+            .get("model_providers")
+            .and_then(Item::as_table)
+            .is_none_or(|providers| !providers.contains_key(PROVIDER_ID)));
+
+        let restored_auth: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        assert_eq!(restored_auth["OPENAI_API_KEY"], "original-key");
+        assert_eq!(restored_auth["last_refresh"], "old");
+        assert_eq!(restored_auth["tokens"]["access_token"], "original");
+        assert_eq!(restored_auth["custom"]["keep"], "current");
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_restore_accepts_a_detached_profile() {
+        let (root, home, backups) = profile_dirs("managed-snapshot-detached");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"custom\"\nmodel_catalog_json = \"before.json\"\n[mcp_servers.context7]\ncommand = \"original\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"original-key\",\"custom\":{\"keep\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(profile_backup_count(&backups), 0);
+
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"changed\"\nmodel_catalog_json = \"current.json\"\n[mcp_servers.context7]\ncommand = \"current\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"current-key\",\"custom\":{\"keep\":\"current\"}}",
+        )
+        .unwrap();
+
+        restore_user_profile_snapshot_managed_with(&home, &backups, &snapshot, &secrets).unwrap();
+
+        let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(root_model_provider(&restored).as_deref(), Some("custom"));
+        assert_eq!(
+            root_model_catalog_json(&restored).as_deref(),
+            Some("current.json")
+        );
+        assert_eq!(
+            restored["mcp_servers"]["context7"]["command"].as_str(),
+            Some("current")
+        );
+        let restored_auth: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        assert_eq!(restored_auth["OPENAI_API_KEY"], "original-key");
+        assert_eq!(restored_auth["custom"]["keep"], "current");
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_restore_blocks_a_fresh_login() {
+        let (root, home, backups) = profile_dirs("managed-snapshot-fresh-login");
+        fs::write(home.join(CONFIG_FILE), "model_provider = \"custom\"\n").unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"tokens\":{\"access_token\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"chatgpt\",\"tokens\":{\"access_token\":\"fresh\"}}",
+        )
+        .unwrap();
+        let config_before = fs::read(home.join(CONFIG_FILE)).unwrap();
+        let auth_before = fs::read(home.join(AUTH_FILE)).unwrap();
+
+        let error =
+            restore_user_profile_snapshot_managed_with(&home, &backups, &snapshot, &secrets)
+                .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+        assert_eq!(fs::read(home.join(CONFIG_FILE)).unwrap(), config_before);
+        assert_eq!(fs::read(home.join(AUTH_FILE)).unwrap(), auth_before);
+        assert!(backup_path(&backups).exists());
         fs::remove_dir_all(root).unwrap();
     }
 

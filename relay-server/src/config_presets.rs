@@ -128,6 +128,7 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
         normalize_image_base_model(preset.settings.routing.image_base_model)
             .map_err(|error| PresetError::Invalid(error.to_string()))?;
     if !(1..=8).contains(&preset.settings.routing.max_retry_candidates)
+        || !(1..=8).contains(&preset.settings.routing.cooldown_after_failures)
         || !(10..=20).contains(&preset.settings.quota.request_timeout_seconds)
     {
         return Err(PresetError::Invalid(
@@ -518,6 +519,8 @@ mod tests {
             accounts: Vec::new(),
             routing: PresetRoutingPolicy {
                 max_retry_candidates: 3,
+                cooldown_after_failures: 3,
+                keep_last_candidate_available: true,
                 routing_strategy: Default::default(),
                 subscription_plan_order: Vec::new(),
                 default_service_tier: Default::default(),
@@ -543,5 +546,20 @@ mod tests {
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, "/routing/maxRetryCandidates");
+    }
+
+    #[test]
+    fn preset_rejects_an_invalid_cooldown_threshold() {
+        let mut preset = zenith_relay_core::protocol::ConfigurationPreset {
+            format: zenith_relay_core::protocol::CONFIGURATION_PRESET_FORMAT.to_string(),
+            schema_version: zenith_relay_core::protocol::CONFIGURATION_PRESET_SCHEMA_VERSION,
+            settings: settings(),
+        };
+        preset.settings.routing.cooldown_after_failures = 0;
+
+        assert!(matches!(
+            super::normalize_preset(preset),
+            Err(super::PresetError::Invalid(_))
+        ));
     }
 }

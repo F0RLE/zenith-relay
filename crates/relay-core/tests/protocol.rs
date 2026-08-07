@@ -31,13 +31,11 @@ fn protocol_overlap_and_missing_optional_capabilities_remain_compatible() {
     .unwrap();
     assert_eq!(negotiated.version, CURRENT_PROTOCOL_VERSION);
 
-    current.features.remove(Feature::ClientKeyBudgets.as_str());
     current
         .features
         .remove(Feature::ProfileKeyRotation.as_str());
     assert!(negotiate(ClientProtocolRange::default(), &current).is_ok());
-    assert!(!current.supports(Feature::ClientKeyBudgets));
-    assert!(current.supports(Feature::ClientAccess));
+    assert!(!current.supports(Feature::ProfileKeyRotation));
 }
 
 #[test]

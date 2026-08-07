@@ -357,13 +357,6 @@ pub async fn delete_account(
         .ok_or_else(|| {
             ManagementError::not_found("account_secret_missing", "account secret missing")
         })?;
-    let old_keys = state.store.keys().map_err(store_error)?;
-    for mut key in old_keys.clone() {
-        if let Some(ids) = &mut key.account_ids {
-            ids.retain(|value| value != &id);
-        }
-        state.store.save_key(&key).map_err(store_error)?;
-    }
     state.store.delete_account(&id).map_err(store_error)?;
     state
         .vault
@@ -376,9 +369,6 @@ pub async fn delete_account(
     if let Err(error) = state.rebuild_runtime().await {
         let _ = state.vault.save(&record.secret_ref, &secret);
         let _ = state.store.save_account(&record);
-        for key in old_keys {
-            let _ = state.store.save_key(&key);
-        }
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }

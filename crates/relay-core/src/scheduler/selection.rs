@@ -39,6 +39,17 @@ pub struct SelectionRequest<'a> {
     pub now_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct CooldownRequest<'a> {
+    pub(crate) scope: &'a str,
+    pub(crate) policy_model: &'a str,
+    pub(crate) allowed_protocols: &'a [WireApi],
+    pub(crate) request_scope: &'a CandidateScope,
+    pub(crate) retry_at_ms: u64,
+    pub(crate) reason: CooldownReason,
+    pub(crate) now_ms: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Selection {
     pub candidate_id: String,
@@ -123,6 +134,8 @@ pub struct PoolScheduler {
     capability_blocks: BTreeSet<(String, String)>,
     provider_storm_breakers: BTreeMap<(String, String), StormBreaker>,
     provider_storm_breaker_enabled: bool,
+    cooldown_after_failures: u32,
+    keep_last_candidate_available: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -166,7 +179,20 @@ impl PoolScheduler {
             capability_blocks: BTreeSet::new(),
             provider_storm_breakers: BTreeMap::new(),
             provider_storm_breaker_enabled: false,
+            // Direct scheduler users historically applied cooldowns
+            // immediately. GatewayRuntime installs the user-facing policy.
+            cooldown_after_failures: 1,
+            keep_last_candidate_available: false,
         }
+    }
+
+    pub(crate) fn set_cooldown_policy(
+        &mut self,
+        cooldown_after_failures: u8,
+        keep_last_candidate_available: bool,
+    ) {
+        self.cooldown_after_failures = u32::from(cooldown_after_failures.max(1));
+        self.keep_last_candidate_available = keep_last_candidate_available;
     }
 
     pub fn set_provider_storm_breaker_enabled(&mut self, enabled: bool) {
@@ -778,11 +804,10 @@ impl PoolScheduler {
             retry_at = Some(retry_at.map_or(candidate_retry_at, |current| {
                 current.min(candidate_retry_at)
             }));
-            if self.cooldown_reason_for(candidate, request.model, request.now_ms)
-                == CooldownReason::Transient
-            {
-                reason = CooldownReason::Transient;
-            }
+            reason = Self::aggregate_cooldown_reason(
+                reason,
+                self.cooldown_reason_for(candidate, request.model, request.now_ms),
+            );
         }
         retry_at.map(|retry_at| (retry_at, reason))
     }
@@ -793,27 +818,35 @@ impl PoolScheduler {
         model: &str,
         now_ms: u64,
     ) -> CooldownReason {
-        let mut found = false;
+        let mut reason = None;
         for (candidate_model, retry_at) in &candidate.cooldowns {
             if *retry_at <= now_ms
                 || (candidate_model.as_str() != "*" && !candidate_model.eq_ignore_ascii_case(model))
             {
                 continue;
             }
-            found = true;
-            let reason = self
+            let candidate_reason = self
                 .cooldown_reasons
                 .get(&(candidate.id.clone(), candidate_model.clone()))
                 .copied()
                 .unwrap_or(CooldownReason::Transient);
-            if reason == CooldownReason::Transient {
-                return reason;
-            }
+            reason = Some(Self::aggregate_cooldown_reason(
+                reason.unwrap_or(CooldownReason::RateLimit),
+                candidate_reason,
+            ));
         }
-        if found {
-            CooldownReason::RateLimit
-        } else {
-            CooldownReason::Transient
+        reason.unwrap_or(CooldownReason::Transient)
+    }
+
+    fn aggregate_cooldown_reason(current: CooldownReason, next: CooldownReason) -> CooldownReason {
+        match (current, next) {
+            (CooldownReason::Mandatory, _) | (_, CooldownReason::Mandatory) => {
+                CooldownReason::Mandatory
+            }
+            (CooldownReason::Transient, _) | (_, CooldownReason::Transient) => {
+                CooldownReason::Transient
+            }
+            _ => CooldownReason::RateLimit,
         }
     }
 
@@ -1056,30 +1089,81 @@ impl PoolScheduler {
         retry_at_ms: u64,
         reason: CooldownReason,
     ) -> bool {
-        let (scope, should_store_reason) = {
+        self.set_cooldown_with_reason_inner(
+            candidate_id,
+            CooldownRequest {
+                scope: model,
+                policy_model: model,
+                allowed_protocols: &[],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms,
+                reason,
+                now_ms: 0,
+            },
+            false,
+        )
+    }
+
+    pub(crate) fn set_cooldown_with_reason_for_model_at(
+        &mut self,
+        candidate_id: &str,
+        request: CooldownRequest<'_>,
+    ) -> bool {
+        self.set_cooldown_with_reason_inner(candidate_id, request, true)
+    }
+
+    fn set_cooldown_with_reason_inner(
+        &mut self,
+        candidate_id: &str,
+        request: CooldownRequest<'_>,
+        enforce_policy: bool,
+    ) -> bool {
+        if enforce_policy
+            && request.reason == CooldownReason::Transient
+            && !self.transient_cooldown_allowed(
+                candidate_id,
+                request.policy_model,
+                request.allowed_protocols,
+                request.request_scope,
+                request.now_ms,
+            )
+        {
+            return false;
+        }
+        let scope = if request.scope == "*" {
+            "*".to_string()
+        } else {
+            request.scope.to_ascii_lowercase()
+        };
+        let previous = self
+            .candidates
+            .get(candidate_id)
+            .and_then(|candidate| candidate.cooldowns.get(&scope).copied());
+        let previous_reason = self
+            .cooldown_reasons
+            .get(&(candidate_id.to_string(), scope.clone()))
+            .copied();
+        let should_store_reason = previous.is_none_or(|current| {
+            request.retry_at_ms > current
+                || (request.retry_at_ms == current
+                    && request.reason == CooldownReason::RateLimit
+                    && previous_reason != Some(CooldownReason::Mandatory))
+                || (request.reason == CooldownReason::Mandatory
+                    && previous_reason != Some(CooldownReason::Mandatory))
+        });
+        {
             let Some(candidate) = self.candidates.get_mut(candidate_id) else {
                 return false;
             };
-            let scope = if model == "*" {
-                "*".to_string()
-            } else {
-                model.to_ascii_lowercase()
-            };
-            let previous = candidate.cooldowns.get(&scope).copied();
             candidate
                 .cooldowns
                 .entry(scope.clone())
-                .and_modify(|current| *current = (*current).max(retry_at_ms))
-                .or_insert(retry_at_ms);
-            let should_store_reason = previous.is_none_or(|current| {
-                retry_at_ms > current
-                    || (retry_at_ms == current && reason == CooldownReason::RateLimit)
-            });
-            (scope, should_store_reason)
-        };
+                .and_modify(|current| *current = (*current).max(request.retry_at_ms))
+                .or_insert(request.retry_at_ms);
+        }
         if should_store_reason {
             self.cooldown_reasons
-                .insert((candidate_id.to_string(), scope.clone()), reason);
+                .insert((candidate_id.to_string(), scope.clone()), request.reason);
         }
         if scope == "*" {
             self.half_open
@@ -1088,6 +1172,52 @@ impl PoolScheduler {
             self.half_open.remove(&(candidate_id.to_string(), scope));
         }
         true
+    }
+
+    fn transient_cooldown_allowed(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> bool {
+        let Some(candidate) = self.candidates.get(candidate_id) else {
+            return false;
+        };
+        if candidate.consecutive_failures < self.cooldown_after_failures {
+            return false;
+        }
+        if !self.keep_last_candidate_available {
+            return true;
+        }
+        !self.is_last_applicable_candidate(
+            candidate_id,
+            model,
+            allowed_protocols,
+            request_scope,
+            now_ms,
+        )
+    }
+
+    fn is_last_applicable_candidate(
+        &self,
+        candidate_id: &str,
+        model: &str,
+        allowed_protocols: &[WireApi],
+        request_scope: &CandidateScope,
+        now_ms: u64,
+    ) -> bool {
+        if !self.candidates.contains_key(candidate_id) {
+            return false;
+        }
+        self.candidates
+            .values()
+            .filter(|candidate| {
+                self.is_eligible(candidate, model, allowed_protocols, request_scope, now_ms)
+            })
+            .count()
+            <= 1
     }
 
     pub fn clear_cooldown(&mut self, candidate_id: &str, model: &str) -> bool {
@@ -2429,6 +2559,209 @@ mod tests {
         );
         assert!(scheduler.clear_cooldown("second", "gpt-5"));
         assert_eq!(scheduler.all_applicable_cooldown(request()), None);
+    }
+
+    #[test]
+    fn mandatory_cooldown_dominates_aggregate_reason() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.upsert(candidate("rate-limited"));
+        scheduler.upsert(candidate("mandatory"));
+        assert!(scheduler.set_cooldown_with_reason(
+            "rate-limited",
+            "gpt-5",
+            20_000,
+            CooldownReason::RateLimit,
+        ));
+        assert!(scheduler.set_cooldown_with_reason(
+            "mandatory",
+            "gpt-5",
+            10_000,
+            CooldownReason::Mandatory,
+        ));
+
+        let scope = CandidateScope::default();
+        let allowed_protocols = [WireApi::Responses];
+        assert_eq!(
+            scheduler.all_applicable_cooldown(SelectionRequest {
+                model: "gpt-5",
+                allowed_protocols: &allowed_protocols,
+                scope: &scope,
+                tried: &HashSet::new(),
+                response_affinity_key: None,
+                prompt_affinity_key: None,
+                now_ms: 100,
+            }),
+            Some((10_000, CooldownReason::Mandatory))
+        );
+    }
+
+    #[test]
+    fn transient_cooldown_waits_for_the_configured_failure_threshold() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(3, false);
+        scheduler.upsert(candidate("candidate"));
+
+        assert_eq!(scheduler.record_failure("candidate"), Some(1));
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "candidate",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert_eq!(scheduler.record_failure("candidate"), Some(2));
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "candidate",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert!(scheduler
+            .candidate("candidate")
+            .unwrap()
+            .cooldowns
+            .is_empty());
+    }
+
+    #[test]
+    fn transient_cooldown_is_applied_at_the_threshold_when_another_candidate_exists() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(3, true);
+        scheduler.upsert(candidate("first"));
+        scheduler.upsert(candidate("second"));
+        for _ in 0..3 {
+            assert!(scheduler.record_failure("first").is_some());
+        }
+
+        assert!(scheduler.set_cooldown_with_reason_for_model_at(
+            "first",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert_eq!(
+            scheduler.candidate("first").unwrap().cooldowns.get("gpt-5"),
+            Some(&10_000)
+        );
+    }
+
+    #[test]
+    fn last_candidate_stays_available_by_default() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(3, true);
+        scheduler.upsert(candidate("only"));
+        for _ in 0..3 {
+            assert!(scheduler.record_failure("only").is_some());
+        }
+
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "only",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert!(scheduler.candidate("only").unwrap().cooldowns.is_empty());
+    }
+
+    #[test]
+    fn last_candidate_respects_request_scope_and_protocols() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(3, true);
+        scheduler.upsert(candidate("first"));
+        scheduler.upsert(candidate("second"));
+        for _ in 0..3 {
+            assert!(scheduler.record_failure("first").is_some());
+        }
+        let request_scope = CandidateScope {
+            source_ids: Some(["first".to_string()].into()),
+            ..CandidateScope::default()
+        };
+
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "first",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &request_scope,
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert!(scheduler.candidate("first").unwrap().cooldowns.is_empty());
+    }
+
+    #[test]
+    fn last_candidate_ignores_unusable_peers() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(1, true);
+        scheduler.upsert(candidate("first"));
+        let mut disabled = candidate("second");
+        disabled.enabled = false;
+        scheduler.upsert(disabled);
+        assert_eq!(scheduler.record_failure("first"), Some(1));
+
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "first",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert!(scheduler.candidate("first").unwrap().cooldowns.is_empty());
+    }
+
+    #[test]
+    fn mandatory_cooldown_bypasses_the_transient_policy() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(8, true);
+        scheduler.upsert(candidate("only"));
+
+        assert!(scheduler.set_cooldown_with_reason_for_model_at(
+            "only",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Mandatory,
+                now_ms: 100,
+            },
+        ));
+        assert_eq!(
+            scheduler.candidate("only").unwrap().cooldowns.get("gpt-5"),
+            Some(&10_000)
+        );
     }
 
     #[test]

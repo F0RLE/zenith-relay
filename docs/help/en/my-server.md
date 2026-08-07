@@ -3,8 +3,8 @@
 > Your pool and OpenAI-compatible API run on Relay Server. The desktop
 > application manages that server but does not need to remain open for requests.
 
-**Use it for:** continuous operation, remote access, and one managed pool shared
-by multiple clients.
+**Use it for:** continuous operation, remote access, and a managed ChatGPT/Codex
+pool.
 
 **Do not use it for:** a server that has not been deployed yet. Prove the pool
 in **This computer** mode first.
@@ -15,26 +15,26 @@ in **This computer** mode first.
 - [Prepare the server](#prepare-the-server)
 - [Connect the application](#connect-the-application)
 - [Move accounts](#move-accounts)
-- [Connect a client](#connect-a-client)
+- [Connect ChatGPT/Codex](#connect-chatgptcodex)
 - [Verify the setup](#verify-the-setup)
 - [If the server fails](#if-the-server-fails)
 - [Security and recovery](#security-and-recovery)
 
 ## How this mode works
 
-There are two separate access levels:
+There are two separate credentials:
 
 - the **management token** connects Zenith Relay to the server administration
   API;
-- a **client key** lets ChatGPT or another client send inference requests to
-  the public `/v1` endpoint.
+- Relay provisions an internal **profile credential** when it attaches
+  ChatGPT/Codex to the public `/v1` endpoint.
 
-Never use the management token as a client API key. It has a different purpose
-and must not appear in end-user configuration.
+Never use the management token as a profile credential. The profile credential
+is managed by Relay; it is not a user-created API key.
 
-The server owns participants, quota state, routing, usage logs, and client keys.
-The desktop application renders server snapshots and sends confirmed management
-operations.
+The server owns participants, quota state, routing, usage logs, and the managed
+profile credential. The desktop application renders server snapshots and sends
+confirmed management operations.
 
 Relay lets routed models receive image attachments without guessing support
 from their names. The selected model makes the final decision; native ChatGPT
@@ -50,8 +50,8 @@ model capabilities remain unchanged.
 - Management API access is restricted to a trusted network or separate access
   control.
 
-Before moving real accounts, verify the health endpoint and one synthetic
-request through a client key.
+Before moving real accounts, verify the health endpoint, attach ChatGPT/Codex,
+and send one synthetic request.
 
 ## Connect the application
 
@@ -77,21 +77,20 @@ same URL. Do not approve an identity change until its cause is understood.
 > Do not import the same session again while a move is incomplete. Reconnect
 > the recorded server and let Relay recover the existing ownership operation.
 
-## Connect a client
+## Connect ChatGPT/Codex
 
-1. Open **API & ChatGPT** → **Client access**.
-2. Create a client key with the required models and budget.
-3. Store the secret immediately; it is not shown in full after the dialog closes.
-4. Connect ChatGPT from the application, or configure another OpenAI-compatible
-   client with the server `/v1` URL and this key.
-5. Start the server API if process management is enabled by the deployment.
+1. Open **API & ChatGPT**.
+2. Attach ChatGPT/Codex to the server pool.
+3. Relay creates or rotates the profile credential internally and saves a
+   reversible profile snapshot.
+4. Send a request from ChatGPT/Codex.
 
 ## Verify the setup
 
-1. Send a request and find it in **Usage**.
+1. Send a request from ChatGPT/Codex and find it in **Usage**.
 2. Check its model, participant, speed, tokens, and HTTP status.
 3. Close the desktop application.
-4. Send a second request with the same client key.
+4. Send a second request from ChatGPT/Codex.
 5. Reopen Zenith Relay and confirm that the second request was stored.
 
 > **Ready means:** both requests succeed, the second works without the desktop
@@ -103,17 +102,18 @@ same URL. Do not approve an identity change until its cause is understood.
 | --- | --- | --- |
 | Server is unreachable | DNS, HTTPS, certificate, and Relay Server process | Restore network or service, then refresh the connection |
 | Server identity changed | Endpoint, database, and server data directory | Do not auto-approve it; compare the deployment and backup |
-| Management API returns `401` | Management token | Replace the management token without changing client keys |
-| `/v1` returns `401` | Client key and its state | Create or re-enable a client key |
+| Management API returns `401` | Management token | Replace the management token and reconnect the app |
+| `/v1` returns `401` | Managed profile credential and profile binding | Attach ChatGPT/Codex again from the desktop app |
 | No eligible participant | Pool state, quota, models, and proxies | Repair the specific participant or enable a fallback |
 | Move was interrupted | The recorded server connection | Reconnect the same server and let Relay recover the operation; do not create a second copy manually |
 | Usage does not refresh | Server `usage` capability and version | Install a compatible server version and fetch a new snapshot |
 
 ## Security and recovery
 
-Account sessions are encrypted with the server vault key. The management token
-is stored in this computer's credential store. Client keys should expose only
-the required protocols, sources or accounts, models, and budget.
+Account sessions and the managed profile credential are encrypted with the
+server vault key. The management token is stored in this computer's credential
+store. The management token and profile credential have different purposes and
+must not be exchanged.
 
 Use the standalone server `--backup <dir>` and `--restore <dir>` commands so the
 database and encrypted vault are validated together. Preserve the stable vault

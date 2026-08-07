@@ -24,6 +24,7 @@ pub struct MessagesStreamBridge {
     next_output_index: usize,
     next_message_index: usize,
     completed: Option<MessagesBridgeResponse>,
+    upstream_error: Option<Value>,
     terminal: bool,
 }
 
@@ -85,6 +86,7 @@ impl MessagesStreamBridge {
             next_output_index: 0,
             next_message_index: 0,
             completed: None,
+            upstream_error: None,
             terminal: false,
         }
     }
@@ -123,6 +125,10 @@ impl MessagesStreamBridge {
         self.terminal
     }
 
+    pub fn take_upstream_error(&mut self) -> Option<Value> {
+        self.upstream_error.take()
+    }
+
     fn handle_event(&mut self, event: &[u8]) {
         let Some(value) = parse_sse_data(event) else {
             if sse_event_has_data(event) {
@@ -157,7 +163,10 @@ impl MessagesStreamBridge {
             // change the client-visible Responses output. They must not turn
             // an otherwise valid stream into a synthetic adapter failure.
             "ping" => {}
-            "error" => self.fail(AdapterError::upstream_stream_invalid()),
+            "error" => {
+                self.upstream_error = Some(value.clone());
+                self.fail(AdapterError::upstream_stream_invalid());
+            }
             kind if is_ignorable_metadata_event(kind) => {}
             _ => self.fail(AdapterError::upstream_stream_invalid()),
         }
