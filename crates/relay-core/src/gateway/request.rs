@@ -327,156 +327,43 @@ mod tests {
     }
 
     #[test]
-    fn responses_lite_preserves_codex_client_tools_without_server_hosted_tools() {
+    fn responses_lite_keeps_provider_owned_tools_and_choices_opaque() {
         let mut request = json!({
             "model": "gpt-lite",
-            "parallel_tool_calls": true,
             "tools": [
                 {"type": "function", "name": "lookup"},
-                {"type": "custom", "name": "patch"},
                 {"type": "namespace", "name": "collaboration", "tools": [
-                    {"type": "function", "name": "spawn_agent"},
-                    {"type": "function", "name": "wait_agent"}
+                    {"name": "spawn_agent"}
                 ]},
-                {"type": "tool_search"},
-                {"type": "tool_search", "execution": "server"},
-                {"type": "future_client_tool", "name": "future_tool"},
-                {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
                 {"type": "web_search"},
-                {"type": "web_search_preview_2025_03_11"},
-                {"type": "image_generation"},
-                {"type": "file_search"},
-                {"type": "mcp", "name": "hosted_mcp"}
-            ],
-            "tool_choice": {
-                "type": "allowed_tools",
-                "tools": [
-                    {"type": "function", "name": "lookup"},
-                    {"type": "namespace", "name": "collaboration"},
-                    {"type": "tool_search"},
-                    {"type": "future_client_tool", "name": "future_tool"},
-                    {"type": "future_server_tool", "name": "hosted_tool", "execution": "server"},
-                    {"type": "web_search"}
-                ]
-            },
-            "input": [
-                {"type": "additional_tools", "tools": [{"type": "web_search"}]},
-                {"type": "additional_tools", "tools": [
-                    {"type": "custom", "name": "patch"},
-                    {"type": "image_generation"}
-                ]},
-                {"type": "additional_tools", "tools": [
-                    {"type": "tool_search"},
-                    {"type": "future_client_tool", "name": "future_tool"}
-                ]},
-                {"role": "user", "content": "hello"}
-            ],
-            "response": {
-                "tools": [{"type": "function", "name": "lookup"}, {"type": "web_search"}],
-                "tool_choice": {"type": "image_generation"}
-            }
-        });
-        normalize_account_request(request.as_object_mut().unwrap(), true);
-
-        let types = |pointer: &str| {
-            request
-                .pointer(pointer)
-                .and_then(Value::as_array)
-                .unwrap()
-                .iter()
-                .filter_map(|tool| tool.get("type").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            types("/tools"),
-            [
-                "function",
-                "custom",
-                "namespace",
-                "tool_search",
-                "future_client_tool"
-            ]
-        );
-        assert_eq!(
-            types("/tool_choice/tools"),
-            ["function", "namespace", "tool_search", "future_client_tool"]
-        );
-        assert_eq!(types("/input/0/tools"), ["custom"]);
-        assert_eq!(
-            types("/input/1/tools"),
-            ["tool_search", "future_client_tool"]
-        );
-        assert_eq!(types("/response/tools"), ["function"]);
-        assert_eq!(request["input"].as_array().unwrap().len(), 3);
-        assert!(request.pointer("/response/tool_choice").is_none());
-        assert_eq!(request["parallel_tool_calls"], true);
-    }
-
-    #[test]
-    fn responses_lite_preserves_namespace_tool_choice() {
-        let mut request = json!({
-            "tools": [{"type": "namespace", "name": "collaboration"}],
-            "tool_choice": {"type": "namespace", "name": "collaboration"}
-        });
-
-        normalize_account_request(request.as_object_mut().unwrap(), true);
-
-        assert_eq!(request["tools"][0]["type"], "namespace");
-        assert_eq!(request["tool_choice"]["type"], "namespace");
-    }
-
-    #[test]
-    fn responses_lite_removes_choices_that_do_not_reference_remaining_client_tools() {
-        let mut required = json!({
-            "tools": [{"type": "web_search", "name": "server_only"}],
-            "tool_choice": {"type": "function", "name": "server_only"}
-        });
-        normalize_account_request(required.as_object_mut().unwrap(), true);
-        assert!(required
-            .get("tools")
-            .is_some_and(|tools| tools.as_array().is_some_and(Vec::is_empty)));
-        assert!(required.get("tool_choice").is_none());
-
-        let mut allowed = json!({
-            "tools": [
-                {"type": "function", "name": "client"},
-                {"type": "namespace", "name": "collaboration", "tools": [
-                    {"name": "spawn_agent"},
-                    {"type": "web_search"}
-                ]},
-                {"type": "web_search", "name": "server_only"}
+                {"type": "future_client_tool", "name": "future_tool"}
             ],
             "tool_choice": {
                 "type": "allowed_tools",
                 "mode": "required",
                 "tools": [
-                    {"type": "function", "name": "client"},
-                    {"type": "function", "name": "missing"},
-                    {"type": "function", "namespace": "collaboration", "name": "spawn_agent"},
-                    {"type": "web_search", "name": "server_only"}
+                    {"type": "function", "name": "lookup"},
+                    {"type": "web_search"}
                 ]
-            }
+            },
+            "input": [
+                {"type": "additional_tools", "tools": [
+                    {"type": "custom", "name": "patch"},
+                    {"type": "image_generation"}
+                ]},
+                {"role": "user", "content": "hello"}
+            ]
         });
-        normalize_account_request(allowed.as_object_mut().unwrap(), true);
+        let original_tools = request["tools"].clone();
+        let original_choice = request["tool_choice"].clone();
+        let original_input = request["input"].clone();
 
-        assert_eq!(
-            allowed["tools"][1]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|tool| tool["name"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["spawn_agent"]
-        );
-        assert_eq!(
-            allowed["tool_choice"]["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|tool| tool["name"].as_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["client", "spawn_agent"]
-        );
+        normalize_account_request(request.as_object_mut().unwrap(), true);
+
+        assert_eq!(request["tools"], original_tools);
+        assert_eq!(request["tool_choice"], original_choice);
+        assert_eq!(request["input"], original_input);
+        assert_eq!(request["reasoning"]["context"], "all_turns");
     }
 
     #[test]

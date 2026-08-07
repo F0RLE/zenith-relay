@@ -520,6 +520,7 @@ async fn execute_request(
     let mut function_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
+    let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
     let has_previous_response_id = wire_api == WireApi::Responses
         && request
@@ -571,6 +572,11 @@ async fn execute_request(
                     );
                 }
             }
+            if last_failure.is_none() {
+                if let Some(error) = last_adapter_error {
+                    return adapter_error_response(error);
+                }
+            }
             break;
         };
         tried.insert(selected.candidate_id.clone());
@@ -616,6 +622,10 @@ async fn execute_request(
             response_scope: &route.candidate_id,
         }) {
             Ok(request) => request,
+            Err(error) if error.is_route_incompatible() => {
+                last_adapter_error = Some(error);
+                continue;
+            }
             Err(error) => return adapter_error_response(error),
         };
         if account_route {
@@ -1317,6 +1327,11 @@ async fn execute_request(
         }
     }
 
+    if last_failure.is_none() {
+        if let Some(error) = last_adapter_error {
+            return adapter_error_response(error);
+        }
+    }
     let failure = last_failure.unwrap_or_else(AttemptFailure::no_candidate);
     if failure.status == StatusCode::TOO_MANY_REQUESTS {
         if let Some((retry_at, reason)) = runtime.all_applicable_cooldown(

@@ -1073,8 +1073,11 @@ async fn account_requests_preserve_responses_lite_compatibility() {
     let requests = state.requests.lock().unwrap();
     assert_eq!(requests[0].responses_lite.as_deref(), Some("true"));
     assert_eq!(requests[0].body["parallel_tool_calls"], true);
-    assert_eq!(requests[0].body["tools"].as_array().unwrap().len(), 1);
-    assert_eq!(requests[0].body["tools"][0]["name"], "local_tool");
+    let tools = requests[0].body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[0]["name"], "local_tool");
+    assert_eq!(tools[1]["type"], "web_search");
+    assert_eq!(tools[2]["type"], "image_generation");
     assert_eq!(requests[0].body["reasoning"]["context"], "all_turns");
     assert_eq!(requests[0].body["reasoning"]["effort"], "high");
 }

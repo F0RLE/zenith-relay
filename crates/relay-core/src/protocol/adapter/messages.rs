@@ -14,8 +14,9 @@ const SUPPORTED_IMAGE_TYPES: &[&str] = &["image/gif", "image/jpeg", "image/png",
 /// JSON-schema functions retain their object input. Direct custom tools are
 /// represented as a function with one raw-text field and are translated back
 /// to the exact Responses custom-call shape before the client sees them.
-/// Provider-hosted, namespace, and dynamic-discovery tools remain rejected:
-/// Relay must not claim it can execute or emulate a tool it cannot represent.
+/// Provider-hosted and dynamic-discovery tools are omitted from the upstream
+/// Messages catalog. They remain in the client request; the bridge only sends
+/// the subset it can represent without inventing a provider capability.
 pub fn prepare_responses_to_messages(
     request: &Value,
     model: &str,
@@ -69,13 +70,6 @@ pub fn prepare_responses_to_messages_scoped(
             upstream,
             client_tools,
         } = translate_tools(&tools)?;
-        // Filtering an unsupported hosted tool is safe only when the client
-        // also supplied at least one representable tool. With no remaining
-        // client tool, silently sending a tool-less Messages request would
-        // make Codex believe that its tool request completed normally.
-        if !tools.is_empty() && upstream.is_empty() {
-            return Err(AdapterError::unsupported_tool());
-        }
         state.tools = (!upstream.is_empty()).then_some(upstream);
         state.tool_targets = client_tools;
         // A Responses request that supplies a new tool catalog without an
@@ -86,6 +80,10 @@ pub fn prepare_responses_to_messages_scoped(
         state.tool_allow_list = None;
     }
     if let Some(tool_choice) = object.get("tool_choice") {
+        // A Responses choice may target a hosted or future tool which is not
+        // present in the translated Messages catalog. Dropping that choice
+        // lets the upstream model answer normally instead of turning a
+        // representable request into a Relay-side 400.
         let translated = translate_tool_choice(tool_choice, &state)?;
         state.tool_choice = translated.value;
         state.tool_allow_list = translated.allowed_names;
@@ -739,41 +737,55 @@ fn translate_tools(tools: &[Value]) -> AdapterResult<TranslatedTools> {
     let mut upstream = Vec::with_capacity(tools.len());
     let mut client_tools = BTreeMap::new();
     for tool in tools {
-        let tool = tool
-            .as_object()
-            .ok_or_else(AdapterError::unsupported_tool)?;
+        let Some(tool) = tool.as_object() else {
+            continue;
+        };
         match tool.get("type").and_then(Value::as_str) {
             Some("function" | "custom") => {
-                translate_client_tool(&mut upstream, &mut client_tools, tool, None, None)?;
+                if let Err(error) =
+                    translate_client_tool(&mut upstream, &mut client_tools, tool, None, None)
+                {
+                    if !error.is_route_incompatible() {
+                        return Err(error);
+                    }
+                }
             }
             Some("namespace") => {
-                let namespace = tool
+                let Some(namespace) = tool
                     .get("name")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .ok_or_else(AdapterError::unsupported_tool)?;
+                else {
+                    continue;
+                };
                 let namespace_description = tool
                     .get("description")
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|value| !value.is_empty());
-                let children = tool
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .ok_or_else(AdapterError::unsupported_tool)?;
+                let Some(children) = tool.get("tools").and_then(Value::as_array) else {
+                    continue;
+                };
                 for child in children {
-                    let child = child
-                        .as_object()
-                        .ok_or_else(AdapterError::unsupported_tool)?;
-                    if let Some("function" | "custom") = child.get("type").and_then(Value::as_str) {
-                        translate_client_tool(
+                    let Some(child) = child.as_object() else {
+                        continue;
+                    };
+                    if matches!(
+                        child.get("type").and_then(Value::as_str),
+                        Some("function" | "custom") | None
+                    ) {
+                        if let Err(error) = translate_client_tool(
                             &mut upstream,
                             &mut client_tools,
                             child,
                             Some(namespace),
                             namespace_description,
-                        )?;
+                        ) {
+                            if !error.is_route_incompatible() {
+                                return Err(error);
+                            }
+                        }
                     }
                     // The Responses namespace can carry tools that require
                     // server execution or a separate adapter. Do not make a
@@ -954,8 +966,14 @@ fn translate_tool_choice(
                 value: Some(json!({"type": "any"})),
                 allowed_names: None,
             }),
-            "required" => Err(AdapterError::unsupported_tool()),
-            _ => Err(AdapterError::unsupported_tool()),
+            "required" => Ok(TranslatedToolChoice {
+                value: None,
+                allowed_names: None,
+            }),
+            _ => Ok(TranslatedToolChoice {
+                value: None,
+                allowed_names: None,
+            }),
         },
         Value::Object(value)
             if matches!(
@@ -963,7 +981,12 @@ fn translate_tool_choice(
                 Some("function" | "custom")
             ) =>
         {
-            let name = selected_upstream_tool_name(state, value)?;
+            let Some(name) = selected_upstream_tool_name(state, value) else {
+                return Ok(TranslatedToolChoice {
+                    value: None,
+                    allowed_names: None,
+                });
+            };
             Ok(TranslatedToolChoice {
                 value: Some(json!({"type": "tool", "name": name})),
                 allowed_names: None,
@@ -987,7 +1010,10 @@ fn translate_tool_choice(
                 })
                 .collect::<BTreeSet<_>>();
             if allowed_names.is_empty() {
-                return Err(AdapterError::unsupported_tool());
+                return Ok(TranslatedToolChoice {
+                    value: None,
+                    allowed_names: None,
+                });
             }
             Ok(TranslatedToolChoice {
                 value: Some(json!({"type": "any"})),
@@ -997,18 +1023,22 @@ fn translate_tool_choice(
         Value::Object(value)
             if value.get("type").and_then(Value::as_str) == Some("allowed_tools") =>
         {
-            let configured_tools = value
-                .get("tools")
-                .and_then(Value::as_array)
-                .ok_or_else(AdapterError::unsupported_tool)?;
+            let Some(configured_tools) = value.get("tools").and_then(Value::as_array) else {
+                return Ok(TranslatedToolChoice {
+                    value: None,
+                    allowed_names: None,
+                });
+            };
             let mut allowed_names = BTreeSet::new();
             for tool in configured_tools {
-                let tool = tool
-                    .as_object()
-                    .ok_or_else(AdapterError::unsupported_tool)?;
+                let Some(tool) = tool.as_object() else {
+                    continue;
+                };
                 match tool.get("type").and_then(Value::as_str) {
                     Some("function" | "custom") => {
-                        allowed_names.insert(selected_upstream_tool_name(state, tool)?);
+                        if let Some(name) = selected_upstream_tool_name(state, tool) {
+                            allowed_names.insert(name);
+                        }
                     }
                     Some("namespace") => {
                         let namespace = tool
@@ -1017,7 +1047,10 @@ fn translate_tool_choice(
                             .and_then(Value::as_str)
                             .map(str::trim)
                             .filter(|namespace| !namespace.is_empty())
-                            .ok_or_else(AdapterError::unsupported_tool)?;
+                            .unwrap_or_default();
+                        if namespace.is_empty() {
+                            continue;
+                        }
                         allowed_names.extend(state.tool_targets.iter().filter_map(
                             |(upstream_name, target)| {
                                 (target.namespace.as_deref() == Some(namespace)
@@ -1033,50 +1066,54 @@ fn translate_tool_choice(
                 }
             }
             if allowed_names.is_empty() {
-                return Err(AdapterError::unsupported_tool());
+                return Ok(TranslatedToolChoice {
+                    value: None,
+                    allowed_names: None,
+                });
             }
             let value = match value.get("mode").and_then(Value::as_str).unwrap_or("auto") {
                 "auto" => json!({"type": "auto"}),
                 "required" => json!({"type": "any"}),
-                _ => return Err(AdapterError::unsupported_tool()),
+                _ => {
+                    return Ok(TranslatedToolChoice {
+                        value: None,
+                        allowed_names: None,
+                    })
+                }
             };
             Ok(TranslatedToolChoice {
                 value: Some(value),
                 allowed_names: Some(allowed_names),
             })
         }
-        _ => Err(AdapterError::unsupported_tool()),
+        _ => Ok(TranslatedToolChoice {
+            value: None,
+            allowed_names: None,
+        }),
     }
 }
 
 fn selected_upstream_tool_name(
     state: &MessagesBridgeState,
     tool: &Map<String, Value>,
-) -> AdapterResult<String> {
-    let kind = ResponsesToolKind::from_definition(tool)?;
+) -> Option<String> {
+    let kind = ResponsesToolKind::from_definition(tool).ok()?;
     let name = tool
         .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .ok_or_else(AdapterError::unsupported_tool)?;
+        .filter(|name| !name.is_empty())?;
     let namespace = match tool.get("namespace") {
         None => None,
         Some(namespace) => Some(
             namespace
                 .as_str()
                 .map(str::trim)
-                .filter(|namespace| !namespace.is_empty())
-                .ok_or_else(AdapterError::unsupported_tool)?,
+                .filter(|namespace| !namespace.is_empty())?,
         ),
     };
-    let upstream_name = state
-        .upstream_tool_name(namespace, name)
-        .ok_or_else(AdapterError::unsupported_tool)?;
-    if state.client_tool_kind(upstream_name) != Some(kind) {
-        return Err(AdapterError::unsupported_tool());
-    }
-    Ok(upstream_name.to_string())
+    let upstream_name = state.upstream_tool_name(namespace, name)?;
+    (state.client_tool_kind(upstream_name) == Some(kind)).then(|| upstream_name.to_string())
 }
 
 fn apply_reasoning(
