@@ -110,6 +110,7 @@ pub(super) struct UserProfileSnapshot {
 enum ManagedSnapshotScope {
     LocalGateway,
     OAuthAccount,
+    NoBinding,
 }
 
 pub(crate) struct BoundOAuthProfile<'a> {
@@ -2530,7 +2531,7 @@ fn managed_snapshot_scope(
     }
 
     let Some(backup) = local_backup(profile_dir, backup_root)? else {
-        return Err(profile_restore_blocked());
+        return Ok(ManagedSnapshotScope::NoBinding);
     };
     if !managed_config_matches(document, &backup)
         || !managed_auth_matches_snapshot(auth, auth_path, &backup)?
@@ -2577,6 +2578,7 @@ fn merge_managed_snapshot_config(
             let base_url = snapshot_value("openai_base_url")?;
             restore_root_string(&mut document, "openai_base_url", base_url.as_deref());
         }
+        ManagedSnapshotScope::NoBinding => {}
     }
     // Snapshot recovery always detaches Relay. Re-creating its provider here
     // would leave Codex pointed at a credential whose backup was discarded.
@@ -4105,6 +4107,63 @@ mod tests {
         assert_eq!(restored_auth["OPENAI_API_KEY"], "original-key");
         assert_eq!(restored_auth["last_refresh"], "old");
         assert_eq!(restored_auth["tokens"]["access_token"], "original");
+        assert_eq!(restored_auth["custom"]["keep"], "current");
+        assert_eq!(profile_backup_count(&backups), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_snapshot_restore_accepts_a_detached_profile() {
+        let (root, home, backups) = profile_dirs("managed-snapshot-detached");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"custom\"\nmodel_catalog_json = \"before.json\"\n[mcp_servers.context7]\ncommand = \"original\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"original-key\",\"custom\":{\"keep\":\"original\"}}",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+        let snapshot = snapshot_user_profile_with(&home, &backups, &secrets).unwrap();
+        restore_with(&home, &backups, &secrets).unwrap();
+        assert_eq!(profile_backup_count(&backups), 0);
+
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"changed\"\nmodel_catalog_json = \"current.json\"\n[mcp_servers.context7]\ncommand = \"current\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home.join(AUTH_FILE),
+            "{\"auth_mode\":\"apikey\",\"OPENAI_API_KEY\":\"current-key\",\"custom\":{\"keep\":\"current\"}}",
+        )
+        .unwrap();
+
+        restore_user_profile_snapshot_managed_with(&home, &backups, &snapshot, &secrets).unwrap();
+
+        let restored = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+        assert_eq!(root_model_provider(&restored).as_deref(), Some("custom"));
+        assert_eq!(
+            root_model_catalog_json(&restored).as_deref(),
+            Some("current.json")
+        );
+        assert_eq!(
+            restored["mcp_servers"]["context7"]["command"].as_str(),
+            Some("current")
+        );
+        let restored_auth: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(AUTH_FILE)).unwrap()).unwrap();
+        assert_eq!(restored_auth["OPENAI_API_KEY"], "original-key");
         assert_eq!(restored_auth["custom"]["keep"], "current");
         assert_eq!(profile_backup_count(&backups), 0);
         fs::remove_dir_all(root).unwrap();

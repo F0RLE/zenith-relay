@@ -141,9 +141,10 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
     for (const sourceId of sourceIds.split("\n")) void refreshSourceStats(sourceId);
     return () => { sourceStatsGeneration.current += 1; };
   }, [mode, refreshSourceStats, sourceIds]);
-  const upcomingTimes = members.flatMap((member) => member.kind === "account"
-    ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)].filter((value): value is number => value != null && value > nowMs)
-    : []);
+  const upcomingTimes = members.flatMap((member) => [
+    ...(member.kind === "account" ? [member.subscription.activeUntilMs, member.quota.primary?.resetAtMs, member.quota.secondary?.resetAtMs, ...(member.quota.supplemental ?? []).map((item) => item.window.resetAtMs)] : []),
+    runtimeByMember.get(member.id)?.nextRetryAtMs,
+  ].filter((value): value is number => value != null && value > nowMs));
   const showSeconds = upcomingTimes.some((value) => value - nowMs < 60 * 60_000);
   useEffect(() => {
     const timer = window.setTimeout(() => setNowMs(Date.now()), showSeconds ? 1_000 : 60_000);
@@ -423,11 +424,11 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
       </div>
       <div className="pool-policy-row">
         <div className="pool-policy-copy"><strong>{t("pool.maxRetryCandidates")}</strong><small>{t("pool.maxRetryCandidatesHint")}</small></div>
-        <input className="pool-policy-control" aria-label={t("pool.maxRetryCandidates")} type="number" min={1} max={8} value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(Number(event.target.value) || 1)} />
+        <input className="pool-policy-control" aria-label={t("pool.maxRetryCandidates")} type="number" min={1} max={8} value={maxRetryCandidates} onChange={(event) => setMaxRetryCandidates(clampRoutingCount(event.target.value))} />
       </div>
       <div className="pool-policy-row">
         <div className="pool-policy-copy"><strong>{t("pool.cooldownAfterFailures")}</strong><small>{t("pool.cooldownAfterFailuresHint")}</small></div>
-        <input className="pool-policy-control" aria-label={t("pool.cooldownAfterFailures")} type="number" min={1} max={8} value={cooldownAfterFailures} onChange={(event) => setCooldownAfterFailures(Number(event.target.value) || 1)} />
+        <input className="pool-policy-control" aria-label={t("pool.cooldownAfterFailures")} type="number" min={1} max={8} value={cooldownAfterFailures} onChange={(event) => setCooldownAfterFailures(clampRoutingCount(event.target.value))} />
       </div>
       <label className="pool-policy-toggle toggle-row"><input type="checkbox" checked={keepLastCandidateAvailable} onChange={(event) => setKeepLastCandidateAvailable(event.target.checked)} /><span>{t("pool.keepLastCandidateAvailable")}</span></label>
       {routingStrategy === "subscription_plan" ? <div className="subscription-plan-policy">
@@ -793,6 +794,10 @@ type RoutingPolicyPayload = {
   defaultServiceTier: DefaultServiceTier;
   subscriptionPlanOrder: string[];
 };
+
+function clampRoutingCount(value: string) {
+  return Math.min(8, Math.max(1, Math.trunc(Number(value)) || 1));
+}
 
 function persistRoutingPolicy(mode: RelayMode, payload: RoutingPolicyPayload) {
   return mode === "local"

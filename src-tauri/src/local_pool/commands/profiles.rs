@@ -1427,15 +1427,16 @@ mod tests {
 
     #[test]
     fn lost_profile_rotation_commit_response_is_reconciled_without_a_blind_rollback() {
+        let system_credential_id = "key_system";
         let current = RemoteProfileCredential {
-            key_id: "key_system".into(),
+            key_id: system_credential_id.into(),
             base_url: "https://relay.example/v1".into(),
             secret: "zrs_current_secret_value_000000".into(),
         };
         let rotation = ProfileKeyRotation {
             schema_version: 1,
             rotation_id: "key_profile_rotation_test".into(),
-            key_id: "key_system".into(),
+            key_id: system_credential_id.into(),
             base_url: current.base_url.clone(),
             secret: "zrs_rotated_secret_value_000000".into(),
         };

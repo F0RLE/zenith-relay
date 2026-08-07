@@ -172,14 +172,10 @@ pub(super) fn ensure_system_gateway_key(
 ) -> LocalResult<LocalGatewayKeyRecord> {
     let existing = {
         let keys = state.store()?.keys().to_vec();
-        keys.into_iter()
+        keys.iter()
             .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
-            .or_else(|| {
-                state
-                    .store()
-                    .ok()
-                    .and_then(|store| store.keys().iter().find(|key| key.system).cloned())
-            })
+            .or_else(|| keys.iter().find(|key| key.system))
+            .cloned()
     };
     if let Some(mut key) = existing {
         if !key.enabled || !key.system || key.label != SYSTEM_GATEWAY_KEY_LABEL {

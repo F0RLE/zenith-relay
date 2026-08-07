@@ -1897,12 +1897,22 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await chooseOption(page, dialog, "Distribution strategy", "subscription_expiry");
   await expect(dialog).not.toContainText("Minimum image model");
   await expect(dialog).toContainText("Uses the nearest known expiry first, then accounts without a date. Quota and load break ties.");
+  const retryCandidates = dialog.getByLabel("Retry candidates");
+  const cooldownAfterFailures = dialog.getByLabel("Failures before cooldown");
+  await retryCandidates.fill("20");
+  await cooldownAfterFailures.fill("20");
+  await expect(retryCandidates).toHaveValue("8");
+  await expect(cooldownAfterFailures).toHaveValue("8");
+  await retryCandidates.fill("0");
+  await cooldownAfterFailures.fill("0");
+  await expect(retryCandidates).toHaveValue("1");
+  await expect(cooldownAfterFailures).toHaveValue("1");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(personalPlus.locator(".pool-member-subscription-date")).toHaveText(/\d{1,2}\/\d{1,2}\/\d{4}/);
   await expect(personalPlus.locator(".pool-member-subscription-expiry")).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 3, cooldownAfterFailures: 3, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
+  expect(calls.findLast((call) => call.command === "update_local_routing")?.args).toEqual({ input: { routingStrategy: "subscription_expiry", maxRetryCandidates: 1, cooldownAfterFailures: 1, keepLastCandidateAvailable: true, defaultServiceTier: "fast", subscriptionPlanOrder: [] } });
 });
 
 test("pool card grid preserves scheduler order at every width", async ({ page }) => {
@@ -2644,21 +2654,29 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   await expect(backupChoice).toBeChecked();
   await page.screenshot({ path: "output/playwright/profile-restore-dialog-1160x760.png" });
   await restoreDialog.getByRole("button", { name: "Restore full profile" }).click();
-  await expect(page.getByRole("dialog", { name: "Restore full Codex profile" })).toContainText("replaces config.toml and auth.json completely");
-  await page.getByRole("dialog", { name: "Restore full Codex profile" }).getByRole("button", { name: "Back to Relay restore" }).click();
-  await restoreDialog.getByRole("button", { name: "Cancel" }).click();
+  const fullRestoreDialog = page.getByRole("dialog", { name: "Restore full ChatGPT profile" });
+  await expect(fullRestoreDialog).toContainText('Restore the full ChatGPT profile from "Before migration"?');
+  await expect(fullRestoreDialog).toContainText("replaces config.toml and auth.json completely");
+  await fullRestoreDialog.getByRole("button", { name: "Restore full profile" }).click();
+  await expect(fullRestoreDialog).toHaveCount(0);
+  await expect(snapshotRows).toHaveCount(3);
   let calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
-  expect(calls.filter((call) => call.command === "restore_codex_profile_snapshot")).toHaveLength(0);
+  const fullRestoreCalls = calls.filter((call) => call.command === "restore_full_codex_profile_snapshot");
+  expect(fullRestoreCalls).toHaveLength(1);
+  expect(fullRestoreCalls[0]?.args).toEqual({
+    snapshotId: expect.any(String),
+    safetyName: "Before restoring Before migration",
+  });
 
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   await expect(backupChoice).toBeChecked();
   await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
-  await expect(snapshotRows).toHaveCount(3);
+  await expect(snapshotRows).toHaveCount(4);
 
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   await backupChoice.uncheck();
   await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
-  await expect(snapshotRows).toHaveCount(3);
+  await expect(snapshotRows).toHaveCount(4);
 
   await page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) }).getByRole("button", { name: "Delete Before migration", exact: true }).click();
   await settleConfirmation(page);

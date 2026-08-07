@@ -106,29 +106,10 @@ paths:
             application/json: { schema: { type: object } }
             text/event-stream: { schema: { type: string } }
         "401": { $ref: "#/components/responses/Unauthorized" }
-  /v1/messages:
-    post:
-      operationId: messages
-      security:
-        - profileCredential: []
-        - nativeProfileCredential: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { type: object }
-      responses:
-        "200":
-          description: Anthropic Messages JSON or SSE stream
-          content:
-            application/json: { schema: { type: object } }
-            text/event-stream: { schema: { type: string } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     managementToken: { type: http, scheme: bearer, description: Management-only token; never valid for /v1. }
     profileCredential: { type: http, scheme: bearer, description: Relay-managed profile credential for /v1; never valid for management. }
-    nativeProfileCredential: { type: apiKey, in: header, name: x-api-key, description: Relay-managed profile credential for native /v1/messages clients. }
   responses:
     Unauthorized:
       description: Missing or invalid token

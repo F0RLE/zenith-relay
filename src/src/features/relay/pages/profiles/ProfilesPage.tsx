@@ -19,6 +19,7 @@ export function ProfilesPage() {
   const [snapshotRestoreMode, setSnapshotRestoreMode] = useState<SnapshotRestoreMode>("managed");
   const [saveCurrentBeforeRestore, setSaveCurrentBeforeRestore] = useState(profileSnapshotBackupBeforeRestore);
   const [loadFailed, setLoadFailed] = useState(false);
+  const snapshotRestoreBusy = busy === "profile-snapshot-restore" || busy === "profile-snapshot-full-restore";
 
   const loadRecovery = useCallback(() => {
     if (mode !== "local") {
@@ -55,19 +56,20 @@ export function ProfilesPage() {
     const snapshot = snapshotRestoreTarget;
     if (!snapshot) return;
     const fullRestore = snapshotRestoreMode === "full";
-    setSnapshotRestoreTarget(null);
-    setSnapshotRestoreMode("managed");
     const safetyName = saveCurrentBeforeRestore
       ? Array.from(t("profiles.safetySnapshotName", { name: snapshot.name })).slice(0, 80).join("").trim()
       : null;
     if (await perform(fullRestore ? "profile-snapshot-full-restore" : "profile-snapshot-restore", () => fullRestore
       ? relayCommands.restoreFullProfileSnapshot(snapshot.id, safetyName)
       : relayCommands.restoreProfileSnapshot(snapshot.id, safetyName), "feedback.snapshotRestored")) {
+      setSnapshotRestoreTarget(null);
+      setSnapshotRestoreMode("managed");
       loadRecovery();
     }
   };
 
   const closeSnapshotRestore = () => {
+    if (snapshotRestoreBusy) return;
     setSnapshotRestoreTarget(null);
     setSnapshotRestoreMode("managed");
   };
@@ -130,21 +132,22 @@ export function ProfilesPage() {
     {snapshotRestoreTarget ? <Dialog
       title={snapshotRestoreMode === "full" ? t("profiles.snapshotFullRestoreTitle") : t("profiles.snapshotRestoreTitle")}
       onClose={closeSnapshotRestore}
-      footer={<><Button variant="secondary" onClick={closeSnapshotRestore}>{t("common.cancel")}</Button><Button variant={snapshotRestoreMode === "full" ? "danger" : "primary"} busy={busy === "profile-snapshot-restore" || busy === "profile-snapshot-full-restore"} onClick={() => void restoreSnapshot()}>{t(snapshotRestoreMode === "full" ? "profiles.snapshotFullRestoreAction" : "profiles.snapshotRestoreAction")}</Button></>}
+      footer={<><Button variant="secondary" disabled={snapshotRestoreBusy} onClick={closeSnapshotRestore}>{t("common.cancel")}</Button><Button variant={snapshotRestoreMode === "full" ? "danger" : "primary"} busy={snapshotRestoreBusy} disabled={snapshotRestoreBusy} onClick={() => void restoreSnapshot()}>{t(snapshotRestoreMode === "full" ? "profiles.snapshotFullRestoreAction" : "profiles.snapshotRestoreAction")}</Button></>}
     >
       {snapshotRestoreMode === "full" ? <div className="snapshot-restore-full-warning">
+        <p className="confirm-dialog-message">{t("profiles.snapshotFullRestoreConfirm", { name: snapshotRestoreTarget.name })}</p>
         <p className="confirm-dialog-message">{t("profiles.snapshotFullRestoreHint")}</p>
-        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} onClick={() => setSnapshotRestoreMode("managed")}>{t("profiles.snapshotFullRestoreBack")}</Button>
+        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} disabled={snapshotRestoreBusy} onClick={() => setSnapshotRestoreMode("managed")}>{t("profiles.snapshotFullRestoreBack")}</Button>
       </div> : <>
         <p className="confirm-dialog-message">{t("profiles.snapshotRestoreConfirm", { name: snapshotRestoreTarget.name })}</p>
         <div className="snapshot-restore-scope">
           <strong>{t("profiles.snapshotRestoreScopeTitle")}</strong>
           <span>{t("profiles.snapshotRestoreScopeHint")}</span>
-          <Button variant="danger" icon={<AlertTriangle aria-hidden />} onClick={() => setSnapshotRestoreMode("full")}>{t("profiles.snapshotFullRestoreAction")}</Button>
+          <Button variant="danger" icon={<AlertTriangle aria-hidden />} disabled={snapshotRestoreBusy} onClick={() => setSnapshotRestoreMode("full")}>{t("profiles.snapshotFullRestoreAction")}</Button>
         </div>
       </>}
       <label className="snapshot-restore-backup-choice">
-        <input type="checkbox" checked={saveCurrentBeforeRestore} onChange={(event) => setSaveCurrentBeforeRestore(event.target.checked)} />
+        <input type="checkbox" checked={saveCurrentBeforeRestore} disabled={snapshotRestoreBusy} onChange={(event) => setSaveCurrentBeforeRestore(event.target.checked)} />
         <span>{t("profiles.snapshotBackupBeforeRestore")}</span>
       </label>
     </Dialog> : null}

@@ -151,6 +151,9 @@ fn contains_sensitive_error_metadata(message: &str) -> bool {
         "cookie",
         "token:",
         "sk-",
+        "@",
+        "org-",
+        "user-",
     ]
     .into_iter()
     .any(|marker| normalized.contains(marker))
@@ -1918,7 +1921,12 @@ mod tests {
 
         assert!(preserved_upstream_error(
             &failure,
-            br#"{"error":{"message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
+            br#"{"error":{"code":"service_unavailable","message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
+        )
+        .is_none());
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"service_unavailable","message":"quota exceeded for org-acme; contact admin@acme.test"}}"#,
         )
         .is_none());
         assert!(preserved_upstream_error(

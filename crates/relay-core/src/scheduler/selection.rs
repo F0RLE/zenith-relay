@@ -3,7 +3,7 @@ mod routing_policy;
 use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
-use super::cooldown::{active_retry_at, has_expired_cooldown, CooldownReason};
+use super::cooldown::{has_expired_cooldown, CooldownReason};
 use crate::WireApi;
 pub use routing_policy::RoutingStrategy;
 use routing_policy::{candidate_kind_preference, routing_tier};
@@ -1214,9 +1214,7 @@ impl PoolScheduler {
         self.candidates
             .values()
             .filter(|candidate| {
-                self.quota_reserve_allows(candidate, now_ms)
-                    && candidate.is_catalog_visible(model, allowed_protocols, request_scope)
-                    && active_retry_at(&candidate.cooldowns, model, now_ms).is_none()
+                self.is_eligible(candidate, model, allowed_protocols, request_scope, now_ms)
             })
             .count()
             <= 1
@@ -2709,6 +2707,31 @@ mod tests {
                 policy_model: "gpt-5",
                 allowed_protocols: &[WireApi::Responses],
                 request_scope: &request_scope,
+                retry_at_ms: 10_000,
+                reason: CooldownReason::Transient,
+                now_ms: 100,
+            },
+        ));
+        assert!(scheduler.candidate("first").unwrap().cooldowns.is_empty());
+    }
+
+    #[test]
+    fn last_candidate_ignores_unusable_peers() {
+        let mut scheduler = PoolScheduler::new();
+        scheduler.set_cooldown_policy(1, true);
+        scheduler.upsert(candidate("first"));
+        let mut disabled = candidate("second");
+        disabled.enabled = false;
+        scheduler.upsert(disabled);
+        assert_eq!(scheduler.record_failure("first"), Some(1));
+
+        assert!(!scheduler.set_cooldown_with_reason_for_model_at(
+            "first",
+            CooldownRequest {
+                scope: "gpt-5",
+                policy_model: "gpt-5",
+                allowed_protocols: &[WireApi::Responses],
+                request_scope: &CandidateScope::default(),
                 retry_at_ms: 10_000,
                 reason: CooldownReason::Transient,
                 now_ms: 100,

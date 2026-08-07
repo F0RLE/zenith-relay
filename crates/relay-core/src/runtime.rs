@@ -3193,7 +3193,7 @@ mod tests {
                 &[WireApi::Responses],
                 &HashSet::new(),
                 (None, None),
-                now_ms.saturating_add(60_001),
+                now_ms,
             )
             .await;
         assert!(selection.is_some());

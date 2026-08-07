@@ -1,7 +1,7 @@
 use super::errors::{
-    canonical_upstream_status, preserved_upstream_error_value, rate_limit_body_hint_value,
-    upstream_event_failure_category, upstream_failure_status, upstream_status_from_value,
-    AttemptFailure, PreservedUpstreamError, RateLimitBodyHint,
+    api_error_type, canonical_upstream_status, preserved_upstream_error_value,
+    rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
+    upstream_status_from_value, AttemptFailure, PreservedUpstreamError, RateLimitBodyHint,
 };
 use super::response::{
     apply_usage, emit_callback, emit_usage, find_usage, response_id, response_service_tier,
@@ -200,14 +200,24 @@ fn rewrite_bridge_failure(bytes: Vec<u8>, preserved: Option<&PreservedUpstreamEr
         "message".to_string(),
         Value::String(preserved.message.clone()),
     );
+    error.insert(
+        "type".to_string(),
+        Value::String(api_error_type(preserved.status, &preserved.code).to_string()),
+    );
     let Some(payload) = terminal.payload else {
         return bytes;
     };
+    let event_name = payload
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("response.failed");
     let Ok(payload) = serde_json::to_vec(&payload) else {
         return bytes;
     };
-    let mut frame = Vec::with_capacity(payload.len() + 44);
-    frame.extend_from_slice(b"event: response.failed\ndata: ");
+    let mut frame = Vec::with_capacity(payload.len() + event_name.len() + 16);
+    frame.extend_from_slice(b"event: ");
+    frame.extend_from_slice(event_name.as_bytes());
+    frame.extend_from_slice(b"\ndata: ");
     frame.extend_from_slice(&payload);
     frame.extend_from_slice(b"\n\n");
     frame
@@ -1027,6 +1037,30 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
                 Some(TerminalOutcome::Failure)
             );
         }
+    }
+
+    #[test]
+    fn bridge_failure_rewrite_preserves_the_upstream_type_and_event_name() {
+        let preserved = PreservedUpstreamError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            category: "upstream_unavailable",
+            code: "service_unavailable".into(),
+            message: "safe upstream message".into(),
+        };
+        let rewritten = String::from_utf8(rewrite_bridge_failure(
+            br#"event: response.cancelled
+data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_error","code":"adapter_upstream_stream_invalid","message":"adapter message"}}}
+
+"#
+            .to_vec(),
+            Some(&preserved),
+        ))
+        .unwrap();
+
+        assert!(rewritten.starts_with("event: response.cancelled\ndata: "));
+        assert!(rewritten.contains("\"type\":\"server_error\""));
+        assert!(rewritten.contains("\"code\":\"service_unavailable\""));
+        assert!(rewritten.contains("\"message\":\"safe upstream message\""));
     }
 
     #[test]

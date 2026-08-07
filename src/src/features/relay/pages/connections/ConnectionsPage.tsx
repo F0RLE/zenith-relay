@@ -218,6 +218,14 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
+  const [nowMs, setNowMs] = useState(Date.now());
+  const sourceCooldownDeadline = Math.min(...(runtime?.gateway.routingOrder ?? [])
+    .flatMap((candidate) => candidate.kind === "api_source" && candidate.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs ? [candidate.nextRetryAtMs] : []));
+  useEffect(() => {
+    if (!Number.isFinite(sourceCooldownDeadline)) return;
+    const timer = window.setTimeout(() => setNowMs(Date.now()), sourceCooldownDeadline - nowMs < 60 * 60_000 ? 1_000 : 60_000);
+    return () => window.clearTimeout(timer);
+  }, [nowMs, sourceCooldownDeadline]);
   if (!runtime?.sources.length) {
     return <EmptyState title={t("sources.emptyTitle")} description={t("sources.emptyDescription")} />;
   }
@@ -230,7 +238,6 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   ));
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
-  const nowMs = Date.now();
   const runtimeBySource = new Map((runtime.gateway.routingOrder ?? []).map((candidate) => [candidate.candidateId, candidate]));
   const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
     `source-pool-${source.id}`,
