@@ -64,6 +64,7 @@ export function AppContextMenu() {
 
   useEffect(() => {
     const open = (event: MouseEvent) => {
+      if (event.defaultPrevented || (event.target instanceof Element && event.target.closest("[data-relay-context-action]"))) return;
       event.preventDefault();
       const field = textFieldFrom(event.target);
       const selectionStart = field?.selectionStart ?? 0;

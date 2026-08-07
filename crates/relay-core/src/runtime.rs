@@ -446,7 +446,7 @@ struct RuntimeKey {
     id: String,
     enabled: bool,
     secret_hash: [u8; 32],
-    scope: CandidateScope,
+    scope: RwLock<CandidateScope>,
     model_rules: ModelRules,
     model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
@@ -816,7 +816,7 @@ impl GatewayRuntime {
                 id: key.key.id,
                 enabled: key.enabled,
                 secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
-                scope,
+                scope: RwLock::new(scope),
                 model_rules,
                 model_prefix: normalize_prefix(key.model_prefix),
                 client_wire_apis,
@@ -933,7 +933,11 @@ impl GatewayRuntime {
             .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
             .map(|key| AuthenticatedKey {
                 id: key.id.clone(),
-                scope: key.scope.clone(),
+                scope: key
+                    .scope
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
                 client_wire_apis: key.client_wire_apis.clone(),
@@ -1412,10 +1416,15 @@ impl GatewayRuntime {
         else {
             return Vec::new();
         };
+        let scope = key
+            .scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         self.visible_models(
             &AuthenticatedKey {
                 id: key.id.clone(),
-                scope: key.scope.clone(),
+                scope,
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
                 client_wire_apis: key.client_wire_apis.clone(),
@@ -1451,6 +1460,23 @@ impl GatewayRuntime {
             quota,
             quota_updated_at_ms,
         )
+    }
+
+    pub fn update_key_scope(&self, key_id: &str, scope: CandidateScope) -> bool {
+        let Some(key) = self.keys.iter().find(|key| key.enabled && key.id == key_id) else {
+            return false;
+        };
+        let mut current = key
+            .scope
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == scope {
+            return true;
+        }
+        *current = scope;
+        drop(current);
+        self.candidate_availability.notify_waiters();
+        true
     }
 
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
@@ -3132,6 +3158,52 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[test]
+    fn runtime_updates_key_scope_without_rebuild() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![
+                RuntimeSource::unrestricted(source("source-a", "a", &["model-a"])),
+                RuntimeSource::unrestricted(source("source-b", "b", &["model-b"])),
+            ],
+            vec![RuntimeLocalKey {
+                key: key("key-1", "local-secret"),
+                enabled: true,
+                source_ids: Some(vec!["source-a".into()]),
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: None,
+            }],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime.visible_models_for_secret(
+                "local-secret",
+                &[WireApi::Responses],
+                current_time_ms()
+            ),
+            vec!["model-a"]
+        );
+        assert!(runtime.update_key_scope(
+            "key-1",
+            CandidateScope {
+                source_ids: Some(std::iter::once("source-b".to_string()).collect()),
+                account_ids: Some(Default::default()),
+                model_rules: ModelRules::default(),
+            },
+        ));
+        assert_eq!(
+            runtime.visible_models_for_secret(
+                "local-secret",
+                &[WireApi::Responses],
+                current_time_ms()
+            ),
+            vec!["model-b"]
+        );
     }
 
     #[tokio::test]

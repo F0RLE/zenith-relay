@@ -319,7 +319,11 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
           {member.kind === "account" && accountEconomicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
-              <IconButton className="danger" label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} />
+              <IconButton className="danger" data-relay-context-action label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void remove(member);
+              }} />
               {member.kind === "source" ? <IconButton label={t("pool.refreshSourceStats")} icon={sourceStats[member.id]?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!member.secretAvailable || sourceStats[member.id]?.loading} onClick={() => void refreshSourceStats(member.id)} /> : null}
               {member.kind === "account" ? <IconButton label={t("accounts.refreshQuota")} icon={busy === `pool-account-quota-${member.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !member.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(member)} /> : null}
               <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />

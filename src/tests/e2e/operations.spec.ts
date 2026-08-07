@@ -1616,6 +1616,22 @@ test("connections stay outside the pool until the user adds selected members", a
   ]);
 });
 
+test("pool member removal on right click skips confirmation", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const member = page.locator(".pool-member-card").first();
+  const memberLabel = await member.getAttribute("data-member-label");
+  expect(memberLabel).toBeTruthy();
+  const remove = member.getByRole("button", { name: /Remove from pool:/ });
+  await remove.click({ button: "right" });
+
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
+  await expect(page.locator(".pool-member-card").filter({ hasText: memberLabel! })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(1);
+});
+
 for (const mode of ["local", "remote"] as const) {
   test(`${mode} API sources expose routing role and pool membership`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });

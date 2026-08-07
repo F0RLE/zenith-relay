@@ -6,7 +6,9 @@ use crate::{
             credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
+        models::{
+            LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord,
+        },
         state::DesktopState,
         store::secret_store,
     },
@@ -14,7 +16,7 @@ use crate::{
 use chrono::Utc;
 use serde::Deserialize;
 use std::collections::BTreeSet;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zenith_relay_core::{
@@ -23,7 +25,7 @@ use zenith_relay_core::{
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
+    ApiModelPriceOverride, CandidateScope, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -485,9 +487,36 @@ fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<Str
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
 }
 
+fn local_pool_scope(
+    sources: &[ProviderSourceRecord],
+    accounts: &[LocalAccountRecord],
+) -> LocalResult<CandidateScope> {
+    let mut source_ids = BTreeSet::new();
+    for source in sources.iter().filter(|source| source.in_pool) {
+        if source
+            .supports_wire_api(WireApi::Responses)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+        {
+            source_ids.insert(source.id.clone());
+        }
+    }
+    Ok(CandidateScope {
+        source_ids: Some(source_ids),
+        account_ids: Some(
+            accounts
+                .iter()
+                .filter(|account| account.account.in_pool)
+                .map(|account| account.account.id.clone())
+                .collect(),
+        ),
+        model_rules: Default::default(),
+    })
+}
+
 #[tauri::command]
 pub async fn set_local_pool_membership(
     input: PoolMembershipInput,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
@@ -509,6 +538,12 @@ pub async fn set_local_pool_membership(
             store.keys().to_vec(),
         )
     };
+    let system_key_id = old_keys
+        .iter()
+        .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
+        .or_else(|| old_keys.iter().find(|key| key.system))
+        .map(|key| key.id.clone())
+        .unwrap_or_else(|| SYSTEM_GATEWAY_KEY_ID.to_string());
     if source_ids
         .iter()
         .any(|id| !old_sources.iter().any(|record| &record.id == id))
@@ -563,20 +598,36 @@ pub async fn set_local_pool_membership(
         return state.snapshot().await.map_err(Into::into);
     }
 
+    let next_scope = local_pool_scope(&sources, &accounts)?;
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
-    restart_or_rollback(&state, || {
-        state
-            .store()?
-            .replace_pool_records(old_sources, old_accounts, old_keys)
-    })
-    .await?;
+    let updated_in_place = state
+        .gateway
+        .runtime()
+        .await
+        .is_some_and(|runtime| runtime.update_key_scope(&system_key_id, next_scope));
+    if !updated_in_place {
+        restart_or_rollback(&state, || {
+            state
+                .store()?
+                .replace_pool_records(old_sources, old_accounts, old_keys)
+        })
+        .await?;
+    }
     let now_ms = super::current_time_ms();
     for account_id in account_ids {
         state.sync_account_quota_refresh(&account_id, now_ms)?;
     }
-    state.snapshot().await.map_err(Into::into)
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place {
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<DesktopState>();
+            let _ = super::profiles::refresh_active_codex_catalog(&state).await;
+        });
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
