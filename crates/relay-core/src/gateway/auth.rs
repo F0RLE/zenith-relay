@@ -30,7 +30,7 @@ pub(super) fn invalid_host() -> Response<Body> {
 pub(super) fn unauthorized() -> Response<Body> {
     let mut response = api_error(
         StatusCode::UNAUTHORIZED,
-        "local API key is missing or invalid",
+        "managed gateway credential is missing or invalid",
         "invalid_api_key",
     );
     response
@@ -42,7 +42,7 @@ pub(super) fn unauthorized() -> Response<Body> {
 pub(super) fn client_api_forbidden() -> Response<Body> {
     api_error(
         StatusCode::FORBIDDEN,
-        "this client key does not allow the requested API",
+        "the managed gateway credential does not allow the requested API",
         "client_api_not_allowed",
     )
 }

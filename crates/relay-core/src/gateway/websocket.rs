@@ -1633,7 +1633,7 @@ impl GatewayFailure {
         Self {
             status: StatusCode::NOT_FOUND,
             category: "model_not_found",
-            message: "model is not available for this local key",
+            message: "model is not available in this managed pool",
             cooldown_ms: 0,
             retry_at_ms: None,
         }

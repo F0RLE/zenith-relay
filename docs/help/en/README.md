@@ -46,8 +46,8 @@ selection after a short confirmation. The same wizard can be restarted from
   sources, proxies, and server management connection.
 - **Pool** controls enabled members, drain state, model rules, order, weight,
   and routing strategy.
-- **API & ChatGPT** starts the personal endpoint, creates scoped client keys,
-  and attaches the selected endpoint to ChatGPT/Codex.
+- **API & ChatGPT** starts the personal endpoint and attaches the selected
+  endpoint to ChatGPT/Codex.
 - **Usage** shows request status, selected member, model, tokens, timing,
   speed, and API-equivalent estimate without storing ordinary prompt/response
   bodies.
@@ -70,9 +70,10 @@ force traffic onto an unavailable account.
 ## Privacy And Recovery
 
 Desktop secrets use the operating-system credential store. A self-hosted
-server stores account secrets in its encrypted vault and operational state in
-SQLite. The server management token and client `/v1` keys are separate and
-must never be exchanged.
+server stores account secrets and its managed profile credential in the
+encrypted vault, while operational state lives in SQLite. The server
+management token and profile credential are separate and must never be
+exchanged.
 
 Keep the server behind HTTPS, keep its vault key outside the data-directory
 backup, and test a restore before depending on it. Relay redacts credentials,

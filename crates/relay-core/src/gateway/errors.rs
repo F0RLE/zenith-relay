@@ -16,6 +16,8 @@ const TRANSPORT_COOLDOWN_MS: u64 = 5_000;
 
 const MAX_RESPONSE_OWNER_CANDIDATES: usize = 8;
 
+const MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS: usize = 1_024;
+
 const MAX_RATE_LIMIT_COOLDOWN_MS: u64 = 30 * 60_000;
 
 const MAX_RATE_LIMIT_RETRY_HINT_MS: u64 = 7 * 24 * 60 * 60_000;
@@ -33,6 +35,123 @@ pub(super) struct AttemptFailure {
     pub(super) message: &'static str,
     pub(super) cooldown_ms: u64,
     pub(super) cooldown_hint: RateLimitBodyHint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct PreservedUpstreamError {
+    pub(super) status: StatusCode,
+    pub(super) category: &'static str,
+    pub(super) code: String,
+    pub(super) message: String,
+}
+
+/// Extracts only a short, structured upstream error message for the final
+/// response after retries are exhausted. Raw upstream bodies are intentionally
+/// never forwarded because they may contain URLs, credentials, or diagnostics.
+pub(super) fn preserved_upstream_error(
+    failure: &AttemptFailure,
+    body: &[u8],
+) -> Option<PreservedUpstreamError> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    preserved_upstream_error_value(failure, &value)
+}
+
+pub(super) fn preserved_upstream_error_value(
+    failure: &AttemptFailure,
+    value: &Value,
+) -> Option<PreservedUpstreamError> {
+    let code = [
+        "/error/code",
+        "/response/error/code",
+        "/body/error/code",
+        "/code",
+        "/response/code",
+        "/body/code",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .find(|code| !code.is_empty() && code.len() <= 128 && !code.chars().any(char::is_control))?;
+    if !is_public_gateway_error_code(code) {
+        return None;
+    }
+    let message = [
+        "/error/message",
+        "/response/error/message",
+        "/body/error/message",
+        "/message",
+        "/response/message",
+        "/body/message",
+        "/error/detail",
+        "/response/error/detail",
+        "/body/error/detail",
+        "/detail",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .map(str::trim)
+    .find(|message| {
+        !message.is_empty()
+            && message.chars().count() <= MAX_SAFE_UPSTREAM_ERROR_MESSAGE_CHARS
+            && !message.chars().any(char::is_control)
+            && !contains_sensitive_error_metadata(message)
+    })?;
+    Some(PreservedUpstreamError {
+        status: failure.status,
+        category: failure.category,
+        code: code.to_string(),
+        message: message.to_string(),
+    })
+}
+
+fn is_public_gateway_error_code(code: &str) -> bool {
+    matches!(
+        code.trim(),
+        "service_unavailable"
+            | "bad_request"
+            | "invalid_request"
+            | "invalid_prompt"
+            | "context_length_exceeded"
+            | "request_too_large"
+            | "content_policy_violation"
+            | "model_not_available"
+            | "model_not_found"
+            | "model_disabled"
+            | "invalid_image_size"
+            | "unauthorized"
+            | "forbidden"
+            | "insufficient_balance"
+            | "rate_limit_exceeded"
+            | "not_found"
+            | "service_timeout"
+            | "internal_error"
+            | "server_error"
+            | "no_eligible_source"
+            | "all_sources_temporarily_unavailable"
+            | "all_sources_cooling_down"
+            | "server_is_overloaded"
+            | "bad_gateway"
+            | "gateway_timeout"
+    )
+}
+
+fn contains_sensitive_error_metadata(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    [
+        "http://",
+        "https://",
+        "url:",
+        "authorization",
+        "bearer ",
+        "api_key",
+        "apikey",
+        "secret",
+        "cookie",
+        "token:",
+        "sk-",
+    ]
+    .into_iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 pub(super) struct FailureState {
@@ -335,6 +454,17 @@ fn classify_upstream_error_text(status: StatusCode, text: &str) -> UpstreamError
         )
     {
         "upstream_edge_challenge"
+    } else if text_has_any(
+        text,
+        &[
+            "invalid_request",
+            "invalid request",
+            "request is invalid",
+            "bad_request",
+            "bad request",
+        ],
+    ) {
+        "upstream_invalid_request"
     } else if status == StatusCode::FORBIDDEN {
         "upstream_forbidden"
     } else if status == StatusCode::NOT_FOUND {
@@ -1597,6 +1727,67 @@ mod tests {
     }
 
     #[test]
+    fn delayed_gateway_invalid_request_event_does_not_cool_down_source() {
+        let value: Value = serde_json::from_slice(
+            br#"{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
+        )
+        .unwrap();
+
+        let classification = classify_upstream_error_value(StatusCode::BAD_GATEWAY, &value);
+        assert_eq!(classification.category, "upstream_invalid_request");
+        assert_eq!(
+            upstream_event_failure_category(Some("error"), &value),
+            Some("upstream_invalid_request")
+        );
+        assert!(!failure_category_requires_cooldown(classification.category));
+    }
+
+    #[test]
+    fn preserved_upstream_error_keeps_only_safe_structured_messages() {
+        let failure = AttemptFailure::status_with_body(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some(
+                br#"{"error":{"code":"service_unavailable","message":"no eligible source is available for this model"}}"#,
+            ),
+        );
+        let preserved = preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"service_unavailable","message":"no eligible source is available for this model"}}"#,
+        )
+        .expect("safe Gateway message is preserved");
+        assert_eq!(preserved.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(preserved.category, "upstream_unavailable");
+        assert_eq!(preserved.code, "service_unavailable");
+        assert_eq!(
+            preserved.message,
+            "no eligible source is available for this model"
+        );
+
+        let nested = preserved_upstream_error(
+            &AttemptFailure::classified_with_hint(
+                StatusCode::BAD_REQUEST,
+                "upstream_invalid_request",
+                RateLimitBodyHint::default(),
+            ),
+            br#"{"type":"error","response":{"error":{"code":"bad_request","message":"Zenith AI request is invalid."}}}"#,
+        )
+        .expect("safe nested Gateway message is preserved");
+        assert_eq!(nested.code, "bad_request");
+        assert_eq!(nested.message, "Zenith AI request is invalid.");
+
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"message":"request failed at https://gateway.example.invalid/v1; bearer secret"}}"#,
+        )
+        .is_none());
+        assert!(preserved_upstream_error(
+            &failure,
+            br#"{"error":{"code":"provider_error","message":"upstream diagnostic"}}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn retry_policy_matches_account_failover_and_official_transient_statuses() {
         assert!(retryable_status(StatusCode::UNAUTHORIZED, false));
         assert!(retryable_status(StatusCode::CONFLICT, false));
@@ -1632,6 +1823,7 @@ mod tests {
             "upstream_stream",
             "stream_incomplete",
             "stream_idle_timeout",
+            "upstream_invalid_request",
         ] {
             assert!(!failure_category_requires_cooldown(category));
         }

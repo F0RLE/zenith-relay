@@ -193,7 +193,7 @@ async fn prepare_request(
     else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         ));
     };

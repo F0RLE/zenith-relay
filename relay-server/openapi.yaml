@@ -77,7 +77,7 @@ paths:
   /v1/models:
     get:
       operationId: models
-      security: [{ clientKey: [] }]
+      security: [{ profileCredential: [] }]
       responses:
         "200":
           description: OpenAI-compatible visible model catalog
@@ -93,7 +93,7 @@ paths:
   /v1/responses:
     post:
       operationId: responses
-      security: [{ clientKey: [] }]
+      security: [{ profileCredential: [] }]
       requestBody:
         required: true
         content:
@@ -110,8 +110,8 @@ paths:
     post:
       operationId: messages
       security:
-        - clientKey: []
-        - anthropicClientKey: []
+        - profileCredential: []
+        - nativeProfileCredential: []
       requestBody:
         required: true
         content:
@@ -127,8 +127,8 @@ paths:
 components:
   securitySchemes:
     managementToken: { type: http, scheme: bearer, description: Management-only token; never valid for /v1. }
-    clientKey: { type: http, scheme: bearer, description: Scoped model request key; never valid for management. }
-    anthropicClientKey: { type: apiKey, in: header, name: x-api-key, description: Scoped model request key for /v1/messages. }
+    profileCredential: { type: http, scheme: bearer, description: Relay-managed profile credential for /v1; never valid for management. }
+    nativeProfileCredential: { type: apiKey, in: header, name: x-api-key, description: Relay-managed profile credential for native /v1/messages clients. }
   responses:
     Unauthorized:
       description: Missing or invalid token

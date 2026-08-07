@@ -24,6 +24,7 @@ pub fn initialize(app: &tauri::AppHandle) -> error::Result<DesktopState> {
     let vault_ms = vault_started.elapsed().as_secs_f64() * 1_000.0;
     let secrets_ready = started.elapsed();
     let state = DesktopState::open(root)?;
+    commands::pool::retire_user_gateway_keys(&state)?;
     let state_ready = started.elapsed();
     state.set_app_handle(app.clone());
     let _ = state.record_performance("vault", vault_ms, Some("startup"));

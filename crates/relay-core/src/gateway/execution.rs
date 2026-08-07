@@ -3,12 +3,12 @@ use super::errors::{
     api_error, apply_attempt_failure_cooldown, apply_cooldown, apply_failure_cooldown_with_body,
     apply_failure_cooldown_with_hint, apply_failure_state, cooldown_error,
     failure_category_is_request_terminal, failure_category_requires_cooldown,
-    failure_requires_independent_source_endpoint, previous_response_not_found,
-    previous_response_requires_websocket, recoverable_response_affinity_miss,
-    responses_function_call_output_has_invalid_call_id,
+    failure_requires_independent_source_endpoint, preserved_upstream_error,
+    previous_response_not_found, previous_response_requires_websocket,
+    recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
     retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure,
-    TRANSIENT_COOLDOWN_MS,
+    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{
@@ -75,6 +75,7 @@ pub(super) async fn execute_account_endpoint(
     let mut function_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
+    let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
 
     while usize::from(attempt)
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
@@ -233,6 +234,7 @@ pub(super) async fn execute_account_endpoint(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             let mut event = usage_event(
                 &request_id,
                 attempt,
@@ -335,6 +337,11 @@ pub(super) async fn execute_account_endpoint(
             );
         }
     }
+    if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
+        preserved.status == failure.status && preserved.category == failure.category
+    }) {
+        return api_error(preserved.status, &preserved.message, &preserved.code);
+    }
     api_error(failure.status, failure.message, failure.category)
 }
 
@@ -434,7 +441,7 @@ pub(super) async fn execute_client_request(
     ) else {
         return api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         );
     };
@@ -513,6 +520,7 @@ async fn execute_request(
     let mut function_item_id_repair_attempted = false;
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
+    let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
     let has_previous_response_id = wire_api == WireApi::Responses
         && request
             .get("previous_response_id")
@@ -770,6 +778,7 @@ async fn execute_request(
                 continue;
             }
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));
+            last_preserved_upstream_error = preserved_upstream_error(&failure, &bytes);
             event.error_category = Some(failure.category.to_string());
             if wire_api == WireApi::Responses
                 && adapter_is_passthrough
@@ -958,6 +967,18 @@ async fn execute_request(
                         }
                         emit_usage(&runtime, event);
                         if failure_category_is_request_terminal(failure.category) {
+                            if let Some(preserved) =
+                                last_preserved_upstream_error.as_ref().filter(|preserved| {
+                                    preserved.status == failure.status
+                                        && preserved.category == failure.category
+                                })
+                            {
+                                return api_error(
+                                    preserved.status,
+                                    &preserved.message,
+                                    &preserved.code,
+                                );
+                            }
                             return api_error(failure.status, failure.message, failure.category);
                         }
                         last_failure = Some(failure);
@@ -1215,7 +1236,9 @@ async fn execute_request(
                 );
                 return proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
             }
-            Err(failure) => {
+            Err(bootstrap_failure) => {
+                let failure = bootstrap_failure.failure;
+                last_preserved_upstream_error = bootstrap_failure.preserved;
                 let state = failure_category_requires_cooldown(failure.category).then(|| {
                     apply_attempt_failure_cooldown(
                         &runtime,
@@ -1252,6 +1275,14 @@ async fn execute_request(
                 }
                 emit_usage(&runtime, event);
                 if failure_category_is_request_terminal(failure.category) {
+                    if let Some(preserved) =
+                        last_preserved_upstream_error.as_ref().filter(|preserved| {
+                            preserved.status == failure.status
+                                && preserved.category == failure.category
+                        })
+                    {
+                        return api_error(preserved.status, &preserved.message, &preserved.code);
+                    }
                     return api_error(failure.status, failure.message, failure.category);
                 }
                 last_failure = Some(failure);
@@ -1302,6 +1333,11 @@ async fn execute_request(
                 reason == crate::scheduler::CooldownReason::RateLimit,
             );
         }
+    }
+    if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
+        preserved.status == failure.status && preserved.category == failure.category
+    }) {
+        return api_error(preserved.status, &preserved.message, &preserved.code);
     }
     api_error(failure.status, failure.message, failure.category)
 }

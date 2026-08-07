@@ -14,7 +14,7 @@ use super::{
 };
 use crate::platform;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -34,12 +34,11 @@ use zenith_relay_core::{
         WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
         WakeTask,
     },
-    protocol::ClientWireApi,
     quota::{
         quota_reference_value, quota_valuation_revision, QuotaRefreshPermit, QuotaRefreshQueue,
         QuotaTransition,
     },
-    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent, WireApi,
+    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent,
 };
 
 #[cfg(test)]
@@ -578,13 +577,12 @@ impl DesktopState {
 
     async fn snapshot_with(&self, secrets: &impl SecretLookup) -> Result<LocalPoolSnapshot> {
         let running = self.gateway.address().await.is_some();
-        let (gateway, sources, accounts, keys, automations) = {
+        let (gateway, sources, accounts, automations) = {
             let store = self.store()?;
             (
                 store.gateway().clone(),
                 store.sources().to_vec(),
                 store.accounts().to_vec(),
-                store.keys().to_vec(),
                 store.automations().clone(),
             )
         };
@@ -598,60 +596,14 @@ impl DesktopState {
         if gateway.enabled && !running {
             warnings.push("gateway_configured_but_not_running".to_string());
         }
-        let mut sources_with_secrets = HashSet::new();
         for source in &sources {
-            if secrets.load(&source.secret_ref)?.is_some() {
-                sources_with_secrets.insert(source.id.as_str());
-            } else {
+            if secrets.load(&source.secret_ref)?.is_none() {
                 warnings.push(warning_code("source_secret_missing", &source.id));
             }
         }
-        let mut accounts_with_secrets = HashSet::new();
         for account in &accounts {
-            let available = account_secret_available(account, secrets)?;
-            if available {
-                accounts_with_secrets.insert(account.account.id.as_str());
-            } else {
+            if !account_secret_available(account, secrets)? {
                 warnings.push(warning_code("account_secret_missing", &account.account.id));
-            }
-        }
-        for key in &keys {
-            let key_secret_available = secrets.load(&key.secret_ref)?.is_some();
-            if !key_secret_available {
-                warnings.push(warning_code("local_key_secret_missing", &key.id));
-            }
-            let mut usable_source = false;
-            for source in &sources {
-                let scoped = key
-                    .source_ids
-                    .as_ref()
-                    .is_none_or(|ids| ids.iter().any(|id| id == &source.id));
-                if !scoped
-                    || !source.enabled
-                    || (key.system && !source.in_pool)
-                    || source.draining
-                    || !sources_with_secrets.contains(source.id.as_str())
-                    || !source_supports_key_protocol(source, key)?
-                {
-                    continue;
-                }
-                usable_source = true;
-                break;
-            }
-            let usable_account = accounts.iter().any(|account| {
-                account.account.enabled
-                    && (!key.system || account.account.in_pool)
-                    && !account.account.draining
-                    && accounts_with_secrets.contains(account.account.id.as_str())
-                    && key_allows_client_wire_api(key, ClientWireApi::Responses)
-                    && key
-                        .account_ids
-                        .as_ref()
-                        .is_none_or(|ids| ids.iter().any(|id| id == &account.account.id))
-            });
-            let usable = key.enabled && key_secret_available && (usable_source || usable_account);
-            if key.enabled && !usable {
-                warnings.push(warning_code("local_key_unavailable", &key.id));
             }
         }
         Ok(LocalPoolSnapshot {
@@ -665,7 +617,6 @@ impl DesktopState {
             capabilities: platform::capabilities(),
             sources,
             accounts,
-            keys,
             automations: automations.tasks,
             wake_history: automations.state.history().iter().cloned().collect(),
             warnings,
@@ -708,38 +659,6 @@ impl DesktopState {
     pub fn root(&self) -> &Path {
         &self.root
     }
-}
-
-fn source_supports_key_protocol(
-    source: &crate::local_pool::models::ProviderSourceRecord,
-    key: &crate::local_pool::models::LocalGatewayKeyRecord,
-) -> Result<bool> {
-    let bindings = source
-        .effective_protocol_bindings()
-        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
-    Ok(bindings.into_iter().any(|binding| {
-        !binding.model_ids.is_empty()
-            && key_allows_client_wire_api(
-                key,
-                match binding.wire_api {
-                    WireApi::Responses => ClientWireApi::Responses,
-                    WireApi::ChatCompletions => ClientWireApi::ChatCompletions,
-                    WireApi::Messages => ClientWireApi::Messages,
-                },
-            )
-    }))
-}
-
-fn key_allows_client_wire_api(
-    key: &crate::local_pool::models::LocalGatewayKeyRecord,
-    wire_api: ClientWireApi,
-) -> bool {
-    if key.system {
-        return wire_api == ClientWireApi::Responses;
-    }
-    key.wire_apis
-        .as_ref()
-        .is_none_or(|allowed| allowed.contains(&wire_api))
 }
 
 fn account_secret_available(
@@ -1057,12 +976,6 @@ mod tests {
                 enabled: true,
                 system: false,
                 secret_ref: "key:key_1".into(),
-                source_ids: None,
-                account_ids: None,
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
                 created_at: "2026-07-10T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -1404,7 +1317,7 @@ mod tests {
             store
                 .replace_account_state(
                     vec![account_record("account-1")],
-                    vec![key_record("key-1", None)],
+                    vec![key_record("key-1")],
                     automations,
                 )
                 .unwrap();
@@ -1589,61 +1502,6 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn snapshot_warns_and_filters_usability_when_secrets_are_missing() {
-        let root = std::env::temp_dir().join(format!(
-            "zenith-relay-secret-state-{}",
-            uuid::Uuid::new_v4()
-        ));
-        let state = DesktopState::open(root.clone()).unwrap();
-        {
-            let mut store = state.store().unwrap();
-            store
-                .replace_records(
-                    vec![source_record("source_missing"), source_record("source_ok")],
-                    vec![
-                        key_record("key_missing", None),
-                        key_record("key_scoped_missing", Some(vec!["source_missing".into()])),
-                        key_record("key_ok", Some(vec!["source_ok".into()])),
-                    ],
-                )
-                .unwrap();
-        }
-        let secrets = MemorySecrets(HashMap::from([
-            ("source:source_ok".into(), "upstream".into()),
-            ("key:key_scoped_missing".into(), "local".into()),
-            ("key:key_ok".into(), "local".into()),
-        ]));
-
-        let snapshot = state.snapshot_with(&secrets).await.unwrap();
-        assert!(snapshot
-            .warnings
-            .contains(&"source_secret_missing:source_m...".into()));
-        assert!(snapshot
-            .warnings
-            .contains(&"local_key_secret_missing:key_missing".into()));
-        assert!(snapshot
-            .warnings
-            .contains(&"local_key_unavailable:key_missing".into()));
-        assert!(snapshot
-            .warnings
-            .contains(&"local_key_unavailable:key_scop...".into()));
-        assert!(!snapshot
-            .warnings
-            .contains(&"local_key_unavailable:key_ok".into()));
-        assert!(snapshot
-            .warnings
-            .iter()
-            .all(|warning| !warning.contains("source_missing")
-                && !warning.contains("key_scoped_missing")));
-        assert!(snapshot
-            .warnings
-            .iter()
-            .all(|warning| !warning.contains("source:") && !warning.contains("key:")));
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     struct MemorySecrets(HashMap<String, String>);
 
     impl SecretLookup for MemorySecrets {
@@ -1668,44 +1526,13 @@ mod tests {
         .unwrap());
     }
 
-    fn source_record(id: &str) -> ProviderSourceRecord {
-        ProviderSourceRecord {
-            id: id.into(),
-            name: id.into(),
-            enabled: true,
-            in_pool: true,
-            draining: false,
-            base_url: "https://example.test/v1".into(),
-            secret_ref: format!("source:{id}"),
-            wire_api: WireApi::Responses,
-            protocol_bindings: Vec::new(),
-            models: vec!["gpt-test".into()],
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            priority: 0,
-            weight: 1,
-            recovery_delay_seconds: 0,
-            model_price_overrides: Default::default(),
-            last_used_at: None,
-            last_test_at: None,
-            last_test_status: None,
-            last_error: None,
-        }
-    }
-
-    fn key_record(id: &str, source_ids: Option<Vec<String>>) -> LocalGatewayKeyRecord {
+    fn key_record(id: &str) -> LocalGatewayKeyRecord {
         LocalGatewayKeyRecord {
             id: id.into(),
             label: id.into(),
             enabled: true,
             system: false,
             secret_ref: format!("key:{id}"),
-            source_ids,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
             created_at: "2026-07-10T00:00:00Z".into(),
             last_used_at: None,
         }

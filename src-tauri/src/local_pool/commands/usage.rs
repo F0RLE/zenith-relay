@@ -70,7 +70,6 @@ fn normalize_usage_query_at(mut query: UsageQuery, now: u64) -> UsageQuery {
     for value in [
         &mut query.model_query,
         &mut query.source_or_account_query,
-        &mut query.local_key_query,
         &mut query.error_category,
         &mut query.request_id_query,
     ] {

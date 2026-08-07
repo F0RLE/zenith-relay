@@ -502,7 +502,7 @@ impl GatewayRuntime {
     ///
     /// Desktop source and pool mutations can validly remove the final
     /// candidate. In that state the gateway must keep authenticating its
-    /// local keys and return an empty catalog instead of preventing the
+    /// gateway credentials and return an empty catalog instead of preventing the
     /// mutation from committing. Authentication, catalog visibility, and
     /// per-request candidate selection remain unchanged; callers validating a
     /// new configuration must use [`Self::from_mixed_pool`] instead.
@@ -759,7 +759,7 @@ impl GatewayRuntime {
             key.key.validate()?;
             if !key_ids.insert(key.key.id.clone()) {
                 return Err(Error::Validation(
-                    "local gateway key ids must be unique".to_string(),
+                    "gateway credential ids must be unique".to_string(),
                 ));
             }
             let scope = CandidateScope {
@@ -783,7 +783,7 @@ impl GatewayRuntime {
             });
             if client_wire_apis.as_ref().is_some_and(Vec::is_empty) {
                 return Err(Error::Validation(
-                    "client key wire scope must not be empty".to_string(),
+                    "gateway credential protocol scope must not be empty".to_string(),
                 ));
             }
             configured_key_rules.push((
@@ -814,7 +814,7 @@ impl GatewayRuntime {
             }
             if !runtime_keys.iter().any(|key| key.enabled) {
                 return Err(Error::Validation(
-                    "at least one enabled local gateway key is required".to_string(),
+                    "at least one enabled gateway credential is required".to_string(),
                 ));
             }
             let has_usable_key = configured_key_rules
@@ -833,7 +833,8 @@ impl GatewayRuntime {
                 });
             if !has_usable_key {
                 return Err(Error::Validation(
-                    "no enabled local key can reach a configured source candidate".to_string(),
+                    "no enabled gateway credential can reach a configured source candidate"
+                        .to_string(),
                 ));
             }
         }
@@ -2141,7 +2142,13 @@ impl GatewayRuntime {
                 .or(event.requested_model.as_deref())
         }
         .unwrap_or("*");
-        if is_model_capability_failure(category) {
+        // A direct API source may advertise a model while its upstream is
+        // being replaced or temporarily unable to serve it. The request path
+        // already applies a model-scoped cooldown for that failure; turning it
+        // into a permanent capability block makes every later retry look like
+        // there is no route at all. Native account capabilities are stable
+        // enough to retain the explicit block until their catalog is refreshed.
+        if event.account_id.is_some() && is_model_capability_failure(category) {
             self.block_candidate_capability(candidate_id, model);
             return;
         }
@@ -3054,6 +3061,7 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolUseDiagnostics;
 
     fn source(id: &str, key: &str, models: &[&str]) -> ProviderSource {
         ProviderSource {
@@ -3092,6 +3100,71 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[tokio::test]
+    async fn source_capability_failure_does_not_permanently_hide_a_declared_model() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+        runtime.apply_usage_event(
+            &UsageEvent {
+                request_id: "request".into(),
+                attempt: 1,
+                local_key_id: "key-1".into(),
+                source_id: "source-1".into(),
+                candidate_id: Some("source-1".into()),
+                account_id: None,
+                routing: None,
+                requested_model: Some("gpt-test".into()),
+                resolved_model: Some("gpt-test".into()),
+                wire_api: WireApi::Responses,
+                service_tier: DefaultServiceTier::Standard,
+                applied_service_tier: None,
+                success: false,
+                http_status: StatusCode::BAD_REQUEST.as_u16(),
+                error_category: Some("upstream_model_not_found".into()),
+                tool_use: ToolUseDiagnostics::default(),
+                cooldown_scope: Some("gpt-test".into()),
+                retry_at_ms: Some(now_ms.saturating_add(60_000)),
+                consecutive_failures: Some(1),
+                latency_ms: 1,
+                ttft_ms: None,
+                generation_ms: None,
+                input_tokens: None,
+                cached_input_tokens: None,
+                cache_write_input_tokens: None,
+                reasoning_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                quota_snapshot: None,
+            },
+            now_ms,
+        );
+
+        let selection = runtime
+            .select_and_reserve(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                now_ms.saturating_add(60_001),
+            )
+            .await;
+        assert!(selection.is_some());
     }
 
     #[test]
@@ -3673,7 +3746,7 @@ mod tests {
             Arc::new(|_| {}),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("no enabled local key"));
+        assert!(error.to_string().contains("no enabled gateway credential"));
     }
 
     #[test]

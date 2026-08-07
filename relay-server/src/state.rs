@@ -15,7 +15,7 @@ use std::{
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
     normalize_source_protocol_bindings,
-    protocol::{Capabilities, ClientWireApi},
+    protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaEconomicsState, QuotaSnapshot, Subscription},
     ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, SourceProtocolBinding,
@@ -26,6 +26,7 @@ pub const SERVER_SCHEMA_VERSION: u32 = 31;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
+pub(crate) const PROFILE_KEY_ROTATION_PREFIX: &str = "key_profile_rotation_";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,15 +135,6 @@ pub struct GatewayKeyRecord {
     #[serde(default)]
     pub system: bool,
     pub secret_ref: String,
-    pub source_ids: Option<Vec<String>>,
-    pub account_ids: Option<Vec<String>>,
-    pub allowed_models: Vec<String>,
-    pub excluded_models: Vec<String>,
-    pub model_prefix: Option<String>,
-    #[serde(default)]
-    pub wire_apis: Option<Vec<ClientWireApi>>,
-    #[serde(default)]
-    pub soft_budget_micro_usd: Option<u64>,
     pub created_at_ms: u64,
     pub last_used_at_ms: Option<u64>,
 }
@@ -245,6 +237,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config, store: Arc<Store>, vault: Arc<Vault>) -> Result<Arc<Self>, String> {
         migrate_legacy_proxies(&store, &vault)?;
+        retire_user_gateway_keys(&store, &vault)?;
         ensure_system_gateway_key(&store, &vault)?;
         let server_id = store.server_id()?;
         let fingerprint = identity_fingerprint(&server_id);
@@ -363,35 +356,105 @@ fn migrate_legacy_proxies(store: &Store, vault: &Vault) -> Result<(), String> {
     Ok(())
 }
 
+fn retire_user_gateway_keys(store: &Store, vault: &Vault) -> Result<(), String> {
+    let keys = store.keys()?;
+    let retained_secret_refs = keys
+        .iter()
+        .filter(|key| key.id == SYSTEM_GATEWAY_KEY_ID || is_internal_gateway_key(key))
+        .map(|key| key.secret_ref.clone())
+        .collect::<HashSet<_>>();
+    let retired = keys
+        .into_iter()
+        .filter(|key| {
+            key.id != SYSTEM_GATEWAY_KEY_ID
+                && !is_internal_gateway_key(key)
+                && !retained_secret_refs.contains(&key.secret_ref)
+        })
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(());
+    }
+
+    let mut secret_refs = HashSet::new();
+    let mut secrets = Vec::new();
+    for key in &retired {
+        if !secret_refs.insert(key.secret_ref.clone()) {
+            continue;
+        }
+        secrets.push((key.secret_ref.clone(), vault.load(&key.secret_ref)?));
+    }
+    let ids = retired.iter().map(|key| key.id.clone()).collect::<Vec<_>>();
+    let mut attempted_refs = Vec::new();
+    for (secret_ref, _) in &secrets {
+        attempted_refs.push(secret_ref.clone());
+        if let Err(error) = vault.delete(secret_ref) {
+            return Err(rollback_retired_gateway_keys(
+                vault,
+                &secrets,
+                &attempted_refs,
+                format!("legacy gateway credential cleanup failed: {error}"),
+            ));
+        }
+    }
+    if let Err(error) = store.delete_keys(&ids) {
+        return Err(rollback_retired_gateway_keys(
+            vault,
+            &secrets,
+            &attempted_refs,
+            format!("legacy gateway credential records could not be removed: {error}"),
+        ));
+    }
+    Ok(())
+}
+
+fn rollback_retired_gateway_keys(
+    vault: &Vault,
+    secrets: &[(String, Option<String>)],
+    attempted_refs: &[String],
+    cause: String,
+) -> String {
+    let mut failures = Vec::new();
+    for (secret_ref, secret) in secrets {
+        if !attempted_refs.iter().any(|value| value == secret_ref) {
+            continue;
+        }
+        if let Some(secret) = secret {
+            if let Err(error) = vault.save(secret_ref, secret) {
+                failures.push(format!("secret restore failed: {error}"));
+            }
+        }
+    }
+    if failures.is_empty() {
+        cause
+    } else {
+        format!("{cause}; cleanup rollback failed: {}", failures.join("; "))
+    }
+}
+
+pub(crate) fn is_internal_gateway_key(key: &GatewayKeyRecord) -> bool {
+    key.system
+        && (key.id == SYSTEM_GATEWAY_KEY_ID || key.id.starts_with(PROFILE_KEY_ROTATION_PREFIX))
+}
+
 fn ensure_system_gateway_key(store: &Store, vault: &Vault) -> Result<(), String> {
     let existing = store
         .keys()?
         .into_iter()
         .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID);
-    let required_wire_apis = Some(vec![ClientWireApi::Responses]);
     let changed = existing
         .as_ref()
-        .is_none_or(|key| !key.enabled || key.wire_apis != required_wire_apis);
+        .is_none_or(|key| !key.enabled || !key.system);
     let mut record = existing.unwrap_or_else(|| GatewayKeyRecord {
         id: SYSTEM_GATEWAY_KEY_ID.to_string(),
         label: "ChatGPT".to_string(),
         enabled: true,
         system: true,
         secret_ref: format!("key:{SYSTEM_GATEWAY_KEY_ID}"),
-        source_ids: None,
-        account_ids: None,
-        allowed_models: Vec::new(),
-        excluded_models: Vec::new(),
-        model_prefix: None,
-        wire_apis: required_wire_apis.clone(),
-        soft_budget_micro_usd: None,
         created_at_ms: now_ms(),
         last_used_at_ms: None,
     });
     record.enabled = true;
-    // The managed profile key is always the ChatGPT/Codex Responses surface.
-    // Its candidate scope is rebuilt from current pool membership at runtime.
-    record.wire_apis = required_wire_apis;
+    record.system = true;
     let created_secret = vault.load(&record.secret_ref)?.is_none();
     if created_secret {
         vault.save(&record.secret_ref, &generate_pool_key())?;

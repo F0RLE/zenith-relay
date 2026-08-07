@@ -36,7 +36,7 @@ use zenith_relay_core::{
 };
 
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
-    pool::ensure_system_gateway_key(state)?;
+    let system_key = pool::ensure_system_gateway_key(state)?;
     let codex_home = crate::platform::default_codex_home();
     let protected_account_id = if codex::credential_kind(&codex_home, &state.profile_backup_root())?
         == Some(codex::ProfileCredentialKind::LocalGateway)
@@ -45,20 +45,16 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     } else {
         None
     };
-    let (source_records, account_records, key_records, settings) = {
+    let (source_records, account_records, settings) = {
         let store = state.store()?;
         (
             store.sources().to_vec(),
             store.accounts().to_vec(),
-            store.keys().to_vec(),
             store.gateway().clone(),
         )
     };
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed ChatGPT/Codex profile has one strict Responses-only pool.
-    // Keep all enabled records in the runtime so separately scoped client keys
-    // can access native Messages or Chat Completions sources without being
-    // forced into that pool.
     let mut pool_source_ids = Vec::new();
     for source in &source_records {
         if source.in_pool
@@ -166,35 +162,20 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             refresh_proxies.push((account_id, proxy));
         }
     }
-    let mut keys = Vec::new();
-    for key in key_records {
-        let secret = if key.enabled {
-            pool::ensure_local_gateway_key_secret(&key)?
-        } else if let Some(secret) = secret_store::load(&key.secret_ref)? {
-            secret
-        } else {
-            continue;
-        };
-        let (source_ids, account_ids, wire_apis) = if key.system {
-            (
-                Some(pool_source_ids.clone()),
-                Some(pool_account_ids.clone()),
-                Some(vec![ClientWireApi::Responses]),
-            )
-        } else {
-            (key.source_ids, key.account_ids, key.wire_apis)
-        };
-        keys.push(RuntimeMixedLocalKey {
-            key: LocalGatewayKey { id: key.id, secret },
-            enabled: key.enabled,
-            source_ids,
-            account_ids,
-            allowed_models: key.allowed_models,
-            excluded_models: key.excluded_models,
-            model_prefix: key.model_prefix,
-            wire_apis,
-        });
-    }
+    let secret = pool::ensure_local_gateway_key_secret(&system_key)?;
+    let keys = vec![RuntimeMixedLocalKey {
+        key: LocalGatewayKey {
+            id: system_key.id,
+            secret,
+        },
+        enabled: system_key.enabled,
+        source_ids: Some(pool_source_ids),
+        account_ids: Some(pool_account_ids),
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        model_prefix: None,
+        wire_apis: Some(vec![ClientWireApi::Responses]),
+    }];
     let oauth = Arc::new(ProxyRefreshClient::new(refresh_proxies)?);
     let refresh = Arc::new(
         StoredRefreshAdapter::new(state.transient_root(), credentials.clone(), oauth, 60_000)
@@ -281,10 +262,7 @@ fn runtime_account_operational_state(
 ) -> AccountOperationalState {
     account_operational_state(AccountOperationalInput {
         enabled: account.enabled,
-        // Pool membership is a system-key scope, not a global runtime
-        // eligibility switch. This lets an explicitly scoped ordinary local
-        // key reach an enabled account outside the ChatGPT pool.
-        in_pool: true,
+        in_pool: account.in_pool,
         draining: account.draining,
         secret_available: true,
         proxy_available: true,
@@ -527,7 +505,6 @@ mod tests {
         let secret = secret_store::load(&key.secret_ref).unwrap().unwrap();
         assert!(key.system);
         assert!(key.enabled);
-        assert_eq!(key.wire_apis, Some(vec![ClientWireApi::Responses]));
         assert!(secret.starts_with("zlr_"));
 
         runtime_from_store(&state).await.unwrap();
@@ -684,96 +661,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_messages_key_reaches_a_non_pool_source_without_leaking_to_system_pool() {
-        let id = uuid::Uuid::new_v4().simple().to_string();
-        let root = std::env::temp_dir().join(format!("zenith-relay-scoped-messages-{id}"));
-        let source_secret_ref = format!("source:messages-{id}");
-        let key_secret_ref = format!("key:messages-{id}");
-        let state = DesktopState::open(root.clone()).unwrap();
-        secret_store::save(&source_secret_ref, "upstream-secret").unwrap();
-        secret_store::save(&key_secret_ref, "messages-key").unwrap();
-        state
-            .store()
-            .unwrap()
-            .upsert_source(ProviderSourceRecord {
-                id: "source_messages".into(),
-                name: "Native Messages".into(),
-                enabled: true,
-                in_pool: false,
-                draining: false,
-                base_url: "http://127.0.0.1:9/v1".into(),
-                secret_ref: source_secret_ref.clone(),
-                wire_api: WireApi::Messages,
-                protocol_bindings: vec![zenith_relay_core::SourceProtocolBinding {
-                    wire_api: WireApi::Messages,
-                    adapter: zenith_relay_core::SourceAdapter::Native,
-                    reasoning_mode: zenith_relay_core::MessagesReasoningMode::Disabled,
-                    model_ids: vec!["claude-native".into()],
-                }],
-                models: vec!["claude-native".into()],
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                priority: 0,
-                weight: 1,
-                recovery_delay_seconds: 0,
-                model_price_overrides: Default::default(),
-                last_used_at: None,
-                last_test_at: None,
-                last_test_status: None,
-                last_error: None,
-            })
-            .unwrap();
-        state
-            .store()
-            .unwrap()
-            .upsert_key(LocalGatewayKeyRecord {
-                id: "key_messages".into(),
-                label: "Messages client".into(),
-                enabled: true,
-                system: false,
-                secret_ref: key_secret_ref.clone(),
-                source_ids: Some(vec!["source_messages".into()]),
-                account_ids: Some(Vec::new()),
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: Some(vec![ClientWireApi::Messages]),
-                created_at: "2026-08-02T00:00:00Z".into(),
-                last_used_at: None,
-            })
-            .unwrap();
-
-        let runtime = runtime_from_store(&state).await.unwrap();
-        assert_eq!(
-            runtime.visible_models_for_secret(
-                "messages-key",
-                &[WireApi::Messages],
-                current_time_ms(),
-            ),
-            vec!["claude-native"]
-        );
-        let system_key = state
-            .store()
-            .unwrap()
-            .keys()
-            .iter()
-            .find(|key| key.system)
-            .cloned()
-            .unwrap();
-        let system_secret = secret_store::load(&system_key.secret_ref).unwrap().unwrap();
-        assert!(runtime
-            .visible_models_for_secret(&system_secret, &[WireApi::Responses], current_time_ms(),)
-            .is_empty());
-
-        secret_store::delete(&source_secret_ref).unwrap();
-        secret_store::delete(&key_secret_ref).unwrap();
-        secret_store::delete(&system_key.secret_ref).unwrap();
-        drop(runtime);
-        drop(state);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
     async fn runtime_repairs_missing_enabled_gateway_key_secret() {
         let id = uuid::Uuid::new_v4().simple().to_string();
         let root = std::env::temp_dir().join(format!("zenith-relay-key-repair-{id}"));
@@ -814,14 +701,8 @@ mod tests {
                 id: "key_1".into(),
                 label: "Default".into(),
                 enabled: true,
-                system: false,
+                system: true,
                 secret_ref: key_secret_ref.clone(),
-                source_ids: None,
-                account_ids: None,
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
                 created_at: "2026-07-15T00:00:00Z".into(),
                 last_used_at: None,
             })
@@ -881,14 +762,8 @@ mod tests {
             id: "old_key".into(),
             label: "Old key".into(),
             enabled: true,
-            system: false,
+            system: true,
             secret_ref: key_secret_ref.clone(),
-            source_ids: None,
-            account_ids: None,
-            allowed_models: Vec::new(),
-            excluded_models: Vec::new(),
-            model_prefix: None,
-            wire_apis: None,
             created_at: "2026-08-05T00:00:00Z".into(),
             last_used_at: None,
         };
@@ -994,14 +869,8 @@ mod tests {
                 id: "key_1".into(),
                 label: "Default".into(),
                 enabled: true,
-                system: false,
+                system: true,
                 secret_ref: key_secret_ref.clone(),
-                source_ids: None,
-                account_ids: None,
-                allowed_models: Vec::new(),
-                excluded_models: Vec::new(),
-                model_prefix: None,
-                wire_apis: None,
                 created_at: "2026-07-11T00:00:00Z".into(),
                 last_used_at: None,
             })

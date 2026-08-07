@@ -1,6 +1,5 @@
 use super::import_orchestrator::{
-    apply_account_patch, credential_local_error, prune_key_account_scopes, validate_account_record,
-    ImportItemError,
+    apply_account_patch, credential_local_error, validate_account_record, ImportItemError,
 };
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
 use crate::local_pool::accounts::exports::normalize_account_ids;
@@ -236,8 +235,6 @@ pub(super) async fn delete_local_account_inner(
         .filter(|account| account.account.id != account_id)
         .cloned()
         .collect::<Vec<_>>();
-    let mut keys = old_keys.clone();
-    prune_key_account_scopes(&mut keys, &accounts);
     let automations = prune_account_task_selectors(old_automations.clone(), account_id);
     let previous_proxy_pool = release_account_proxy(account_id)?;
     if let Err(error) = credentials
@@ -276,9 +273,10 @@ pub(super) async fn delete_local_account_inner(
             return Err(error.into());
         }
     }
-    if let Err(error) = state
-        .store()?
-        .delete_account_state(account_id, accounts, keys, automations)
+    if let Err(error) =
+        state
+            .store()?
+            .delete_account_state(account_id, accounts, old_keys.clone(), automations)
     {
         rollback_deleted_account_side_effects(
             state,

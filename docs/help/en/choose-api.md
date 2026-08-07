@@ -3,7 +3,7 @@
 > ChatGPT connects directly to a hosted OpenAI-compatible API. The account pool
 > and Zenith Relay local API are not involved in this mode.
 
-**Use it for:** an existing API endpoint and client key that must work without
+**Use it for:** an existing API endpoint and provider API key that must work without
 keeping Zenith Relay open.
 
 **Do not use it for:** combining your own ChatGPT accounts into a pool. Use
@@ -39,19 +39,19 @@ balance and counters exposed by the selected provider.
 ## Before you start
 
 - A base HTTPS URL for a Responses-compatible API when connecting ChatGPT.
-- A client API key issued by that service.
+- A provider API key issued by that service.
 - The required model list, or an endpoint capable of returning it.
 - Current provider prices when they differ from the official catalog.
 
 A Zenith Relay server management token is not valid here. This mode requires a
-**client key for inference requests**.
+**provider API key for inference requests**.
 
 ## Connect an API
 
 1. Switch to **Choose API**.
 2. Open **Connections** and select **Add API**.
 3. Choose a known provider profile or **Custom API**.
-4. Enter a clear name, base URL, client key, and select **Responses API** for a
+4. Enter a clear name, base URL, provider API key, and select **Responses API** for a
    direct ChatGPT connection.
 5. Save the source and wait for model discovery.
 6. Open the saved source menu and select **Connect ChatGPT**.
@@ -85,7 +85,7 @@ A Zenith Relay server management token is not valid here. This mode requires a
 
 | Symptom | Check | Action |
 | --- | --- | --- |
-| `401 Unauthorized` | Key value, expiry, and issuing service | Create or enter a new client key |
+| `401 Unauthorized` | Key value, expiry, and issuing service | Create or enter a new provider API key |
 | `404` or no models | Base URL and API compatibility | Remove model-specific paths and verify `/v1` in provider docs |
 | `429 Too Many Requests` | Balance, quota, and provider rate limit | Add balance, wait for reset, or select another source |
 | **Connect ChatGPT** is unavailable | Saved source protocol | Change the source to **Responses API**; direct Chat Completions attachment is not supported |

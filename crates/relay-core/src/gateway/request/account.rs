@@ -56,7 +56,7 @@ pub(in crate::gateway) async fn responses_compact(
     let Some(resolved_model) = runtime.resolve_visible_account_model(&key, &requested_model) else {
         return api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         );
     };
@@ -126,7 +126,7 @@ pub(in crate::gateway) async fn alpha_search(
     let Some(resolved_model) = runtime.resolve_visible_account_model(&key, &requested_model) else {
         return api_error(
             StatusCode::NOT_FOUND,
-            "model is not available for this local key",
+            "model is not available in this managed pool",
             "model_not_found",
         );
     };

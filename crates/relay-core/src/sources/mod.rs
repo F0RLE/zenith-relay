@@ -206,8 +206,8 @@ pub struct LocalGatewayKey {
 
 impl LocalGatewayKey {
     pub fn validate(&self) -> Result<()> {
-        require_value("local key id", &self.id)?;
-        require_value("local key secret", &self.secret)
+        require_value("gateway credential id", &self.id)?;
+        require_value("gateway credential", &self.secret)
     }
 }
 

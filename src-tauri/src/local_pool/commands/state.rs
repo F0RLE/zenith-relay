@@ -5,18 +5,17 @@ use crate::local_pool::{
         NativeSecretBackend,
     },
     error::CommandError,
-    models::{LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
-    profiles::codex,
+    models::{LocalAccountRecord, LocalPoolSnapshot, ProviderSourceRecord},
     state::DesktopState,
     store::secret_store,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
     account_operational_state, operational_status, pool_model_summaries, AccountOperationalInput,
-    AccountSummary, Capabilities, GatewaySummary, KeySummary, OperationalStatus,
-    RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+    AccountSummary, Capabilities, GatewaySummary, OperationalStatus, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
     quota::{
@@ -60,15 +59,6 @@ pub async fn get_local_runtime_state(
             .map(|source| (source.id.clone(), source.model_price_overrides.clone()))
             .collect::<BTreeMap<_, _>>(),
     )?;
-    let managed_key_ids = codex::profile_bindings(
-        &crate::platform::default_codex_home(),
-        &state.profile_backup_root(),
-    )
-    .unwrap_or_default()
-    .into_iter()
-    .filter(|binding| binding.credential_kind == codex::ProfileCredentialKind::LocalGateway)
-    .map(|binding| binding.credential_id)
-    .collect::<BTreeSet<_>>();
     let source_summaries = snapshot
         .sources
         .iter()
@@ -209,11 +199,6 @@ pub async fn get_local_runtime_state(
         capabilities: Capabilities::desktop_local(),
         sources: source_summaries,
         accounts: account_summaries,
-        keys: snapshot
-            .keys
-            .iter()
-            .map(|record| local_key_summary(record, managed_key_ids.contains(&record.id)))
-            .collect(),
         automations: snapshot.automations,
         wake_history: snapshot.wake_history,
         warnings: snapshot.warnings,
@@ -377,31 +362,6 @@ fn local_account_summary(
     })
 }
 
-fn local_key_summary(record: &LocalGatewayKeyRecord, managed_by_chatgpt: bool) -> KeySummary {
-    KeySummary {
-        id: record.id.clone(),
-        label: record.label.clone(),
-        enabled: record.enabled,
-        system: record.system || managed_by_chatgpt,
-        source_ids: record.source_ids.clone(),
-        account_ids: record.account_ids.clone(),
-        allowed_models: record.allowed_models.clone(),
-        excluded_models: record.excluded_models.clone(),
-        model_prefix: record.model_prefix.clone(),
-        wire_apis: record.wire_apis.clone(),
-        soft_budget_micro_usd: None,
-        usage_totals: Default::default(),
-        created_at_ms: timestamp_ms(&record.created_at).unwrap_or_default(),
-        last_used_at_ms: record.last_used_at.as_deref().and_then(timestamp_ms),
-    }
-}
-
-fn timestamp_ms(value: &str) -> Option<u64> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
-}
-
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,7 +408,6 @@ mod parity_tests {
             capabilities: Capabilities::desktop_local(),
             sources: Vec::new(),
             accounts: Vec::new(),
-            keys: Vec::new(),
             automations: Vec::new(),
             wake_history: Vec::new(),
             warnings: Vec::new(),

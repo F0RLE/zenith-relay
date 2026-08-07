@@ -216,16 +216,6 @@
     display: none;
   }
 
-  .relay-dialog.source-add-configuring .client-protocol-grid > label {
-    min-height: 72px;
-    padding: 9px;
-  }
-
-  .relay-dialog.source-add-configuring .client-protocol-grid > label small {
-    font-size: 10px;
-    line-height: 14px;
-  }
-
   .relay-dialog.source-add-configuring .source-route-model-list {
     max-height: 150px;
   }
@@ -434,14 +424,6 @@
     justify-content: start;
   }
 
-  .client-key-row {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-
-  .client-key-scopes {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
 }
 
 @media (max-width: 700px) {
@@ -511,11 +493,6 @@
     grid-template-columns: 1fr;
   }
 
-  .client-protocol-grid,
-  .client-key-scopes,
-  .scope-grid.client-scope-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .gateway-runtime-metrics {
     border-top: 1px solid var(--relay-border);
     border-left: 0;

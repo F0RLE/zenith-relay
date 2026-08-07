@@ -4,12 +4,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{fmt, time::Duration};
 use zenith_relay_core::accounts::{AccountExportDocument, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    negotiate, Capabilities, ClientKeyCreateInput, ClientKeyPatch, ClientProtocolRange,
-    ConfigurationPresetApplyInput, ConfigurationPresetApplyResult, ConfigurationPresetDocument,
-    ConfigurationPresetPreview, ConfigurationPresetPreviewInput, GatewayDiagnostic,
-    GeneratedClientKey, HealthResponse, KeySummary, NegotiatedProtocol, ProfileKeyRotation,
-    RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery, UsageRange,
-    CLIENT_ACCESS_SCHEMA_VERSION, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
+    negotiate, Capabilities, ClientProtocolRange, ConfigurationPresetApplyInput,
+    ConfigurationPresetApplyResult, ConfigurationPresetDocument, ConfigurationPresetPreview,
+    ConfigurationPresetPreviewInput, GatewayDiagnostic, HealthResponse, NegotiatedProtocol,
+    ProfileKeyRotation, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
+    UsageRange, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
 use zenith_relay_core::WireApi;
 use zenith_relay_core::{CandidateRuntimeSnapshot, SourceProviderStats};
@@ -250,56 +249,6 @@ impl RemoteClient {
         .await
     }
 
-    pub async fn create_client_key(
-        &self,
-        input: &ClientKeyCreateInput,
-    ) -> Result<GeneratedClientKey, RemoteClientError> {
-        let generated = self
-            .request(Method::POST, "/keys", Some(input), true)
-            .await?;
-        validate_generated_client_key(generated)
-    }
-
-    pub async fn update_client_key(
-        &self,
-        key_id: &str,
-        input: &ClientKeyPatch,
-    ) -> Result<KeySummary, RemoteClientError> {
-        self.request(
-            Method::PATCH,
-            &remote_object_path("keys", key_id)?,
-            Some(input),
-            true,
-        )
-        .await
-    }
-
-    pub async fn rotate_client_key(
-        &self,
-        key_id: &str,
-    ) -> Result<GeneratedClientKey, RemoteClientError> {
-        let generated = self
-            .request(
-                Method::POST,
-                &format!("{}/rotate", remote_object_path("keys", key_id)?),
-                Option::<&()>::None,
-                true,
-            )
-            .await?;
-        validate_generated_client_key(generated)
-    }
-
-    pub async fn revoke_client_key(&self, key_id: &str) -> Result<(), RemoteClientError> {
-        let response = self
-            .mutate(Method::DELETE, &remote_object_path("keys", key_id)?, None)
-            .await?;
-        if response.is_null() {
-            Ok(())
-        } else {
-            Err(RemoteClientError::InvalidResponse)
-        }
-    }
-
     pub async fn export_accounts(
         &self,
         input: &AccountExportRequest,
@@ -468,20 +417,6 @@ fn validate_profile_credential_fields(
     Ok(())
 }
 
-fn validate_generated_client_key(
-    generated: GeneratedClientKey,
-) -> Result<GeneratedClientKey, RemoteClientError> {
-    if generated.schema_version != CLIENT_ACCESS_SCHEMA_VERSION
-        || !generated.secret.starts_with("zrs_")
-        || generated.secret.len() < 24
-        || generated.secret.len() > 256
-        || generated.secret.bytes().any(|byte| byte.is_ascii_control())
-    {
-        return Err(RemoteClientError::InvalidResponse);
-    }
-    Ok(generated)
-}
-
 fn remote_object_path(collection: &str, id: &str) -> Result<String, RemoteClientError> {
     if id.is_empty()
         || id.len() > 128
@@ -517,11 +452,6 @@ fn usage_path(query: &UsageQuery) -> String {
         &mut parameters,
         "sourceOrAccountQuery",
         query.source_or_account_query.as_deref(),
-    );
-    append_text(
-        &mut parameters,
-        "localKeyQuery",
-        query.local_key_query.as_deref(),
     );
     if let Some(value) = query.wire_api {
         parameters.append_pair("wireApi", wire_api_name(value));

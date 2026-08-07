@@ -375,6 +375,11 @@
   color: var(--relay-info);
 }
 
+.pool-member-card-header .pool-member-kind-icon[data-status="disabled"] {
+  background: var(--relay-subtle);
+  color: var(--relay-muted);
+}
+
 .pool-member-card-header .pool-member-kind-icon svg {
   width: 17px;
   height: 17px;

@@ -39,6 +39,7 @@ import {
   compareAccountPlans,
   formatDetailedRemainingTime,
   operationalStatusTone,
+  transientCandidateTone,
   useConfirm,
 } from "../../components/Ui";
 import { useOAuthSignIn } from "../../hooks/useOAuthSignIn";
@@ -214,7 +215,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 }
 
 function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: SourceSummary) => void }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { mode, runtime, perform, activateCodexProfile, busy } = useRelayState();
   const confirm = useConfirm();
   if (!runtime?.sources.length) {
@@ -229,6 +230,8 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
   ));
   if (!sources.length) return <NoResults />;
   const localSource = mode !== "remote";
+  const nowMs = Date.now();
+  const runtimeBySource = new Map((runtime.gateway.routingOrder ?? []).map((candidate) => [candidate.candidateId, candidate]));
   const updateParticipation = (source: SourceSummary, inPool: boolean) => perform(
     `source-pool-${source.id}`,
     () => localSource
@@ -259,8 +262,20 @@ function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: Sourc
               : !source.enabled || !source.secretAvailable
                 ? t("sources.launchUnavailable")
                 : t("sources.launch");
+          const runtimeState = source.inPool ? runtimeBySource.get(source.id) : undefined;
+          const runtimeTone = source.operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, true) : null;
+          const runtimeHint = runtimeState?.halfOpen
+            ? t("pool.recoveryProbe")
+            : runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
+              ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
+              : null;
+          const statusLabel = t(`connections.status.${source.operationalStatus}`);
+          const indicatorLabel = runtimeHint ? `${statusLabel} · ${runtimeHint}` : statusLabel;
+          const indicatorTone = source.operationalStatus === "unavailable" || source.operationalStatus === "disabled"
+            ? operationalStatusTone(source.operationalStatus)
+            : runtimeTone ?? operationalStatusTone(source.operationalStatus);
           return <tr key={source.id}>
-            <td><StatusIcon status={operationalStatusTone(source.operationalStatus)} label={t(`connections.status.${source.operationalStatus}`)} /></td>
+            <td><StatusIcon status={indicatorTone} label={indicatorLabel} /></td>
             <td><strong>{source.name}</strong></td>
             <td><code>{safeHost(source.baseUrl)}</code></td>
             <td><SourceProtocolBindingsSummary source={source} /></td>
@@ -318,6 +333,7 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
   const disabledCount = allAccounts.filter((account) => !account.enabled).length;
   const storedPosition = new Map(allAccounts.map((account, index) => [account.id, index]));
   const runtimePosition = routingOrderPositions(runtime?.gateway.routingOrder ?? []);
+  const runtimeByAccount = new Map((runtime?.gateway.routingOrder ?? []).map((candidate) => [candidate.candidateId, candidate]));
   const activePlan = planFilter === "all" || planOptions.has(planFilter) || (planFilter === "errors" && errorCount > 0) ? planFilter : "all";
   useEffect(() => setSelected((current) => current.filter((id) => allAccounts.some((account) => account.id === id))), [runtime?.accounts]);
   useEffect(() => { setSelected([]); setPlanFilter("all"); setParticipationFilter("all"); }, [mode]);
@@ -550,12 +566,26 @@ function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport,
         const remoteMissing = onServer && errorCode === "remote_missing";
         const operationalStatus = account.operationalStatus;
         const operationalLabel = remoteMissing ? accountErrorLabel(errorCode, t) : onServer ? t("accounts.onServerHint") : t(`connections.status.${operationalStatus}`);
+        const runtimeState = account.inPool ? runtimeByAccount.get(account.id) : undefined;
+        const runtimeTone = operationalStatus === "rotation" ? transientCandidateTone(runtimeState, nowMs, false) : null;
+        const runtimeHint = runtimeState?.halfOpen ? t("pool.recoveryProbe") : null;
         const proxyLabel = account.proxyAvailable === false && account.proxyMode === "direct" ? t("proxies.modes.blocked") : t(`proxies.modes.${account.proxyMode ?? "direct"}`);
         const poolLabel = participates ? t("accounts.participation.included") : t("accounts.participation.excluded");
         const quotaStatus = account.quotaRefreshStatus;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-        const indicatorTone = quotaStatus === "refreshing" ? "disabled" : quotaStatus === "failed" || quotaStatus === "requires_reauth" ? "error" : quotaStatus === "pending" ? "disabled" : onServer ? "info" : operationalStatusTone(operationalStatus);
-        const indicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
+        const indicatorTone = onServer
+          ? "info"
+          : operationalStatus === "unavailable" || operationalStatus === "disabled"
+            ? operationalStatusTone(operationalStatus)
+            : quotaStatus === "refreshing"
+            ? "disabled"
+            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
+              ? "error"
+              : quotaStatus === "pending"
+                ? "disabled"
+                : runtimeTone ?? operationalStatusTone(operationalStatus);
+        const statusIndicatorLabel = quotaStatus === "updated" ? operationalLabel : `${t(`accounts.quotaRefreshStatus.${quotaStatus}`)} · ${operationalLabel}`;
+        const indicatorLabel = runtimeHint ? `${statusIndicatorLabel} · ${runtimeHint}` : statusIndicatorLabel;
         const selectedAccount = selected.includes(account.id);
         return <Fragment key={account.id}>
         {groupByPlan && plan.id !== previousPlan ? <div className="account-plan-group-heading" role="presentation"><AccountPlanBadge planType={account.subscription.planType} unknown={t("common.unknown")} /><span>{t("accounts.groupCount", { count: visiblePlanCounts.get(plan.id) ?? 0 })}</span></div> : null}

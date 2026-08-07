@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import { Camera, CircleAlert, FolderOpen, History, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Camera, CircleAlert, FolderOpen, History, RotateCcw, ShieldCheck, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ProfileBinding, ProfileSnapshot } from "../../api/types";
 import { Button, Dialog, EmptyState, IconButton, PageHeader, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+
+type SnapshotRestoreMode = "managed" | "full";
 
 export function ProfilesPage() {
   const { i18n, t } = useTranslation();
@@ -14,6 +16,7 @@ export function ProfilesPage() {
   const [snapshots, setSnapshots] = useState<ProfileSnapshot[]>([]);
   const [snapshotName, setSnapshotName] = useState("");
   const [snapshotRestoreTarget, setSnapshotRestoreTarget] = useState<ProfileSnapshot | null>(null);
+  const [snapshotRestoreMode, setSnapshotRestoreMode] = useState<SnapshotRestoreMode>("managed");
   const [saveCurrentBeforeRestore, setSaveCurrentBeforeRestore] = useState(profileSnapshotBackupBeforeRestore);
   const [loadFailed, setLoadFailed] = useState(false);
 
@@ -44,19 +47,29 @@ export function ProfilesPage() {
 
   const requestSnapshotRestore = (snapshot: ProfileSnapshot) => {
     setSaveCurrentBeforeRestore(profileSnapshotBackupBeforeRestore);
+    setSnapshotRestoreMode("managed");
     setSnapshotRestoreTarget(snapshot);
   };
 
   const restoreSnapshot = async () => {
     const snapshot = snapshotRestoreTarget;
     if (!snapshot) return;
+    const fullRestore = snapshotRestoreMode === "full";
     setSnapshotRestoreTarget(null);
+    setSnapshotRestoreMode("managed");
     const safetyName = saveCurrentBeforeRestore
       ? Array.from(t("profiles.safetySnapshotName", { name: snapshot.name })).slice(0, 80).join("").trim()
       : null;
-    if (await perform("profile-snapshot-restore", () => relayCommands.restoreProfileSnapshot(snapshot.id, safetyName), "feedback.snapshotRestored")) {
+    if (await perform(fullRestore ? "profile-snapshot-full-restore" : "profile-snapshot-restore", () => fullRestore
+      ? relayCommands.restoreFullProfileSnapshot(snapshot.id, safetyName)
+      : relayCommands.restoreProfileSnapshot(snapshot.id, safetyName), "feedback.snapshotRestored")) {
       loadRecovery();
     }
+  };
+
+  const closeSnapshotRestore = () => {
+    setSnapshotRestoreTarget(null);
+    setSnapshotRestoreMode("managed");
   };
 
   const deleteSnapshot = async (snapshot: ProfileSnapshot) => {
@@ -115,11 +128,21 @@ export function ProfilesPage() {
       </section>
     </section>}
     {snapshotRestoreTarget ? <Dialog
-      title={t("profiles.snapshotRestoreTitle")}
-      onClose={() => setSnapshotRestoreTarget(null)}
-      footer={<><Button variant="secondary" onClick={() => setSnapshotRestoreTarget(null)}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === "profile-snapshot-restore"} onClick={() => void restoreSnapshot()}>{t("profiles.restoreAutomatic")}</Button></>}
+      title={snapshotRestoreMode === "full" ? t("profiles.snapshotFullRestoreTitle") : t("profiles.snapshotRestoreTitle")}
+      onClose={closeSnapshotRestore}
+      footer={<><Button variant="secondary" onClick={closeSnapshotRestore}>{t("common.cancel")}</Button><Button variant={snapshotRestoreMode === "full" ? "danger" : "primary"} busy={busy === "profile-snapshot-restore" || busy === "profile-snapshot-full-restore"} onClick={() => void restoreSnapshot()}>{t(snapshotRestoreMode === "full" ? "profiles.snapshotFullRestoreAction" : "profiles.snapshotRestoreAction")}</Button></>}
     >
-      <p className="confirm-dialog-message">{t("profiles.snapshotRestoreConfirm", { name: snapshotRestoreTarget.name })}</p>
+      {snapshotRestoreMode === "full" ? <div className="snapshot-restore-full-warning">
+        <p className="confirm-dialog-message">{t("profiles.snapshotFullRestoreHint")}</p>
+        <Button variant="ghost" icon={<ArrowLeft aria-hidden />} onClick={() => setSnapshotRestoreMode("managed")}>{t("profiles.snapshotFullRestoreBack")}</Button>
+      </div> : <>
+        <p className="confirm-dialog-message">{t("profiles.snapshotRestoreConfirm", { name: snapshotRestoreTarget.name })}</p>
+        <div className="snapshot-restore-scope">
+          <strong>{t("profiles.snapshotRestoreScopeTitle")}</strong>
+          <span>{t("profiles.snapshotRestoreScopeHint")}</span>
+          <Button variant="danger" icon={<AlertTriangle aria-hidden />} onClick={() => setSnapshotRestoreMode("full")}>{t("profiles.snapshotFullRestoreAction")}</Button>
+        </div>
+      </>}
       <label className="snapshot-restore-backup-choice">
         <input type="checkbox" checked={saveCurrentBeforeRestore} onChange={(event) => setSaveCurrentBeforeRestore(event.target.checked)} />
         <span>{t("profiles.snapshotBackupBeforeRestore")}</span>

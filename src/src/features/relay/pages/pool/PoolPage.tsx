@@ -6,7 +6,7 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
 import { effectiveSourceProtocolBindings, sourceModelsForWireApi } from "../../sourceProtocolBindings";
-import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, useConfirm } from "../../components/Ui";
+import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
 import { groupModels, sortModelIdsForLauncher, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
@@ -263,10 +263,21 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
         const runtimeState = runtimeByMember.get(member.id);
         const statusKey = member.operationalStatus;
         const statusTone = operationalStatusTone(statusKey);
+        const runtimeTone = statusKey === "rotation"
+          ? transientCandidateTone(runtimeState, nowMs, member.kind === "source")
+          : null;
         const quotaStatus = member.kind === "account" ? member.quotaRefreshStatus : "updated";
         const errorCode = member.kind === "account" ? currentAccountErrorCode(member) : null;
         const displayedErrorCode = quotaStatus === "refreshing" ? null : errorCode;
-        const indicatorTone = statusKey === "unavailable" ? statusTone : quotaStatus === "refreshing" ? "disabled" : quotaStatus === "failed" || quotaStatus === "requires_reauth" ? "error" : quotaStatus === "pending" ? "disabled" : statusTone;
+        const indicatorTone = statusKey === "unavailable" || statusKey === "disabled"
+          ? statusTone
+          : quotaStatus === "refreshing"
+            ? "disabled"
+            : quotaStatus === "failed" || quotaStatus === "requires_reauth"
+              ? "error"
+              : quotaStatus === "pending"
+                ? "disabled"
+                : runtimeTone ?? statusTone;
         const codexInterface = member.kind === "account" && codexPoolOauthSelection === member.id;
         const identity = member.kind === "source" ? member.name : member.identityHint || member.label;
         const detail = member.kind === "source"
@@ -281,7 +292,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
         const isLastUsed = !isCurrent && runtimeState != null && runtimeState.candidateId === lastUsedRuntime?.candidateId && runtimeState.kind === lastUsedRuntime.kind;
         const runtimeHint = runtimeState?.halfOpen
           ? t("pool.recoveryProbe")
-          : member.kind === "source" && runtimeState?.nextRetryAtMs
+          : member.kind === "source" && runtimeState?.nextRetryAtMs != null && runtimeState.nextRetryAtMs > nowMs
             ? t("pool.retryAt", { time: new Date(runtimeState.nextRetryAtMs).toLocaleString(i18n.language) })
             : undefined;
         const editLabel = `${t("pool.editMember")}: ${member.kind === "source" ? member.name : member.label}`;

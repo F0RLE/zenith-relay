@@ -75,13 +75,11 @@ health and clear a model-level transient restriction.
 
 The scheduler evaluates factual conditions for the requested model:
 
-1. the candidate is enabled; ordinary keys may reach enabled candidates outside
-   the managed pool, while the generated ChatGPT/Codex key restricts candidates
-   to `in_pool` membership;
+1. the candidate is enabled and belongs to the managed pool;
 2. it is not draining and its credential and proxy are available;
 3. its account and requested model are healthy and not cooling down;
 4. the account has usable quota or the source is otherwise usable;
-5. the client key's source, account, model, and protocol scopes allow the model.
+5. the managed ChatGPT/Codex profile credential allows the requested protocol.
 
 It preserves response ownership affinity where a protocol response requires the
 same upstream account. Prompt affinity is a preference guarded by capacity and
@@ -150,7 +148,7 @@ represented upstream as a function with one raw-text `input` field, then
 returns to the client as `custom_tool_call` and accepts only its direct string
 `custom_tool_call_output`; the original tool host remains the validator and
 executor. It stores the native assistant turn only in a bounded volatile local
-continuation store keyed by local client key, bridge response id, and candidate.
+continuation store keyed by bridge response id and candidate.
 A missing or mismatched continuation is rejected instead of sending a
 context-free tool result. Provider-hosted, namespace, and dynamic-discovery
 tools are rejected rather than converted into text. Budget and adaptive
@@ -168,8 +166,13 @@ has multiple routes, the binding assignment is the capability declaration and
 must be verified against the provider's documentation or a safe operator test.
 The same generic source catalog may optionally declare reasoning through
 <code>capabilities.reasoning</code>, <code>reasoning</code>,
-Codex-compatible fields, or <code>reasoningEffortModes</code>. Relay does not
-infer reasoning from a provider or model name. It advertises an effort to
+Codex-compatible fields, <code>reasoningEffortModes</code>, or explicit
+<code>reasoningEfforts</code>/<code>reasoningEffortOptions</code> rows with
+their values and default. Relay reads either OpenAI-style <code>data</code>
+rows or a top-level <code>models</code> catalog. A bare
+<code>supportsReasoningEffort</code> flag never invents levels, and an
+explicit false flag suppresses stale option lists. Relay does not infer
+reasoning from a provider or model name. It advertises an effort to
 Codex only when every eligible Responses route for that model explicitly
 confirms it; a Responses-to-Messages bridge further removes efforts it cannot
 translate and never advertises reasoning summaries. The generic source catalog
@@ -230,7 +233,7 @@ that changed after Relay attached the profile.
 The server is a personal single-deployment runtime:
 
 - its management API uses a management token;
-- clients call <code>/v1</code> with separate scoped pool keys;
+- ChatGPT/Codex receives a server-managed profile credential for <code>/v1</code>;
 - encrypted secrets live in the server vault, while operational state and
   redacted usage live in SQLite;
 - migrations are append-only and protect interrupted upgrades with a
@@ -241,7 +244,7 @@ The server is a personal single-deployment runtime:
   needed for current totals and diagnostics.
 
 The desktop client negotiates protocol capabilities before it performs a
-remote management action. It can manage accounts, sources, proxies, keys,
+remote management action. It can manage accounts, sources, proxies,
 model/routing settings, usage, and profile attachment through that contract.
 Server backup and restore use the standalone server CLI so they can validate
 the database and encrypted vault while the data directory is locked. The
@@ -273,15 +276,16 @@ Codex profile attachment is the current supported client integration. Future
 client adapters are selected by user need and only when their configuration can
 be inspected, changed reversibly, verified, and restored. An adapter owns
 client-specific file discovery and managed configuration; the pool endpoint,
-client keys, usage, and scheduler remain shared.
+profile credential, usage, and scheduler remain shared.
 
 ## Known limits
 
 - Only the ChatGPT account connector is shipped today.
 - The current ChatGPT/Codex profile integration uses the Responses client
-  contract. Native Messages sources require a compatible Messages client and a
-  separately scoped key; a source must opt into the explicit
-  Responses-to-Messages bridge to make a Messages model visible to Codex.
+  contract. Native Messages sources require a separate compatible client
+  integration and are not exposed through the managed profile; a source must
+  opt into the explicit Responses-to-Messages bridge to make a Messages model
+  visible to Codex.
 - The bridge does not claim hosted, namespace, dynamic-discovery, structured
   custom result, native encrypted reasoning, or Responses WebSocket
   capabilities. Image support is limited to the validated data-URI formats

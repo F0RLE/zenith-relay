@@ -2753,21 +2753,6 @@ pub(super) fn find_existing_account(
     Ok(matching.pop())
 }
 
-pub(super) fn prune_key_account_scopes(
-    keys: &mut [LocalGatewayKeyRecord],
-    accounts: &[LocalAccountRecord],
-) {
-    let valid_ids = accounts
-        .iter()
-        .map(|account| account.account.id.as_str())
-        .collect::<HashSet<_>>();
-    for key in keys {
-        if let Some(account_ids) = &mut key.account_ids {
-            account_ids.retain(|id| valid_ids.contains(id.as_str()));
-        }
-    }
-}
-
 pub(super) fn imported_identity(
     id_token: Option<&str>,
     access_token: Option<&str>,

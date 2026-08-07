@@ -1,5 +1,5 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::state::AppState;
+use crate::state::{AppState, SYSTEM_GATEWAY_KEY_ID};
 use axum::body::{to_bytes, Body};
 use axum::extract::State;
 use axum::http::{header, Request, StatusCode};
@@ -54,14 +54,14 @@ pub async fn diagnose_gateway(
         .map_err(store_error)?
         .into_iter()
         .find_map(|key| {
-            key.enabled
+            (key.id == SYSTEM_GATEWAY_KEY_ID && key.system && key.enabled)
                 .then(|| state.vault.load(&key.secret_ref).ok().flatten())
                 .flatten()
         })
         .ok_or_else(|| {
             ManagementError::validation(
                 "diagnostic_key_unavailable",
-                "no enabled personal pool key is available",
+                "internal profile credential is unavailable",
             )
         })?;
 
@@ -78,7 +78,7 @@ pub async fn diagnose_gateway(
         .ok_or_else(|| {
             ManagementError::validation(
                 "diagnostic_model_unavailable",
-                "personal pool key exposes no usable model",
+                "managed profile exposes no usable model",
             )
         })?;
     let body = serde_json::to_vec(&serde_json::json!({

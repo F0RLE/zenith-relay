@@ -502,6 +502,22 @@ impl Store {
     pub fn delete_key(&self, id: &str) -> Result<Option<GatewayKeyRecord>, String> {
         self.delete_record("gateway_keys", id)
     }
+
+    pub fn delete_keys(&self, ids: &[String]) -> Result<(), String> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        for id in ids {
+            transaction
+                .execute("DELETE FROM gateway_keys WHERE id = ?1", [id])
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)
+    }
 }
 
 pub fn configuration_revision(settings: &ConfigurationPresetSettings) -> Result<String, String> {
