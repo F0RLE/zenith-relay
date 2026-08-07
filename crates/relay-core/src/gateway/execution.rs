@@ -102,7 +102,7 @@ pub(super) async fn execute_account_endpoint(
         let Some(mut route) = runtime.executor_route(
             &selected.candidate_id,
             &resolved_model,
-            &key.scope,
+            &key.scope_snapshot(),
             &[WireApi::Responses],
         ) else {
             continue;
@@ -598,7 +598,7 @@ async fn execute_request(
         let Some(mut route) = runtime.executor_route(
             &selected.candidate_id,
             &resolved_model,
-            &key.scope,
+            &key.scope_snapshot(),
             allowed_protocols,
         ) else {
             continue;

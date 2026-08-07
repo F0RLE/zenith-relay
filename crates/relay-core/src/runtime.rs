@@ -367,10 +367,25 @@ impl Drop for ExecutionFence {
 #[derive(Clone)]
 pub(crate) struct AuthenticatedKey {
     pub(crate) id: String,
-    pub(crate) scope: CandidateScope,
+    scope: Arc<RwLock<CandidateScope>>,
     pub(crate) model_rules: ModelRules,
     pub(crate) model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
+}
+
+impl AuthenticatedKey {
+    pub(crate) fn scope_snapshot(&self) -> CandidateScope {
+        self.scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn scope_read(&self) -> std::sync::RwLockReadGuard<'_, CandidateScope> {
+        self.scope
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 struct ChatGptAccountExecutor {
@@ -446,7 +461,7 @@ struct RuntimeKey {
     id: String,
     enabled: bool,
     secret_hash: [u8; 32],
-    scope: RwLock<CandidateScope>,
+    scope: Arc<RwLock<CandidateScope>>,
     model_rules: ModelRules,
     model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
@@ -816,7 +831,7 @@ impl GatewayRuntime {
                 id: key.key.id,
                 enabled: key.enabled,
                 secret_hash: Sha256::digest(key.key.secret.as_bytes()).into(),
-                scope: RwLock::new(scope),
+                scope: Arc::new(RwLock::new(scope)),
                 model_rules,
                 model_prefix: normalize_prefix(key.model_prefix),
                 client_wire_apis,
@@ -933,11 +948,7 @@ impl GatewayRuntime {
             .find(|key| key.enabled && bool::from(candidate.ct_eq(&key.secret_hash)))
             .map(|key| AuthenticatedKey {
                 id: key.id.clone(),
-                scope: key
-                    .scope
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
+                scope: key.scope.clone(),
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
                 client_wire_apis: key.client_wire_apis.clone(),
@@ -1009,10 +1020,11 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> Vec<String> {
+        let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         let models = self
             .registry
-            .visible_models(&scheduler, &key.scope, allowed_protocols, now_ms)
+            .visible_models(&scheduler, &scope, allowed_protocols, now_ms)
             .into_iter()
             .filter(|model| key.model_rules.allows(model))
             .collect::<Vec<_>>();
@@ -1030,6 +1042,7 @@ impl GatewayRuntime {
         key: &AuthenticatedKey,
         now_ms: u64,
     ) -> Vec<(String, Url)> {
+        let scope = key.scope_snapshot();
         let routes = {
             let scheduler = self.lock_scheduler();
             self.chatgpt_accounts
@@ -1044,7 +1057,7 @@ impl GatewayRuntime {
                                 && candidate.is_catalog_visible(
                                     model,
                                     &[WireApi::Responses],
-                                    &key.scope,
+                                    &scope,
                                 )
                         })
                         .count();
@@ -1105,6 +1118,7 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
+        let scope = key.scope_snapshot();
         let routes = {
             let scheduler = self.lock_scheduler();
             let mut routes = Vec::new();
@@ -1124,7 +1138,7 @@ impl GatewayRuntime {
                 let mut configured_models = BTreeSet::new();
                 for model in models {
                     if key.model_rules.allows(model)
-                        && candidate.is_catalog_visible(model, allowed_protocols, &key.scope)
+                        && candidate.is_catalog_visible(model, allowed_protocols, &scope)
                     {
                         configured_models.insert(model.clone());
                     }
@@ -1350,6 +1364,7 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn visible_account_models(&self, key: &AuthenticatedKey) -> Vec<String> {
+        let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         let mut models = BTreeSet::new();
         for account in self.chatgpt_accounts.values() {
@@ -1358,7 +1373,7 @@ impl GatewayRuntime {
             };
             for model in &account.configured_models {
                 if key.model_rules.allows(model)
-                    && candidate.is_catalog_visible(model, &[WireApi::Responses], &key.scope)
+                    && candidate.is_catalog_visible(model, &[WireApi::Responses], &scope)
                 {
                     models.insert(match key.model_prefix.as_deref() {
                         Some(prefix) => format!("{prefix}/{model}"),
@@ -1386,6 +1401,7 @@ impl GatewayRuntime {
         let Some(model) = self.resolve_model(key, model) else {
             return false;
         };
+        let scope = key.scope_snapshot();
         let scheduler = self.lock_scheduler();
         self.chatgpt_accounts.values().any(|account| {
             account
@@ -1393,7 +1409,7 @@ impl GatewayRuntime {
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(&model))
                 && scheduler.candidate(&account.id).is_some_and(|candidate| {
-                    candidate.is_configured(&model, &[WireApi::Responses], &key.scope)
+                    candidate.is_configured(&model, &[WireApi::Responses], &scope)
                 })
         })
     }
@@ -1416,15 +1432,10 @@ impl GatewayRuntime {
         else {
             return Vec::new();
         };
-        let scope = key
-            .scope
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         self.visible_models(
             &AuthenticatedKey {
                 id: key.id.clone(),
-                scope,
+                scope: key.scope.clone(),
                 model_rules: key.model_rules.clone(),
                 model_prefix: key.model_prefix.clone(),
                 client_wire_apis: key.client_wire_apis.clone(),
@@ -1632,12 +1643,16 @@ impl GatewayRuntime {
                 }
             }
         }
+        // Keep authorization live through selection and reservation. A pool
+        // mutation waits for this read lock, so it cannot race a stale scope
+        // into a newly reserved lease.
+        let scope = key.scope_read();
         let mut scheduler = self.lock_scheduler();
         let selection = match lane {
             CandidateLeaseLane::Text => scheduler.select(SelectionRequest {
                 model,
                 allowed_protocols,
-                scope: &key.scope,
+                scope: &scope,
                 tried,
                 response_affinity_key,
                 prompt_affinity_key,
@@ -1646,7 +1661,7 @@ impl GatewayRuntime {
             CandidateLeaseLane::Image => scheduler.select_image(SelectionRequest {
                 model,
                 allowed_protocols,
-                scope: &key.scope,
+                scope: &scope,
                 tried,
                 response_affinity_key,
                 prompt_affinity_key,
@@ -1679,13 +1694,14 @@ impl GatewayRuntime {
             && scheduler.has_waitable_text_candidate(SelectionRequest {
                 model,
                 allowed_protocols,
-                scope: &key.scope,
+                scope: &scope,
                 tried,
                 response_affinity_key,
                 prompt_affinity_key,
                 now_ms,
             });
         drop(scheduler);
+        drop(scope);
         if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
             if selection.response_affinity_hit {
                 self.persist_response_affinity(key, &selection.candidate_id, now_ms);
@@ -1703,10 +1719,11 @@ impl GatewayRuntime {
         response_affinity_key: Option<&str>,
         now_ms: u64,
     ) -> Option<u64> {
+        let scope = key.scope_snapshot();
         self.lock_scheduler().earliest_retry_at(SelectionRequest {
             model,
             allowed_protocols,
-            scope: &key.scope,
+            scope: &scope,
             tried,
             response_affinity_key,
             prompt_affinity_key: None,
@@ -1723,11 +1740,12 @@ impl GatewayRuntime {
         response_affinity_key: Option<&str>,
         now_ms: u64,
     ) -> Option<(u64, CooldownReason)> {
+        let scope = key.scope_snapshot();
         self.lock_scheduler()
             .all_applicable_cooldown(SelectionRequest {
                 model,
                 allowed_protocols,
-                scope: &key.scope,
+                scope: &scope,
                 tried,
                 response_affinity_key,
                 prompt_affinity_key: None,

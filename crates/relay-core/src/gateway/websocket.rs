@@ -305,7 +305,7 @@ async fn connect_upstream(
         let Some(mut route) = runtime.executor_route(
             &selected.candidate_id,
             &request.resolved_model,
-            &key.scope,
+            &key.scope_snapshot(),
             WEBSOCKET_PROTOCOLS,
         ) else {
             continue;
@@ -1158,7 +1158,7 @@ async fn start_next_request(
             .executor_route(
                 &selected.candidate_id,
                 &request.resolved_model,
-                &key.scope,
+                &key.scope_snapshot(),
                 WEBSOCKET_PROTOCOLS,
             )
             .ok_or_else(GatewayFailure::unavailable)?;

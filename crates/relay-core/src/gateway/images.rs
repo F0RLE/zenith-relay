@@ -449,9 +449,11 @@ async fn execute_prepared(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(mut route) =
-            runtime.image_executor_route(&selected.candidate_id, &key.scope, IMAGE_PROTOCOLS)
-        else {
+        let Some(mut route) = runtime.image_executor_route(
+            &selected.candidate_id,
+            &key.scope_snapshot(),
+            IMAGE_PROTOCOLS,
+        ) else {
             continue;
         };
         route.half_open_probe = selected.half_open_probe;

@@ -10,7 +10,7 @@ use futures_util::stream;
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{Message as ClientWsMessage, Upgrade};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,9 +26,9 @@ use zenith_relay_core::accounts::{
 use zenith_relay_core::gateway;
 use zenith_relay_core::providers::chatgpt::{AgentIdentityCredential, CODEX_MODELS_CLIENT_VERSION};
 use zenith_relay_core::{
-    CandidateHealth, CandidateQuota, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, ProviderSource, RuntimeChatGptAccount, RuntimeChatGptAuth,
-    RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
+    CandidateHealth, CandidateQuota, CandidateScope, DefaultServiceTier, GatewayRuntime,
+    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
+    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, SelectionReason, UsageEvent, WireApi,
 };
 
 const LOCAL_KEY: &str = "p3-local-key";
@@ -3830,6 +3830,86 @@ async fn independent_chat_waits_for_the_only_oauth_account_to_finish() {
 
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn queued_request_rechecks_scope_after_pool_member_removal() {
+    let (removed_upstream, removed_state) = spawn_held_stream_upstream().await;
+    let (blocker_upstream, blocker_state) = spawn_held_then_json_upstream().await;
+    let authority = Arc::new(TokenAuthority::new(4).unwrap());
+    register_ready(&authority, "removed-account", "removed-access").await;
+    register_ready(&authority, "blocker-account", "blocker-access").await;
+    let (gateway, _, _, _) = spawn_mixed_gateway(
+        Vec::new(),
+        vec![
+            account("removed-account", "provider-removed", &removed_upstream, 10),
+            account("blocker-account", "provider-blocker", &blocker_upstream, 10),
+        ],
+        vec![mixed_key(None, Some(vec!["removed-account"]))],
+        authority,
+        refresh_adapter(),
+        Arc::new(PersistenceAdapter::default()),
+    )
+    .await;
+    let runtime = gateway.runtime.as_ref().unwrap().clone();
+
+    let removed_request = request(&gateway, true).await;
+    assert_eq!(removed_request.status(), StatusCode::OK);
+    assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
+
+    assert!(runtime.update_key_scope(
+        "local-key",
+        CandidateScope {
+            source_ids: Some(BTreeSet::new()),
+            account_ids: Some(
+                ["removed-account", "blocker-account"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            model_rules: Default::default(),
+        },
+    ));
+    let blocker_request = request(&gateway, true).await;
+    assert_eq!(blocker_request.status(), StatusCode::OK);
+    assert_eq!(blocker_state.requests.lock().unwrap().len(), 1);
+
+    let queued = request(&gateway, false);
+    tokio::pin!(queued);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut queued)
+            .await
+            .is_err(),
+        "the third request must wait while both OAuth accounts are occupied"
+    );
+
+    assert!(runtime.update_key_scope(
+        "local-key",
+        CandidateScope {
+            source_ids: Some(BTreeSet::new()),
+            account_ids: Some(BTreeSet::from(["blocker-account".to_string()])),
+            model_rules: Default::default(),
+        },
+    ));
+    removed_state.release.notify_waiters();
+    let _ = removed_request.bytes().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut queued)
+            .await
+            .is_err(),
+        "removing the released account must not dispatch the queued request to it"
+    );
+    assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
+
+    blocker_state.release.notify_waiters();
+    let _ = blocker_request.bytes().await.unwrap();
+    let queued_response = tokio::time::timeout(Duration::from_secs(2), queued)
+        .await
+        .expect("the queued request did not resume after the allowed account was released");
+    assert_eq!(queued_response.status(), StatusCode::OK);
+    let _ = queued_response.bytes().await.unwrap();
+    assert_eq!(removed_state.requests.lock().unwrap().len(), 1);
+    assert_eq!(blocker_state.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
