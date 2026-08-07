@@ -300,6 +300,30 @@ impl Store {
         self.save_record("sources", &record.id, &record.secret_ref, record)
     }
 
+    pub fn save_sources(&self, records: &[SourceRecord]) -> Result<(), String> {
+        let encoded = records
+            .iter()
+            .map(|record| Ok((record, to_json(record)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "INSERT INTO sources(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
+                )
+                .map_err(db_error)?;
+            for (record, data_json) in encoded {
+                statement
+                    .execute(params![record.id, data_json, record.secret_ref])
+                    .map_err(db_error)?;
+            }
+        }
+        transaction.commit().map_err(db_error)
+    }
+
     pub fn delete_source(&self, id: &str) -> Result<Option<SourceRecord>, String> {
         self.delete_record("sources", id)
     }

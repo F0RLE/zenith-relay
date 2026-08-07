@@ -146,10 +146,12 @@ export function apiSourceRole(priority: number): ApiSourceRole {
   return "stabilizer";
 }
 
-export function apiSourcePriority(role: ApiSourceRole) {
-  if (role === "primary") return API_SOURCE_PRIMARY_PRIORITY;
-  if (role === "reserve") return API_SOURCE_RESERVE_PRIORITY;
-  return 0;
+export function apiSourcePriority(role: ApiSourceRole, position = 0, total = 1) {
+  const index = Math.max(0, Math.trunc(position));
+  const rank = Math.max(1, Math.trunc(total) - index);
+  if (role === "primary") return API_SOURCE_PRIMARY_PRIORITY + rank;
+  if (role === "reserve") return API_SOURCE_RESERVE_PRIORITY - index;
+  return rank;
 }
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {

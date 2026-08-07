@@ -1342,6 +1342,61 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
     let source_id = created["id"].as_str().unwrap();
     assert_eq!(created["models"], json!(["gpt-source-lifecycle"]));
 
+    let second_created: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Lifecycle backup",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": first_key,
+            "wireApi": "responses",
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second_source_id = second_created["id"].as_str().unwrap();
+    let mut source_priorities = serde_json::Map::new();
+    source_priorities.insert(source_id.to_string(), json!(2));
+    source_priorities.insert(second_source_id.to_string(), json!(1));
+    let ordered: Value = client
+        .patch(format!("{}/sources/{source_id}", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({ "priority": 2, "sourcePriorities": source_priorities }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ordered["priority"], json!(2));
+    let listed: Vec<Value> = client
+        .get(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|source| source["id"] == source_id)
+            .unwrap()["priority"],
+        json!(2)
+    );
+    assert_eq!(
+        listed
+            .iter()
+            .find(|source| source["id"] == second_source_id)
+            .unwrap()["priority"],
+        json!(1)
+    );
+
     let stats_response = client
         .get(format!("{}/sources/{source_id}/stats", server.origin))
         .bearer_auth(management_key)
@@ -1478,6 +1533,16 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
         .load(&format!("source:{source_id}"))
         .unwrap()
         .is_none());
+    assert_eq!(
+        client
+            .delete(format!("{}/sources/{second_source_id}", server.origin))
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
     assert!(server.state.snapshot().unwrap().sources.is_empty());
 
     server.task.abort();

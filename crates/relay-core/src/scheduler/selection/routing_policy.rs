@@ -31,11 +31,12 @@ impl PoolScheduler {
         let right_dispatches = self.rotation_dispatch_count(right, lane);
         let common = routing_tier(left)
             .cmp(&routing_tier(right))
-            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)));
+            .then_with(|| candidate_kind_preference(left).cmp(&candidate_kind_preference(right)))
+            .then_with(|| compare_api_source_priority(left, right));
         // Parallel-load balancing protects OAuth accounts from being selected by
         // every concurrent chat. API sources are connection-based providers:
         // an active request must not make a different API source win selection.
-        // They still honor explicit routing tier, quota, configured weight, and
+        // They still honor explicit routing tier, source order, quota, and
         // normal fallback rules below.
         let load = || {
             if left.kind == CandidateKind::OAuthAccount && right.kind == CandidateKind::OAuthAccount
@@ -87,6 +88,8 @@ impl PoolScheduler {
             || candidate_kind_preference(selected) != candidate_kind_preference(runner_up)
         {
             SelectionReason::SourceRole
+        } else if compare_api_source_priority(selected, runner_up) != Ordering::Equal {
+            SelectionReason::ManualPriority
         } else if self.routing_strategy == RoutingStrategy::SubscriptionExpiry
             && self.compare_subscription_expiry(selected, runner_up) != Ordering::Equal
         {
@@ -110,13 +113,7 @@ impl PoolScheduler {
                 runner_up_dispatches,
             ) != Ordering::Equal
         {
-            if selected.kind == CandidateKind::ApiSource
-                && runner_up.kind == CandidateKind::ApiSource
-            {
-                SelectionReason::WeightedRotation
-            } else {
-                SelectionReason::FairRotation
-            }
+            SelectionReason::FairRotation
         } else {
             SelectionReason::StableTieBreak
         }
@@ -155,12 +152,7 @@ impl PoolScheduler {
         right_dispatches: u64,
     ) -> Ordering {
         if left.kind == CandidateKind::ApiSource && right.kind == CandidateKind::ApiSource {
-            return compare_projected_weighted_values(
-                left_dispatches,
-                right_dispatches,
-                u128::from(left.weight.max(1)),
-                u128::from(right.weight.max(1)),
-            );
+            return Ordering::Equal;
         }
         right_dispatches.cmp(&left_dispatches)
     }
@@ -238,25 +230,13 @@ pub(super) fn candidate_kind_preference(candidate: &RuntimeCandidate) -> u8 {
     u8::from(candidate.kind == CandidateKind::OAuthAccount)
 }
 
-fn compare_weighted_values(
-    left_value: u64,
-    right_value: u64,
-    left_weight: u128,
-    right_weight: u128,
-) -> Ordering {
-    (u128::from(right_value) * left_weight).cmp(&(u128::from(left_value) * right_weight))
-}
-
-fn compare_projected_weighted_values(
-    left_value: u64,
-    right_value: u64,
-    left_weight: u128,
-    right_weight: u128,
-) -> Ordering {
-    compare_weighted_values(
-        left_value.saturating_add(1),
-        right_value.saturating_add(1),
-        left_weight,
-        right_weight,
-    )
+fn compare_api_source_priority(left: &RuntimeCandidate, right: &RuntimeCandidate) -> Ordering {
+    if left.kind == CandidateKind::ApiSource
+        && right.kind == CandidateKind::ApiSource
+        && routing_tier(left) == routing_tier(right)
+    {
+        left.priority.cmp(&right.priority)
+    } else {
+        Ordering::Equal
+    }
 }

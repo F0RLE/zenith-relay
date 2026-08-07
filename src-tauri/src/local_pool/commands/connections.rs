@@ -67,6 +67,8 @@ pub struct UpdateSourceInput {
     #[serde(default)]
     excluded_models: Vec<String>,
     priority: i32,
+    #[serde(default)]
+    source_priorities: BTreeMap<String, i32>,
     weight: u32,
     #[serde(default)]
     recovery_delay_seconds: u64,
@@ -153,6 +155,7 @@ pub async fn update_local_source(
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
+    let source_priorities = input.source_priorities.clone();
     let current = state
         .store()?
         .source(&input.source_id)
@@ -191,7 +194,16 @@ pub async fn update_local_source(
         .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error))?;
     validate_source_record(&state, &updated)?;
     let (old_sources, old_keys) = current_records(&state)?;
-    state.store()?.upsert_source(updated)?;
+    let mut next_sources = old_sources.clone();
+    let target = next_sources
+        .iter_mut()
+        .find(|source| source.id == updated.id)
+        .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
+    *target = updated;
+    apply_source_priorities(&mut next_sources, &source_priorities)?;
+    state
+        .store()?
+        .replace_records(next_sources, old_keys.clone())?;
     sync_records_or_rollback(&state, old_sources, old_keys).await?;
     state.snapshot().await.map_err(Into::into)
 }
@@ -502,6 +514,22 @@ fn default_weight() -> u32 {
     1
 }
 
+fn apply_source_priorities(
+    sources: &mut [ProviderSourceRecord],
+    priorities: &BTreeMap<String, i32>,
+) -> LocalResult<()> {
+    for (source_id, priority) in priorities {
+        let source = sources
+            .iter_mut()
+            .find(|source| source.id == *source_id)
+            .ok_or_else(|| {
+                LocalPoolError::new(ErrorCode::InvalidState, "source priority target not found")
+            })?;
+        source.priority = *priority;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +573,27 @@ mod tests {
         source.normalize();
         source.normalize_protocol_bindings().unwrap();
         assert!(source.validate_protocol_bindings().is_ok());
+    }
+
+    #[test]
+    fn source_priorities_are_applied_as_one_order() {
+        let first = source_record();
+        let mut second = source_record();
+        second.id = "source-2".into();
+        let mut sources = vec![first, second];
+
+        apply_source_priorities(
+            &mut sources,
+            &BTreeMap::from([("source".into(), 2), ("source-2".into(), 1)]),
+        )
+        .unwrap();
+
+        assert_eq!(sources[0].priority, 2);
+        assert_eq!(sources[1].priority, 1);
+        assert!(
+            apply_source_priorities(&mut sources, &BTreeMap::from([("missing".into(), 3)]),)
+                .is_err()
+        );
     }
 
     #[test]

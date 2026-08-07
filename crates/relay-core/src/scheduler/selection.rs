@@ -96,6 +96,7 @@ pub enum SelectionReason {
     QuotaHeadroom,
     SubscriptionExpiry,
     SubscriptionPlan,
+    ManualPriority,
     WeightedRotation,
     FairRotation,
     FallbackAttempt,
@@ -1738,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_orders_quota_then_source_share_and_stable_id() {
+    fn selection_orders_api_priority_then_quota_and_stable_id() {
         let mut scheduler = PoolScheduler::new();
         let mut low_priority = candidate("a-low-priority");
         low_priority.priority = 1;
@@ -1746,14 +1747,11 @@ mod tests {
         scheduler.upsert(low_priority);
         let mut high_priority = candidate("z-high-priority");
         high_priority.priority = 100;
-        high_priority.quota = CandidateQuota::Available(100);
+        high_priority.quota = CandidateQuota::Available(1);
         scheduler.upsert(high_priority);
-        assert_eq!(
-            select(&mut scheduler, &HashSet::new())
-                .unwrap()
-                .candidate_id,
-            "a-low-priority"
-        );
+        let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "z-high-priority");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::ManualPriority);
 
         scheduler = PoolScheduler::new();
         let mut unknown = candidate("unknown");
@@ -1788,18 +1786,15 @@ mod tests {
         );
 
         scheduler = PoolScheduler::new();
-        let mut light = candidate("light");
+        let mut light = candidate("a-light");
         light.weight = 1;
         scheduler.upsert(light);
-        let mut heavy = candidate("heavy");
+        let mut heavy = candidate("z-heavy");
         heavy.weight = 2;
         scheduler.upsert(heavy);
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
-        assert_eq!(selected.candidate_id, "heavy");
-        assert_eq!(
-            selected.diagnostics.reason,
-            SelectionReason::WeightedRotation
-        );
+        assert_eq!(selected.candidate_id, "a-light");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
 
         scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("b"));
@@ -1813,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn active_api_source_does_not_rotate_concurrent_requests() {
+    fn api_source_order_stays_stable_across_concurrent_and_sequential_requests() {
         let mut scheduler = PoolScheduler::new();
         scheduler.upsert(candidate("active-source"));
         scheduler.upsert(candidate("other-source"));
@@ -1833,10 +1828,18 @@ mod tests {
         assert!(scheduler.release("active-source"));
         assert!(scheduler.release("active-source"));
         let selected = select(&mut scheduler, &HashSet::new()).unwrap();
+        assert_eq!(selected.candidate_id, "active-source");
+        assert_eq!(selected.diagnostics.reason, SelectionReason::StableTieBreak);
+
+        let selected = select(
+            &mut scheduler,
+            &HashSet::from(["active-source".to_string()]),
+        )
+        .unwrap();
         assert_eq!(selected.candidate_id, "other-source");
         assert_eq!(
             selected.diagnostics.reason,
-            SelectionReason::WeightedRotation
+            SelectionReason::FallbackAttempt
         );
     }
 

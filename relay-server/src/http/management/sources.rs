@@ -101,6 +101,8 @@ pub struct SourcePatch {
     in_pool: Option<bool>,
     draining: Option<bool>,
     priority: Option<i32>,
+    #[serde(default)]
+    source_priorities: BTreeMap<String, i32>,
     weight: Option<u32>,
     recovery_delay_seconds: Option<u64>,
     #[serde(default)]
@@ -114,6 +116,7 @@ pub async fn update_source(
 ) -> Result<Json<SourceSummary>, ManagementError> {
     let mut record = find_source(&state, &id)?;
     let old_record = record.clone();
+    let source_priorities = input.source_priorities.clone();
     let old_secret = state
         .vault
         .load(&record.secret_ref)
@@ -154,6 +157,9 @@ pub async fn update_source(
     if let Some(value) = input.priority {
         record.priority = value;
     }
+    if let Some(value) = source_priorities.get(&id) {
+        record.priority = *value;
+    }
     if let Some(value) = input.weight {
         record.weight = valid_weight(value)?;
     }
@@ -179,6 +185,24 @@ pub async fn update_source(
     }
     validate_source_record(&record, input.api_key.as_deref().unwrap_or(&old_secret))?;
     ensure_not_server_self_source(&state, &record.base_url)?;
+    let source_order = if source_priorities.is_empty() {
+        None
+    } else {
+        let old_sources = state.store.sources().map_err(store_error)?;
+        let mut next_sources = old_sources.clone();
+        let target = next_sources
+            .iter_mut()
+            .find(|source| source.id == record.id)
+            .ok_or_else(|| {
+                ManagementError::validation(
+                    "source_priority_target_not_found",
+                    "source priority target not found",
+                )
+            })?;
+        *target = record.clone();
+        apply_source_priorities(&mut next_sources, &source_priorities)?;
+        Some((old_sources, next_sources))
+    };
     if let Some(secret) = input.api_key.as_deref() {
         validate_secret(secret, "source API key")?;
         state
@@ -186,17 +210,47 @@ pub async fn update_source(
             .save(&record.secret_ref, secret)
             .map_err(vault_error)?;
     }
-    if let Err(error) = state.store.save_source(&record) {
+    let save_result = match &source_order {
+        Some((_, sources)) => state.store.save_sources(sources),
+        None => state.store.save_source(&record),
+    };
+    if let Err(error) = save_result {
         let _ = state.vault.save(&record.secret_ref, &old_secret);
         return Err(store_error(error));
     }
     if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.save_source(&old_record);
+        match &source_order {
+            Some((sources, _)) => {
+                let _ = state.store.save_sources(sources);
+            }
+            None => {
+                let _ = state.store.save_source(&old_record);
+            }
+        }
         let _ = state.vault.save(&old_record.secret_ref, &old_secret);
         let _ = state.rebuild_runtime().await;
         return Err(runtime_error(error));
     }
     Ok(Json(source_summary(&state, &record)?))
+}
+
+fn apply_source_priorities(
+    sources: &mut [SourceRecord],
+    priorities: &BTreeMap<String, i32>,
+) -> Result<(), ManagementError> {
+    for (source_id, priority) in priorities {
+        let source = sources
+            .iter_mut()
+            .find(|source| source.id == *source_id)
+            .ok_or_else(|| {
+                ManagementError::validation(
+                    "source_priority_target_not_found",
+                    "source priority target not found",
+                )
+            })?;
+        source.priority = *priority;
+    }
+    Ok(())
 }
 
 pub async fn delete_source(

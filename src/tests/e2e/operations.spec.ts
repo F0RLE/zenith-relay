@@ -127,7 +127,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("Accounts");
   await sourceRoles.getByRole("radio", { name: /API first/ }).click();
   await expect(sourcePolicy.locator('.source-route-stage[data-current="true"]')).toContainText("API first");
-  await sourcePolicy.getByRole("spinbutton", { name: "Traffic share" }).fill("250");
+  await expect(sourcePolicy.getByRole("spinbutton", { name: "Traffic share" })).toHaveCount(0);
+  await expect(sourcePolicy.getByRole("list", { name: "API order in this role" }).getByRole("listitem")).toHaveCount(1);
   await chooseOption(page, sourcePolicy, "Recovery check", "60");
   await expect(sourcePolicy.locator(".member-model-rules")).toHaveCount(0);
   await expect(sourcePolicy.locator(".source-model-configuration > summary")).toContainText("Models and cost");
@@ -162,9 +163,30 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
       .filter((call) => ["update_local_source", "test_quota_wake_automation", "update_local_account"].includes(call.command))
       .map((call) => [call.command, call.args]));
   });
-  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: [] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_000, weight: 250, recoveryDelaySeconds: 60 } });
+  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: [] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_001, sourcePriorities: { source_synthetic: 1_000_001 }, weight: 1, recoveryDelaySeconds: 60 } });
   expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
+});
+
+test("API sources use an explicit fallback order instead of traffic weights", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceCount: 2 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
+
+  const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
+  const order = dialog.getByRole("list", { name: "API order in this role" });
+  await expect(order.getByRole("listitem")).toHaveCount(2);
+  await expect(order.getByRole("listitem").nth(0)).toContainText("Example compatible API");
+  await dialog.getByRole("button", { name: "Move Example compatible API down" }).click();
+  await expect(order.getByRole("listitem").nth(0)).toContainText("Backup API 1");
+  await dialog.getByRole("button", { name: "Save policy" }).click();
+
+  const input = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "update_local_source")?.args.input;
+  });
+  expect(input).toMatchObject({ priority: 1, sourcePriorities: { source_synthetic: 1, source_synthetic_2: 2 }, weight: 1 });
 });
 
 test("dialogs keep editable focus and close a nested option list before the dialog", async ({ page }) => {
@@ -1692,12 +1714,12 @@ for (const mode of ["local", "remote"] as const) {
     if (mode === "local") {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
-      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([1_000_000, -1_000_000]);
+      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([1_000_001, -1_000_000]);
     } else {
       const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
       expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
       expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([1_000_000, -1_000_000]);
+      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([1_000_001, -1_000_000]);
     }
   });
 
