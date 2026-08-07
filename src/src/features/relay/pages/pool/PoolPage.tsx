@@ -5,10 +5,10 @@ import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
-import { effectiveSourceProtocolBindings, sourceModelsForWireApi } from "../../sourceProtocolBindings";
+import { effectiveSourceProtocolBindings } from "../../sourceProtocolBindings";
 import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
 import type { ApiSourceRole } from "../../components/Ui";
-import { groupModels, sortModelIdsForLauncher, supportsCacheWritePricing } from "../../modelGroups";
+import { groupModels, supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
 import { activeModelCounts, activeRequestCount, compareRoutingOrder, compareSubscriptionPlanPriority, routingOrderPositions } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
@@ -168,10 +168,6 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
   const lastUsedMember = lastUsedRuntime ? members.find((member) => member.id === lastUsedRuntime.candidateId) ?? null : null;
   const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
-  const currentRouteMember = activeMembers.length === 1 ? activeMembers[0] : nextMember;
-  const readyRouteModels = currentRouteMember
-    ? poolVisibleModels(runtime ?? undefined).filter((model) => memberSupportsModel(currentRouteMember, model))
-    : [];
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
@@ -240,7 +236,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : currentRouteMember && readyRouteModels.length ? <small className="pool-ready-models" data-ready-route={currentRouteMember.id} data-ready-models={readyRouteModels.join(",")}>{t("pool.readyModels", { member: memberName(currentRouteMember), models: readyRouteModels.join(", ") })}</small> : null}</span></div>
+        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
@@ -771,25 +767,6 @@ function comparePoolMembers(left: Member, right: Member, order: Map<string, numb
     || memberName(left).localeCompare(memberName(right));
 }
 function memberName(member: Member) { return member.kind === "source" ? member.name : member.identityHint || member.label; }
-function memberSupportsModel(member: Member, model: string) {
-  const normalized = model.toLowerCase();
-  const includes = (values: string[]) => values.some((value) => value.toLowerCase() === normalized);
-  const models = member.kind === "source"
-    ? sourceModelsForWireApi(member, "responses")
-    : member.models;
-  return includes(models)
-    && (!member.allowedModels.length || includes(member.allowedModels))
-    && !includes(member.excludedModels);
-}
-function poolVisibleModels(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]> | undefined) {
-  if (!runtime) return [];
-  const enabledCatalog = runtime.gateway.models?.filter((model) => model.enabled).map((model) => model.id) ?? [];
-  const enabled = new Set(enabledCatalog.map((model) => model.toLowerCase()));
-  const visible = runtime.gateway.visibleModelIds.filter((model) => !enabled.size || enabled.has(model.toLowerCase()));
-  const models = visible.length ? visible : enabledCatalog;
-  return sortModelIdsForLauncher(models.filter((model, index) => models.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index));
-}
-
 type RoutingPolicyPayload = {
   maxRetryCandidates: number;
   cooldownAfterFailures: number;

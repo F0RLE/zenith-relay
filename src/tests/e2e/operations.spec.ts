@@ -1544,7 +1544,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const routing = page.locator(".pool-priority-label");
     const member = page.locator('[data-member-label="Personal Plus"]');
-    await expect(routing.locator('[data-ready-route="source_synthetic"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
+    await expect(routing.locator("[data-ready-route]")).toHaveCount(0);
     expect(await usageReads()).toBe(before);
     await expect(member.locator(".pool-member-kind-icon")).toHaveAttribute("aria-label", "Waiting for quota");
   });
@@ -1755,7 +1755,7 @@ test("pool reflects active models from the live runtime order", async ({ page })
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveText("Available now via Example compatible API: gpt-5.4, gpt-5.4-mini");
+  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveCount(0);
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -1794,12 +1794,12 @@ test("pool keeps the last completed route visible after its lease is released", 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Usage order");
   await expect(priority).toContainText("Last request: Pro account");
-  await expect(priority.locator('[data-ready-route="account_synthetic_4"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini,o3");
+  await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
 
-test("pool shows the next route's actual Responses models before any request", async ({ page }) => {
+test("pool does not show the next route's models before any request", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
@@ -1814,10 +1814,9 @@ test("pool shows the next route's actual Responses models before any request", a
 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Next choice: Personal Plus");
-  const readyModels = priority.locator('[data-ready-route="account_synthetic"]');
-  await expect(readyModels).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
-  await expect(readyModels).toHaveText("Available now via Personal Plus: gpt-5.4, gpt-5.4-mini");
-  await expect(readyModels).not.toContainText("claude-opus-4-8");
+  await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
+  await expect(priority).not.toContainText("gpt-5.4");
+  await expect(priority).not.toContainText("claude-opus-4-8");
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
