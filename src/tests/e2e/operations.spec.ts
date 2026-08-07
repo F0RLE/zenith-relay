@@ -2641,6 +2641,7 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   await expect(page.getByRole("row").filter({ hasText: "Original profile" })).toBeVisible();
   await page.getByLabel("Snapshot name").fill("Before migration");
   await page.getByLabel("Snapshot name").press("Enter");
+  const createdSnapshotId = "22222222-2222-4222-8222-000000000002";
   const created = page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) });
   await expect(created).toBeVisible();
   const snapshotRows = page.locator(".profile-snapshot-table tbody tr");
@@ -2664,7 +2665,7 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   const fullRestoreCalls = calls.filter((call) => call.command === "restore_full_codex_profile_snapshot");
   expect(fullRestoreCalls).toHaveLength(1);
   expect(fullRestoreCalls[0]?.args).toEqual({
-    snapshotId: expect.any(String),
+    snapshotId: createdSnapshotId,
     safetyName: "Before restoring Before migration",
   });
 
@@ -2672,11 +2673,19 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
   await expect(backupChoice).toBeChecked();
   await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
   await expect(snapshotRows).toHaveCount(4);
+  calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  let restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
+  expect(restoreCalls).toHaveLength(1);
+  expect(restoreCalls[0]?.args).toEqual({ snapshotId: createdSnapshotId, safetyName: "Before restoring Before migration" });
 
   await created.getByRole("button", { name: "Restore Before migration" }).click();
   await backupChoice.uncheck();
   await restoreDialog.getByRole("button", { name: "Restore Relay settings" }).click();
   await expect(snapshotRows).toHaveCount(4);
+  calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
+  expect(restoreCalls).toHaveLength(2);
+  expect(restoreCalls[1]?.args).toEqual({ snapshotId: createdSnapshotId, safetyName: null });
 
   await page.getByRole("row").filter({ has: page.getByText("Before migration", { exact: true }) }).getByRole("button", { name: "Delete Before migration", exact: true }).click();
   await settleConfirmation(page);
@@ -2684,16 +2693,7 @@ test("named ChatGPT snapshots save the current profile by default and allow opti
 
   calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   expect(calls.some((call) => call.command === "restore_codex_profile")).toBe(true);
-  const restoreCalls = calls.filter((call) => call.command === "restore_codex_profile_snapshot");
-  expect(restoreCalls).toHaveLength(2);
-  expect(restoreCalls[0]?.args).toEqual({
-    snapshotId: expect.any(String),
-    safetyName: "Before restoring Before migration",
-  });
-  expect(restoreCalls[1]?.args).toEqual({
-    snapshotId: expect.any(String),
-    safetyName: null,
-  });
+  expect(calls.filter((call) => call.command === "restore_codex_profile_snapshot")).toHaveLength(2);
   expect(calls.filter((call) => call.command === "create_codex_profile_snapshot")).toHaveLength(1);
   expect(calls.findLast((call) => call.command === "open_relay_folder")?.args).toEqual({ folder: "profile_backups" });
 });
