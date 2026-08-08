@@ -6,6 +6,7 @@ mod host;
 mod models;
 mod profiles;
 mod remote;
+mod response_affinity;
 mod state;
 mod store;
 

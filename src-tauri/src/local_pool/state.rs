@@ -10,6 +10,7 @@ use super::{
     host::GatewayManager,
     models::{AutomationRecords, LocalAccountRecord, LocalPoolSnapshot, RuntimeTarget},
     profiles::repair,
+    response_affinity::DesktopResponseAffinityStore,
     store::{telemetry_db::TelemetryDb, LocalPoolStore},
 };
 use crate::platform;
@@ -38,7 +39,7 @@ use zenith_relay_core::{
         quota_reference_value, quota_valuation_revision, QuotaRefreshPermit, QuotaRefreshQueue,
         QuotaTransition,
     },
-    ResponseAffinityBinding, ResponseAffinityStore, UsageCallback, UsageEvent,
+    ResponseAffinityStore, UsageCallback, UsageEvent,
 };
 
 #[cfg(test)]
@@ -537,10 +538,10 @@ impl DesktopState {
     }
 
     pub(crate) fn response_affinity_store(&self) -> Arc<dyn ResponseAffinityStore> {
-        Arc::new(DesktopResponseAffinityStore {
-            telemetry: self.telemetry.clone(),
-            failed_writes: self.failed_affinity_writes.clone(),
-        })
+        Arc::new(DesktopResponseAffinityStore::new(
+            self.telemetry.clone(),
+            self.failed_affinity_writes.clone(),
+        ))
     }
 
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -665,46 +666,6 @@ fn account_secret_available(
     Ok(secrets.load(&secret_ref)?.is_some())
 }
 
-struct DesktopResponseAffinityStore {
-    telemetry: Arc<TelemetryDb>,
-    failed_writes: Arc<AtomicU64>,
-}
-
-impl DesktopResponseAffinityStore {
-    fn finish<T>(&self, result: Result<T>) -> std::result::Result<T, String> {
-        result.map_err(|error| {
-            self.failed_writes.fetch_add(1, Ordering::Relaxed);
-            error.to_string()
-        })
-    }
-}
-
-impl ResponseAffinityStore for DesktopResponseAffinityStore {
-    fn load(&self, now_ms: u64) -> std::result::Result<Vec<ResponseAffinityBinding>, String> {
-        self.finish(self.telemetry.affinity_bindings(now_ms))
-    }
-
-    fn find(
-        &self,
-        key: &str,
-        now_ms: u64,
-    ) -> std::result::Result<Option<ResponseAffinityBinding>, String> {
-        self.finish(self.telemetry.find_affinity(key, now_ms))
-    }
-
-    fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String> {
-        self.finish(self.telemetry.upsert_affinity(binding, now_ms()))
-    }
-
-    fn delete(&self, key: &str) -> std::result::Result<(), String> {
-        self.finish(self.telemetry.delete_affinity(key))
-    }
-
-    fn delete_candidate(&self, candidate_id: &str) -> std::result::Result<(), String> {
-        self.finish(self.telemetry.delete_candidate_affinities(candidate_id))
-    }
-}
-
 fn expire_account_access(
     credentials: &CredentialStore<NativeSecretBackend>,
     account_id: &str,
@@ -786,7 +747,7 @@ fn invalid_core_state(error: impl std::fmt::Display) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
