@@ -101,7 +101,7 @@ mod tests {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
     use zenith_relay_core::{
-        CandidateHealth, CandidateQuota, LocalGatewayKey, ProviderSource, WireApi,
+        CandidateHealth, CandidateQuota, CandidateScope, LocalGatewayKey, ProviderSource, WireApi,
     };
 
     #[tokio::test]
@@ -219,6 +219,46 @@ mod tests {
             false,
             CandidateHealth::Healthy,
             CandidateQuota::Exhausted,
+        ));
+        assert_eq!(manager.address().await, Some(address));
+        assert!(!client
+            .get(&models_url)
+            .bearer_auth("key")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .contains("model"));
+        manager.stop().await;
+    }
+
+    #[tokio::test]
+    async fn key_scope_updates_without_rebinding_the_listener() {
+        let manager = GatewayManager::default();
+        let runtime = test_runtime("source", "model", "key");
+        let address = manager.start(runtime.clone(), 0).await.unwrap();
+        let models_url = format!("http://{address}/v1/models");
+        let client = reqwest::Client::new();
+        assert!(client
+            .get(&models_url)
+            .bearer_auth("key")
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+            .contains("model"));
+
+        assert!(runtime.update_key_scope(
+            "local-source",
+            CandidateScope {
+                source_ids: Some(Default::default()),
+                account_ids: Some(Default::default()),
+                model_rules: Default::default(),
+            },
         ));
         assert_eq!(manager.address().await, Some(address));
         assert!(!client

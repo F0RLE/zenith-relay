@@ -65,6 +65,26 @@
   padding: 18px;
 }
 
+@media (max-height: 800px) {
+  .relay-modal-backdrop {
+    padding-block: 16px;
+  }
+
+  .relay-dialog {
+    max-height: calc(100vh - 68px);
+  }
+}
+
+@media (max-height: 620px) {
+  .relay-modal-backdrop {
+    padding-block: 12px;
+  }
+
+  .relay-dialog {
+    max-height: calc(100vh - 60px);
+  }
+}
+
 .confirm-dialog-message {
   margin: 0;
   color: var(--relay-secondary);

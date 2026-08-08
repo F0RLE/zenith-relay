@@ -10,7 +10,7 @@ use crate::{
     CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
     SourceProtocolBinding, WireApi,
 };
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -92,6 +92,54 @@ pub struct ModelSummary {
     pub output_micro_usd_per_million: Option<u64>,
     #[serde(default)]
     pub custom_price: bool,
+    #[serde(default)]
+    pub reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub reasoning_allowed_levels: Vec<String>,
+    #[serde(default)]
+    pub reasoning_configurable: bool,
+}
+
+/// Adds the confirmed API-source reasoning capabilities to a management
+/// model row. Native ChatGPT routes retain their provider-owned catalog and
+/// are intentionally never configurable here.
+pub fn apply_model_reasoning_summary(
+    model: &mut ModelSummary,
+    confirmed_levels: Vec<String>,
+    saved_allowed_levels: Option<&[String]>,
+    has_native_account_route: bool,
+) {
+    model.reasoning_levels.clear();
+    model.reasoning_allowed_levels.clear();
+    model.reasoning_configurable = false;
+    if has_native_account_route {
+        return;
+    }
+
+    let mut seen = BTreeSet::new();
+    for level in confirmed_levels {
+        let level = level.trim().to_ascii_lowercase();
+        if !level.is_empty() && seen.insert(level.clone()) {
+            model.reasoning_levels.push(level);
+        }
+    }
+    if model.reasoning_levels.is_empty() {
+        return;
+    }
+
+    model.reasoning_configurable = true;
+    if let Some(saved_allowed_levels) = saved_allowed_levels {
+        let configured = saved_allowed_levels
+            .iter()
+            .map(|level| level.trim().to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
+        model.reasoning_allowed_levels = model
+            .reasoning_levels
+            .iter()
+            .filter(|level| configured.contains(level.as_str()))
+            .cloned()
+            .collect();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -143,6 +191,22 @@ pub struct AccountOperationalState {
     pub quota: CandidateQuota,
     pub routing_eligible: bool,
     pub routing_block_reason: Option<AccountRoutingBlockReason>,
+}
+
+/// Whether an account should remain instantiated as a runtime candidate.
+///
+/// An exhausted quota is a temporary scheduler condition rather than a broken
+/// configuration. Keeping that candidate lets a quota refresh restore it in
+/// place without rebuilding the gateway or dropping active work.
+pub fn account_candidate_enabled(
+    account_enabled: bool,
+    routing_block_reason: Option<AccountRoutingBlockReason>,
+) -> bool {
+    account_enabled
+        && matches!(
+            routing_block_reason,
+            None | Some(AccountRoutingBlockReason::QuotaExhausted)
+        )
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -448,7 +512,7 @@ impl fmt::Debug for ProfileKeyRotation {
 }
 
 pub const CONFIGURATION_PRESET_FORMAT: &str = "zenith-relay-configuration";
-pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 2;
+pub const CONFIGURATION_PRESET_SCHEMA_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -458,8 +522,7 @@ pub struct ConfigurationPreset {
     pub settings: ConfigurationPresetSettings,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigurationPresetSettings {
     pub sources: Vec<SourcePresetRule>,
     pub accounts: Vec<AccountPresetRule>,
@@ -467,6 +530,83 @@ pub struct ConfigurationPresetSettings {
     pub quota: PresetQuotaPolicy,
     pub hidden_models: Vec<String>,
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
+    /// Whether the preset explicitly supplied `modelReasoningAllowedLevels`.
+    ///
+    /// Resolved configuration settings always set this to `true`; it is false
+    /// only while importing a backward-compatible sparse preset.
+    pub model_reasoning_allowed_levels_present: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConfigurationPresetSettingsWire {
+    sources: Vec<SourcePresetRule>,
+    accounts: Vec<AccountPresetRule>,
+    routing: PresetRoutingPolicy,
+    quota: PresetQuotaPolicy,
+    hidden_models: Vec<String>,
+    model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(
+        default,
+        alias = "modelReasoningOverrides",
+        deserialize_with = "deserialize_optional_model_reasoning_allowed_levels"
+    )]
+    model_reasoning_allowed_levels: Option<BTreeMap<String, Vec<String>>>,
+}
+
+fn deserialize_optional_model_reasoning_allowed_levels<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, Vec<String>>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    crate::deserialize_model_reasoning_allowed_levels(deserializer).map(Some)
+}
+
+impl<'de> Deserialize<'de> for ConfigurationPresetSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ConfigurationPresetSettingsWire::deserialize(deserializer)?;
+        let model_reasoning_allowed_levels_present = wire.model_reasoning_allowed_levels.is_some();
+        Ok(Self {
+            sources: wire.sources,
+            accounts: wire.accounts,
+            routing: wire.routing,
+            quota: wire.quota,
+            hidden_models: wire.hidden_models,
+            model_price_overrides: wire.model_price_overrides,
+            model_reasoning_allowed_levels: wire.model_reasoning_allowed_levels.unwrap_or_default(),
+            model_reasoning_allowed_levels_present,
+        })
+    }
+}
+
+impl Serialize for ConfigurationPresetSettings {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct(
+            "ConfigurationPresetSettings",
+            6 + usize::from(self.model_reasoning_allowed_levels_present),
+        )?;
+        state.serialize_field("sources", &self.sources)?;
+        state.serialize_field("accounts", &self.accounts)?;
+        state.serialize_field("routing", &self.routing)?;
+        state.serialize_field("quota", &self.quota)?;
+        state.serialize_field("hiddenModels", &self.hidden_models)?;
+        state.serialize_field("modelPriceOverrides", &self.model_price_overrides)?;
+        if self.model_reasoning_allowed_levels_present {
+            state.serialize_field(
+                "modelReasoningAllowedLevels",
+                &self.model_reasoning_allowed_levels,
+            )?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -662,6 +802,9 @@ pub fn pool_model_summaries(
                     output_micro_usd_per_million: price
                         .map(|price| price.output_micro_usd_per_million),
                     custom_price: false,
+                    reasoning_levels: Vec::new(),
+                    reasoning_allowed_levels: Vec::new(),
+                    reasoning_configurable: false,
                 },
             )
         })
@@ -1198,6 +1341,7 @@ mod tests {
             state.routing_block_reason,
             Some(AccountRoutingBlockReason::QuotaExhausted)
         );
+        assert!(account_candidate_enabled(true, state.routing_block_reason));
     }
 
     #[test]

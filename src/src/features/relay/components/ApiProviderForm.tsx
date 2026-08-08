@@ -101,7 +101,7 @@ export function apiProviderSourceInput(value: ApiProviderValue) {
     excludedModels: [],
     draining: false,
     priority: 0,
-    weight: 100,
+    weight: 1,
     recoveryDelaySeconds: 0,
   };
 }

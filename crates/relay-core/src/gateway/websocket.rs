@@ -305,7 +305,7 @@ async fn connect_upstream(
         let Some(mut route) = runtime.executor_route(
             &selected.candidate_id,
             &request.resolved_model,
-            &key.scope,
+            &key.scope_snapshot(),
             WEBSOCKET_PROTOCOLS,
         ) else {
             continue;
@@ -404,7 +404,7 @@ async fn connect_upstream(
             let response = upgrade.into_inner();
             let body = timeout(
                 UPSTREAM_CONNECT_TIMEOUT,
-                crate::runtime::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
+                crate::transport::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
             )
             .await
             .ok()
@@ -1158,7 +1158,7 @@ async fn start_next_request(
             .executor_route(
                 &selected.candidate_id,
                 &request.resolved_model,
-                &key.scope,
+                &key.scope_snapshot(),
                 WEBSOCKET_PROTOCOLS,
             )
             .ok_or_else(GatewayFailure::unavailable)?;

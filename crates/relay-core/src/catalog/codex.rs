@@ -227,6 +227,9 @@ pub fn normalize_upstream_codex_catalog_entry(
             entry.insert("supported_reasoning_levels".into(), value.clone());
         }
     }
+    // API routes use Relay's neutral automatic default and never inherit an
+    // upstream automatic default such as `ultra`.
+    prefer_medium_reasoning_default(&mut entry);
 
     for key in [
         "use_responses_lite",
@@ -287,6 +290,27 @@ pub fn normalize_upstream_codex_catalog_entry(
 
     let value = Value::Object(entry);
     codex_catalog_entry_is_compatible(&value).then_some(value)
+}
+
+fn prefer_medium_reasoning_default(entry: &mut Map<String, Value>) {
+    let Some(medium) = entry
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .and_then(|levels| {
+            levels.iter().find_map(|level| {
+                level
+                    .get("effort")
+                    .and_then(Value::as_str)
+                    .filter(|effort| effort.eq_ignore_ascii_case("medium"))
+            })
+        })
+        .map(str::to_owned)
+    else {
+        entry.remove("default_reasoning_level");
+        return;
+    };
+
+    entry.insert("default_reasoning_level".into(), Value::String(medium));
 }
 
 /// Preserve the upstream Codex identity for a confirmed ChatGPT account model.
@@ -726,6 +750,57 @@ mod tests {
         assert_eq!(entry["supports_reasoning_summaries"], false);
         assert_eq!(entry["supports_parallel_tool_calls"], false);
         assert_eq!(entry["input_modalities"], json!(["text", "image"]));
+    }
+
+    #[test]
+    fn api_models_use_medium_when_provider_default_is_ultra() {
+        let template = json!({
+            "default_reasoning_level": "ultra",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "medium", "description": "Medium"},
+                {"effort": "ultra", "description": "Ultra"}
+            ]
+        });
+
+        let entry = normalize_upstream_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "vendor/model",
+            1_000,
+            None,
+        )
+        .expect("API catalog entry");
+
+        assert_eq!(entry["default_reasoning_level"], "medium");
+        assert_eq!(
+            entry["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn api_models_do_not_inherit_ultra_when_medium_is_unavailable() {
+        let template = json!({
+            "default_reasoning_level": "ultra",
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "ultra", "description": "Ultra"}
+            ]
+        });
+
+        let entry = normalize_upstream_codex_catalog_entry(
+            template.as_object().unwrap(),
+            "vendor/model",
+            1_000,
+            None,
+        )
+        .expect("API catalog entry");
+
+        assert!(entry.get("default_reasoning_level").is_none());
     }
 
     #[test]

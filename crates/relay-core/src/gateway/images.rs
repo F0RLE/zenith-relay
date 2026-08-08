@@ -449,9 +449,11 @@ async fn execute_prepared(
             break;
         };
         tried.insert(selected.candidate_id.clone());
-        let Some(mut route) =
-            runtime.image_executor_route(&selected.candidate_id, &key.scope, IMAGE_PROTOCOLS)
-        else {
+        let Some(mut route) = runtime.image_executor_route(
+            &selected.candidate_id,
+            &key.scope_snapshot(),
+            IMAGE_PROTOCOLS,
+        ) else {
             continue;
         };
         route.half_open_probe = selected.half_open_probe;
@@ -550,7 +552,7 @@ async fn execute_prepared(
 
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes = match crate::runtime::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
+        let bytes = match crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
             .await
         {
             Ok(bytes) => bytes,

@@ -1335,6 +1335,79 @@ async fn chat_completions_stays_on_a_matching_chat_source_and_rejects_tool_use()
 }
 
 #[tokio::test]
+async fn chat_completions_enforces_manual_reasoning_levels() {
+    let chat = json!({
+        "id": "chat-reasoning",
+        "object": "chat.completion",
+        "created": 123,
+        "model": "chat-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "translated"},
+            "finish_reason": "stop"
+        }]
+    });
+    let (chat_server, state) = spawn_upstream(
+        "chat-key",
+        vec![Reply::Json {
+            status: StatusCode::OK,
+            body: chat,
+            cache_control: "chat",
+            retry_after: None,
+        }],
+    )
+    .await;
+    let mut chat_source = source("chat", &chat_server, "chat-key", &["chat-model"], 0);
+    chat_source.source.wire_api = WireApi::ChatCompletions;
+    let mut options = GatewayRuntimeOptions::default();
+    options
+        .model_reasoning_allowed_levels
+        .insert("chat-model".to_string(), vec!["high".to_string()]);
+    let (gateway, _) = spawn_gateway_with_options(
+        vec![chat_source],
+        vec![local_key("key", LOCAL_KEY, None)],
+        options,
+    )
+    .await;
+    let client = reqwest::Client::new();
+
+    let rejected = client
+        .post(format!("{}/v1/chat/completions", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "chat-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "low"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "reasoning_effort_not_allowed"
+    );
+    assert!(state.requests.lock().unwrap().is_empty());
+
+    let accepted = client
+        .post(format!("{}/v1/chat/completions", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "chat-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "high"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(
+        state.requests.lock().unwrap()[0].body["reasoning_effort"],
+        "high"
+    );
+}
+
+#[tokio::test]
 async fn messages_passthrough_preserves_native_tool_use_headers_and_sse() {
     let native_message = json!({
         "id": "msg_01",
@@ -1674,6 +1747,7 @@ async fn repeated_session_id_does_not_pin_requests_to_one_source() {
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
             provider_storm_breaker: false,
             cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,
@@ -1777,6 +1851,7 @@ async fn spawn_gateway(
             default_service_tier: Default::default(),
             quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            model_reasoning_allowed_levels: Default::default(),
             response_affinity_store: None,
             provider_storm_breaker: false,
             cooldown_after_failures: zenith_relay_core::DEFAULT_COOLDOWN_AFTER_FAILURES,

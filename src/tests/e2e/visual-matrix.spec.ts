@@ -291,9 +291,10 @@ test("API source routing editor stays readable in the standard window", async ({
   await page.getByRole("button", { name: "Правила участника пула: Example compatible API" }).click();
 
   const dialog = page.getByRole("dialog", { name: /Правила участника пула.*Example compatible API/ });
-  await expect(dialog.getByRole("radiogroup", { name: "Роль API-источника" }).getByRole("radio")).toHaveCount(3);
+  await expect(dialog.locator('.source-route-map[role="group"] > button[aria-pressed]')).toHaveCount(3);
   await expect(dialog.getByLabel("Порядок перехода при ошибке")).toContainText("Учётные записи");
-  await expect(dialog.getByRole("spinbutton", { name: "Доля трафика" })).toBeVisible();
+  await expect(dialog.getByRole("spinbutton", { name: "Доля трафика" })).toHaveCount(0);
+  await expect(dialog.getByRole("list", { name: "Порядок API в этой роли" }).getByRole("listitem")).toHaveCount(1);
   await expect(dialog.getByRole("button", { name: /^Повторная проверка:/ })).toBeVisible();
   await expect(dialog.locator("[data-member-model-id]")).toHaveCount(2);
   await expect(dialog.getByLabel("Не назначать запросы")).toHaveCount(0);
@@ -304,6 +305,18 @@ test("API source routing editor stays readable in the standard window", async ({
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-840x560.png" });
   await page.setViewportSize({ width: 1024, height: 681 });
   await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-1024x681.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight && element.scrollWidth <= element.clientWidth;
+  })).toBe(true);
+  expect(await dialog.locator(".source-route-map, .source-priority-order, .source-routing-control").evaluateAll((elements) => elements.every((element) => {
+    const rect = element.getBoundingClientRect();
+    const dialogRect = element.closest("[data-relay-dialog]")!.getBoundingClientRect();
+    return rect.left >= dialogRect.left && rect.right <= dialogRect.right;
+  }))).toBe(true);
+  await page.screenshot({ path: "output/playwright/api-source-routing-ru-dark-390x844.png" });
+  await page.setViewportSize({ width: 1024, height: 681 });
   await dialog.locator(".source-model-configuration > summary").click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await dialog.locator('[data-member-model-id="gpt-5.4"]').scrollIntoViewIfNeeded();

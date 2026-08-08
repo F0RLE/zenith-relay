@@ -13,7 +13,7 @@ type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" 
 type UpdateInstallError = "write" | "install" | null;
 
 const ConnectionsPage = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ConnectionsPage }));
-const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ImportDialog }));
+const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
 const PoolPage = lazy(async () => ({ default: (await import("../pages/pool/PoolPage")).PoolPage }));
 const GatewayPage = lazy(async () => ({ default: (await import("../pages/gateway/GatewayPage")).GatewayPage }));
 const UsagePage = lazy(async () => ({ default: (await import("../pages/usage/UsagePage")).UsagePage }));

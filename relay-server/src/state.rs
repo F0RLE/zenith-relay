@@ -1,7 +1,7 @@
 use crate::{
-    app::UsageWriter,
     config::Config,
     store::{Store, Vault},
+    usage_writer::UsageWriter,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::Rng;

@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 use zenith_relay_core::{
     accounts::AccountRecord,
     automations::{WakeAutomationState, WakeHistory, WakeTask},
-    normalize_model_price_overrides, normalize_source_protocol_bindings,
+    deserialize_model_reasoning_allowed_levels, normalize_model_price_overrides,
+    normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
     quota::QuotaEconomicsState,
@@ -62,6 +63,12 @@ pub struct GatewaySettings {
     pub hidden_models: Vec<String>,
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(
+        default,
+        alias = "modelReasoningOverrides",
+        deserialize_with = "deserialize_model_reasoning_allowed_levels"
+    )]
+    pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -319,6 +326,7 @@ impl Default for GatewaySettings {
                 DEFAULT_CHATGPT_INTERFACE_QUOTA_RESERVE_BASIS_POINTS,
             hidden_models: Vec::new(),
             model_price_overrides: BTreeMap::new(),
+            model_reasoning_allowed_levels: BTreeMap::new(),
         }
     }
 }
@@ -358,6 +366,7 @@ impl GatewaySettings {
             return Err("ChatGPT account quota reserve must be disabled or between 1% and 99%");
         }
         validate_model_price_overrides(&self.model_price_overrides)?;
+        normalize_model_reasoning_allowed_levels(self.model_reasoning_allowed_levels.clone())?;
         Ok(())
     }
 }

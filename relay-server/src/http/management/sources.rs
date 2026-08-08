@@ -14,7 +14,8 @@ use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
     normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, ProviderSource, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
+    SourceDiscovery, SourceProtocolBinding, WireApi,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -78,11 +79,14 @@ pub async fn create_source(
         let _ = state.vault.delete(&secret_ref);
         return Err(store_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.delete_source(&record.id);
-        let _ = state.vault.delete(&secret_ref);
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.store.delete_source(&record.id)?;
+            state.vault.delete(&secret_ref)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok((StatusCode::CREATED, Json(source_summary(&state, &record)?)))
 }
 
@@ -101,6 +105,8 @@ pub struct SourcePatch {
     in_pool: Option<bool>,
     draining: Option<bool>,
     priority: Option<i32>,
+    #[serde(default)]
+    source_priorities: BTreeMap<String, i32>,
     weight: Option<u32>,
     recovery_delay_seconds: Option<u64>,
     #[serde(default)]
@@ -114,6 +120,7 @@ pub async fn update_source(
 ) -> Result<Json<SourceSummary>, ManagementError> {
     let mut record = find_source(&state, &id)?;
     let old_record = record.clone();
+    let source_priorities = input.source_priorities.clone();
     let old_secret = state
         .vault
         .load(&record.secret_ref)
@@ -154,6 +161,9 @@ pub async fn update_source(
     if let Some(value) = input.priority {
         record.priority = value;
     }
+    if let Some(value) = source_priorities.get(&id) {
+        record.priority = *value;
+    }
     if let Some(value) = input.weight {
         record.weight = valid_weight(value)?;
     }
@@ -179,6 +189,33 @@ pub async fn update_source(
     }
     validate_source_record(&record, input.api_key.as_deref().unwrap_or(&old_secret))?;
     ensure_not_server_self_source(&state, &record.base_url)?;
+    let source_order = if source_priorities.is_empty() {
+        None
+    } else {
+        let old_sources = state.store.sources().map_err(store_error)?;
+        let mut next_sources = old_sources.clone();
+        let target = next_sources
+            .iter_mut()
+            .find(|source| source.id == record.id)
+            .ok_or_else(|| {
+                ManagementError::validation(
+                    "source_priority_target_not_found",
+                    "source priority target not found",
+                )
+            })?;
+        *target = record.clone();
+        apply_source_priorities(&mut next_sources, &source_priorities)?;
+        Some((old_sources, next_sources))
+    };
+    let (previous_sources, next_sources) = match &source_order {
+        Some((previous, next)) => (previous.as_slice(), next.as_slice()),
+        None => (
+            std::slice::from_ref(&old_record),
+            std::slice::from_ref(&record),
+        ),
+    };
+    let policy_only_update =
+        input.api_key.is_none() && source_runtime_policy_compatible(previous_sources, next_sources);
     if let Some(secret) = input.api_key.as_deref() {
         validate_secret(secret, "source API key")?;
         state
@@ -186,17 +223,130 @@ pub async fn update_source(
             .save(&record.secret_ref, secret)
             .map_err(vault_error)?;
     }
-    if let Err(error) = state.store.save_source(&record) {
+    let save_result = match &source_order {
+        Some((_, sources)) => state.store.save_sources(sources),
+        None => state.store.save_source(&record),
+    };
+    if let Err(error) = save_result {
         let _ = state.vault.save(&record.secret_ref, &old_secret);
         return Err(store_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.save_source(&old_record);
-        let _ = state.vault.save(&old_record.secret_ref, &old_secret);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
+    let runtime_applied = if policy_only_update {
+        match apply_source_policies_if_running(&state, previous_sources, next_sources) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let restore = state
+                    .rollback_and_rebuild_runtime(|| {
+                        match &source_order {
+                            Some((sources, _)) => state.store.save_sources(sources)?,
+                            None => state.store.save_source(&old_record)?,
+                        }
+                        state.vault.save(&old_record.secret_ref, &old_secret)?;
+                        Ok(())
+                    })
+                    .await;
+                return match restore {
+                    Ok(()) => Err(runtime_error(error)),
+                    Err(restore) => Err(runtime_error(format!("{error}; {restore}"))),
+                };
+            }
+        }
+    } else {
+        false
+    };
+    if !runtime_applied {
+        state
+            .rebuild_runtime_or_rollback(|| {
+                match &source_order {
+                    Some((sources, _)) => state.store.save_sources(sources)?,
+                    None => state.store.save_source(&old_record)?,
+                }
+                state.vault.save(&old_record.secret_ref, &old_secret)?;
+                Ok(())
+            })
+            .await
+            .map_err(runtime_error)?;
     }
     Ok(Json(source_summary(&state, &record)?))
+}
+
+fn apply_source_policies_if_running(
+    state: &AppState,
+    previous: &[SourceRecord],
+    next: &[SourceRecord],
+) -> Result<bool, String> {
+    let updates = next
+        .iter()
+        .filter(|source| {
+            previous
+                .iter()
+                .find(|previous| previous.id == source.id)
+                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
+        })
+        .map(|source| RuntimeSourcePolicyUpdate {
+            source_id: source.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: source.enabled,
+                draining: source.draining,
+                priority: source.priority,
+                weight: source.weight,
+                allowed_models: source.allowed_models.clone(),
+                excluded_models: source.excluded_models.clone(),
+            },
+            recovery_delay_seconds: source.recovery_delay_seconds,
+        })
+        .collect::<Vec<_>>();
+    let Some(runtime) = state.runtime()? else {
+        return Ok(!state.store.gateway_enabled()?);
+    };
+    if !updates.is_empty() && !runtime.update_source_policies(&updates) {
+        return Ok(false);
+    }
+    state.refresh_internal_gateway_key_scopes(&runtime)
+}
+
+fn source_runtime_policy_compatible(previous: &[SourceRecord], next: &[SourceRecord]) -> bool {
+    previous.len() == next.len()
+        && previous.iter().all(|source| {
+            next.iter()
+                .find(|candidate| candidate.id == source.id)
+                .is_some_and(|candidate| {
+                    source.base_url == candidate.base_url
+                        && source.secret_ref == candidate.secret_ref
+                        && source.wire_api == candidate.wire_api
+                        && source.protocol_bindings == candidate.protocol_bindings
+                        && source.models == candidate.models
+                })
+        })
+}
+
+fn source_runtime_policy_changed(previous: &SourceRecord, next: &SourceRecord) -> bool {
+    previous.enabled != next.enabled
+        || previous.draining != next.draining
+        || previous.priority != next.priority
+        || previous.weight != next.weight
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
+        || previous.recovery_delay_seconds != next.recovery_delay_seconds
+}
+
+fn apply_source_priorities(
+    sources: &mut [SourceRecord],
+    priorities: &BTreeMap<String, i32>,
+) -> Result<(), ManagementError> {
+    for (source_id, priority) in priorities {
+        let source = sources
+            .iter_mut()
+            .find(|source| source.id == *source_id)
+            .ok_or_else(|| {
+                ManagementError::validation(
+                    "source_priority_target_not_found",
+                    "source priority target not found",
+                )
+            })?;
+        source.priority = *priority;
+    }
+    Ok(())
 }
 
 pub async fn delete_source(
@@ -216,12 +366,14 @@ pub async fn delete_source(
         .vault
         .delete(&record.secret_ref)
         .map_err(vault_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.vault.save(&record.secret_ref, &secret);
-        let _ = state.store.save_source(&record);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.vault.save(&record.secret_ref, &secret)?;
+            state.store.save_source(&record)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -252,11 +404,13 @@ pub async fn test_source(
     normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
     state.store.save_source(&record).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.save_source(&previous);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.store.save_source(&previous)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(source_summary(&state, &record)?))
 }
 

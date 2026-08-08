@@ -1,22 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { Activity, ArrowDown, ArrowRightLeft, ArrowUp, BrainCircuit, CheckCheck, Clock3, Cloud, DollarSign, Download, Gauge, GripVertical, ListMinus, Loader2, Pencil, Play, Plus, Power, RefreshCw, RotateCcw, Trash2, Upload, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
-import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
-import { effectiveSourceProtocolBindings, sourceModelsForWireApi } from "../../sourceProtocolBindings";
-import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
-import type { ApiSourceRole } from "../../components/Ui";
-import { groupModels, sortModelIdsForLauncher, supportsCacheWritePricing } from "../../modelGroups";
+import { PoolMemberEditor } from "../../components/PoolMemberEditor";
+import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
+import { supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
-import { activeModelCounts, activeRequestCount, compareRoutingOrder, compareSubscriptionPlanPriority, routingOrderPositions } from "../../routingOrder";
+import { accountPlanOption, apiSourceRole, compareAccountPlans, activeModelCounts, activeRequestCount, compareRoutingOrder, routingOrderPositions } from "../../routingOrder";
+import { clampRoutingCount, comparePoolMembers, compareStableText, groupModelSummariesForLauncher, memberName, mergeSubscriptionPlanOrder, modelSummaries, subscriptionPlanGroups, toggle, type PoolMember } from "../../poolHelpers";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountErrorDialog, SourceDialog } from "../connections/ConnectionsPage";
 
 type View = "members" | "models";
-type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source" });
-type SubscriptionPlanGroup = { id: string; label: string; count: number };
+type Member = PoolMember;
 type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: boolean };
 
 export function PoolPage() {
@@ -168,10 +165,6 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   const lastUsedRuntime = runtimeOrder.reduce<CandidateRuntimeSnapshot | null>((latest, candidate) => candidate.lastUsedAtMs != null && (latest?.lastUsedAtMs == null || candidate.lastUsedAtMs > latest.lastUsedAtMs) ? candidate : latest, null);
   const lastUsedMember = lastUsedRuntime ? members.find((member) => member.id === lastUsedRuntime.candidateId) ?? null : null;
   const nextMember = members.find((member) => runtimeByMember.get(member.id)?.available) ?? null;
-  const currentRouteMember = activeMembers.length === 1 ? activeMembers[0] : nextMember;
-  const readyRouteModels = currentRouteMember
-    ? poolVisibleModels(runtime ?? undefined).filter((model) => memberSupportsModel(currentRouteMember, model))
-    : [];
   const routingSummary = activeMembers.length === 1
     ? `${t("pool.currentRoute")}: ${memberName(activeMembers[0])}`
     : activeMembers.length > 1
@@ -240,7 +233,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
   return <>
     <div className="pool-controls">
       <div className="table-toolbar pool-member-toolbar">
-        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : currentRouteMember && readyRouteModels.length ? <small className="pool-ready-models" data-ready-route={currentRouteMember.id} data-ready-models={readyRouteModels.join(",")}>{t("pool.readyModels", { member: memberName(currentRouteMember), models: readyRouteModels.join(", ") })}</small> : null}</span></div>
+        <div className="pool-priority-label" title={t("pool.priorityHint")}><Activity aria-hidden /><span><strong>{t("pool.priorityTitle")}</strong><small>{routingSummary}</small>{activeRequestSummary ? <small className="pool-active-models" data-active-request-count={activeRequestTotal} data-active-models={activeModels.map(({ model, requestCount }) => `${model}:${requestCount}`).join(",")} title={activeRequestSummary}>{activeRequestSummary}</small> : null}</span></div>
         <div className="inline-actions pool-quota-actions">
           <div className="pool-control-group" data-toolbar-group="routing">
             <label className="pool-speed-control" data-fast={serviceTier === "fast" ? "true" : "false"} title={t("pool.serviceTierHint")}>
@@ -319,7 +312,11 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
           {member.kind === "account" && accountEconomicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
-              <IconButton className="danger" label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} />
+              <IconButton className="danger" data-relay-context-action label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void remove(member);
+              }} />
               {member.kind === "source" ? <IconButton label={t("pool.refreshSourceStats")} icon={sourceStats[member.id]?.loading ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!member.secretAvailable || sourceStats[member.id]?.loading} onClick={() => void refreshSourceStats(member.id)} /> : null}
               {member.kind === "account" ? <IconButton label={t("accounts.refreshQuota")} icon={busy === `pool-account-quota-${member.id}` ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={!canRefreshQuota || !member.secretAvailable || Boolean(busy)} onClick={() => void refreshAccountQuota(member)} /> : null}
               <IconButton label={editLabel} icon={<Pencil aria-hidden />} aria-haspopup="dialog" onClick={() => setSelectedId(memberId)} />
@@ -328,7 +325,7 @@ function MembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAd
         </article>;
       })}
     </div>
-    {selected ? <MemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : null}
+    {selected ? <PoolMemberEditor key={`${selected.kind}:${selected.id}`} member={selected} onClose={() => setSelectedId(null)} /> : null}
     {errorDetails ? <AccountErrorDialog account={errorDetails} onClose={() => setErrorDetails(null)} /> : null}
   </>;
 }
@@ -454,117 +451,6 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   </Dialog>;
 }
 
-function subscriptionPlanGroups(accounts: AccountSummary[], unknown: string): SubscriptionPlanGroup[] {
-  const groups = new Map<string, SubscriptionPlanGroup>();
-  for (const account of accounts.filter((account) => account.inPool)) {
-    const id = account.subscription.planType?.trim().toLocaleLowerCase() || "unknown";
-    const current = groups.get(id);
-    if (current) current.count += 1;
-    else groups.set(id, { id, label: accountPlanOption(account.subscription.planType, unknown).label, count: 1 });
-  }
-  return [...groups.values()].sort((left, right) => compareSubscriptionPlanPriority(accountPlanOption(left.id === "unknown" ? null : left.id, unknown), accountPlanOption(right.id === "unknown" ? null : right.id, unknown)));
-}
-
-function mergeSubscriptionPlanOrder(groups: SubscriptionPlanGroup[], saved: string[]) {
-  const available = new Set(groups.map((group) => group.id));
-  return [...saved.filter((plan) => available.delete(plan)), ...groups.map((group) => group.id).filter((plan) => available.has(plan))];
-}
-
-function MemberEditor({ member, onClose }: { member: Member; onClose: () => void }) {
-  const { t } = useTranslation();
-  const { mode, runtime, perform, busy } = useRelayState();
-  const canSave = mode !== "remote" || Boolean(runtime?.capabilities.features.includes(member.kind === "account" ? "accounts" : "sources"));
-  const [sourceRole, setSourceRole] = useState<ApiSourceRole>(apiSourceRole(member.priority));
-  const [sourceWeight, setSourceWeight] = useState(member.weight);
-  const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const pricedModels = member.kind === "source" ? Object.keys(member.modelPriceOverrides ?? {}) : [];
-  const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels, ...pricedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
-  const [enabledModels, setEnabledModels] = useState(() => {
-    const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));
-    const excluded = new Set(member.excludedModels.map((model) => model.toLocaleLowerCase()));
-    return modelIds.filter((model) => (!allowed.size || allowed.has(model.toLocaleLowerCase())) && !excluded.has(model.toLocaleLowerCase()));
-  });
-  const toggleEnabledModel = useCallback((model: string) => {
-    setEnabledModels((values) => toggle(values, model));
-  }, []);
-  const [draining, setDraining] = useState(member.draining);
-  const [sourcePriceDraftsState, setSourcePriceDrafts] = useState<SourcePriceDrafts>(() => sourcePriceDrafts(member.kind === "source" ? member.modelPriceOverrides ?? {} : {}));
-  const sourcePriceOverrides = useMemo(() => parseSourcePriceDrafts(sourcePriceDraftsState), [sourcePriceDraftsState]);
-  const [purchaseCost, setPurchaseCost] = useState(member.kind === "account" && member.economics?.purchaseCostMicroUsd ? String(member.economics.purchaseCostMicroUsd / 1_000_000) : "");
-  const purchaseCostUsd = purchaseCost.trim() === "" ? 0 : Number(purchaseCost);
-  const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
-  const sourceWeightValid = Number.isInteger(sourceWeight) && sourceWeight >= 1 && sourceWeight <= 1_000;
-  const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole, t) : [];
-  const save = async () => {
-    if (member.kind === "source" && !sourcePriceOverrides) return;
-    const allEnabled = modelIds.every((model) => enabledModels.includes(model));
-    const allowedModels = allEnabled ? [] : modelIds.filter((model) => enabledModels.includes(model));
-    const excludedModels = allEnabled ? [] : modelIds.filter((model) => !enabledModels.includes(model));
-    const ok = await perform(`member-${member.id}`, () => {
-      if (member.kind === "account") {
-        const payload = { allowedModels, excludedModels, draining, purchaseCostMicroUsd: Math.round(purchaseCostUsd * 1_000_000) };
-        return mode === "local"
-          ? relayCommands.updateAccount({ accountId: member.id, ...payload })
-          : relayCommands.remoteAction({ type: "update_account", id: member.id }, payload);
-      }
-      const protocolBindings = effectiveSourceProtocolBindings(member);
-      const payload = { allowedModels, excludedModels, draining: member.draining, priority: apiSourcePriority(sourceRole), weight: sourceWeight, recoveryDelaySeconds, modelPriceOverrides: sourcePriceOverrides ?? {}, protocolBindings };
-      const sourcePayload = { sourceId: member.id, name: member.name, baseUrl: member.baseUrl, wireApi: member.wireApi, models: member.models, ...payload };
-      return mode === "local" ? relayCommands.updateSource(sourcePayload) : relayCommands.remoteAction({ type: "update_source", id: member.id }, payload);
-    }, "feedback.saved");
-    if (ok) onClose();
-  };
-  return <Dialog wide title={`${t("pool.editMember")} · ${member.kind === "source" ? member.name : member.label}`} onClose={onClose} footer={<><Button variant="secondary" onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === `member-${member.id}`} disabled={!canSave || !purchaseCostValid || (member.kind === "source" && (!sourcePriceOverrides || !sourceWeightValid))} title={!canSave ? t("remote.capabilityUnavailable") : undefined} onClick={save}>{t("pool.savePolicy")}</Button></>}>
-    <div className="relay-form member-editor">
-      {member.kind === "source" ? <section className="source-routing-section">
-        <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p>{t("sources.routingHint")}</p></div></header>
-        <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
-          <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")}>
-            {sourceStages.map((stage, index) => stage.role === "accounts"
-              ? <div className="source-route-stage accounts" key={stage.role} aria-label={`${stage.label}: ${stage.count}`}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></div>
-              : <button className="source-route-stage" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} type="button" role="radio" aria-checked={stage.role === sourceRole} aria-label={`${stage.label}: ${t(`sources.roleHints.${stage.role}`)}`} onClick={() => setSourceRole(stage.role)}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></button>)}
-          </div>
-        </div>
-        <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
-        <div className="source-routing-controls">
-          <label className="relay-field source-routing-control"><span>{t("sources.trafficWeight")}</span><input aria-label={t("sources.trafficWeight")} type="number" min="1" max="1000" step="1" value={sourceWeight} onChange={(event) => setSourceWeight(Number(event.target.value))} /><small>{t("sources.trafficWeightHint")}</small></label>
-          <div className="relay-field source-routing-control"><span>{t("sources.recoveryDelay")}</span><OptionMenu className="field-option-menu" label={t("sources.recoveryDelay")} value={String(recoveryDelaySeconds)} onChange={(value) => setRecoveryDelaySeconds(Number(value))} options={[0, 5, 30, 60, 300, 900].map((seconds) => ({ value: String(seconds), label: seconds === 0 ? t("sources.recoveryAutomatic") : formatRecoveryDelay(seconds, t) }))} /><small>{t("sources.recoveryDelayHint")}</small></div>
-        </div>
-      </section> : <><div className="settings-row"><label className="toggle-row"><input type="checkbox" checked={draining} onChange={(event) => setDraining(event.target.checked)} /><span>{t("accounts.drain")}</span></label></div><label className="relay-field"><span>{t("accounts.economics.purchaseCost")}</span><input type="number" min="0" max="1000000" step="0.01" value={purchaseCost} onChange={(event) => setPurchaseCost(event.target.value)} placeholder="0.00" /><small>{t("accounts.economics.purchaseCostHint")}</small></label></>}
-      {member.kind === "source" ? <SourcePriceEditor source={member} drafts={sourcePriceDraftsState} onChange={setSourcePriceDrafts} enabledModels={enabledModels} onToggleModel={toggleEnabledModel} /> : <details className="member-model-rules source-editor-panel">
-        <summary className="source-editor-panel-summary"><span><strong>{t("common.models")}</strong><small>{t("models.memberRulesHint")}</small></span><small>{t("common.enabled")}: {enabledModels.length}/{modelIds.length}</small></summary>
-        <div className="member-model-content">{modelIds.length ? <ul>{modelIds.map((model) => {
-          const enabled = enabledModels.includes(model);
-          return <li key={model} data-member-model-id={model} data-enabled={enabled ? "true" : "false"}>
-            <code>{model}</code>
-            <StatusIcon status={enabled ? "ready" : "disabled"} label={t(enabled ? "models.available" : "models.disabled")} />
-            <IconButton className="member-model-toggle" aria-pressed={enabled} label={t(enabled ? "models.disable" : "models.enable", { model })} icon={<Power aria-hidden />} onClick={() => toggleEnabledModel(model)} />
-          </li>;
-        })}</ul> : <p className="form-note">{t("models.emptyDescription")}</p>}</div>
-      </details>}
-    </div>
-  </Dialog>;
-}
-
-function sourceRoutingStages(sources: SourceSummary[], accounts: AccountSummary[], sourceId: string, selectedRole: ApiSourceRole, t: TFunction) {
-  const enabledSources = sources.filter((source) => source.inPool && source.enabled);
-  const sourceStage = (role: ApiSourceRole) => {
-    const members = enabledSources.filter((source) => (source.id === sourceId ? selectedRole : apiSourceRole(source.priority)) === role);
-    return { role, label: t(`sources.roles.${role}`), count: members.length, names: members.map((source) => source.name) };
-  };
-  return [
-    sourceStage("primary"),
-    { role: "accounts" as const, label: t("connections.accounts"), count: accounts.filter((account) => account.inPool && account.enabled).length, names: accounts.filter((account) => account.inPool && account.enabled).map((account) => account.label) },
-    sourceStage("stabilizer"),
-    sourceStage("reserve"),
-  ];
-}
-
-function formatRecoveryDelay(seconds: number, t: TFunction) {
-  return seconds < 60 ? t("sources.recoverySeconds", { count: seconds }) : t("sources.recoveryMinutes", { count: seconds / 60 });
-}
-
 function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAddSource: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
@@ -586,7 +472,7 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
   const accounts = allAccounts
     .filter((account) => activePlan === "all" || accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan)
     .filter((account) => !normalizedQuery || [account.identityHint, account.label, account.subscription.planType].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
-    .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || left.label.localeCompare(right.label));
+    .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareStableText(left.label, right.label));
   const sources = (runtime?.sources ?? []).filter((source) => !source.inPool);
   const selectedCount = accountIds.length + sourceIds.length;
   const availableCount = allAccounts.length + sources.length;
@@ -626,6 +512,7 @@ function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [priceModel, setPriceModel] = useState<ModelSummary | null>(null);
+  const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
   const models = runtime ? modelSummaries(runtime) : [];
   const modelGroups = groupModelSummariesForLauncher(models, runtime?.accounts ?? []);
   const canEditPrice = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("model_pricing"));
@@ -664,11 +551,36 @@ function ModelsView() {
         <td data-column="codex"><div className={`model-codex-state ${model.codexVisible ? "visible" : "hidden"}`}><BrainCircuit aria-hidden /><span><strong>{t(model.codexVisible ? "models.codexVisible" : model.enabled ? "models.codexUnsupported" : "models.codexDisabled")}</strong></span></div></td>
         <td data-column="price"><div className="model-price">{hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
         <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
-        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
+        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{model.reasoningConfigurable ? <IconButton data-model-reasoning-edit={model.id} label={t("models.editReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
     })}</tbody>)}
     </table></div>
-  </section>{priceModel ? <ModelPriceDialog key={priceModel.id} model={priceModel} onClose={() => setPriceModel(null)} /> : null}</>;
+  </section>{priceModel ? <ModelPriceDialog key={priceModel.id} model={priceModel} onClose={() => setPriceModel(null)} /> : null}{reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}</>;
+}
+
+function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, perform, busy } = useRelayState();
+  const [allowedLevels, setAllowedLevels] = useState(model.reasoningAllowedLevels ?? []);
+  const operation = `model-reasoning-${model.id}`;
+  const levels = model.reasoningLevels ?? [];
+  const save = async () => {
+    const ok = await perform(operation, () => mode === "local"
+      ? relayCommands.setModelReasoning(model.id, allowedLevels)
+      : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels }), "feedback.saved");
+    if (ok) onClose();
+  };
+  const automatic = allowedLevels.length === 0;
+  const toggleAllowedLevel = (level: string) => setAllowedLevels((current) => current.length ? toggle(current, level) : [level]);
+  return <Dialog title={t("models.reasoningTitle")} onClose={onClose} footer={<><Button variant="secondary" disabled={busy === operation} onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === operation} onClick={() => void save()}>{t("common.save")}</Button></>}>
+    <div className="model-reasoning-form">
+      <div className="model-price-context"><code title={model.id}>{model.id}</code><span>{t("models.reasoningHint")}</span></div>
+      <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
+        <button type="button" aria-pressed={automatic} className={automatic ? "selected" : undefined} onClick={() => setAllowedLevels([])}>{t("models.reasoningAuto")}</button>
+        {levels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={!automatic && allowedLevels.includes(level)} className={!automatic && allowedLevels.includes(level) ? "selected" : undefined} onClick={() => toggleAllowedLevel(level)}>{formatReasoningEffort(level)}</button>)}
+      </div>
+    </div>
+  </Dialog>;
 }
 
 function ModelPriceDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
@@ -725,67 +637,10 @@ function ModelPriceField({ label, value, invalid, onChange }: { label: string; v
   return <label className="model-price-field"><span className="model-price-label">{label}</span><span className="model-price-input"><span className="model-price-currency" aria-hidden>$</span><input aria-label={label} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} placeholder="0.00" aria-invalid={invalid || undefined} onChange={(event) => onChange(event.target.value)} /></span></label>;
 }
 
-function toggle(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function formatApiEquivalent(microUsd: number, locale: string) { return `≈${new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function formatProviderMicroUsd(value: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000); }
 function formatModelPrice(microUsd: number, locale: string) { return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
-function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
-  if (runtime.gateway.models?.length) return runtime.gateway.models.map((model) => ({
-    ...model,
-    codexVisible: model.codexVisible ?? false,
-    codexDisplayName: model.codexDisplayName || model.id,
-  }));
-  return runtime.gateway.visibleModelIds.map((id) => ({
-    id,
-    enabled: true,
-    memberCount: [...runtime.sources, ...runtime.accounts].filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
-    codexVisible: false,
-    codexDisplayName: id,
-    catalogRank: null,
-    inputMicroUsdPerMillion: null,
-    cachedInputMicroUsdPerMillion: null,
-    cacheWrite5mMicroUsdPerMillion: null,
-    cacheWrite1hMicroUsdPerMillion: null,
-    outputMicroUsdPerMillion: null,
-    customPrice: false,
-  }));
-}
-function groupModelSummariesForLauncher(models: ModelSummary[], accounts: AccountSummary[]) {
-  const chatGptModelIds = new Set(
-    accounts.flatMap((account) => account.models.map((model) => model.toLowerCase())),
-  );
-  return groupModels(
-    models,
-    (model) => model.id,
-    (model) => chatGptModelIds.has(model.id.toLowerCase()),
-  );
-}
-function comparePoolMembers(left: Member, right: Member, order: Map<string, number>) {
-  const unavailable = (member: Member) => member.operationalStatus === "unavailable" || member.operationalStatus === "disabled" ? 1 : 0;
-  return unavailable(left) - unavailable(right)
-    || compareRoutingOrder(left.id, right.id, order)
-    || memberName(left).localeCompare(memberName(right));
-}
-function memberName(member: Member) { return member.kind === "source" ? member.name : member.identityHint || member.label; }
-function memberSupportsModel(member: Member, model: string) {
-  const normalized = model.toLowerCase();
-  const includes = (values: string[]) => values.some((value) => value.toLowerCase() === normalized);
-  const models = member.kind === "source"
-    ? sourceModelsForWireApi(member, "responses")
-    : member.models;
-  return includes(models)
-    && (!member.allowedModels.length || includes(member.allowedModels))
-    && !includes(member.excludedModels);
-}
-function poolVisibleModels(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]> | undefined) {
-  if (!runtime) return [];
-  const enabledCatalog = runtime.gateway.models?.filter((model) => model.enabled).map((model) => model.id) ?? [];
-  const enabled = new Set(enabledCatalog.map((model) => model.toLowerCase()));
-  const visible = runtime.gateway.visibleModelIds.filter((model) => !enabled.size || enabled.has(model.toLowerCase()));
-  const models = visible.length ? visible : enabledCatalog;
-  return sortModelIdsForLauncher(models.filter((model, index) => models.findIndex((candidate) => candidate.toLowerCase() === model.toLowerCase()) === index));
-}
-
+function formatReasoningEffort(effort: string) { return effort.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 type RoutingPolicyPayload = {
   maxRetryCandidates: number;
   cooldownAfterFailures: number;
@@ -794,10 +649,6 @@ type RoutingPolicyPayload = {
   defaultServiceTier: DefaultServiceTier;
   subscriptionPlanOrder: string[];
 };
-
-function clampRoutingCount(value: string) {
-  return Math.min(8, Math.max(1, Math.trunc(Number(value)) || 1));
-}
 
 function persistRoutingPolicy(mode: RelayMode, payload: RoutingPolicyPayload) {
   return mode === "local"

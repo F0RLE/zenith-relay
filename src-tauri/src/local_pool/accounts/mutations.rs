@@ -5,7 +5,10 @@ use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCrede
 use crate::local_pool::accounts::exports::normalize_account_ids;
 use crate::local_pool::accounts::proxy::ProxyPool;
 use crate::local_pool::accounts::NativeSecretBackend;
-use crate::local_pool::commands::{current_time_ms, sync_accounts_or_rollback};
+use crate::local_pool::commands::{
+    apply_account_policy_if_running, current_time_ms, refresh_active_codex_catalog_in_background,
+    refresh_local_gateway_key_scope_if_running, sync_accounts_or_rollback,
+};
 use crate::local_pool::error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult};
 use crate::local_pool::models::{
     AutomationRecords, LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot,
@@ -14,7 +17,7 @@ use crate::local_pool::profiles::codex;
 use crate::local_pool::state::DesktopState;
 use serde::Deserialize;
 use std::path::Path;
-use tauri::State;
+use tauri::{AppHandle, State};
 use zenith_relay_core::automations::AccountSelector;
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -54,6 +57,7 @@ pub struct SetAccountProxyInput {
 #[tauri::command]
 pub async fn update_local_account(
     input: UpdateAccountInput,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
@@ -63,13 +67,43 @@ pub async fn update_local_account(
         .account(&account_id)
         .cloned()
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "account not found"))?;
+    let previous = account.clone();
     apply_account_patch(&mut account, input)?;
     validate_account_record(&account)?;
     let (old_accounts, old_keys) = current_account_records(&state)?;
-    state.store()?.upsert_account(account)?;
-    sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    let catalog_changed = account_catalog_visibility_changed(&previous, &account);
+    state.store()?.upsert_account(account.clone())?;
+    let membership_changed = previous.account.in_pool != account.account.in_pool;
+    let updated_in_place = if apply_account_policy_if_running(&state, &account).await {
+        !membership_changed
+            || refresh_local_gateway_key_scope_if_running(&state)
+                .await
+                .unwrap_or(false)
+    } else {
+        false
+    };
+    if !updated_in_place {
+        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
-    state.snapshot().await.map_err(Into::into)
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place && catalog_changed {
+        refresh_active_codex_catalog_in_background(app);
+    }
+    Ok(snapshot)
+}
+
+fn account_catalog_visibility_changed(
+    previous: &LocalAccountRecord,
+    current: &LocalAccountRecord,
+) -> bool {
+    (previous.account.in_pool || current.account.in_pool)
+        && (previous.account.in_pool != current.account.in_pool
+            || previous.account.enabled != current.account.enabled
+            || previous.account.draining != current.account.draining
+            || previous.allowed_models != current.allowed_models
+            || previous.excluded_models != current.excluded_models)
 }
 
 #[tauri::command]
@@ -92,6 +126,7 @@ pub async fn set_local_account_proxy(
 pub async fn set_local_account_enabled(
     account_id: String,
     enabled: bool,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
@@ -108,16 +143,26 @@ pub async fn set_local_account_enabled(
         validate_account_record(&account)?;
     }
     let (old_accounts, old_keys) = current_account_records(&state)?;
-    state.store()?.upsert_account(account)?;
-    sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    let catalog_changed = account.account.in_pool;
+    state.store()?.upsert_account(account.clone())?;
+    let updated_in_place = apply_account_policy_if_running(&state, &account).await;
+    if !updated_in_place {
+        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    }
     state.sync_account_quota_refresh(&account_id, current_time_ms())?;
-    state.snapshot().await.map_err(Into::into)
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place && catalog_changed {
+        refresh_active_codex_catalog_in_background(app);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
 pub async fn set_local_account_draining(
     account_id: String,
     draining: bool,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
@@ -131,9 +176,18 @@ pub async fn set_local_account_draining(
     }
     account.account.draining = draining;
     let (old_accounts, old_keys) = current_account_records(&state)?;
-    state.store()?.upsert_account(account)?;
-    sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
-    state.snapshot().await.map_err(Into::into)
+    let catalog_changed = account.account.in_pool;
+    state.store()?.upsert_account(account.clone())?;
+    let updated_in_place = apply_account_policy_if_running(&state, &account).await;
+    if !updated_in_place {
+        sync_accounts_or_rollback(&state, old_accounts, old_keys).await?;
+    }
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place && catalog_changed {
+        refresh_active_codex_catalog_in_background(app);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -506,4 +560,49 @@ pub(super) async fn repair_gateway_after_item_restore(
         .map_err(|_| {
             ImportItemError::recovery("failed to rebuild gateway after credential rollback")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::local_pool::accounts::{credentials::StoredCodexCredentials, records};
+    use zenith_relay_core::accounts::AccountAuthMode;
+
+    fn account_record() -> LocalAccountRecord {
+        let credentials = StoredCodexCredentials::new(
+            "account",
+            "access-private".into(),
+            Some("refresh-private".into()),
+            None,
+            None,
+            1,
+            0,
+            None,
+            Some("provider-private".into()),
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("test credentials");
+        records::new_account_record(
+            &credentials,
+            AccountAuthMode::OAuth,
+            vec!["gpt-test".into()],
+            0,
+            1,
+        )
+        .expect("test account")
+    }
+
+    #[test]
+    fn account_catalog_refreshes_for_pool_membership_changes() {
+        let mut inside = account_record();
+        inside.account.in_pool = true;
+        let mut outside = inside.clone();
+        outside.account.in_pool = false;
+
+        assert!(account_catalog_visibility_changed(&inside, &outside));
+        assert!(account_catalog_visibility_changed(&outside, &inside));
+    }
 }

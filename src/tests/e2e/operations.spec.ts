@@ -127,7 +127,8 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(sourcePolicy.getByLabel("Fallback order")).toContainText("Accounts");
   await sourceRoles.getByRole("radio", { name: /API first/ }).click();
   await expect(sourcePolicy.locator('.source-route-stage[data-current="true"]')).toContainText("API first");
-  await sourcePolicy.getByRole("spinbutton", { name: "Traffic share" }).fill("250");
+  await expect(sourcePolicy.getByRole("spinbutton", { name: "Traffic share" })).toHaveCount(0);
+  await expect(sourcePolicy.getByRole("list", { name: "API order in this role" }).getByRole("listitem")).toHaveCount(1);
   await chooseOption(page, sourcePolicy, "Recovery check", "60");
   await expect(sourcePolicy.locator(".member-model-rules")).toHaveCount(0);
   await expect(sourcePolicy.locator(".source-model-configuration > summary")).toContainText("Models and cost");
@@ -162,9 +163,37 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
       .filter((call) => ["update_local_source", "test_quota_wake_automation", "update_local_account"].includes(call.command))
       .map((call) => [call.command, call.args]));
   });
-  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: [] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_000, weight: 250, recoveryDelaySeconds: 60 } });
+  expect(policyCalls.update_local_source).toMatchObject({ input: { wireApi: "chat_completions", protocolBindings: [{ wireApi: "chat_completions", modelIds: [] }], models: ["gpt-5.4", "gpt-5.4-mini"], allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], priority: 1_000_001, sourcePriorities: { source_synthetic: 1_000_001 }, weight: 1, recoveryDelaySeconds: 60 } });
   expect(policyCalls.test_quota_wake_automation).toEqual({ taskId: "wake_synthetic" });
   expect(policyCalls.update_local_account).toMatchObject({ input: { draining: true, allowedModels: ["gpt-5.4-mini"], excludedModels: ["gpt-5.4"], purchaseCostMicroUsd: 25_500_000 } });
+});
+
+test("API sources use an explicit fallback order instead of traffic weights", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, sourceCount: 2 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("button", { name: "Pool member policy: Example compatible API" }).click();
+
+  const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
+  const order = dialog.getByRole("list", { name: "API order in this role" });
+  await expect(order.getByRole("listitem")).toHaveCount(2);
+  await expect(order.getByRole("listitem").nth(0)).toContainText("Example compatible API");
+  await dialog.getByRole("button", { name: "Move Example compatible API down" }).click();
+  await expect(order.getByRole("listitem").nth(0)).toContainText("Backup API 1");
+  await dialog.getByRole("button", { name: "Save policy" }).click();
+
+  const input = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: Record<string, unknown> } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((call) => call.command === "update_local_source")?.args.input;
+  });
+  expect(input).toMatchObject({ priority: 1, sourcePriorities: { source_synthetic: 1, source_synthetic_2: 2 }, weight: 1 });
+  const routingOrder = await page.evaluate(async () => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<Array<{ candidateId: string; kind: string }>> } }).__TAURI_INTERNALS__;
+    return (await internals.invoke("get_local_runtime_order"))
+      .filter((candidate) => candidate.kind === "api_source")
+      .map((candidate) => candidate.candidateId);
+  });
+  expect(routingOrder).toEqual(["source_synthetic_2", "source_synthetic"]);
 });
 
 test("dialogs keep editable focus and close a nested option list before the dialog", async ({ page }) => {
@@ -1544,7 +1573,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const routing = page.locator(".pool-priority-label");
     const member = page.locator('[data-member-label="Personal Plus"]');
-    await expect(routing.locator('[data-ready-route="source_synthetic"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
+    await expect(routing.locator("[data-ready-route]")).toHaveCount(0);
     expect(await usageReads()).toBe(before);
     await expect(member.locator(".pool-member-kind-icon")).toHaveAttribute("aria-label", "Waiting for quota");
   });
@@ -1616,6 +1645,22 @@ test("connections stay outside the pool until the user adds selected members", a
   ]);
 });
 
+test("pool member removal on right click skips confirmation", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  const member = page.locator(".pool-member-card").first();
+  const memberLabel = await member.getAttribute("data-member-label");
+  expect(memberLabel).toBeTruthy();
+  const remove = member.getByRole("button", { name: /Remove from pool:/ });
+  await remove.click({ button: "right" });
+
+  await expect(page.getByRole("dialog", { name: "Confirm action" })).toHaveCount(0);
+  await expect(page.locator(".pool-member-card").filter({ hasText: memberLabel! })).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string }> }).__TAURI_TEST_INVOKES__.filter((call) => call.command === "set_local_pool_membership").length)).toBe(1);
+});
+
 for (const mode of ["local", "remote"] as const) {
   test(`${mode} API sources expose routing role and pool membership`, async ({ page }) => {
     await installTauriMock(page, { mode, locale: "en", populated: true });
@@ -1662,13 +1707,13 @@ for (const mode of ["local", "remote"] as const) {
     await expect(member).toContainText("Stabilizer");
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     let editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /API first/ }).click();
+    await editor.getByRole("group", { name: "API source role" }).getByRole("button", { name: /API first/ }).click();
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("API first");
 
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /Last resort/ }).click();
+    await editor.getByRole("group", { name: "API source role" }).getByRole("button", { name: /Last resort/ }).click();
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("Last resort");
 
@@ -1676,12 +1721,12 @@ for (const mode of ["local", "remote"] as const) {
     if (mode === "local") {
       expect(calls.find((call) => call.command === "create_local_source")?.args.input).toMatchObject({ name: "Failover API", priority: 0 });
       expect(calls.find((call) => call.command === "set_local_pool_membership")?.args).toEqual({ input: { accountIds: [], sourceIds: ["source_created_1"], inPool: true } });
-      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([1_000_000, -1_000_000]);
+      expect(calls.filter((call) => call.command === "update_local_source").map((call) => (call.args.input as { priority: number }).priority)).toEqual([1_000_001, -1_000_000]);
     } else {
       const actions = calls.filter((call) => call.command === "execute_remote_server_action").map((call) => call.args.input as { action: { type: string }; payload?: Record<string, unknown> });
       expect(actions.find((call) => call.action.type === "create_source")?.payload).toMatchObject({ name: "Failover API", priority: 0 });
       expect(actions.find((call) => call.action.type === "set_pool_membership")?.payload).toMatchObject({ sourceIds: ["source_remote_created_1"] });
-      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([1_000_000, -1_000_000]);
+      expect(actions.filter((call) => call.action.type === "update_source").map((call) => call.payload?.priority)).toEqual([1_000_001, -1_000_000]);
     }
   });
 
@@ -1739,7 +1784,7 @@ test("pool reflects active models from the live runtime order", async ({ page })
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, usageActive: false });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveText("Available now via Example compatible API: gpt-5.4, gpt-5.4-mini");
+  await expect(page.locator('.pool-priority-label [data-ready-route="source_synthetic"]')).toHaveCount(0);
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -1778,12 +1823,12 @@ test("pool keeps the last completed route visible after its lease is released", 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Usage order");
   await expect(priority).toContainText("Last request: Pro account");
-  await expect(priority.locator('[data-ready-route="account_synthetic_4"]')).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini,o3");
+  await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
   await expect(page.locator('.pool-member-card[data-member-label="Pro account"]')).toHaveAttribute("data-last-used", "true");
   await expect(page.locator(".pool-member-card[data-current=true]")).toHaveCount(0);
 });
 
-test("pool shows the next route's actual Responses models before any request", async ({ page }) => {
+test("pool does not show the next route's models before any request", async ({ page }) => {
   await installTauriMock(page, {
     mode: "local",
     locale: "en",
@@ -1798,10 +1843,9 @@ test("pool shows the next route's actual Responses models before any request", a
 
   const priority = page.locator(".pool-priority-label");
   await expect(priority).toContainText("Next choice: Personal Plus");
-  const readyModels = priority.locator('[data-ready-route="account_synthetic"]');
-  await expect(readyModels).toHaveAttribute("data-ready-models", "gpt-5.4,gpt-5.4-mini");
-  await expect(readyModels).toHaveText("Available now via Personal Plus: gpt-5.4, gpt-5.4-mini");
-  await expect(readyModels).not.toContainText("claude-opus-4-8");
+  await expect(priority.locator("[data-ready-route]")).toHaveCount(0);
+  await expect(priority).not.toContainText("gpt-5.4");
+  await expect(priority).not.toContainText("claude-opus-4-8");
 });
 
 test("pool member picker lists individual accounts instead of subscription groups", async ({ page }) => {
@@ -2505,6 +2549,56 @@ test("remote model prices use the server-owned override", async ({ page }) => {
   ]);
 });
 
+test("local model reasoning uses only confirmed source levels", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["low", "medium", "high", "ultra"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+  await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Ultra"]);
+  await dialog.getByRole("checkbox", { name: "High" }).click();
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  await expect(page.locator('[data-model-reasoning-edit="gpt-5.4"]')).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "set_local_model_reasoning").map((call) => call.args)).toEqual([
+    { input: { modelId: "claude-opus-4-8", allowedLevels: ["high"] } },
+  ]);
+});
+
+test("remote model reasoning is saved through the server action", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "remote",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["low", "high", "ultra"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+  await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await dialog.getByRole("checkbox", { name: "Ultra" }).click();
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "execute_remote_server_action" && (call.args.input as { action?: { type?: string } } | undefined)?.action?.type === "set_model_reasoning").map((call) => call.args)).toEqual([
+    { input: { action: { type: "set_model_reasoning" }, payload: { modelId: "claude-opus-4-8", allowedLevels: ["ultra"] } } },
+  ]);
+});
+
 test("Help opens the current mode guide and keeps quick setup explicit", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
@@ -2920,10 +3014,17 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
-  const feedbackBox = await feedback.boundingBox();
+  const [feedbackBox, headerBox, poolControlsBox] = await Promise.all([
+    feedback.boundingBox(),
+    page.locator(".relay-page-header").boundingBox(),
+    page.locator(".pool-controls").boundingBox(),
+  ]);
   expect(feedbackBox).not.toBeNull();
-  expect(feedbackBox!.x).toBeLessThan(page.viewportSize()!.width / 2);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeGreaterThan(page.viewportSize()!.height - 64);
+  expect(headerBox).not.toBeNull();
+  expect(poolControlsBox).not.toBeNull();
+  expect(feedbackBox!.x).toBeGreaterThan(page.viewportSize()!.width / 2);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(headerBox!.y);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(poolControlsBox!.y);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));

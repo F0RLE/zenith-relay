@@ -9,7 +9,7 @@ import { Button, IconButton, OptionMenu, SecretField } from "../components/Ui";
 import { useOAuthSignIn } from "../hooks/useOAuthSignIn";
 import { useRelayState } from "../state/RelayStateProvider";
 
-const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ConnectionsPage")).ImportDialog }));
+const ImportDialog = lazy(async () => ({ default: (await import("../pages/connections/ImportDialog")).ImportDialog }));
 const CURRENT_PROFILE_CONTINUE_SECONDS = 3;
 
 type CurrentProfileImportState =

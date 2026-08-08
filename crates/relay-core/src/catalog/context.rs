@@ -1,9 +1,11 @@
+use serde::{de::Error as _, Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ADVERTISED_CONTEXT_WINDOW: u64 = 16_000_000;
 const MAX_REASONING_EFFORT_LENGTH: usize = 64;
 const MAX_REASONING_DESCRIPTION_LENGTH: usize = 256;
+const MAX_MODEL_REASONING_LEVELS: usize = 64;
 const CLAUDE_MANUAL_REASONING_LEVELS: &[(&str, &str)] = &[
     ("low", "Low"),
     ("medium", "Medium"),
@@ -18,7 +20,7 @@ const CLAUDE_MANUAL_DEFAULT_REASONING_EFFORT: &str = "medium";
 ///
 /// This is intentionally independent of model names and provider names. Relay
 /// only creates it from a source's structured `/models` metadata, then
-/// intersects it across every route that can receive the same public model.
+/// combines it across routes that can receive the same public model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SourceReasoningCapabilities {
     levels: Vec<SourceReasoningLevel>,
@@ -35,6 +37,10 @@ struct SourceReasoningLevel {
 }
 
 impl SourceReasoningCapabilities {
+    pub(crate) fn effort_ids(&self) -> impl Iterator<Item = &str> {
+        self.levels.iter().map(|level| level.effort.as_str())
+    }
+
     /// Removes efforts that cannot be represented by the selected adapter.
     ///
     /// Native Responses routes preserve provider-defined effort names. A
@@ -78,7 +84,16 @@ impl SourceReasoningCapabilities {
                     .collect(),
             ),
         );
-        if let Some(default_effort) = &self.default_effort {
+        // API sources must not inherit a provider-specific automatic default
+        // such as `ultra`. Relay uses the neutral middle option only when it
+        // was actually confirmed; native ChatGPT catalog rows never use this
+        // template and retain their provider-owned defaults.
+        let default_effort = self
+            .levels
+            .iter()
+            .find(|level| level.effort.eq_ignore_ascii_case("medium"))
+            .map(|level| &level.effort);
+        if let Some(default_effort) = default_effort {
             template.insert(
                 "default_reasoning_level".to_string(),
                 Value::String(default_effort.clone()),
@@ -314,26 +329,33 @@ pub(crate) fn apply_claude_reasoning_capability_fallback(
     Some(capabilities)
 }
 
-/// A public model can be routed through more than one provider source. Only
-/// advertise an effort that every currently eligible route proves it can
-/// serve; otherwise Codex could select an effort and be routed to a source
-/// that rejects it.
-pub(crate) fn intersect_source_reasoning_capabilities(
+/// Combines capabilities confirmed by one or more provider routes.
+///
+/// A route that does not publish metadata is intentionally absent from this
+/// input. The request path excludes that route when a client explicitly asks
+/// for an effort, so it is safe to expose every level confirmed by at least
+/// one route instead of hiding controls for the whole public model.
+pub(crate) fn union_source_reasoning_capabilities(
     capabilities: impl IntoIterator<Item = SourceReasoningCapabilities>,
 ) -> Option<SourceReasoningCapabilities> {
     let mut capabilities = capabilities.into_iter();
-    let mut common = capabilities.next()?;
+    let mut combined = capabilities.next()?;
 
     for next in capabilities {
-        common.levels.retain(|level| {
-            next.levels
+        for level in next.levels {
+            if combined
+                .levels
                 .iter()
                 .any(|candidate| candidate.effort.eq_ignore_ascii_case(&level.effort))
-        });
-        common.default_effort = match (&common.default_effort, &next.default_effort) {
+            {
+                continue;
+            }
+            combined.levels.push(level);
+        }
+        combined.default_effort = match (&combined.default_effort, &next.default_effort) {
             (Some(current), Some(candidate))
                 if current.eq_ignore_ascii_case(candidate)
-                    && common
+                    && combined
                         .levels
                         .iter()
                         .any(|level| level.effort.eq_ignore_ascii_case(current)) =>
@@ -342,20 +364,77 @@ pub(crate) fn intersect_source_reasoning_capabilities(
             }
             _ => None,
         };
-        common.supports_summary_parameter &= next.supports_summary_parameter;
-        common.supports_summaries &= next.supports_summaries;
-        if common.default_summary != next.default_summary {
-            common.default_summary = "none".to_string();
+        combined.supports_summary_parameter &= next.supports_summary_parameter;
+        combined.supports_summaries &= next.supports_summaries;
+        if combined.default_summary != next.default_summary {
+            combined.default_summary = "none".to_string();
         }
     }
 
-    if common.levels.is_empty() {
+    if combined.levels.is_empty() {
         return None;
     }
-    if !common.supports_summary_parameter && !common.supports_summaries {
-        common.default_summary = "none".to_string();
+    if !combined.supports_summary_parameter && !combined.supports_summaries {
+        combined.default_summary = "none".to_string();
     }
-    Some(common)
+    Some(combined)
+}
+
+pub fn normalize_model_reasoning_allowed_levels(
+    allowed_levels: BTreeMap<String, Vec<String>>,
+) -> Result<BTreeMap<String, Vec<String>>, &'static str> {
+    let mut normalized = BTreeMap::new();
+    for (model, levels) in allowed_levels {
+        let model = model.trim();
+        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err("model reasoning allowed levels are invalid");
+        }
+        if levels.len() > MAX_MODEL_REASONING_LEVELS {
+            return Err("model reasoning allowed levels are invalid");
+        }
+        let mut model_levels = BTreeSet::new();
+        for level in levels {
+            let level = level.trim().to_ascii_lowercase();
+            if !valid_reasoning_effort(&level) {
+                return Err("model reasoning allowed levels are invalid");
+            }
+            model_levels.insert(level);
+        }
+        if !model_levels.is_empty() {
+            normalized.insert(
+                model.to_ascii_lowercase(),
+                model_levels.into_iter().collect(),
+            );
+        }
+    }
+    Ok(normalized)
+}
+
+/// Reads the v2 one-default format as a one-item allow-list so local state
+/// and exported presets remain recoverable after the setting was clarified.
+pub fn deserialize_model_reasoning_allowed_levels<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawLevels {
+        Levels(Vec<String>),
+        LegacyDefault(String),
+    }
+
+    let raw = BTreeMap::<String, RawLevels>::deserialize(deserializer)?;
+    let allowed_levels = raw
+        .into_iter()
+        .filter_map(|(model, levels)| match levels {
+            RawLevels::Levels(levels) => Some((model, levels)),
+            RawLevels::LegacyDefault(default) if default.eq_ignore_ascii_case("auto") => None,
+            RawLevels::LegacyDefault(default) => Some((model, vec![default])),
+        })
+        .collect();
+    normalize_model_reasoning_allowed_levels(allowed_levels).map_err(D::Error::custom)
 }
 
 pub(crate) fn context_window(value: &Value) -> Option<u64> {
@@ -657,7 +736,6 @@ mod tests {
                     {"effort": "low", "description": "Low"},
                     {"effort": "ultra", "description": "Maximum"}
                 ],
-                "default_reasoning_level": "ultra",
                 "supports_reasoning_summary_parameter": true,
                 "supports_reasoning_summaries": true,
                 "default_reasoning_summary": "detailed"
@@ -704,7 +782,7 @@ mod tests {
                     {"effort": "medium", "description": "Medium"},
                     {"effort": "high", "description": "High"}
                 ],
-                "default_reasoning_level": "high"
+                "default_reasoning_level": "medium"
             })
             .as_object()
             .unwrap()
@@ -738,7 +816,6 @@ mod tests {
                     {"effort": "low", "description": "Low"},
                     {"effort": "very_high", "description": "Very high"}
                 ],
-                "default_reasoning_level": "very_high"
             })
             .as_object()
             .unwrap()
@@ -761,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn intersects_reasoning_only_when_every_route_confirms_the_effort() {
+    fn unions_reasoning_confirmed_by_any_route() {
         let first = parse_reasoning_object(
             json!({
                 "reasoningEffortModes": ["low", "high", "ultra"],
@@ -786,12 +863,13 @@ mod tests {
         )
         .unwrap();
 
-        let common = intersect_source_reasoning_capabilities([first, second]).unwrap();
+        let combined = union_source_reasoning_capabilities([first, second]).unwrap();
 
         assert_eq!(
-            common.codex_catalog_template(),
+            combined.codex_catalog_template(),
             json!({
                 "supported_reasoning_levels": [
+                    {"effort": "low", "description": "low"},
                     {"effort": "high", "description": "high"},
                     {"effort": "ultra", "description": "ultra"}
                 ],
@@ -846,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn non_claude_models_preserve_every_source_declared_effort() {
+    fn non_claude_models_preserve_every_source_declared_effort_and_use_medium_auto_default() {
         let declared = parse_reasoning_object(
             json!({
                 "reasoningEffortModes": [
@@ -881,7 +959,7 @@ mod tests {
                         {"effort": "ultra", "description": "ultra"},
                         {"effort": "very_high", "description": "very_high"}
                     ],
-                    "default_reasoning_level": "very_high"
+                    "default_reasoning_level": "medium"
                 })
                 .as_object()
                 .unwrap()

@@ -8,20 +8,20 @@ use crate::{
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
     fmt, fs,
     path::{Path, PathBuf},
 };
 use toml_edit::{value, DocumentMut, Item, Table};
-use zenith_relay_core::{
-    accounts::TokenSet, canonicalize_model_ids, codex_catalog_entry_is_compatible,
-    codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry, CODEX_RELAY_CATALOG_HASH,
-};
+use zenith_relay_core::{accounts::TokenSet, CODEX_RELAY_CATALOG_HASH};
+#[cfg(test)]
+use zenith_relay_core::{codex_catalog_entry_is_compatible, routed_codex_catalog_entry};
+
+mod catalog;
 
 const PROVIDER_ID: &str = "zenith_relay_local";
 const CONFIG_FILE: &str = "config.toml";
@@ -31,8 +31,6 @@ const MODELS_CACHE_FILE: &str = "models_cache.json";
 const BACKUP_SECRET_REF: &str = "profile:codex:default:previous_auth";
 const ACCOUNT_BACKUP_PREFIX: &str = "codex-account-";
 const MAX_MANAGED_TOKEN_BYTES: usize = 64 * 1024;
-const MAX_MODEL_CATALOG_BYTES: usize = 512 * 1024;
-const DIRECT_SOURCE_FALLBACK_PRIORITY: u64 = 1_000;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +39,8 @@ struct ProfileBackup {
     previous_model_provider: Option<String>,
     #[serde(default)]
     previous_model_catalog_json: Option<String>,
+    #[serde(default)]
+    previous_model_reasoning_effort: Option<String>,
     #[serde(default)]
     previous_auth_hash: Option<String>,
     previous_auth_secret_ref: Option<String>,
@@ -56,6 +56,8 @@ struct ProfileBackup {
     managed_bearer_in_config: bool,
     #[serde(default)]
     managed_supports_websockets: bool,
+    #[serde(default)]
+    managed_model_reasoning_effort_cleared: bool,
     #[serde(default)]
     managed_model_catalog_path: Option<String>,
     #[serde(default)]
@@ -187,7 +189,7 @@ pub(crate) fn direct_source_model_catalog(
     codex_home: &Path,
     source_models: &[String],
 ) -> Result<Option<String>> {
-    direct_source_model_catalog_with_manifest(codex_home, source_models, None)
+    catalog::direct_source_model_catalog_with_manifest(codex_home, source_models, None)
 }
 
 pub(crate) fn direct_source_model_catalog_with_manifest(
@@ -195,376 +197,7 @@ pub(crate) fn direct_source_model_catalog_with_manifest(
     source_models: &[String],
     source_manifest: Option<&Value>,
 ) -> Result<Option<String>> {
-    let user_catalog_path = configured_model_catalog_path(codex_home)?;
-    let template = collect_native_catalog_template(codex_home, user_catalog_path.as_deref(), None)?;
-    // A catalog override is optional in Codex.  Relay should prefer a verified
-    // native row when one is present, but must not make profile attachment
-    // depend on a cache that it deliberately invalidates after catalog changes.
-    let template = template.unwrap_or_default();
-    // `model_provider` points to this selected source.  Native Codex rows are
-    // useful only as a schema template here; advertising them would send their
-    // requests to this source and produce a false model picker entry.
-    let selected_models = source_models
-        .iter()
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|model| is_direct_source_model(model) && codex_model_is_picker_eligible(model))
-        .collect::<Vec<_>>();
-    let selected_models = canonicalize_model_ids(selected_models);
-
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    for (index, model) in selected_models.into_iter().enumerate() {
-        let normalized = model.to_ascii_lowercase();
-        if !seen.insert(normalized) {
-            continue;
-        }
-        let entry = direct_source_catalog_entry(
-            &template,
-            source_manifest.and_then(|manifest| source_catalog_entry(manifest, &model)),
-            &model,
-            DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64,
-        );
-        if codex_catalog_entry_is_compatible(&entry) {
-            models.push(entry);
-        }
-    }
-    if models.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(normalize_model_catalog_values(models)?))
-}
-
-fn is_direct_source_model(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 256
-        && !model.chars().any(char::is_control)
-        && !model.to_ascii_lowercase().starts_with("zenith/")
-}
-
-fn cached_native_catalog_models(codex_home: &Path) -> Vec<Value> {
-    let Ok(content) = fs::read_to_string(codex_home.join(MODELS_CACHE_FILE)) else {
-        return Vec::new();
-    };
-    let Ok(cache) = serde_json::from_str::<Value>(&content) else {
-        return Vec::new();
-    };
-    cache
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|entry| is_native_catalog_entry(entry))
-        .filter(|entry| codex_catalog_entry_is_compatible(entry))
-        .cloned()
-        .collect()
-}
-
-fn is_native_catalog_entry(entry: &Value) -> bool {
-    entry
-        .get("slug")
-        .and_then(Value::as_str)
-        .is_some_and(|slug| {
-            !slug.to_ascii_lowercase().starts_with("zenith/")
-                && entry
-                    .get("comp_hash")
-                    .and_then(Value::as_str)
-                    .is_none_or(|hash| hash != CODEX_RELAY_CATALOG_HASH)
-        })
-}
-
-fn model_slug(entry: &Value) -> Option<&str> {
-    entry.get("slug").and_then(Value::as_str)
-}
-
-fn catalog_entry_is_picker_eligible(entry: &Value) -> bool {
-    model_slug(entry).is_some_and(|slug| {
-        let model = decode_codex_model_alias(slug).unwrap_or_else(|| slug.to_string());
-        codex_model_is_picker_eligible(&model)
-    })
-}
-
-fn direct_source_catalog_entry(
-    template: &serde_json::Map<String, Value>,
-    source_entry: Option<&serde_json::Map<String, Value>>,
-    model: &str,
-    priority: u64,
-) -> Value {
-    let mut entry = source_entry
-        .and_then(|source_entry| {
-            normalize_upstream_codex_catalog_entry(source_entry, model, priority, None)
-        })
-        .unwrap_or_else(|| routed_codex_catalog_entry(Some(template), model, priority, None));
-    entry["slug"] = Value::String(model.to_string());
-    entry["display_name"] = Value::String(codex_model_display_name(model));
-    entry["description"] = Value::String("Available through this API connection.".into());
-    entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
-    entry
-}
-
-fn source_catalog_entry<'a>(
-    manifest: &'a Value,
-    model: &str,
-) -> Option<&'a serde_json::Map<String, Value>> {
-    manifest
-        .get("models")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-        .find(|entry| {
-            entry
-                .get("slug")
-                .and_then(Value::as_str)
-                .is_some_and(|slug| slug.eq_ignore_ascii_case(model))
-        })
-        .or_else(|| {
-            manifest
-                .get("data")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-                .find(|entry| {
-                    entry
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id.eq_ignore_ascii_case(model))
-                })
-        })
-}
-
-fn collect_native_catalog_template(
-    codex_home: &Path,
-    user_catalog_path: Option<&str>,
-    managed_catalog: Option<&[u8]>,
-) -> Result<Option<serde_json::Map<String, Value>>> {
-    let mut candidates = Vec::new();
-    if let Some(path) = user_catalog_path {
-        candidates.extend(read_catalog_file_models(codex_home, path)?);
-    }
-    candidates.extend(cached_native_catalog_models(codex_home));
-    let managed_models = match managed_catalog {
-        Some(content) => read_catalog_values(content, false)?,
-        None => Vec::new(),
-    };
-    // Attaching Relay invalidates Codex's live cache after writing a verified
-    // catalog. On a later refresh, the current managed catalog is therefore
-    // the only remaining compatible schema template. It is never returned as
-    // a native model: routed_codex_catalog_entry resets capability fields for
-    // a plain upstream /v1/models row before it is advertised again.
-    let managed_template = managed_models
-        .iter()
-        .filter(|entry| {
-            codex_catalog_entry_is_compatible(entry) && catalog_entry_is_picker_eligible(entry)
-        })
-        .find_map(Value::as_object)
-        .cloned();
-    candidates.extend(managed_models);
-
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    for candidate in candidates {
-        if !is_native_catalog_entry(&candidate) || !codex_catalog_entry_is_compatible(&candidate) {
-            continue;
-        }
-        let Some(slug) = model_slug(&candidate) else {
-            continue;
-        };
-        if seen.insert(slug.to_ascii_lowercase()) {
-            models.push(candidate);
-        }
-    }
-    let picker_template = |entry: &&Value| {
-        catalog_entry_is_picker_eligible(entry)
-            && entry.get("supported_in_api") != Some(&Value::Bool(false))
-    };
-    // Prefer an actual native entry over a namespaced user provider row.  The
-    // latter remains a useful schema fallback when it is the only catalog
-    // available, but must not override native client capabilities by default.
-    let template = models
-        .iter()
-        .filter(|entry| picker_template(entry))
-        .filter(|entry| model_slug(entry).is_some_and(|slug| !slug.contains('/')))
-        .find_map(Value::as_object)
-        .cloned()
-        .or_else(|| {
-            models
-                .iter()
-                .filter(|entry| picker_template(entry))
-                .find_map(Value::as_object)
-                .cloned()
-        })
-        .or(managed_template);
-    Ok(template)
-}
-
-fn configured_model_catalog_path(codex_home: &Path) -> Result<Option<String>> {
-    let config_path = codex_home.join(CONFIG_FILE);
-    let config = read_optional_bytes(&config_path)?;
-    let document = parse_config(snapshot_text(&config, &config_path)?.unwrap_or_default())?;
-    Ok(root_model_catalog_json(&document))
-}
-
-fn read_catalog_file_models(codex_home: &Path, configured_path: &str) -> Result<Vec<Value>> {
-    let configured_path = Path::new(configured_path);
-    let path = if configured_path.is_absolute() {
-        configured_path.to_path_buf()
-    } else {
-        codex_home.join(configured_path)
-    };
-    let content = fs::read(&path).map_err(|error| io_error_at(&path, error))?;
-    read_catalog_values(&content, false)
-}
-
-fn read_catalog_values(content: &[u8], require_compatible: bool) -> Result<Vec<Value>> {
-    if content.len() > MAX_MODEL_CATALOG_BYTES {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog exceeds 512 KiB",
-        ));
-    }
-    let value: Value = serde_json::from_slice(content).map_err(|_| {
-        LocalPoolError::new(ErrorCode::InvalidState, "ChatGPT model catalog is invalid")
-    })?;
-    let models = value
-        .get("models")
-        .and_then(Value::as_array)
-        .filter(|models| !models.is_empty() && models.len() <= 4_096)
-        .ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "ChatGPT model catalog has no usable models",
-            )
-        })?;
-    let mut output = Vec::new();
-    for model in models {
-        if require_compatible && !codex_catalog_entry_is_compatible(model) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "ChatGPT model catalog contains incompatible model entries",
-            ));
-        }
-        if !require_compatible || codex_catalog_entry_is_compatible(model) {
-            output.push(model.clone());
-        }
-    }
-    Ok(output)
-}
-
-fn normalize_model_catalog_values(models: Vec<Value>) -> Result<String> {
-    if models.is_empty() || models.len() > 4_096 {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog has no usable models",
-        ));
-    }
-    let mut seen = HashSet::new();
-    let mut models = models
-        .into_iter()
-        .filter(codex_catalog_entry_is_compatible)
-        .filter(|model| {
-            model_slug(model).is_some_and(|slug| seen.insert(slug.to_ascii_lowercase()))
-        })
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "ChatGPT model catalog has no compatible models",
-        ));
-    }
-    normalize_codex_catalog_priorities(&mut models);
-    serde_json::to_string_pretty(&json!({ "models": models }))
-        .map(|content| format!("{content}\n"))
-        .map_err(|error| LocalPoolError::new(ErrorCode::InvalidState, error.to_string()))
-}
-
-fn build_managed_model_catalog(
-    codex_home: &Path,
-    user_catalog_path: Option<&str>,
-    current_managed_catalog: Option<&[u8]>,
-    relay_catalog_json: &str,
-) -> Result<String> {
-    let template =
-        collect_native_catalog_template(codex_home, user_catalog_path, current_managed_catalog)?;
-    let template = template.unwrap_or_default();
-    let relay_models = read_catalog_values(relay_catalog_json.as_bytes(), false)?;
-    // The managed provider is the Relay endpoint, so the catalog must contain
-    // only models that its live pool exposes.  Native/user catalog rows remain
-    // untouched in their original profile and only supply a compatible template.
-    let mut models = Vec::new();
-    let mut seen = HashSet::new();
-    let mut accepted = 0usize;
-    for (index, relay_model) in relay_models.iter().enumerate() {
-        let Some(slug) = model_slug(relay_model) else {
-            continue;
-        };
-        let model = if slug.to_ascii_lowercase().starts_with("zenith/") {
-            let Some(model) = decode_codex_model_alias(slug) else {
-                continue;
-            };
-            model
-        } else {
-            slug.to_string()
-        };
-        if !codex_model_is_picker_eligible(&model) {
-            continue;
-        }
-        accepted += 1;
-        let context_window = relay_model
-            .get("context_window")
-            .and_then(Value::as_u64)
-            .filter(|value| *value > 0);
-        let priority = relay_model
-            .get("priority")
-            .and_then(Value::as_i64)
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64);
-        // A Relay model row may have come from a real upstream Codex catalog.
-        // Preserve its strictly validated capability data (including arbitrary
-        // reasoning levels) instead of inheriting anything from the native
-        // template.  Plain `/v1/models` entries receive the conservative route
-        // defaults instead.
-        let mut entry = relay_model
-            .as_object()
-            .and_then(|upstream| {
-                if slug.to_ascii_lowercase().starts_with("zenith/") {
-                    normalize_upstream_codex_catalog_entry(
-                        upstream,
-                        &model,
-                        priority,
-                        context_window,
-                    )
-                } else {
-                    normalize_native_codex_catalog_entry(upstream, &model, priority, context_window)
-                }
-            })
-            .unwrap_or_else(|| {
-                routed_codex_catalog_entry(Some(&template), &model, priority, context_window)
-            });
-        if !slug.to_ascii_lowercase().starts_with("zenith/") {
-            entry["slug"] = Value::String(slug.to_string());
-        }
-        entry["comp_hash"] = Value::String(CODEX_RELAY_CATALOG_HASH.into());
-        if let Some(display_name) = relay_model.get("display_name").and_then(Value::as_str) {
-            entry["display_name"] = Value::String(display_name.to_string());
-        }
-        if let Some(description) = relay_model.get("description").and_then(Value::as_str) {
-            entry["description"] = Value::String(description.to_string());
-        }
-        if let Some(slug) = model_slug(&entry) {
-            if seen.insert(slug.to_ascii_lowercase()) {
-                models.push(entry);
-            }
-        }
-    }
-    if accepted == 0 {
-        return Err(LocalPoolError::new(
-            ErrorCode::Conflict,
-            "pool has no compatible text models",
-        ));
-    }
-    normalize_model_catalog_values(models)
+    catalog::direct_source_model_catalog_with_manifest(codex_home, source_models, source_manifest)
 }
 
 pub(crate) fn attach_with_oauth_and_catalog(
@@ -671,11 +304,7 @@ fn snapshot_user_profile_with(
     } else if let Some(backup) = local_backup(codex_home, backup_root)? {
         if managed_config_matches(&document, &backup) {
             let model_catalog = model_catalog_to_restore(&document, &backup);
-            restore_config(
-                &mut document,
-                backup.previous_model_provider.as_deref(),
-                model_catalog.as_deref(),
-            );
+            restore_local_config(&mut document, &backup, model_catalog.as_deref());
             let auth = if managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
                 previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
             } else {
@@ -1189,7 +818,7 @@ pub(crate) fn refresh_managed_model_catalog(
         return Ok(false);
     }
 
-    let catalog = build_managed_model_catalog(
+    let catalog = catalog::build_managed_model_catalog(
         codex_home,
         backup.previous_model_catalog_json.as_deref(),
         catalog_bytes.as_deref(),
@@ -1325,7 +954,7 @@ fn ensure_test_native_catalog(home: &Path) {
         .and_then(|value| value.get("models").and_then(Value::as_array).cloned())
         .is_some_and(|models| {
             models.iter().any(|model| {
-                is_native_catalog_entry(model) && codex_catalog_entry_is_compatible(model)
+                catalog::is_native_catalog_entry(model) && codex_catalog_entry_is_compatible(model)
             })
         });
     if has_compatible_native {
@@ -1530,7 +1159,7 @@ fn attach_local_locked(
     };
     let catalog = catalog_json
         .map(|content| {
-            build_managed_model_catalog(
+            catalog::build_managed_model_catalog(
                 codex_home,
                 user_catalog_path.as_deref(),
                 had_managed_catalog
@@ -1546,6 +1175,7 @@ fn attach_local_locked(
         version: 1,
         previous_model_provider: root_model_provider(&document),
         previous_model_catalog_json: root_model_catalog_json(&document),
+        previous_model_reasoning_effort: root_model_reasoning_effort(&document),
         previous_auth_hash: original_auth_bytes.as_deref().map(bytes_hash),
         previous_auth_secret_ref: None,
         managed_key_id: String::new(),
@@ -1555,6 +1185,7 @@ fn attach_local_locked(
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
         managed_supports_websockets: false,
+        managed_model_reasoning_effort_cleared: false,
         managed_model_catalog_path: None,
         managed_model_catalog_hash: None,
         managed_model_catalog_pending_hash: None,
@@ -1568,6 +1199,10 @@ fn attach_local_locked(
     {
         backup.previous_model_catalog_json = root_model_catalog_json(&document);
     }
+    if created_backup || external_takeover || !backup.managed_model_reasoning_effort_cleared {
+        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&document);
+    }
+    backup.managed_model_reasoning_effort_cleared = true;
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
         backup.previous_model_catalog_json = external_model_catalog(&document, &backup);
@@ -1864,11 +1499,7 @@ fn restore_local_locked(
     }
 
     let model_catalog = backup.previous_model_catalog_json.clone();
-    restore_config(
-        &mut document,
-        backup.previous_model_provider.as_deref(),
-        model_catalog.as_deref(),
-    );
+    restore_local_config(&mut document, &backup, model_catalog.as_deref());
     let restored_config = document.to_string();
     if original_config_bytes.as_deref() != Some(restored_config.as_bytes()) {
         replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
@@ -2460,6 +2091,17 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
             "ChatGPT model_providers must be a table",
         ));
     }
+    if document.get("model_reasoning_effort").is_some()
+        && document
+            .get("model_reasoning_effort")
+            .and_then(Item::as_str)
+            .is_none()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT model_reasoning_effort must be a string",
+        ));
+    }
     Ok(())
 }
 
@@ -2470,6 +2112,10 @@ fn attach_config(
     model_catalog_path: Option<&str>,
     previous_model_catalog: Option<&str>,
 ) {
+    // A global Codex effort overrides each model catalog entry. While Relay is
+    // active it must be absent so automatic models use Relay's `medium`
+    // default and a manual per-model rule remains authoritative.
+    document.remove("model_reasoning_effort");
     document["model_provider"] = value(PROVIDER_ID);
     restore_root_string(
         document,
@@ -2501,6 +2147,25 @@ fn restore_config(
     remove_managed_provider(document);
     restore_root_string(document, "model_provider", previous_model_provider);
     restore_root_string(document, "model_catalog_json", previous_model_catalog);
+}
+
+fn restore_local_config(
+    document: &mut DocumentMut,
+    backup: &ProfileBackup,
+    previous_model_catalog: Option<&str>,
+) {
+    restore_config(
+        document,
+        backup.previous_model_provider.as_deref(),
+        previous_model_catalog,
+    );
+    if backup.managed_model_reasoning_effort_cleared {
+        restore_root_string(
+            document,
+            "model_reasoning_effort",
+            backup.previous_model_reasoning_effort.as_deref(),
+        );
+    }
 }
 
 const MANAGED_SNAPSHOT_AUTH_KEYS: &[&str] =
@@ -2690,6 +2355,13 @@ fn root_model_catalog_json(document: &DocumentMut) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn root_model_reasoning_effort(document: &DocumentMut) -> Option<String> {
+    document
+        .get("model_reasoning_effort")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn external_model_catalog(document: &DocumentMut, backup: &ProfileBackup) -> Option<String> {
     let current = root_model_catalog_json(document);
     if current.as_deref() == backup.managed_model_catalog_path.as_deref() {
@@ -2727,11 +2399,15 @@ fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> boo
             || root_model_catalog_json(document).as_deref()
                 == backup.managed_model_catalog_path.as_deref())
         && managed_provider_matches(document, backup)
+        && (!backup.managed_model_reasoning_effort_cleared
+            || document.get("model_reasoning_effort").is_none())
 }
 
 fn previous_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document) == backup.previous_model_provider
         && root_model_catalog_json(document) == backup.previous_model_catalog_json
+        && (!backup.managed_model_reasoning_effort_cleared
+            || root_model_reasoning_effort(document) == backup.previous_model_reasoning_effort)
 }
 
 fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
@@ -3077,7 +2753,7 @@ fn configured_catalog_matches_path(codex_home: &Path, configured: &str, expected
 }
 
 fn is_relay_managed_model_catalog(content: &[u8]) -> bool {
-    read_catalog_values(content, true).is_ok_and(|models| {
+    catalog::read_catalog_values(content, true).is_ok_and(|models| {
         !models.is_empty()
             && models.iter().all(|model| {
                 model.get("comp_hash").and_then(Value::as_str) == Some(CODEX_RELAY_CATALOG_HASH)
@@ -3514,6 +3190,43 @@ mod tests {
     }
 
     #[test]
+    fn local_gateway_uses_catalog_reasoning_default_and_restores_global_override() {
+        let (root, home, backups) = profile_dirs("reasoning-effort-override");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"openai\"\nmodel_reasoning_effort = \"ultra\"\n",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+
+        let managed_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(!managed_config.contains("model_reasoning_effort"));
+        let backup = local_backup(&home, &backups)
+            .unwrap()
+            .expect("profile backup");
+        assert_eq!(
+            backup.previous_model_reasoning_effort.as_deref(),
+            Some("ultra")
+        );
+        assert!(backup.managed_model_reasoning_effort_cleared);
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        let restored_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(restored_config.contains("model_provider = \"openai\""));
+        assert!(restored_config.contains("model_reasoning_effort = \"ultra\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
         let (root, home, backups) = profile_dirs("model-catalog-restore");
         let previous_catalog_path = root.join("previous-codex-models.json");
@@ -3670,6 +3383,71 @@ mod tests {
     }
 
     #[test]
+    fn direct_source_catalog_uses_medium_for_automatic_reasoning() {
+        let (root, home, _backups) = profile_dirs("direct-source-reasoning-default");
+        let manifest = json!({
+            "models": [{
+                "slug": "provider/reasoning",
+                "default_reasoning_level": "ultra",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ]
+            }]
+        });
+
+        let catalog = direct_source_model_catalog_with_manifest(
+            &home,
+            &["provider/reasoning".into()],
+            Some(&manifest),
+        )
+        .unwrap()
+        .expect("direct catalog");
+        let model = &serde_json::from_str::<Value>(&catalog).unwrap()["models"][0];
+
+        assert_eq!(model["default_reasoning_level"], "medium");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_direct_source_catalog_does_not_restore_provider_ultra_default() {
+        let (root, home, _backups) = profile_dirs("managed-direct-source-reasoning-default");
+        let manifest = json!({
+            "models": [{
+                "slug": "provider/reasoning",
+                "default_reasoning_level": "ultra",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ]
+            }]
+        });
+        let direct = direct_source_model_catalog_with_manifest(
+            &home,
+            &["provider/reasoning".into()],
+            Some(&manifest),
+        )
+        .unwrap()
+        .expect("direct catalog");
+
+        let managed = catalog::build_managed_model_catalog(&home, None, None, &direct).unwrap();
+        let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
+
+        assert!(model.get("default_reasoning_level").is_none());
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "ultra", "description": "Ultra"}
+            ])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn direct_source_catalog_resolves_the_configured_relative_template() {
         let (root, home, _backups) = profile_dirs("direct-source-relative-template");
         write_test_catalog_file(&home.join("native-catalog.json"), "gpt-5.6-sol");
@@ -3698,6 +3476,7 @@ mod tests {
         let (root, home, _backups) = profile_dirs("managed-native-settings");
         let mut native = routed_codex_catalog_entry(None, "gpt-native", 1, None);
         native["slug"] = Value::String("gpt-native".into());
+        native["comp_hash"] = Value::String("official".into());
         native["input_modalities"] = json!(["text", "image"]);
         native["default_reasoning_level"] = Value::String("ultra".into());
         native["supported_reasoning_levels"] = json!([
@@ -3716,7 +3495,7 @@ mod tests {
         native["native_setting"] = Value::String("keep-me".into());
         let catalog = serde_json::to_string(&json!({"models": [native]})).unwrap();
 
-        let managed = build_managed_model_catalog(&home, None, None, &catalog).unwrap();
+        let managed = catalog::build_managed_model_catalog(&home, None, None, &catalog).unwrap();
         let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
 
         assert_eq!(model["input_modalities"], json!(["text", "image"]));
@@ -3749,7 +3528,7 @@ mod tests {
             "vendor/direct"
         );
 
-        let managed = build_managed_model_catalog(
+        let managed = catalog::build_managed_model_catalog(
             &home,
             None,
             None,

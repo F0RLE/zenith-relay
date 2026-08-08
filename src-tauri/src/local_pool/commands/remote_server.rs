@@ -107,6 +107,7 @@ pub enum RemoteServerAction {
     RefreshAllQuotas,
     SetModelEnabled,
     SetModelPrice,
+    SetModelReasoning,
     StartGateway,
     StopGateway,
     CreateWakeTask,
@@ -1862,6 +1863,9 @@ fn action_request(action: &RemoteServerAction) -> Result<(Method, String, bool),
         }
         RemoteServerAction::SetModelEnabled => (Method::POST, "/models/rules".to_string(), true),
         RemoteServerAction::SetModelPrice => (Method::POST, "/models/prices".to_string(), true),
+        RemoteServerAction::SetModelReasoning => {
+            (Method::POST, "/models/reasoning".to_string(), true)
+        }
         RemoteServerAction::StartGateway => (Method::POST, "/gateway/start".to_string(), false),
         RemoteServerAction::StopGateway => (Method::POST, "/gateway/stop".to_string(), false),
         RemoteServerAction::CreateWakeTask => (Method::POST, "/wake-tasks".to_string(), true),

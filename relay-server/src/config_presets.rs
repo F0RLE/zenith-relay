@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zenith_relay_core::{
     normalize_image_base_model, normalize_model_price_overrides,
-    normalize_source_protocol_bindings, normalize_subscription_plan_order,
+    normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
@@ -84,22 +85,10 @@ pub async fn apply(
             ConfigurationReplaceError::Invalid(message) => PresetError::Invalid(message),
             ConfigurationReplaceError::Store(message) => PresetError::Store(message),
         })?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .restore_configuration(&replacement.previous)
-            .map_err(|rollback| {
-                PresetError::Store(format!(
-                    "runtime rebuild failed: {error}; configuration rollback failed: {rollback}"
-                ))
-            })?;
-        state.rebuild_runtime().await.map_err(|rollback| {
-            PresetError::Runtime(format!(
-                "runtime rebuild failed: {error}; previous runtime could not be restored: {rollback}"
-            ))
-        })?;
-        return Err(PresetError::Runtime(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.restore_configuration(&replacement.previous))
+        .await
+        .map_err(PresetError::Runtime)?;
     Ok(ConfigurationPresetApplyResult {
         previous_revision: replacement.previous_revision,
         revision: replacement.revision,
@@ -113,7 +102,7 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
             "configuration preset format is unsupported".to_string(),
         ));
     }
-    if preset.schema_version != CONFIGURATION_PRESET_SCHEMA_VERSION {
+    if !(2..=CONFIGURATION_PRESET_SCHEMA_VERSION).contains(&preset.schema_version) {
         return Err(PresetError::Invalid(format!(
             "configuration preset schema {} is unsupported",
             preset.schema_version
@@ -138,6 +127,9 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
     preset.settings.hidden_models = normalize_models(preset.settings.hidden_models)?;
     preset.settings.model_price_overrides =
         normalize_prices(preset.settings.model_price_overrides)?;
+    preset.settings.model_reasoning_allowed_levels =
+        normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
+            .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
     Ok(preset)
 }
 
@@ -446,6 +438,10 @@ fn merge_settings(
     merged.quota = requested.quota.clone();
     merged.hidden_models = requested.hidden_models.clone();
     merged.model_price_overrides = requested.model_price_overrides.clone();
+    if requested.model_reasoning_allowed_levels_present {
+        merged.model_reasoning_allowed_levels = requested.model_reasoning_allowed_levels.clone();
+    }
+    merged.model_reasoning_allowed_levels_present = true;
     Ok(merged)
 }
 
@@ -508,9 +504,12 @@ fn pointer_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::configuration_diff;
+    use super::{configuration_diff, merge_settings, normalize_preset};
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use zenith_relay_core::protocol::{
-        ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
+        ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
+        CONFIGURATION_PRESET_FORMAT,
     };
 
     fn settings() -> ConfigurationPresetSettings {
@@ -533,6 +532,8 @@ mod tests {
             },
             hidden_models: Vec::new(),
             model_price_overrides: Default::default(),
+            model_reasoning_allowed_levels: Default::default(),
+            model_reasoning_allowed_levels_present: true,
         }
     }
 
@@ -561,5 +562,57 @@ mod tests {
             super::normalize_preset(preset),
             Err(super::PresetError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn schema_two_omitted_reasoning_levels_preserve_current_configuration() {
+        let mut current = settings();
+        current.model_reasoning_allowed_levels =
+            BTreeMap::from([("gpt-test".to_string(), vec!["medium".to_string()])]);
+        let mut omitted_settings = serde_json::to_value(&current).unwrap();
+        omitted_settings
+            .as_object_mut()
+            .unwrap()
+            .remove("modelReasoningAllowedLevels");
+        let omitted: ConfigurationPreset = serde_json::from_value(json!({
+            "format": CONFIGURATION_PRESET_FORMAT,
+            "schemaVersion": 2,
+            "settings": omitted_settings,
+        }))
+        .unwrap();
+
+        assert!(!omitted.settings.model_reasoning_allowed_levels_present);
+        assert!(serde_json::to_value(&omitted).unwrap()["settings"]
+            .get("modelReasoningAllowedLevels")
+            .is_none());
+        let merged =
+            merge_settings(&current, &normalize_preset(omitted).unwrap().settings).unwrap();
+        assert_eq!(
+            merged.model_reasoning_allowed_levels,
+            current.model_reasoning_allowed_levels
+        );
+        assert!(merged.model_reasoning_allowed_levels_present);
+
+        let mut explicit_settings = serde_json::to_value(&current).unwrap();
+        explicit_settings["modelReasoningAllowedLevels"] = json!({});
+        let explicit_empty: ConfigurationPreset = serde_json::from_value(json!({
+            "format": CONFIGURATION_PRESET_FORMAT,
+            "schemaVersion": 2,
+            "settings": explicit_settings,
+        }))
+        .unwrap();
+
+        assert!(
+            explicit_empty
+                .settings
+                .model_reasoning_allowed_levels_present
+        );
+        assert!(merge_settings(
+            &current,
+            &normalize_preset(explicit_empty).unwrap().settings
+        )
+        .unwrap()
+        .model_reasoning_allowed_levels
+        .is_empty());
     }
 }

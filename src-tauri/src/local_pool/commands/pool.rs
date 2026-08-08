@@ -1,4 +1,4 @@
-use super::{restart_or_rollback, sync_gateway_or_rollback};
+use super::{restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback};
 use crate::{
     files::atomic_write,
     local_pool::{
@@ -6,15 +6,17 @@ use crate::{
             credentials::CredentialStore, proxy::COMMON_PROXY_SECRET_REF, NativeSecretBackend,
         },
         error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
-        models::{LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord},
+        models::{
+            LocalAccountRecord, LocalGatewayKeyRecord, LocalPoolSnapshot, ProviderSourceRecord,
+        },
         state::DesktopState,
         store::secret_store,
     },
 };
 use chrono::Utc;
 use serde::Deserialize;
-use std::collections::BTreeSet;
-use tauri::{AppHandle, State};
+use std::collections::{BTreeMap, BTreeSet};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zenith_relay_core::{
@@ -23,7 +25,7 @@ use zenith_relay_core::{
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
+    ApiModelPriceOverride, CandidateScope, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -123,6 +125,8 @@ pub fn export_local_configuration_preset(
             },
             hidden_models: gateway.hidden_models,
             model_price_overrides: gateway.model_price_overrides,
+            model_reasoning_allowed_levels: gateway.model_reasoning_allowed_levels,
+            model_reasoning_allowed_levels_present: true,
         },
     };
     write_configuration_preset(&preset, &app)
@@ -401,6 +405,14 @@ pub struct SetModelPriceInput {
     output_micro_usd_per_million: Option<u64>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelReasoningInput {
+    model_id: String,
+    #[serde(default)]
+    allowed_levels: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn set_local_model_enabled(
     input: SetModelEnabledInput,
@@ -455,6 +467,76 @@ pub async fn set_local_model_price(
     state.snapshot().await.map_err(Into::into)
 }
 
+#[tauri::command]
+pub async fn set_local_model_reasoning(
+    input: SetModelReasoningInput,
+    app: AppHandle,
+    state: State<'_, DesktopState>,
+) -> CommandResult<LocalPoolSnapshot> {
+    let _mutation = state.setup_guard().await;
+    let canonical = canonical_pool_model(&state, &input.model_id)?;
+    let mut normalized_allowed_levels =
+        zenith_relay_core::normalize_model_reasoning_allowed_levels(BTreeMap::from([(
+            canonical.clone(),
+            input.allowed_levels,
+        )]))
+        .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
+    let allowed_levels = normalized_allowed_levels
+        .remove(&canonical.to_ascii_lowercase())
+        .unwrap_or_default();
+    if !allowed_levels.is_empty() {
+        if pool_model_has_native_account(&state, &canonical)? {
+            return Err(LocalPoolError::new(
+                ErrorCode::Conflict,
+                "native ChatGPT model reasoning settings cannot be configured here",
+            )
+            .into());
+        }
+        let runtime = state.gateway.runtime().await.ok_or_else(|| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "confirm model reasoning capabilities before allowing modes",
+            )
+        })?;
+        if allowed_levels
+            .iter()
+            .any(|effort| !runtime.supports_source_reasoning_effort(&canonical, effort))
+        {
+            return Err(LocalPoolError::new(
+                ErrorCode::InvalidState,
+                "requested reasoning mode is not confirmed for this model",
+            )
+            .into());
+        }
+    }
+    let old_gateway = state.store()?.gateway().clone();
+    let mut gateway = old_gateway.clone();
+    let key = canonical.to_ascii_lowercase();
+    if allowed_levels.is_empty() {
+        gateway.model_reasoning_allowed_levels.remove(&key);
+    } else {
+        gateway
+            .model_reasoning_allowed_levels
+            .insert(key, allowed_levels);
+    }
+    if gateway == old_gateway {
+        return state.snapshot().await.map_err(Into::into);
+    }
+    state.store()?.replace_gateway(gateway.clone())?;
+    if let Some(runtime) = state.gateway.runtime().await {
+        if let Err(error) =
+            runtime.set_model_reasoning_allowed_levels(gateway.model_reasoning_allowed_levels)
+        {
+            state.store()?.replace_gateway(old_gateway)?;
+            return Err(LocalPoolError::new(ErrorCode::InvalidState, error.to_string()).into());
+        }
+    }
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    super::refresh_active_codex_catalog_in_background(app);
+    Ok(snapshot)
+}
+
 fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
     let requested = model_id.trim();
     if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
@@ -485,9 +567,46 @@ fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<Str
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "pool model not found"))
 }
 
+fn pool_model_has_native_account(state: &DesktopState, model: &str) -> LocalResult<bool> {
+    Ok(state.store()?.accounts().iter().any(|account| {
+        account.account.in_pool
+            && account
+                .models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model))
+    }))
+}
+
+pub(super) fn local_pool_scope(
+    sources: &[ProviderSourceRecord],
+    accounts: &[LocalAccountRecord],
+) -> LocalResult<CandidateScope> {
+    let mut source_ids = BTreeSet::new();
+    for source in sources.iter().filter(|source| source.in_pool) {
+        if source
+            .supports_wire_api(WireApi::Responses)
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
+        {
+            source_ids.insert(source.id.clone());
+        }
+    }
+    Ok(CandidateScope {
+        source_ids: Some(source_ids),
+        account_ids: Some(
+            accounts
+                .iter()
+                .filter(|account| account.account.in_pool)
+                .map(|account| account.account.id.clone())
+                .collect(),
+        ),
+        model_rules: Default::default(),
+    })
+}
+
 #[tauri::command]
 pub async fn set_local_pool_membership(
     input: PoolMembershipInput,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let account_ids = input.account_ids.into_iter().collect::<BTreeSet<_>>();
@@ -509,6 +628,12 @@ pub async fn set_local_pool_membership(
             store.keys().to_vec(),
         )
     };
+    let system_key_id = old_keys
+        .iter()
+        .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
+        .or_else(|| old_keys.iter().find(|key| key.system))
+        .map(|key| key.id.clone())
+        .unwrap_or_else(|| SYSTEM_GATEWAY_KEY_ID.to_string());
     if source_ids
         .iter()
         .any(|id| !old_sources.iter().any(|record| &record.id == id))
@@ -563,20 +688,47 @@ pub async fn set_local_pool_membership(
         return state.snapshot().await.map_err(Into::into);
     }
 
+    let next_scope = local_pool_scope(&sources, &accounts)?;
+    let changed_accounts = accounts
+        .iter()
+        .filter(|account| account_ids.contains(&account.account.id))
+        .cloned()
+        .collect::<Vec<_>>();
     state
         .store()?
         .replace_pool_records(sources, accounts, old_keys.clone())?;
-    restart_or_rollback(&state, || {
-        state
-            .store()?
-            .replace_pool_records(old_sources, old_accounts, old_keys)
-    })
-    .await?;
-    let now_ms = super::current_time_ms();
+    let policy_now_ms = super::current_time_ms();
+    let updated_in_place = if let Some(runtime) = state.gateway.runtime().await {
+        changed_accounts.iter().all(|account| {
+            runtime.update_account_policy(
+                &account.account.id,
+                runtime_account_policy(account, policy_now_ms),
+            )
+        }) && runtime.update_key_scope(&system_key_id, next_scope)
+    } else {
+        false
+    };
+    if !updated_in_place {
+        restart_or_rollback(&state, || {
+            state
+                .store()?
+                .replace_pool_records(old_sources, old_accounts, old_keys)
+        })
+        .await?;
+    }
+    let now_ms = policy_now_ms;
     for account_id in account_ids {
         state.sync_account_quota_refresh(&account_id, now_ms)?;
     }
-    state.snapshot().await.map_err(Into::into)
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place {
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<DesktopState>();
+            let _ = super::profiles::refresh_active_codex_catalog(&state).await;
+        });
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]

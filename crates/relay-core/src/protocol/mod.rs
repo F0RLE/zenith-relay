@@ -15,9 +15,10 @@ pub(crate) use adapter::{
 };
 pub use capabilities::{Capabilities, Feature, CURRENT_PROTOCOL_VERSION};
 pub use management::{
-    account_operational_state, operational_status, pool_model_summaries, quota_refresh_status,
-    AccountOperationalInput, AccountOperationalState, AccountPresetRule, AccountRoutingBlockReason,
-    AccountSummary, ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
+    account_candidate_enabled, account_operational_state, apply_model_reasoning_summary,
+    operational_status, pool_model_summaries, quota_refresh_status, AccountOperationalInput,
+    AccountOperationalState, AccountPresetRule, AccountRoutingBlockReason, AccountSummary,
+    ApiError, ClientWireApi, ConfigurationPreset, ConfigurationPresetApplyInput,
     ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
     ConfigurationPresetPreview, ConfigurationPresetPreviewInput, ConfigurationPresetSettings,
     ErrorEnvelope, GatewayDiagnostic, GatewaySummary, HealthResponse, ModelSummary,

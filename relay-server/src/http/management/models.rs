@@ -1,18 +1,21 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::state::AppState;
+use crate::{app::model_has_native_account_route, state::AppState};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use zenith_relay_core::protocol::RuntimeStateSnapshot;
-use zenith_relay_core::ApiModelPriceOverride;
+use std::{collections::BTreeMap, sync::Arc};
+use zenith_relay_core::{
+    normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot, ApiModelPriceOverride,
+};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/models", get(models))
         .route("/models/rules", post(set_model_enabled))
         .route("/models/prices", post(set_model_price))
+        .route("/models/reasoning", post(set_model_reasoning))
 }
 
 #[derive(Serialize)]
@@ -56,21 +59,8 @@ pub async fn set_model_enabled(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelEnabledInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
-    }
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.clone())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?;
     let old_hidden = state.store.hidden_models().map_err(store_error)?;
     let mut hidden = old_hidden.clone();
     hidden.retain(|model| !model.eq_ignore_ascii_case(&canonical));
@@ -81,18 +71,10 @@ pub async fn set_model_enabled(
         return Ok(Json(snapshot));
     }
     state.store.set_hidden_models(hidden).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .set_hidden_models(old_hidden)
-            .map_err(|rollback| {
-                ManagementError::internal(
-                    "model_rule_recovery_failed",
-                    format!("{error}; failed to restore model rules: {rollback}"),
-                )
-            })?;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_hidden_models(old_hidden))
+        .await
+        .map_err(runtime_error)?;
     state.snapshot().map(Json).map_err(store_error)
 }
 
@@ -119,21 +101,8 @@ pub async fn set_model_price(
         input.output_micro_usd_per_million,
     )
     .map_err(|message| ManagementError::validation("model_price_invalid", message))?;
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
-    }
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.to_ascii_lowercase())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
@@ -152,4 +121,115 @@ pub async fn set_model_price(
             .map_err(store_error)?;
     }
     state.snapshot().map(Json).map_err(store_error)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetModelReasoningInput {
+    model_id: String,
+    #[serde(default)]
+    allowed_levels: Vec<String>,
+}
+
+pub async fn set_model_reasoning(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<SetModelReasoningInput>,
+) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let snapshot = state.snapshot().map_err(store_error)?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
+    let mut normalized_allowed_levels =
+        normalize_model_reasoning_allowed_levels(BTreeMap::from([(
+            canonical.clone(),
+            input.allowed_levels,
+        )]))
+        .map_err(|message| ManagementError::validation("reasoning_levels_invalid", message))?;
+    let allowed_levels = normalized_allowed_levels
+        .remove(&canonical)
+        .unwrap_or_default();
+    let runtime = state.runtime().map_err(runtime_error)?;
+    if !allowed_levels.is_empty() {
+        if model_has_native_account_route(&snapshot.accounts, &canonical) {
+            return Err(ManagementError::new(
+                StatusCode::CONFLICT,
+                "native_reasoning_managed",
+                "native ChatGPT model reasoning settings cannot be configured here",
+                "configuration",
+                false,
+            ));
+        }
+        let runtime = runtime.as_ref().ok_or_else(|| {
+            ManagementError::new(
+                StatusCode::CONFLICT,
+                "reasoning_capabilities_unavailable",
+                "confirm model reasoning capabilities before allowing modes",
+                "configuration",
+                true,
+            )
+        })?;
+        if allowed_levels
+            .iter()
+            .any(|effort| !runtime.supports_source_reasoning_effort(&canonical, effort))
+        {
+            return Err(ManagementError::new(
+                StatusCode::CONFLICT,
+                "reasoning_levels_unconfirmed",
+                "requested reasoning mode is not confirmed for this model",
+                "configuration",
+                true,
+            ));
+        }
+    }
+
+    let previous = state
+        .store
+        .model_reasoning_allowed_levels()
+        .map_err(store_error)?;
+    let mut configured = previous.clone();
+    if allowed_levels.is_empty() {
+        configured.remove(&canonical);
+    } else {
+        configured.insert(canonical, allowed_levels);
+    }
+    if configured == previous {
+        return Ok(Json(snapshot));
+    }
+    state
+        .store
+        .set_model_reasoning_allowed_levels(configured.clone())
+        .map_err(store_error)?;
+    if let Some(runtime) = runtime {
+        if let Err(error) = runtime.set_model_reasoning_allowed_levels(configured) {
+            state
+                .store
+                .set_model_reasoning_allowed_levels(previous)
+                .map_err(|rollback| {
+                    ManagementError::internal(
+                        "model_reasoning_recovery_failed",
+                        format!("{error}; failed to restore model reasoning levels: {rollback}"),
+                    )
+                })?;
+            return Err(runtime_error(error.to_string()));
+        }
+    }
+    state.snapshot().map(Json).map_err(store_error)
+}
+
+fn canonical_model_id(
+    snapshot: &RuntimeStateSnapshot,
+    requested: &str,
+) -> Result<String, ManagementError> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(ManagementError::validation(
+            "model_id_invalid",
+            "model id is invalid",
+        ));
+    }
+    snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case(requested))
+        .map(|model| model.id.clone())
+        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))
 }

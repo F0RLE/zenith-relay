@@ -107,6 +107,7 @@ export const relayCommands = {
   setPoolMembership: (accountIds: string[], sourceIds: string[], inPool: boolean) => invoke("set_local_pool_membership", { input: { accountIds, sourceIds, inPool } }),
   setModelEnabled: (modelId: string, enabled: boolean) => invoke("set_local_model_enabled", { input: { modelId, enabled } }),
   setModelPrice: (modelId: string, inputMicroUsdPerMillion: number | null, cachedInputMicroUsdPerMillion: number | null, cacheWrite5mMicroUsdPerMillion: number | null, cacheWrite1hMicroUsdPerMillion: number | null, outputMicroUsdPerMillion: number | null) => invoke("set_local_model_price", { input: { modelId, inputMicroUsdPerMillion, cachedInputMicroUsdPerMillion, cacheWrite5mMicroUsdPerMillion, cacheWrite1hMicroUsdPerMillion, outputMicroUsdPerMillion } }),
+  setModelReasoning: (modelId: string, allowedLevels: string[]) => invoke("set_local_model_reasoning", { input: { modelId, allowedLevels } }),
   exportLocalConfigurationPreset: () => invoke<string | null>("export_local_configuration_preset"),
   updateRouting: (routingStrategy: RoutingStrategy, maxRetryCandidates: number, cooldownAfterFailures: number, keepLastCandidateAvailable: boolean, defaultServiceTier: DefaultServiceTier, subscriptionPlanOrder: string[]) => invoke("update_local_routing", { input: { routingStrategy, maxRetryCandidates, cooldownAfterFailures, keepLastCandidateAvailable, defaultServiceTier, subscriptionPlanOrder } }),
   startGateway: () => invoke("start_local_gateway"),
