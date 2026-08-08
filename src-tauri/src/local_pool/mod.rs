@@ -9,6 +9,7 @@ mod remote;
 mod response_affinity;
 mod state;
 mod store;
+mod usage_writer;
 
 use std::{fs, path::Path, time::Instant};
 
