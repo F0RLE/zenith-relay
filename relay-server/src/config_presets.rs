@@ -85,22 +85,10 @@ pub async fn apply(
             ConfigurationReplaceError::Invalid(message) => PresetError::Invalid(message),
             ConfigurationReplaceError::Store(message) => PresetError::Store(message),
         })?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .restore_configuration(&replacement.previous)
-            .map_err(|rollback| {
-                PresetError::Store(format!(
-                    "runtime rebuild failed: {error}; configuration rollback failed: {rollback}"
-                ))
-            })?;
-        state.rebuild_runtime().await.map_err(|rollback| {
-            PresetError::Runtime(format!(
-                "runtime rebuild failed: {error}; previous runtime could not be restored: {rollback}"
-            ))
-        })?;
-        return Err(PresetError::Runtime(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.restore_configuration(&replacement.previous))
+        .await
+        .map_err(PresetError::Runtime)?;
     Ok(ConfigurationPresetApplyResult {
         previous_revision: replacement.previous_revision,
         revision: replacement.revision,

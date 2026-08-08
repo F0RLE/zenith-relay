@@ -75,17 +75,9 @@ pub async fn set_routing_policy(
         .store
         .set_routing_policy(&policy)
         .map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .set_routing_policy(&previous_policy)
-            .map_err(store_error)?;
-        if let Err(restore) = state.rebuild_runtime().await {
-            return Err(store_error(format!(
-                "{error}; failed to restore previous runtime: {restore}"
-            )));
-        }
-        return Err(store_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_routing_policy(&previous_policy))
+        .await
+        .map_err(store_error)?;
     state.snapshot().map(Json).map_err(store_error)
 }

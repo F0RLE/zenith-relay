@@ -63,11 +63,10 @@ pub async fn profile_credential(
         let old = key.clone();
         key.enabled = true;
         state.store.save_key(&key).map_err(store_error)?;
-        if let Err(error) = state.rebuild_runtime().await {
-            let _ = state.store.save_key(&old);
-            let _ = state.rebuild_runtime().await;
-            return Err(runtime_error(error));
-        }
+        state
+            .rebuild_runtime_or_rollback(|| state.store.save_key(&old))
+            .await
+            .map_err(runtime_error)?;
     }
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
@@ -116,12 +115,14 @@ pub async fn prepare_profile_key_rotation(
         let _ = state.vault.delete(&secret_ref);
         return Err(store_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.delete_key(&rotation_id);
-        let _ = state.vault.delete(&secret_ref);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.store.delete_key(&rotation_id)?;
+            state.vault.delete(&secret_ref)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok((
         StatusCode::CREATED,
         [(header::CACHE_CONTROL, "no-store")],
@@ -185,21 +186,30 @@ pub async fn commit_profile_key_rotation(
         .map_err(vault_error)?;
     for (key, _) in &rotations {
         if let Err(error) = state.store.delete_key(&key.id) {
-            restore_profile_rotation(&state, &current, &old_secret, &rotations);
-            let _ = state.rebuild_runtime().await;
+            state
+                .rollback_and_rebuild_runtime(|| {
+                    restore_profile_rotation(&state, &current, &old_secret, &rotations)
+                })
+                .await
+                .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
             return Err(store_error(error));
         }
         if let Err(error) = state.vault.delete(&key.secret_ref) {
-            restore_profile_rotation(&state, &current, &old_secret, &rotations);
-            let _ = state.rebuild_runtime().await;
+            state
+                .rollback_and_rebuild_runtime(|| {
+                    restore_profile_rotation(&state, &current, &old_secret, &rotations)
+                })
+                .await
+                .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
             return Err(vault_error(error));
         }
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        restore_profile_rotation(&state, &current, &old_secret, &rotations);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            restore_profile_rotation(&state, &current, &old_secret, &rotations)
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -226,14 +236,15 @@ pub async fn abort_profile_key_rotation(
         let _ = state.store.save_key(&key);
         return Err(vault_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        if let Some(secret) = secret.as_deref() {
-            let _ = state.vault.save(&key.secret_ref, secret);
-        }
-        let _ = state.store.save_key(&key);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            if let Some(secret) = secret.as_deref() {
+                state.vault.save(&key.secret_ref, secret)?;
+            }
+            state.store.save_key(&key)
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -271,12 +282,13 @@ fn restore_profile_rotation(
     current: &GatewayKeyRecord,
     current_secret: &str,
     rotations: &[(GatewayKeyRecord, Option<String>)],
-) {
-    let _ = state.vault.save(&current.secret_ref, current_secret);
+) -> Result<(), String> {
+    state.vault.save(&current.secret_ref, current_secret)?;
     for (key, secret) in rotations {
         if let Some(secret) = secret.as_deref() {
-            let _ = state.vault.save(&key.secret_ref, secret);
+            state.vault.save(&key.secret_ref, secret)?;
         }
-        let _ = state.store.save_key(key);
+        state.store.save_key(key)?;
     }
+    Ok(())
 }

@@ -204,8 +204,10 @@ pub async fn update_account(
         match apply_account_policy_if_running(&state, &record) {
             Ok(applied) => applied,
             Err(error) => {
-                let _ = state.store.save_account(&old);
-                let _ = state.rebuild_runtime().await;
+                state
+                    .rollback_and_rebuild_runtime(|| state.store.save_account(&old))
+                    .await
+                    .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
                 return Err(runtime_error(error));
             }
         }
@@ -213,11 +215,10 @@ pub async fn update_account(
         true
     };
     if !runtime_applied {
-        if let Err(error) = state.rebuild_runtime().await {
-            let _ = state.store.save_account(&old);
-            let _ = state.rebuild_runtime().await;
-            return Err(runtime_error(error));
-        }
+        state
+            .rebuild_runtime_or_rollback(|| state.store.save_account(&old))
+            .await
+            .map_err(runtime_error)?;
     }
     Ok(Json(account_summary(&state, &record)?))
 }
@@ -409,32 +410,25 @@ pub async fn set_pool_membership(
         Ok(applied) => applied,
         Err(error) => {
             state
-                .store
-                .replace_pool_membership(&old_sources, &old_accounts)
-                .map_err(|rollback| {
-                    ManagementError::internal(
-                        "pool_membership_recovery_failed",
-                        format!("{error}; failed to restore pool membership: {rollback}"),
-                    )
-                })?;
-            let _ = state.rebuild_runtime().await;
+                .rollback_and_rebuild_runtime(|| {
+                    state
+                        .store
+                        .replace_pool_membership(&old_sources, &old_accounts)
+                })
+                .await
+                .map_err(|restore| runtime_error(format!("{error}; {restore}")))?;
             return Err(runtime_error(error));
         }
     };
     if !runtime_applied {
-        if let Err(error) = state.rebuild_runtime().await {
-            state
-                .store
-                .replace_pool_membership(&old_sources, &old_accounts)
-                .map_err(|rollback| {
-                    ManagementError::internal(
-                        "pool_membership_recovery_failed",
-                        format!("{error}; failed to restore pool membership: {rollback}"),
-                    )
-                })?;
-            let _ = state.rebuild_runtime().await;
-            return Err(runtime_error(error));
-        }
+        state
+            .rebuild_runtime_or_rollback(|| {
+                state
+                    .store
+                    .replace_pool_membership(&old_sources, &old_accounts)
+            })
+            .await
+            .map_err(runtime_error)?;
     }
     state.snapshot().map(Json).map_err(store_error)
 }
@@ -502,12 +496,14 @@ pub async fn delete_account(
     if let Some(runtime) = state.runtime().map_err(runtime_error)? {
         runtime.remove_candidate(&id);
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.vault.save(&record.secret_ref, &secret);
-        let _ = state.store.save_account(&record);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.vault.save(&record.secret_ref, &secret)?;
+            state.store.save_account(&record)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     state
         .store
         .remove_account_from_wake_tasks(&id, now_ms())

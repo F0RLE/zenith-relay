@@ -61,21 +61,8 @@ pub async fn set_model_enabled(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelEnabledInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
-    }
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.clone())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?;
     let old_hidden = state.store.hidden_models().map_err(store_error)?;
     let mut hidden = old_hidden.clone();
     hidden.retain(|model| !model.eq_ignore_ascii_case(&canonical));
@@ -86,18 +73,10 @@ pub async fn set_model_enabled(
         return Ok(Json(snapshot));
     }
     state.store.set_hidden_models(hidden).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .set_hidden_models(old_hidden)
-            .map_err(|rollback| {
-                ManagementError::internal(
-                    "model_rule_recovery_failed",
-                    format!("{error}; failed to restore model rules: {rollback}"),
-                )
-            })?;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_hidden_models(old_hidden))
+        .await
+        .map_err(runtime_error)?;
     state.snapshot().map(Json).map_err(store_error)
 }
 
@@ -124,21 +103,8 @@ pub async fn set_model_price(
         input.output_micro_usd_per_million,
     )
     .map_err(|message| ManagementError::validation("model_price_invalid", message))?;
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
-    }
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.to_ascii_lowercase())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
     let previous_overrides = state.store.model_price_overrides().map_err(store_error)?;
     let mut overrides = previous_overrides.clone();
     if let Some(price) = price {
@@ -171,21 +137,8 @@ pub async fn set_model_reasoning(
     State(state): State<Arc<AppState>>,
     Json(input): Json<SetModelReasoningInput>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
-    let requested = input.model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
-        return Err(ManagementError::validation(
-            "model_id_invalid",
-            "model id is invalid",
-        ));
-    }
     let snapshot = state.snapshot().map_err(store_error)?;
-    let canonical = snapshot
-        .gateway
-        .models
-        .iter()
-        .find(|model| model.id.eq_ignore_ascii_case(requested))
-        .map(|model| model.id.to_ascii_lowercase())
-        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))?;
+    let canonical = canonical_model_id(&snapshot, &input.model_id)?.to_ascii_lowercase();
     let mut normalized_allowed_levels =
         normalize_model_reasoning_allowed_levels(BTreeMap::from([(
             canonical.clone(),
@@ -271,4 +224,24 @@ fn has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
                 .iter()
                 .any(|candidate| candidate.eq_ignore_ascii_case(model))
     })
+}
+
+fn canonical_model_id(
+    snapshot: &RuntimeStateSnapshot,
+    requested: &str,
+) -> Result<String, ManagementError> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+        return Err(ManagementError::validation(
+            "model_id_invalid",
+            "model id is invalid",
+        ));
+    }
+    snapshot
+        .gateway
+        .models
+        .iter()
+        .find(|model| model.id.eq_ignore_ascii_case(requested))
+        .map(|model| model.id.clone())
+        .ok_or_else(|| ManagementError::not_found("model_not_found", "pool model not found"))
 }

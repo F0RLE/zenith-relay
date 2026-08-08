@@ -16,7 +16,7 @@ use crate::platform;
 use std::{
     collections::HashMap,
     future::Future,
-    path::{Path, PathBuf},
+    path::PathBuf,
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -653,11 +653,6 @@ impl DesktopState {
 
     pub fn cache_root(&self) -> PathBuf {
         self.root.join("cache")
-    }
-
-    #[allow(dead_code)]
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 }
 

@@ -79,11 +79,14 @@ pub async fn create_source(
         let _ = state.vault.delete(&secret_ref);
         return Err(store_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.delete_source(&record.id);
-        let _ = state.vault.delete(&secret_ref);
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.store.delete_source(&record.id)?;
+            state.vault.delete(&secret_ref)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok((StatusCode::CREATED, Json(source_summary(&state, &record)?)))
 }
 
@@ -232,36 +235,37 @@ pub async fn update_source(
         match apply_source_policies_if_running(&state, previous_sources, next_sources) {
             Ok(applied) => applied,
             Err(error) => {
-                match &source_order {
-                    Some((sources, _)) => {
-                        let _ = state.store.save_sources(sources);
-                    }
-                    None => {
-                        let _ = state.store.save_source(&old_record);
-                    }
-                }
-                let _ = state.vault.save(&old_record.secret_ref, &old_secret);
-                let _ = state.rebuild_runtime().await;
-                return Err(runtime_error(error));
+                let restore = state
+                    .rollback_and_rebuild_runtime(|| {
+                        match &source_order {
+                            Some((sources, _)) => state.store.save_sources(sources)?,
+                            None => state.store.save_source(&old_record)?,
+                        }
+                        state.vault.save(&old_record.secret_ref, &old_secret)?;
+                        Ok(())
+                    })
+                    .await;
+                return match restore {
+                    Ok(()) => Err(runtime_error(error)),
+                    Err(restore) => Err(runtime_error(format!("{error}; {restore}"))),
+                };
             }
         }
     } else {
         false
     };
     if !runtime_applied {
-        if let Err(error) = state.rebuild_runtime().await {
-            match &source_order {
-                Some((sources, _)) => {
-                    let _ = state.store.save_sources(sources);
+        state
+            .rebuild_runtime_or_rollback(|| {
+                match &source_order {
+                    Some((sources, _)) => state.store.save_sources(sources)?,
+                    None => state.store.save_source(&old_record)?,
                 }
-                None => {
-                    let _ = state.store.save_source(&old_record);
-                }
-            }
-            let _ = state.vault.save(&old_record.secret_ref, &old_secret);
-            let _ = state.rebuild_runtime().await;
-            return Err(runtime_error(error));
-        }
+                state.vault.save(&old_record.secret_ref, &old_secret)?;
+                Ok(())
+            })
+            .await
+            .map_err(runtime_error)?;
     }
     Ok(Json(source_summary(&state, &record)?))
 }
@@ -362,12 +366,14 @@ pub async fn delete_source(
         .vault
         .delete(&record.secret_ref)
         .map_err(vault_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.vault.save(&record.secret_ref, &secret);
-        let _ = state.store.save_source(&record);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.vault.save(&record.secret_ref, &secret)?;
+            state.store.save_source(&record)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -398,11 +404,13 @@ pub async fn test_source(
     normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
     state.store.save_source(&record).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.save_source(&previous);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            state.store.save_source(&previous)?;
+            Ok(())
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(source_summary(&state, &record)?))
 }
 

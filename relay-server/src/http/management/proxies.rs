@@ -65,14 +65,10 @@ pub async fn set_common_proxy(
         .store
         .set_common_proxy_id(next.as_deref())
         .map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .set_common_proxy_id(previous.as_deref())
-            .map_err(store_error)?;
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_common_proxy_id(previous.as_deref()))
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(state.snapshot().map_err(store_error)?))
 }
 
@@ -88,14 +84,10 @@ pub async fn set_account_proxy_required(
         .store
         .set_account_proxy_required(input.required)
         .map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .set_account_proxy_required(previous)
-            .map_err(store_error)?;
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_account_proxy_required(previous))
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(state.snapshot().map_err(store_error)?))
 }
 
@@ -125,13 +117,14 @@ pub async fn set_account_proxy(
     record.proxy_id = next;
     record.bypass_common_proxy = input.bypass_common_proxy;
     state.store.save_account(&record).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        record.proxy_id = previous.0;
-        record.bypass_common_proxy = previous.1;
-        state.store.save_account(&record).map_err(store_error)?;
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| {
+            record.proxy_id = previous.0.clone();
+            record.bypass_common_proxy = previous.1;
+            state.store.save_account(&record)
+        })
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(account_summary(&state, &record)?))
 }
 
@@ -177,14 +170,10 @@ pub async fn assign_account_proxies(
         updates.push(record);
     }
     state.store.save_accounts(&updates).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .save_accounts(&old_records)
-            .map_err(store_error)?;
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
-    }
+    state
+        .rebuild_runtime_or_rollback(|| state.store.save_accounts(&old_records))
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(ProxyAssignmentResult {
         assigned: updates.len(),
         unused: input.proxy_urls.len().saturating_sub(updates.len()),

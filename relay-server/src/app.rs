@@ -347,6 +347,43 @@ impl AppState {
         self.replace_runtime(Some(Arc::new(runtime)))
     }
 
+    /// Rebuilds the runtime from persisted state and restores the previous
+    /// configuration if activation fails. Callers use this for mutations that
+    /// have already been committed to the store or vault.
+    pub(crate) async fn rebuild_runtime_or_rollback<F>(
+        self: &Arc<Self>,
+        rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let Err(error) = self.rebuild_runtime().await else {
+            return Ok(());
+        };
+        rollback().map_err(|rollback_error| {
+            format!("{error}; failed to restore persisted state: {rollback_error}")
+        })?;
+        self.rebuild_runtime().await.map_err(|restore_error| {
+            format!("{error}; failed to rebuild previous runtime: {restore_error}")
+        })?;
+        Err(error)
+    }
+
+    /// Restores persisted state after an in-place activation failed, then
+    /// rebuilds the runtime from that restored state.
+    pub(crate) async fn rollback_and_rebuild_runtime<F>(
+        self: &Arc<Self>,
+        rollback: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        rollback().map_err(|error| format!("failed to restore persisted state: {error}"))?;
+        self.rebuild_runtime()
+            .await
+            .map_err(|error| format!("failed to rebuild previous runtime: {error}"))
+    }
+
     /// Updates the scopes of all active internal profile keys after a candidate
     /// policy changes in place. This keeps an enabled or un-drained pool member
     /// reachable without replacing the runtime that owns active streams.

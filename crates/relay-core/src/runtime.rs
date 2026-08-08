@@ -669,7 +669,7 @@ impl GatewayRuntime {
                 crate::sources::normalized_base_url(&source.source.base_url)?.to_string();
             let source_id = source.source.id.clone();
             let connector = SourceConnector::new(&source.source, &bindings)?;
-            let rules = model_rules(source.allowed_models, source.excluded_models);
+            let rules = model_rules(&source.allowed_models, &source.excluded_models);
             for binding in &bindings {
                 let models = normalized_set(binding.model_ids.iter());
                 if models.is_empty() {
@@ -787,7 +787,7 @@ impl GatewayRuntime {
                 priority: account.priority,
                 weight: account.weight,
                 models: candidate_models.clone(),
-                model_rules: model_rules(account.allowed_models, account.excluded_models),
+                model_rules: model_rules(&account.allowed_models, &account.excluded_models),
                 health: account.health,
                 quota: account.quota,
                 quota_updated_at_ms: account.quota_updated_at_ms,
@@ -1760,8 +1760,8 @@ impl GatewayRuntime {
         let mut recovery_updates = Vec::new();
         for update in updates {
             let rules = model_rules(
-                update.policy.allowed_models.clone(),
-                update.policy.excluded_models.clone(),
+                &update.policy.allowed_models,
+                &update.policy.excluded_models,
             );
             let mut matched = false;
             for (candidate_id, binding) in &self.source_candidate_bindings {
@@ -1812,10 +1812,7 @@ impl GatewayRuntime {
         if policy.weight == 0 {
             return false;
         }
-        let rules = model_rules(
-            policy.allowed_models.clone(),
-            policy.excluded_models.clone(),
-        );
+        let rules = model_rules(&policy.allowed_models, &policy.excluded_models);
         let mut scheduler = self.lock_scheduler();
         let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
             return false;
@@ -3376,7 +3373,7 @@ fn compare_image_main_models(left: &str, right: &str) -> CmpOrdering {
     .then_with(|| left.cmp(right))
 }
 
-fn model_rules(allowed: Vec<String>, excluded: Vec<String>) -> ModelRules {
+fn model_rules(allowed: &[String], excluded: &[String]) -> ModelRules {
     ModelRules {
         allowed: normalized_set(allowed.iter()),
         excluded: normalized_set(excluded.iter()),
@@ -3426,40 +3423,34 @@ fn normalized_responses_url(value: &str) -> Result<Url> {
     Ok(url)
 }
 
-fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest::Client> {
+fn runtime_client_builder(proxy: Option<&ProxyConfig>) -> reqwest::ClientBuilder {
     let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_nodelay(true)
-        .http2_adaptive_window(true)
-        .redirect(reqwest::redirect::Policy::none());
-    let builder = if bounded {
-        builder.timeout(Duration::from_secs(900))
-    } else {
-        builder.read_timeout(Duration::from_secs(300))
-    };
-    let builder = match proxy {
-        Some(proxy) => proxy.apply(builder),
-        None => builder,
-    };
-    builder.build().map_err(Error::from)
-}
-
-fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
-        .pool_idle_timeout(Duration::from_secs(90))
-        .tcp_nodelay(true)
-        .http1_only()
         .redirect(reqwest::redirect::Policy::none());
     match proxy {
         Some(proxy) => proxy.apply(builder),
         None => builder,
     }
-    .build()
-    .map_err(Error::from)
+}
+
+fn runtime_client(proxy: Option<&ProxyConfig>, bounded: bool) -> Result<reqwest::Client> {
+    let builder = runtime_client_builder(proxy).http2_adaptive_window(true);
+    let builder = if bounded {
+        builder.timeout(Duration::from_secs(900))
+    } else {
+        builder.read_timeout(Duration::from_secs(300))
+    };
+    builder.build().map_err(Error::from)
+}
+
+fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Client> {
+    runtime_client_builder(proxy)
+        .http1_only()
+        .build()
+        .map_err(Error::from)
 }
 
 fn is_loopback_url(url: &Url) -> bool {
