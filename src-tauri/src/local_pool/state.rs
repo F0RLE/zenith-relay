@@ -1,40 +1,29 @@
+mod adapters;
+mod coordination;
 mod snapshot;
 
+pub(crate) use adapters::DesktopOAuthEvents;
+use coordination::wake_coordinator;
 #[cfg(test)]
 use snapshot::{account_secret_available, SecretLookup};
 
 use super::{
     accounts::{
-        authority::{AccountMetadataSink, MetadataSinkError},
-        import_session::ImportSessionStore,
-        oauth_flow::{OAuthFlowEvent, OAuthFlowEventSink, OAuthFlowManager, OAuthFlowStatus},
-        NativeSecretBackend,
+        import_session::ImportSessionStore, oauth_flow::OAuthFlowManager, NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
     host::GatewayManager,
-    models::AutomationRecords,
     profiles::repair,
-    response_affinity::DesktopResponseAffinityStore,
     store::{telemetry_db::TelemetryDb, LocalPoolStore},
-    usage_writer::{DesktopUsageWriter, DesktopUsageWriterParts},
 };
 use std::{
     collections::HashMap,
-    future::Future,
     path::PathBuf,
-    pin::Pin,
     sync::{atomic::AtomicU64, Arc, Mutex, MutexGuard},
 };
-use tauri::{Emitter, Manager, UserAttentionType};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use zenith_relay_core::{
-    accounts::{AccountRecord, TokenAuthority},
-    automations::{
-        WakeAdapterPolicy, WakeCompletion, WakeCoordinator, WakeDecision, WakeOutcome, WakePermit,
-        WakeTask,
-    },
-    quota::{QuotaRefreshPermit, QuotaRefreshQueue, QuotaTransition},
-    ResponseAffinityStore, UsageCallback,
+    accounts::TokenAuthority, automations::WakeCoordinator, quota::QuotaRefreshQueue,
 };
 
 #[cfg(test)]
@@ -144,264 +133,6 @@ impl DesktopState {
             .record_performance(name, duration_ms, context)
     }
 
-    pub(crate) fn mark_quota_refresh(&self, account_id: &str, due_at_ms: u64) -> Result<bool> {
-        let changed = self
-            .quota_refresh_queue()?
-            .mark_dirty(account_id, due_at_ms)
-            .map_err(invalid_core_state)?;
-        if changed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(changed)
-    }
-
-    pub(crate) fn restore_quota_refresh(&self, previous: QuotaRefreshQueue) -> Result<()> {
-        *self.quota_refresh_queue()? = previous;
-        self.quota_refresh_notify.notify_one();
-        Ok(())
-    }
-
-    pub(crate) fn quota_refresh_snapshot(&self) -> Result<QuotaRefreshQueue> {
-        Ok(self.quota_refresh_queue()?.clone())
-    }
-
-    pub(crate) fn remove_quota_refresh(&self, account_id: &str) -> Result<bool> {
-        let removed = self.quota_refresh_queue()?.remove(account_id);
-        if removed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(removed)
-    }
-
-    pub(crate) fn sync_account_quota_refresh(
-        &self,
-        account_id: &str,
-        due_at_ms: u64,
-    ) -> Result<bool> {
-        let monitored_account = {
-            let store = self.store()?;
-            store.account(account_id).is_some_and(|account| {
-                account.remote_location.is_none()
-                    && account.account.is_automatic_quota_monitoring_eligible()
-            })
-        };
-        if monitored_account {
-            self.mark_quota_refresh(account_id, due_at_ms)
-        } else {
-            self.remove_quota_refresh(account_id)
-        }
-    }
-
-    pub(crate) fn quota_refresh_in_flight(&self, account_id: &str) -> Result<bool> {
-        Ok(self.quota_refresh_queue()?.is_in_flight(account_id))
-    }
-
-    pub(crate) fn claim_due_quota_refreshes(
-        &self,
-        now_ms: u64,
-        max_claims: usize,
-    ) -> Result<Vec<QuotaRefreshPermit>> {
-        Ok(self.quota_refresh_queue()?.claim_due(now_ms, max_claims))
-    }
-
-    pub(crate) fn reschedule_quota_refresh(
-        &self,
-        permit: QuotaRefreshPermit,
-        due_at_ms: u64,
-    ) -> Result<bool> {
-        let rescheduled = self.quota_refresh_queue()?.reschedule(permit, due_at_ms);
-        if rescheduled {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(rescheduled)
-    }
-
-    pub(crate) fn complete_quota_refresh(&self, permit: QuotaRefreshPermit) -> Result<bool> {
-        let completed = self.quota_refresh_queue()?.complete(permit);
-        if completed {
-            self.quota_refresh_notify.notify_one();
-        }
-        Ok(completed)
-    }
-
-    pub(crate) fn next_quota_refresh_due(&self) -> Result<Option<u64>> {
-        Ok(self.quota_refresh_queue()?.next_due())
-    }
-
-    pub(crate) async fn wait_for_quota_refresh(&self) {
-        self.quota_refresh_notify.notified().await;
-    }
-
-    pub(crate) fn evaluate_wake_transition(
-        &self,
-        task: &WakeTask,
-        account: &AccountRecord,
-        transition: &QuotaTransition,
-        policy: &WakeAdapterPolicy,
-        now_ms: u64,
-    ) -> Result<WakeDecision> {
-        let decision = self.update_wake(|coordinator| {
-            coordinator.evaluate(
-                task,
-                account,
-                transition,
-                account.last_used_at_ms,
-                policy,
-                now_ms,
-            )
-        })?;
-        let notify = matches!(
-            decision,
-            WakeDecision::Scheduled(_) | WakeDecision::Skipped(WakeOutcome::SkippedAlreadyStarted)
-        );
-        if notify {
-            self.wake_notify.notify_one();
-        }
-        Ok(decision)
-    }
-
-    pub(crate) fn claim_due_automatic_wakes(
-        &self,
-        now_ms: u64,
-        max_claims: usize,
-    ) -> Result<Vec<WakePermit>> {
-        self.update_wake(|coordinator| coordinator.claim_due_automatic(now_ms, max_claims))
-    }
-
-    pub(crate) fn claim_due_confirmation_wakes(
-        &self,
-        now_ms: u64,
-        max_claims: usize,
-    ) -> Result<Vec<WakePermit>> {
-        self.update_wake(|coordinator| coordinator.claim_due_confirmations(now_ms, max_claims))
-    }
-
-    pub(crate) fn complete_wake(
-        &self,
-        permit: WakePermit,
-        completion: WakeCompletion,
-    ) -> Result<bool> {
-        let completed = self.update_wake(|coordinator| coordinator.complete(permit, completion))?;
-        if completed {
-            self.wake_notify.notify_one();
-        }
-        Ok(completed)
-    }
-
-    pub(crate) fn is_wake_permit_active(&self, permit: &WakePermit) -> Result<bool> {
-        Ok(self.wake_coordinator_lock()?.is_permit_active(permit))
-    }
-
-    pub(crate) fn remove_pending_wakes_for_task(&self, task_id: &str) -> Result<usize> {
-        self.remove_pending_wakes(|coordinator| {
-            coordinator.remove_pending_for_task(task_id, now_ms())
-        })
-    }
-
-    pub(crate) fn remove_pending_wakes_for_account(&self, account_id: &str) -> Result<usize> {
-        self.remove_pending_wakes(|coordinator| {
-            coordinator.remove_pending_for_account(account_id, now_ms())
-        })
-    }
-
-    pub(crate) fn wake_snapshot(&self) -> Result<WakeCoordinator> {
-        Ok(self.wake_coordinator_lock()?.clone())
-    }
-
-    pub(crate) fn restore_wake(
-        &self,
-        previous: WakeCoordinator,
-        mut automations: AutomationRecords,
-    ) -> Result<()> {
-        let mut store = self.store()?;
-        let mut coordinator = self.wake_coordinator_lock()?;
-        automations.state = previous.state().clone();
-        store.replace_automations(automations)?;
-        *coordinator = previous;
-        drop(coordinator);
-        drop(store);
-        self.wake_notify.notify_one();
-        Ok(())
-    }
-
-    pub(crate) fn next_automatic_wake_due(&self) -> Result<Option<u64>> {
-        Ok(self.wake_coordinator_lock()?.next_automatic_due())
-    }
-
-    pub(crate) async fn wait_for_wake(&self) {
-        self.wake_notify.notified().await;
-    }
-
-    fn quota_refresh_queue(&self) -> Result<MutexGuard<'_, QuotaRefreshQueue>> {
-        self.quota_refresh
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "quota refresh queue lock poisoned"))
-    }
-
-    fn remove_pending_wakes(
-        &self,
-        remove: impl FnOnce(&mut WakeCoordinator) -> usize,
-    ) -> Result<usize> {
-        let removed = self.update_wake(remove)?;
-        if removed > 0 {
-            self.wake_notify.notify_one();
-        }
-        Ok(removed)
-    }
-
-    fn update_wake<T>(&self, update: impl FnOnce(&mut WakeCoordinator) -> T) -> Result<T> {
-        let mut store = self.store()?;
-        let mut coordinator = self.wake_coordinator_lock()?;
-        let mut next = coordinator.clone();
-        let output = update(&mut next);
-        let mut automations = store.automations().clone();
-        automations.state = next.state().clone();
-        store.replace_automations(automations)?;
-        *coordinator = next;
-        Ok(output)
-    }
-
-    fn wake_coordinator_lock(&self) -> Result<MutexGuard<'_, WakeCoordinator>> {
-        self.wake
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "wake coordinator lock poisoned"))
-    }
-
-    pub(crate) fn account_metadata_sink(&self) -> Arc<StoreAccountMetadata> {
-        Arc::new(StoreAccountMetadata {
-            store: self.store.clone(),
-        })
-    }
-
-    pub(crate) fn oauth_flow(&self) -> OAuthFlowManager<NativeSecretBackend, DesktopOAuthEvents> {
-        self.oauth_flow.clone()
-    }
-
-    pub(crate) fn set_app_handle(&self, app: tauri::AppHandle) {
-        self.oauth_events.set_app_handle(app);
-    }
-
-    pub fn usage_callback(&self) -> UsageCallback {
-        DesktopUsageWriter::new(DesktopUsageWriterParts {
-            telemetry: self.telemetry.clone(),
-            store: self.store.clone(),
-            quota_refresh: self.quota_refresh.clone(),
-            quota_refresh_notify: self.quota_refresh_notify.clone(),
-            wake: self.wake.clone(),
-            failed: self.failed_usage_writes.clone(),
-            wake_notify: self.wake_notify.clone(),
-            state_events: self.oauth_events.clone(),
-        })
-        .callback()
-    }
-
-    pub(crate) fn response_affinity_store(&self) -> Arc<dyn ResponseAffinityStore> {
-        Arc::new(DesktopResponseAffinityStore::new(
-            self.telemetry.clone(),
-            self.failed_affinity_writes.clone(),
-        ))
-    }
-
     pub async fn setup_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.setup_lock.lock().await
     }
@@ -463,90 +194,12 @@ impl DesktopState {
     }
 }
 
-fn wake_coordinator(automations: &AutomationRecords) -> Result<WakeCoordinator> {
-    WakeCoordinator::from_state(automations.state.clone()).map_err(invalid_core_state)
-}
-
 fn invalid_core_state(error: impl std::fmt::Display) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
 pub(super) fn now_ms() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
-}
-
-pub(crate) struct StoreAccountMetadata {
-    store: Arc<Mutex<LocalPoolStore>>,
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct DesktopOAuthEvents {
-    app: Arc<Mutex<Option<tauri::AppHandle>>>,
-}
-
-impl DesktopOAuthEvents {
-    fn set_app_handle(&self, app: tauri::AppHandle) {
-        if let Ok(mut current) = self.app.lock() {
-            *current = Some(app);
-        }
-    }
-
-    pub(super) fn emit_state_changed(&self) {
-        if let Some(app) = self.app.lock().ok().and_then(|app| app.clone()) {
-            let _ = app.emit("zenith-state-changed", ());
-        }
-    }
-}
-
-impl OAuthFlowEventSink for DesktopOAuthEvents {
-    fn emit(&self, event: OAuthFlowEvent) {
-        let app = self.app.lock().ok().and_then(|app| app.clone());
-        if let Some(app) = app {
-            if event.status == OAuthFlowStatus::CallbackReceived {
-                crate::tray::show_main_window(&app);
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.request_user_attention(Some(UserAttentionType::Informational));
-                }
-            }
-            let _ = app.emit("relay-oauth-status", event);
-        }
-    }
-}
-
-impl AccountMetadataSink for StoreAccountMetadata {
-    fn persist_generation<'a>(
-        &'a self,
-        local_account_id: &'a str,
-        generation: u64,
-        updated_at_ms: u64,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), MetadataSinkError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
-            let mut account = store
-                .account(local_account_id)
-                .cloned()
-                .ok_or(MetadataSinkError)?;
-            account.account.token_generation = generation;
-            account.account.token_updated_at_ms = Some(updated_at_ms);
-            store.upsert_account(account).map_err(|_| MetadataSinkError)
-        })
-    }
-
-    fn persist_auth_state<'a>(
-        &'a self,
-        local_account_id: &'a str,
-        auth_state: zenith_relay_core::accounts::AccountAuthState,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), MetadataSinkError>> + Send + 'a>> {
-        Box::pin(async move {
-            let mut store = self.store.lock().map_err(|_| MetadataSinkError)?;
-            let mut account = store
-                .account(local_account_id)
-                .cloned()
-                .ok_or(MetadataSinkError)?;
-            account.account.auth_state = auth_state;
-            store.upsert_account(account).map_err(|_| MetadataSinkError)
-        })
-    }
 }
 
 #[cfg(test)]
@@ -563,9 +216,10 @@ mod tests {
             AccountAuthMode, AccountAuthState, AccountHealthState, AccountIdentity, AccountRecord,
         },
         automations::{
-            AccountSelector, WakeExecutionPolicy, WakeModel, WakeModelPolicy, WakeTrigger,
+            AccountSelector, WakeAdapterPolicy, WakeCompletion, WakeDecision, WakeExecutionPolicy,
+            WakeModel, WakeModelPolicy, WakeOutcome, WakeTask, WakeTrigger,
         },
-        quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription},
+        quota::{QuotaSnapshot, QuotaTransition, QuotaWindow, QuotaWindowKind, Subscription},
         UsageEvent, WireApi,
     };
 
