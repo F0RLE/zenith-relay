@@ -119,59 +119,8 @@ impl Store {
     }
 
     pub fn routing_policy(&self) -> Result<PresetRoutingPolicy, String> {
-        let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
-            Ok(DEFAULT_MAX_RETRY_CANDIDATES),
-            |value| {
-                value
-                    .parse::<u8>()
-                    .map_err(|_| "max retry candidates is invalid".to_string())
-            },
-        )?;
-        let routing_strategy = match self.metadata("routing_strategy")?.as_deref() {
-            None | Some("adaptive") => RoutingStrategy::Adaptive,
-            Some("quota_highest") => RoutingStrategy::QuotaHighest,
-            Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
-            Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
-            Some(_) => return Err("routing strategy is invalid".to_string()),
-        };
-        let default_service_tier = match self.metadata("default_service_tier")?.as_deref() {
-            None | Some("standard") => DefaultServiceTier::Standard,
-            Some("fast") => DefaultServiceTier::Fast,
-            Some(_) => return Err("default service tier is invalid".to_string()),
-        };
-        let image_base_model = normalize_image_base_model(self.metadata("image_base_model")?)
-            .map_err(|error| error.to_string())?;
-        let subscription_plan_order =
-            self.metadata("subscription_plan_order")?
-                .map_or(Ok(Vec::new()), |value| {
-                    serde_json::from_str::<Vec<String>>(&value)
-                        .map_err(|_| "subscription plan order is invalid".to_string())
-                })?;
-        let subscription_plan_order =
-            normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
-        let cooldown_after_failures = self.metadata("cooldown_after_failures")?.map_or(
-            Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
-            |value| {
-                value
-                    .parse::<u8>()
-                    .map_err(|_| "cooldown after failures is invalid".to_string())
-            },
-        )?;
-        let keep_last_candidate_available = self
-            .metadata("keep_last_candidate_available")?
-            .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
-                value == "true"
-            });
-        validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
-        Ok(PresetRoutingPolicy {
-            max_retry_candidates,
-            cooldown_after_failures,
-            keep_last_candidate_available,
-            routing_strategy,
-            subscription_plan_order,
-            default_service_tier,
-            image_base_model,
-        })
+        let connection = self.lock()?;
+        routing_policy_from_connection(&connection)
     }
 
     pub fn set_routing_policy(&self, policy: &PresetRoutingPolicy) -> Result<(), String> {
@@ -627,49 +576,7 @@ fn configuration_settings_from_connection(
                 .map_err(|_| "quota request timeout is invalid".to_string())
         })?;
     validate_quota_request_timeout(request_timeout_seconds)?;
-    let max_retry_candidates = metadata_from(connection, "max_retry_candidates")?.map_or(
-        Ok(DEFAULT_MAX_RETRY_CANDIDATES),
-        |value| {
-            value
-                .parse::<u8>()
-                .map_err(|_| "max retry candidates is invalid".to_string())
-        },
-    )?;
-    let cooldown_after_failures = metadata_from(connection, "cooldown_after_failures")?.map_or(
-        Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
-        |value| {
-            value
-                .parse::<u8>()
-                .map_err(|_| "cooldown after failures is invalid".to_string())
-        },
-    )?;
-    let keep_last_candidate_available = metadata_from(connection, "keep_last_candidate_available")?
-        .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
-            value == "true"
-        });
-    validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
-    let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
-        None | Some("adaptive") => RoutingStrategy::Adaptive,
-        Some("quota_highest") => RoutingStrategy::QuotaHighest,
-        Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
-        Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
-        Some(_) => return Err("routing strategy is invalid".to_string()),
-    };
-    let default_service_tier = match metadata_from(connection, "default_service_tier")?.as_deref() {
-        None | Some("standard") => DefaultServiceTier::Standard,
-        Some("fast") => DefaultServiceTier::Fast,
-        Some(_) => return Err("default service tier is invalid".to_string()),
-    };
-    let image_base_model =
-        normalize_image_base_model(metadata_from(connection, "image_base_model")?)
-            .map_err(|error| error.to_string())?;
-    let subscription_plan_order =
-        metadata_from(connection, "subscription_plan_order")?.map_or(Ok(Vec::new()), |value| {
-            serde_json::from_str::<Vec<String>>(&value)
-                .map_err(|_| "subscription plan order is invalid".to_string())
-        })?;
-    let subscription_plan_order =
-        normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
+    let routing = routing_policy_from_connection(connection)?;
     let hidden_models = normalize_model_ids(
         metadata_from(connection, "hidden_model_ids")?.map_or(Ok(Vec::new()), |value| {
             serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())
@@ -691,15 +598,7 @@ fn configuration_settings_from_connection(
     Ok(ConfigurationPresetSettings {
         sources,
         accounts,
-        routing: PresetRoutingPolicy {
-            max_retry_candidates,
-            cooldown_after_failures,
-            keep_last_candidate_available,
-            routing_strategy,
-            subscription_plan_order,
-            default_service_tier,
-            image_base_model,
-        },
+        routing,
         quota: PresetQuotaPolicy {
             request_timeout_seconds,
             account_proxy_required: metadata_from(connection, "account_proxy_required")?
@@ -970,6 +869,61 @@ fn metadata_from(connection: &Connection, key: &str) -> Result<Option<String>, S
         })
         .optional()
         .map_err(db_error)
+}
+
+fn routing_policy_from_connection(connection: &Connection) -> Result<PresetRoutingPolicy, String> {
+    let max_retry_candidates = metadata_from(connection, "max_retry_candidates")?.map_or(
+        Ok(DEFAULT_MAX_RETRY_CANDIDATES),
+        |value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| "max retry candidates is invalid".to_string())
+        },
+    )?;
+    let routing_strategy = match metadata_from(connection, "routing_strategy")?.as_deref() {
+        None | Some("adaptive") => RoutingStrategy::Adaptive,
+        Some("quota_highest") => RoutingStrategy::QuotaHighest,
+        Some("subscription_expiry") => RoutingStrategy::SubscriptionExpiry,
+        Some("subscription_plan") => RoutingStrategy::SubscriptionPlan,
+        Some(_) => return Err("routing strategy is invalid".to_string()),
+    };
+    let default_service_tier = match metadata_from(connection, "default_service_tier")?.as_deref() {
+        None | Some("standard") => DefaultServiceTier::Standard,
+        Some("fast") => DefaultServiceTier::Fast,
+        Some(_) => return Err("default service tier is invalid".to_string()),
+    };
+    let image_base_model =
+        normalize_image_base_model(metadata_from(connection, "image_base_model")?)
+            .map_err(|error| error.to_string())?;
+    let subscription_plan_order =
+        metadata_from(connection, "subscription_plan_order")?.map_or(Ok(Vec::new()), |value| {
+            serde_json::from_str::<Vec<String>>(&value)
+                .map_err(|_| "subscription plan order is invalid".to_string())
+        })?;
+    let subscription_plan_order =
+        normalize_subscription_plan_order(subscription_plan_order).map_err(str::to_string)?;
+    let cooldown_after_failures = metadata_from(connection, "cooldown_after_failures")?.map_or(
+        Ok(DEFAULT_COOLDOWN_AFTER_FAILURES),
+        |value| {
+            value
+                .parse::<u8>()
+                .map_err(|_| "cooldown after failures is invalid".to_string())
+        },
+    )?;
+    let keep_last_candidate_available = metadata_from(connection, "keep_last_candidate_available")?
+        .map_or(DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE, |value| {
+            value == "true"
+        });
+    validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
+    Ok(PresetRoutingPolicy {
+        max_retry_candidates,
+        cooldown_after_failures,
+        keep_last_candidate_available,
+        routing_strategy,
+        subscription_plan_order,
+        default_service_tier,
+        image_base_model,
+    })
 }
 
 fn configuration_replace_message(error: ConfigurationReplaceError) -> String {
