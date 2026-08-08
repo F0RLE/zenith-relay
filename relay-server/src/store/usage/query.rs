@@ -1,5 +1,5 @@
 use super::super::{
-    records::SourcePriceOverrides,
+    configuration::SourcePriceOverrides,
     sqlite::{db_error, optional_u64},
 };
 use rusqlite::{params_from_iter, types::Value as SqlValue, Connection};
