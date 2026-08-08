@@ -85,15 +85,7 @@ impl AppState {
         let hidden_models = self.store.hidden_models()?;
         let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
         let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
-        let (
-            max_retry_candidates,
-            routing_strategy,
-            default_service_tier,
-            _,
-            subscription_plan_order,
-            cooldown_after_failures,
-            keep_last_candidate_available,
-        ) = self.store.routing_policy()?;
+        let routing_policy = self.store.routing_policy()?;
         // Candidate state remains available to management, while the internal
         // profile credential derives its request scope solely from pool membership.
         let mut pool_source_ids = source_records
@@ -224,13 +216,13 @@ impl AppState {
                 agent_identities,
             },
             GatewayRuntimeOptions {
-                max_retry_candidates: usize::from(max_retry_candidates),
-                cooldown_after_failures,
-                keep_last_candidate_available,
-                routing_strategy,
-                subscription_plan_order,
+                max_retry_candidates: usize::from(routing_policy.max_retry_candidates),
+                cooldown_after_failures: routing_policy.cooldown_after_failures,
+                keep_last_candidate_available: routing_policy.keep_last_candidate_available,
+                routing_strategy: routing_policy.routing_strategy,
+                subscription_plan_order: routing_policy.subscription_plan_order,
                 hidden_models,
-                default_service_tier,
+                default_service_tier: routing_policy.default_service_tier,
                 quota_stale_after_ms,
                 image_base_model: None,
                 model_reasoning_allowed_levels,
@@ -387,15 +379,7 @@ impl AppState {
         let common_proxy_available = common_proxy_available(self, common_proxy_configured);
         let account_proxy_required = self.store.account_proxy_required()?;
         let quota_request_timeout_seconds = self.store.quota_request_timeout_seconds()?;
-        let (
-            max_retry_candidates,
-            routing_strategy,
-            default_service_tier,
-            image_base_model,
-            subscription_plan_order,
-            cooldown_after_failures,
-            keep_last_candidate_available,
-        ) = self.store.routing_policy()?;
+        let routing_policy = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let model_price_overrides = self.store.model_price_overrides()?;
         let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
@@ -466,7 +450,7 @@ impl AppState {
                         .get(&identity_hint(&record.id))
                         .copied()
                         .unwrap_or_default(),
-                    default_service_tier,
+                    routing_policy.default_service_tier,
                     QUOTA_STALE_AFTER_MS,
                 ))
             })
@@ -485,7 +469,7 @@ impl AppState {
                 "chatgpt",
                 record.subscription.plan_type.as_deref(),
                 &record.quota,
-                default_service_tier,
+                routing_policy.default_service_tier,
                 economics_revision,
                 &plan_benchmarks,
             );
@@ -560,13 +544,13 @@ impl AppState {
                         })
                         .count(),
                 visible_model_ids,
-                max_retry_candidates,
-                cooldown_after_failures,
-                keep_last_candidate_available,
-                routing_strategy,
-                subscription_plan_order,
-                default_service_tier,
-                image_base_model,
+                max_retry_candidates: routing_policy.max_retry_candidates,
+                cooldown_after_failures: routing_policy.cooldown_after_failures,
+                keep_last_candidate_available: routing_policy.keep_last_candidate_available,
+                routing_strategy: routing_policy.routing_strategy,
+                subscription_plan_order: routing_policy.subscription_plan_order,
+                default_service_tier: routing_policy.default_service_tier,
+                image_base_model: routing_policy.image_base_model,
                 models,
                 common_proxy_configured,
                 common_proxy_available,

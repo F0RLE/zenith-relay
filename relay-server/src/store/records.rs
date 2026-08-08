@@ -27,16 +27,6 @@ pub const DEFAULT_MAX_RETRY_CANDIDATES: u8 = 3;
 
 pub(super) type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
 
-pub type RoutingPolicy = (
-    u8,
-    RoutingStrategy,
-    DefaultServiceTier,
-    Option<String>,
-    Vec<String>,
-    u8,
-    bool,
-);
-
 #[derive(Debug)]
 pub enum ConfigurationReplaceError {
     Stale { current_revision: String },
@@ -128,7 +118,7 @@ impl Store {
         Ok(timeout)
     }
 
-    pub fn routing_policy(&self) -> Result<RoutingPolicy, String> {
+    pub fn routing_policy(&self) -> Result<PresetRoutingPolicy, String> {
         let max_retry_candidates = self.metadata("max_retry_candidates")?.map_or(
             Ok(DEFAULT_MAX_RETRY_CANDIDATES),
             |value| {
@@ -173,15 +163,15 @@ impl Store {
                 value == "true"
             });
         validate_routing_policy(max_retry_candidates, cooldown_after_failures)?;
-        Ok((
+        Ok(PresetRoutingPolicy {
             max_retry_candidates,
-            routing_strategy,
-            default_service_tier,
-            image_base_model,
-            subscription_plan_order,
             cooldown_after_failures,
             keep_last_candidate_available,
-        ))
+            routing_strategy,
+            subscription_plan_order,
+            default_service_tier,
+            image_base_model,
+        })
     }
 
     pub fn set_routing_policy(&self, policy: &PresetRoutingPolicy) -> Result<(), String> {
@@ -1129,15 +1119,15 @@ mod tests {
         let store = Store::open(path.clone()).unwrap();
         assert_eq!(
             store.routing_policy().unwrap(),
-            (
-                3,
-                RoutingStrategy::Adaptive,
-                DefaultServiceTier::Standard,
-                None,
-                Vec::new(),
-                DEFAULT_COOLDOWN_AFTER_FAILURES,
-                DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
-            )
+            PresetRoutingPolicy {
+                max_retry_candidates: 3,
+                cooldown_after_failures: DEFAULT_COOLDOWN_AFTER_FAILURES,
+                keep_last_candidate_available: DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+                routing_strategy: RoutingStrategy::Adaptive,
+                subscription_plan_order: Vec::new(),
+                default_service_tier: DefaultServiceTier::Standard,
+                image_base_model: None,
+            }
         );
         assert!(store
             .set_routing_policy(&PresetRoutingPolicy {
@@ -1166,15 +1156,15 @@ mod tests {
         let reopened = Store::open(path).unwrap();
         assert_eq!(
             reopened.routing_policy().unwrap(),
-            (
-                5,
-                RoutingStrategy::SubscriptionPlan,
-                DefaultServiceTier::Fast,
-                Some("gpt-5.4-mini".into()),
-                vec!["business".into(), "plus".into()],
-                5,
-                false,
-            )
+            PresetRoutingPolicy {
+                max_retry_candidates: 5,
+                cooldown_after_failures: 5,
+                keep_last_candidate_available: false,
+                routing_strategy: RoutingStrategy::SubscriptionPlan,
+                subscription_plan_order: vec!["business".into(), "plus".into()],
+                default_service_tier: DefaultServiceTier::Fast,
+                image_base_model: Some("gpt-5.4-mini".into()),
+            }
         );
         drop(reopened);
         fs::remove_dir_all(root).unwrap();
