@@ -291,7 +291,7 @@ test("API source routing editor stays readable in the standard window", async ({
   await page.getByRole("button", { name: "Правила участника пула: Example compatible API" }).click();
 
   const dialog = page.getByRole("dialog", { name: /Правила участника пула.*Example compatible API/ });
-  await expect(dialog.locator('.source-route-map[role="group"] > button[aria-pressed]')).toHaveCount(3);
+  await expect(dialog.locator('.source-route-map[role="radiogroup"] > button[role="radio"]')).toHaveCount(3);
   await expect(dialog.getByLabel("Порядок перехода при ошибке")).toContainText("Учётные записи");
   await expect(dialog.getByRole("spinbutton", { name: "Доля трафика" })).toHaveCount(0);
   await expect(dialog.getByRole("list", { name: "Порядок API в этой роли" }).getByRole("listitem")).toHaveCount(1);
