@@ -13,7 +13,7 @@ use crate::scheduler::{CooldownReason, CooldownRequest};
 use crate::sources::discover_models_with_client;
 use crate::ProxyConfig;
 use crate::{
-    api_model_price, decode_codex_model_alias, normalize_source_protocol_bindings,
+    decode_codex_model_alias, normalize_source_protocol_bindings,
     normalize_subscription_plan_order, CandidateHealth, CandidateKind, CandidateQuota,
     CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules,
     NativeResponsesReplayState, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
@@ -26,7 +26,6 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -36,7 +35,13 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 mod candidates;
+mod images;
 mod source_metadata;
+
+#[cfg(test)]
+use images::cheapest_image_main_model;
+pub use images::normalize_image_base_model;
+use images::select_image_main_model;
 
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
@@ -2507,97 +2512,6 @@ fn normalized_set<'a>(values: impl IntoIterator<Item = &'a String>) -> BTreeSet<
         }
     }
     normalized.into_values().collect()
-}
-
-pub fn normalize_image_base_model(value: Option<String>) -> Result<Option<String>> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    if value.is_empty() || value.eq_ignore_ascii_case("auto") {
-        return Ok(None);
-    }
-    if value.len() > 256 || value.chars().any(char::is_control) {
-        return Err(Error::Validation(
-            "image base model id is invalid".to_string(),
-        ));
-    }
-    Ok(Some(value.to_string()))
-}
-
-fn select_image_main_model(models: &BTreeSet<String>, preferred: Option<&str>) -> Option<String> {
-    match preferred
-        .map(str::trim)
-        .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("auto"))
-    {
-        Some(preferred) => models
-            .iter()
-            .find(|model| {
-                model.eq_ignore_ascii_case(preferred)
-                    && !model.eq_ignore_ascii_case(IMAGE_API_MODEL)
-            })
-            .cloned(),
-        None => cheapest_image_main_model(models),
-    }
-}
-
-fn cheapest_image_main_model(models: &BTreeSet<String>) -> Option<String> {
-    models
-        .iter()
-        .filter(|model| image_auto_model_is_supported(model))
-        .min_by(|left, right| compare_image_main_models(left, right))
-        .cloned()
-}
-
-fn image_main_model_is_compatible(model: &str) -> bool {
-    let lower = model.trim().to_ascii_lowercase();
-    !lower.is_empty()
-        && lower != IMAGE_API_MODEL
-        && [
-            "image",
-            "embedding",
-            "moderation",
-            "realtime",
-            "transcribe",
-            "tts",
-            "audio",
-        ]
-        .iter()
-        .all(|excluded| !lower.contains(excluded))
-}
-
-fn image_auto_model_is_supported(model: &str) -> bool {
-    // OpenAI's image-generation guide currently requires GPT-5 or newer for the Responses tool.
-    let lower = model.trim().to_ascii_lowercase();
-    let Some(version) = lower.strip_prefix("gpt-") else {
-        return false;
-    };
-    let major = version
-        .split(|character: char| !character.is_ascii_digit())
-        .next()
-        .and_then(|value| value.parse::<u32>().ok());
-    major.is_some_and(|major| major >= 5)
-        && image_main_model_is_compatible(model)
-        && api_model_price(model).is_some()
-}
-
-fn compare_image_main_models(left: &str, right: &str) -> CmpOrdering {
-    match (api_model_price(left), api_model_price(right)) {
-        (Some(left_price), Some(right_price)) => left_price
-            .input_micro_usd_per_million
-            .cmp(&right_price.input_micro_usd_per_million)
-            .then_with(|| {
-                left_price
-                    .output_micro_usd_per_million
-                    .cmp(&right_price.output_micro_usd_per_million)
-            })
-            .then_with(|| left_price.catalog_rank.cmp(&right_price.catalog_rank)),
-        (Some(_), None) => CmpOrdering::Less,
-        (None, Some(_)) => CmpOrdering::Greater,
-        (None, None) => CmpOrdering::Equal,
-    }
-    .then_with(|| left.len().cmp(&right.len()))
-    .then_with(|| left.cmp(right))
 }
 
 fn model_rules(allowed: &[String], excluded: &[String]) -> ModelRules {
