@@ -1,5 +1,6 @@
 mod accounts;
 mod automations;
+mod error;
 mod gateway;
 mod imports;
 mod keys;
@@ -10,19 +11,20 @@ mod routing;
 mod sources;
 mod usage;
 
+pub use error::ManagementError;
+
 use crate::config_presets::{self, PresetError};
 use crate::state::{AppState, ServerAccountRecord};
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use std::collections::HashSet;
 use std::sync::Arc;
 use zenith_relay_core::protocol::{
-    AccountSummary, ApiError, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
+    AccountSummary, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
     ConfigurationPresetDocument, ConfigurationPresetPreview, ConfigurationPresetPreviewInput,
-    ErrorEnvelope, HealthResponse, RuntimeStateSnapshot,
+    HealthResponse, RuntimeStateSnapshot,
 };
 use zenith_relay_core::CandidateRuntimeSnapshot;
 
@@ -172,66 +174,6 @@ fn valid_weight(value: u32) -> Result<u32, ManagementError> {
     (value > 0)
         .then_some(value)
         .ok_or_else(|| validation_error("weight must be positive"))
-}
-
-#[derive(Debug)]
-pub struct ManagementError {
-    status: StatusCode,
-    code: String,
-    message: String,
-    stage: String,
-    retryable: bool,
-}
-
-impl ManagementError {
-    fn validation(code: &str, message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, code, message, "validation", false)
-    }
-    fn not_found(code: &str, message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, code, message, "lookup", false)
-    }
-    fn internal(code: &str, message: impl Into<String>) -> Self {
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            code,
-            message,
-            "server",
-            true,
-        )
-    }
-    fn new(
-        status: StatusCode,
-        code: &str,
-        message: impl Into<String>,
-        stage: &str,
-        retryable: bool,
-    ) -> Self {
-        Self {
-            status,
-            code: code.to_string(),
-            message: message.into(),
-            stage: stage.to_string(),
-            retryable,
-        }
-    }
-}
-
-impl IntoResponse for ManagementError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(ErrorEnvelope {
-                error: ApiError {
-                    code: self.code,
-                    message: self.message,
-                    stage: self.stage,
-                    retryable: self.retryable,
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                },
-            }),
-        )
-            .into_response()
-    }
 }
 
 fn validation_error(message: impl Into<String>) -> ManagementError {
