@@ -334,28 +334,7 @@ pub struct GatewayRuntime {
     candidate_availability: Arc<tokio::sync::Notify>,
     registry: ModelRegistry,
     codex_responses_lite_models: Mutex<BTreeSet<String>>,
-    /// Native Codex catalog rows returned by `/models?client_version=...`.
-    codex_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
-    /// Generic source `/models` rows used only for source-declared
-    /// capabilities such as context and reasoning.
-    ///
-    /// This must remain separate from `codex_model_manifests`: a provider can
-    /// legitimately return different payload shapes for the generic endpoint
-    /// and for Codex's catalog request.
-    source_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
-    /// Serializes generic `/models` discovery so a dashboard prefetch cannot
-    /// duplicate a simultaneous Codex catalog request.
-    source_model_metadata_refresh_lock: tokio::sync::Mutex<()>,
-    source_model_metadata_prefetch_pending: AtomicBool,
-    /// Avoid polling an unavailable provider's `/models` endpoint on every
-    /// management-state refresh. Explicit Codex catalog requests still use the
-    /// normal refresh path.
-    source_model_metadata_prefetch_not_before_ms: AtomicU64,
-    /// Confirmed source route -> effort support, populated while refreshing
-    /// the Codex catalog. It is deliberately separate from native account
-    /// catalog metadata, which remains opaque.
-    confirmed_source_reasoning_efforts: Mutex<BTreeMap<String, BTreeMap<String, BTreeSet<String>>>>,
-    confirmed_source_reasoning_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    model_metadata: SourceModelMetadataState,
     model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
@@ -381,6 +360,37 @@ struct CachedModelManifest {
     observed_at_ms: u64,
 }
 
+struct SourceModelMetadataState {
+    /// Native Codex catalog rows returned by `/models?client_version=...`.
+    codex_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    /// Generic source `/models` rows used only for source-declared
+    /// capabilities such as context and reasoning. This stays separate from
+    /// the Codex catalog because providers can return different payloads.
+    source_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    /// Serializes generic discovery and throttles best-effort prefetches.
+    refresh_lock: tokio::sync::Mutex<()>,
+    prefetch_pending: AtomicBool,
+    prefetch_not_before_ms: AtomicU64,
+    /// Confirmed source route -> effort support. Native account metadata is
+    /// intentionally kept out of this state.
+    confirmed_reasoning_efforts: Mutex<BTreeMap<String, BTreeMap<String, BTreeSet<String>>>>,
+    confirmed_reasoning_levels: Mutex<BTreeMap<String, Vec<String>>>,
+}
+
+impl Default for SourceModelMetadataState {
+    fn default() -> Self {
+        Self {
+            codex_manifests: Mutex::new(BTreeMap::new()),
+            source_manifests: Mutex::new(BTreeMap::new()),
+            refresh_lock: tokio::sync::Mutex::new(()),
+            prefetch_pending: AtomicBool::new(false),
+            prefetch_not_before_ms: AtomicU64::new(0),
+            confirmed_reasoning_efforts: Mutex::new(BTreeMap::new()),
+            confirmed_reasoning_levels: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
 struct SourceModelMetadataPrefetchGuard {
     runtime: Arc<GatewayRuntime>,
 }
@@ -388,7 +398,8 @@ struct SourceModelMetadataPrefetchGuard {
 impl Drop for SourceModelMetadataPrefetchGuard {
     fn drop(&mut self) {
         self.runtime
-            .source_model_metadata_prefetch_pending
+            .model_metadata
+            .prefetch_pending
             .store(false, Ordering::Release);
     }
 }
@@ -1001,13 +1012,7 @@ impl GatewayRuntime {
             candidate_availability: Arc::new(tokio::sync::Notify::new()),
             registry,
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
-            codex_model_manifests: Mutex::new(BTreeMap::new()),
-            source_model_manifests: Mutex::new(BTreeMap::new()),
-            source_model_metadata_refresh_lock: tokio::sync::Mutex::new(()),
-            source_model_metadata_prefetch_pending: AtomicBool::new(false),
-            source_model_metadata_prefetch_not_before_ms: AtomicU64::new(0),
-            confirmed_source_reasoning_efforts: Mutex::new(BTreeMap::new()),
-            confirmed_source_reasoning_levels: Mutex::new(BTreeMap::new()),
+            model_metadata: SourceModelMetadataState::default(),
             model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
             passive_quotas: Mutex::new(passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
@@ -1229,13 +1234,15 @@ impl GatewayRuntime {
     pub fn prefetch_source_model_metadata(self: &Arc<Self>) {
         if runtime_now_ms()
             < self
-                .source_model_metadata_prefetch_not_before_ms
+                .model_metadata
+                .prefetch_not_before_ms
                 .load(Ordering::Acquire)
         {
             return;
         }
         if self
-            .source_model_metadata_prefetch_pending
+            .model_metadata
+            .prefetch_pending
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -1252,7 +1259,7 @@ impl GatewayRuntime {
             runtime
                 .source_model_metadata(&rules, &scope, &[WireApi::Responses], runtime_now_ms())
                 .await;
-            runtime.source_model_metadata_prefetch_not_before_ms.store(
+            runtime.model_metadata.prefetch_not_before_ms.store(
                 runtime_now_ms().saturating_add(SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS),
                 Ordering::Release,
             );
@@ -1290,7 +1297,7 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
-        let _refresh_guard = self.source_model_metadata_refresh_lock.lock().await;
+        let _refresh_guard = self.model_metadata.refresh_lock.lock().await;
         let routes = {
             let scheduler = self.lock_scheduler();
             let mut routes = Vec::new();
@@ -1472,13 +1479,15 @@ impl GatewayRuntime {
                 .insert(model, capabilities.codex_catalog_template());
         }
         let previous_levels = self
-            .confirmed_source_reasoning_levels
+            .model_metadata
+            .confirmed_reasoning_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let confirmed_levels = {
             let mut confirmed_efforts = self
-                .confirmed_source_reasoning_efforts
+                .model_metadata
+                .confirmed_reasoning_efforts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for (model, candidate_id, efforts) in evaluated_reasoning {
@@ -1504,7 +1513,8 @@ impl GatewayRuntime {
             )
         };
         *self
-            .confirmed_source_reasoning_levels
+            .model_metadata
+            .confirmed_reasoning_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_levels;
         for (model, route_support) in image_support_by_model {
@@ -1544,7 +1554,8 @@ impl GatewayRuntime {
         if scheduler.candidate(candidate_id).is_none() {
             return;
         }
-        self.codex_model_manifests
+        self.model_metadata
+            .codex_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -1566,7 +1577,8 @@ impl GatewayRuntime {
         if scheduler.candidate(candidate_id).is_none() {
             return;
         }
-        self.source_model_manifests
+        self.model_metadata
+            .source_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -1579,7 +1591,8 @@ impl GatewayRuntime {
     }
 
     fn cached_source_model_manifest(&self, candidate_id: &str) -> Option<CachedModelManifest> {
-        self.source_model_manifests
+        self.model_metadata
+            .source_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(candidate_id)
@@ -1591,7 +1604,8 @@ impl GatewayRuntime {
         candidate_ids: impl IntoIterator<Item = &'a str>,
     ) -> Vec<Value> {
         let manifests = self
-            .codex_model_manifests
+            .model_metadata
+            .codex_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         candidate_ids
@@ -1671,7 +1685,8 @@ impl GatewayRuntime {
             return;
         }
         let capabilities = self
-            .confirmed_source_reasoning_efforts
+            .model_metadata
+            .confirmed_reasoning_efforts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A catalog refresh can be absent or temporarily fail. Until at least
@@ -1691,7 +1706,8 @@ impl GatewayRuntime {
     }
 
     pub fn confirmed_source_reasoning_levels(&self, model: &str) -> Vec<String> {
-        self.confirmed_source_reasoning_levels
+        self.model_metadata
+            .confirmed_reasoning_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model.trim().to_ascii_lowercase())
@@ -1734,7 +1750,8 @@ impl GatewayRuntime {
     }
 
     pub fn supports_source_reasoning_effort(&self, model: &str, effort: &str) -> bool {
-        self.confirmed_source_reasoning_efforts
+        self.model_metadata
+            .confirmed_reasoning_efforts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&model.trim().to_ascii_lowercase())
@@ -1934,22 +1951,26 @@ impl GatewayRuntime {
 
     pub fn remove_candidate(&self, candidate_id: &str) -> bool {
         let removed = self.lock_scheduler().remove(candidate_id).is_some();
-        self.codex_model_manifests
+        self.model_metadata
+            .codex_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
-        self.source_model_manifests
+        self.model_metadata
+            .source_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
         let previous_levels = self
-            .confirmed_source_reasoning_levels
+            .model_metadata
+            .confirmed_reasoning_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let confirmed_levels = {
             let mut efforts = self
-                .confirmed_source_reasoning_efforts
+                .model_metadata
+                .confirmed_reasoning_efforts
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             for routes in efforts.values_mut() {
@@ -1959,7 +1980,8 @@ impl GatewayRuntime {
             confirmed_source_reasoning_levels(&efforts, &previous_levels, &BTreeMap::new())
         };
         *self
-            .confirmed_source_reasoning_levels
+            .model_metadata
+            .confirmed_reasoning_levels
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_levels;
         self.passive_quotas
@@ -3999,13 +4021,15 @@ mod tests {
             vec!["low".to_string(), "medium".to_string(), "high".to_string()]
         );
         let not_before = runtime
-            .source_model_metadata_prefetch_not_before_ms
+            .model_metadata
+            .prefetch_not_before_ms
             .load(Ordering::Acquire);
         assert!(not_before > runtime_now_ms());
         runtime.prefetch_source_model_metadata();
         assert_eq!(
             runtime
-                .source_model_metadata_prefetch_not_before_ms
+                .model_metadata
+                .prefetch_not_before_ms
                 .load(Ordering::Acquire),
             not_before
         );
