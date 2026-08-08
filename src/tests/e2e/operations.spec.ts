@@ -1707,13 +1707,13 @@ for (const mode of ["local", "remote"] as const) {
     await expect(member).toContainText("Stabilizer");
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     let editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /API first/ }).click();
+    await editor.getByRole("group", { name: "API source role" }).getByRole("button", { name: /API first/ }).click();
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("API first");
 
     await member.getByRole("button", { name: "Pool member policy: Failover API" }).click();
     editor = page.getByRole("dialog", { name: /Pool member policy/ });
-    await editor.getByRole("radiogroup", { name: "API source role" }).getByRole("radio", { name: /Last resort/ }).click();
+    await editor.getByRole("group", { name: "API source role" }).getByRole("button", { name: /Last resort/ }).click();
     await editor.getByRole("button", { name: "Save policy" }).click();
     await expect(member).toContainText("Last resort");
 
