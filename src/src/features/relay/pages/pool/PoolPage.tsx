@@ -6,17 +6,16 @@ import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, ConfigurationPresetPreview, DefaultServiceTier, ModelSummary, RelayMode, RoutingStrategy, SourceStats, SourceSummary } from "../../api/types";
 import { SourcePriceEditor, parseSourcePriceDrafts, sourcePriceDrafts, type SourcePriceDrafts } from "../../components/SourcePriceEditor";
 import { effectiveSourceProtocolBindings } from "../../sourceProtocolBindings";
-import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
-import type { ApiSourceRole } from "../../components/Ui";
-import { groupModels, supportsCacheWritePricing } from "../../modelGroups";
+import { QuotaEconomicsStrip, AccountPlanBadge, Button, Dialog, EmptyState, IconButton, OptionMenu, PageHeader, QuotaStack, StatusIcon, Tabs, accountErrorLabel, currentAccountErrorCode, formatDetailedRemainingTime, isCodexOauthAccountEligible, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
+import { supportsCacheWritePricing } from "../../modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../../modelPricing";
-import { activeModelCounts, activeRequestCount, compareRoutingOrder, compareSubscriptionPlanPriority, routingOrderPositions } from "../../routingOrder";
+import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, activeModelCounts, activeRequestCount, compareRoutingOrder, routingOrderPositions, type ApiSourceRole } from "../../routingOrder";
+import { clampRoutingCount, comparePoolMembers, compareStableText, groupModelSummariesForLauncher, memberName, mergeSubscriptionPlanOrder, modelSummaries, sourceOrderForRole, sourceRoutingStages, subscriptionPlanGroups, toggle, type PoolMember } from "../../poolHelpers";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { AccountErrorDialog, SourceDialog } from "../connections/ConnectionsPage";
 
 type View = "members" | "models";
-type Member = (AccountSummary & { kind: "account" }) | (SourceSummary & { kind: "source" });
-type SubscriptionPlanGroup = { id: string; label: string; count: number };
+type Member = PoolMember;
 type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: boolean };
 
 export function PoolPage() {
@@ -454,22 +453,6 @@ function RoutingPolicyDialog({ onClose }: { onClose: () => void }) {
   </Dialog>;
 }
 
-function subscriptionPlanGroups(accounts: AccountSummary[], unknown: string): SubscriptionPlanGroup[] {
-  const groups = new Map<string, SubscriptionPlanGroup>();
-  for (const account of accounts.filter((account) => account.inPool)) {
-    const id = account.subscription.planType?.trim().toLocaleLowerCase() || "unknown";
-    const current = groups.get(id);
-    if (current) current.count += 1;
-    else groups.set(id, { id, label: accountPlanOption(account.subscription.planType, unknown).label, count: 1 });
-  }
-  return [...groups.values()].sort((left, right) => compareSubscriptionPlanPriority(accountPlanOption(left.id === "unknown" ? null : left.id, unknown), accountPlanOption(right.id === "unknown" ? null : right.id, unknown)));
-}
-
-function mergeSubscriptionPlanOrder(groups: SubscriptionPlanGroup[], saved: string[]) {
-  const available = new Set(groups.map((group) => group.id));
-  return [...saved.filter((plan) => available.delete(plan)), ...groups.map((group) => group.id).filter((plan) => available.has(plan))];
-}
-
 function MemberEditor({ member, onClose }: { member: Member; onClose: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
@@ -494,7 +477,7 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
   const [purchaseCost, setPurchaseCost] = useState(member.kind === "account" && member.economics?.purchaseCostMicroUsd ? String(member.economics.purchaseCostMicroUsd / 1_000_000) : "");
   const purchaseCostUsd = purchaseCost.trim() === "" ? 0 : Number(purchaseCost);
   const purchaseCostValid = Number.isFinite(purchaseCostUsd) && purchaseCostUsd >= 0 && purchaseCostUsd <= 1_000_000;
-  const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole, t) : [];
+  const sourceStages = member.kind === "source" ? sourceRoutingStages(runtime?.sources ?? [], runtime?.accounts ?? [], member.id, sourceRole) : [];
   const orderedSources = sourceOrder.map((sourceId) => runtime?.sources.find((source) => source.id === sourceId)).filter((source): source is SourceSummary => Boolean(source));
   const chooseSourceRole = (role: ApiSourceRole) => {
     setSourceRole(role);
@@ -544,9 +527,14 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
         <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
           <span>{t("sources.fallbackOrder")}</span>
           <div className="source-route-map" role="group" aria-label={t("sources.poolRole")}>
-            {sourceStages.map((stage, index) => stage.role === "accounts"
-              ? <div className="source-route-stage accounts" key={stage.role} aria-label={`${stage.label}: ${stage.count}`}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></div>
-              : <button className="source-route-stage" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} type="button" aria-pressed={stage.role === sourceRole} aria-label={`${stage.label}: ${t(`sources.roleHints.${stage.role}`)}`} onClick={() => chooseSourceRole(stage.role)}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></button>)}
+            {sourceStages.map((stage, index) => {
+              const label = stage.role === "accounts" ? t("connections.accounts") : t(`sources.roles.${stage.role}`);
+              if (stage.role === "accounts") {
+                return <div className="source-route-stage accounts" key={stage.role} aria-label={`${label}: ${stage.count}`}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></div>;
+              }
+              const role: ApiSourceRole = stage.role;
+              return <button className="source-route-stage" data-current={role === sourceRole ? "true" : undefined} key={role} type="button" aria-pressed={role === sourceRole} aria-label={`${label}: ${t(`sources.roleHints.${role}`)}`} onClick={() => chooseSourceRole(role)}><small>{index + 1}</small><strong>{label}</strong><span>{stage.count}</span></button>;
+            })}
           </div>
         </div>
         <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
@@ -583,35 +571,6 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
       </details>}
     </div>
   </Dialog>;
-}
-
-function sourceOrderForRole(sources: SourceSummary[], role: ApiSourceRole, sourceId: string) {
-  const current = sources.find((source) => source.id === sourceId);
-  const ordered = sources
-    .filter((source) => source.inPool && source.id !== sourceId && apiSourceRole(source.priority) === role)
-    .sort((left, right) => right.priority - left.priority || compareStableText(left.name, right.name) || compareStableText(left.id, right.id));
-  if (!current) return ordered.map((source) => source.id);
-  if (apiSourceRole(current.priority) === role) {
-    ordered.push(current);
-    ordered.sort((left, right) => right.priority - left.priority || compareStableText(left.name, right.name) || compareStableText(left.id, right.id));
-  } else {
-    ordered.push(current);
-  }
-  return ordered.map((source) => source.id);
-}
-
-function sourceRoutingStages(sources: SourceSummary[], accounts: AccountSummary[], sourceId: string, selectedRole: ApiSourceRole, t: TFunction) {
-  const enabledSources = sources.filter((source) => source.inPool && source.enabled);
-  const sourceStage = (role: ApiSourceRole) => {
-    const members = enabledSources.filter((source) => (source.id === sourceId ? selectedRole : apiSourceRole(source.priority)) === role);
-    return { role, label: t(`sources.roles.${role}`), count: members.length, names: members.map((source) => source.name) };
-  };
-  return [
-    sourceStage("primary"),
-    { role: "accounts" as const, label: t("connections.accounts"), count: accounts.filter((account) => account.inPool && account.enabled).length, names: accounts.filter((account) => account.inPool && account.enabled).map((account) => account.label) },
-    sourceStage("stabilizer"),
-    sourceStage("reserve"),
-  ];
 }
 
 function formatRecoveryDelay(seconds: number, t: TFunction) {
@@ -804,58 +763,10 @@ function ModelPriceField({ label, value, invalid, onChange }: { label: string; v
   return <label className="model-price-field"><span className="model-price-label">{label}</span><span className="model-price-input"><span className="model-price-currency" aria-hidden>$</span><input aria-label={label} type="text" inputMode="decimal" autoComplete="off" spellCheck={false} value={value} placeholder="0.00" aria-invalid={invalid || undefined} onChange={(event) => onChange(event.target.value)} /></span></label>;
 }
 
-function toggle(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function formatApiEquivalent(microUsd: number, locale: string) { return `≈${new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function formatProviderMicroUsd(value: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000); }
 function formatModelPrice(microUsd: number, locale: string) { return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function formatReasoningEffort(effort: string) { return effort.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
-function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
-  if (runtime.gateway.models?.length) return runtime.gateway.models.map((model) => ({
-    ...model,
-    codexVisible: model.codexVisible ?? false,
-    codexDisplayName: model.codexDisplayName || model.id,
-    reasoningLevels: model.reasoningLevels ?? [],
-    reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
-    reasoningConfigurable: model.reasoningConfigurable ?? false,
-  }));
-  return runtime.gateway.visibleModelIds.map((id) => ({
-    id,
-    enabled: true,
-    memberCount: [...runtime.sources, ...runtime.accounts].filter((member) => member.models.some((model) => model.toLowerCase() === id.toLowerCase())).length,
-    codexVisible: false,
-    codexDisplayName: id,
-    catalogRank: null,
-    inputMicroUsdPerMillion: null,
-    cachedInputMicroUsdPerMillion: null,
-    cacheWrite5mMicroUsdPerMillion: null,
-    cacheWrite1hMicroUsdPerMillion: null,
-    outputMicroUsdPerMillion: null,
-    customPrice: false,
-    reasoningLevels: [],
-    reasoningAllowedLevels: [],
-    reasoningConfigurable: false,
-  }));
-}
-function groupModelSummariesForLauncher(models: ModelSummary[], accounts: AccountSummary[]) {
-  const chatGptModelIds = new Set(
-    accounts.flatMap((account) => account.models.map((model) => model.toLowerCase())),
-  );
-  return groupModels(
-    models,
-    (model) => model.id,
-    (model) => chatGptModelIds.has(model.id.toLowerCase()),
-  );
-}
-function comparePoolMembers(left: Member, right: Member, order: Map<string, number>) {
-  const unavailable = (member: Member) => member.operationalStatus === "unavailable" || member.operationalStatus === "disabled" ? 1 : 0;
-  return unavailable(left) - unavailable(right)
-    || compareRoutingOrder(left.id, right.id, order)
-    || compareStableText(memberName(left), memberName(right));
-}
-function compareStableText(left: string, right: string) {
-  return left === right ? 0 : left < right ? -1 : 1;
-}
-function memberName(member: Member) { return member.kind === "source" ? member.name : member.identityHint || member.label; }
 type RoutingPolicyPayload = {
   maxRetryCandidates: number;
   cooldownAfterFailures: number;
@@ -864,10 +775,6 @@ type RoutingPolicyPayload = {
   defaultServiceTier: DefaultServiceTier;
   subscriptionPlanOrder: string[];
 };
-
-function clampRoutingCount(value: string) {
-  return Math.min(8, Math.max(1, Math.trunc(Number(value)) || 1));
-}
 
 function persistRoutingPolicy(mode: RelayMode, payload: RoutingPolicyPayload) {
   return mode === "local"

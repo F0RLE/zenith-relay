@@ -320,9 +320,7 @@ impl Default for GatewayRuntimeOptions {
 }
 
 pub struct GatewayRuntime {
-    pub(crate) client: reqwest::Client,
-    pub(crate) bounded_client: reqwest::Client,
-    websocket_client: reqwest::Client,
+    clients: RuntimeHttpClients,
     discovery_client: reqwest::Client,
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
@@ -501,9 +499,7 @@ struct ChatGptAccountExecutor {
     refresh_adapter: Arc<dyn TokenRefreshAdapter>,
     persistence_adapter: Arc<dyn TokenPersistenceAdapter>,
     refresh_skew_ms: u64,
-    client: reqwest::Client,
-    bounded_client: reqwest::Client,
-    websocket_client: reqwest::Client,
+    clients: RuntimeHttpClients,
     active: AtomicBool,
     agent_identity: RwLock<Option<AgentIdentityCredential>>,
     agent_task_lock: tokio::sync::Mutex<()>,
@@ -567,6 +563,30 @@ struct RuntimeKey {
     model_rules: ModelRules,
     model_prefix: Option<String>,
     client_wire_apis: Option<Vec<ClientWireApi>>,
+}
+
+struct RuntimeHttpClients {
+    streaming: reqwest::Client,
+    bounded: reqwest::Client,
+    websocket: reqwest::Client,
+}
+
+impl RuntimeHttpClients {
+    fn new(proxy: Option<&ProxyConfig>) -> Result<Self> {
+        Ok(Self {
+            streaming: runtime_client(proxy, false)?,
+            bounded: runtime_client(proxy, true)?,
+            websocket: runtime_websocket_client(proxy)?,
+        })
+    }
+
+    fn request(&self, upstream_stream: bool) -> &reqwest::Client {
+        if upstream_stream {
+            &self.streaming
+        } else {
+            &self.bounded
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -677,9 +697,7 @@ impl GatewayRuntime {
         )
         .map_err(|message| Error::Validation(message.to_string()))?;
 
-        let client = runtime_client(None, false)?;
-        let bounded_client = runtime_client(None, true)?;
-        let websocket_client = runtime_websocket_client(None)?;
+        let clients = RuntimeHttpClients::new(None)?;
         let discovery_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
@@ -821,9 +839,7 @@ impl GatewayRuntime {
             );
             // OAuth identities must not share an HTTP/2 connection pool. A connection-level
             // failure for one account would otherwise abort concurrent streams on other accounts.
-            let client = runtime_client(account.proxy.as_ref(), false)?;
-            let bounded_client = runtime_client(account.proxy.as_ref(), true)?;
-            let websocket_client = runtime_websocket_client(account.proxy.as_ref())?;
+            let clients = RuntimeHttpClients::new(account.proxy.as_ref())?;
             let identity = CodexIdentityEnvelope::standard(&account.chatgpt_account_id)
                 .map_err(|message| Error::Validation(message.to_string()))?;
             let mut published_models = account.models.clone();
@@ -882,9 +898,7 @@ impl GatewayRuntime {
                     refresh_adapter: auth.refresh_adapter.clone(),
                     persistence_adapter: auth.persistence_adapter.clone(),
                     refresh_skew_ms: auth.refresh_skew_ms,
-                    client,
-                    bounded_client,
-                    websocket_client,
+                    clients,
                     active: AtomicBool::new(true),
                     agent_identity: RwLock::new(auth.agent_identities.get(&candidate_id).cloned()),
                     agent_task_lock: tokio::sync::Mutex::new(()),
@@ -998,9 +1012,7 @@ impl GatewayRuntime {
         }
 
         Ok(Self {
-            client,
-            bounded_client,
-            websocket_client,
+            clients,
             discovery_client,
             sources: source_executors,
             source_candidate_bindings,
@@ -2763,24 +2775,16 @@ impl GatewayRuntime {
         upstream_stream: bool,
     ) -> &reqwest::Client {
         if let Some(account) = self.chatgpt_accounts.get(candidate_id) {
-            return if upstream_stream {
-                &account.client
-            } else {
-                &account.bounded_client
-            };
+            return account.clients.request(upstream_stream);
         }
-        if upstream_stream {
-            &self.client
-        } else {
-            &self.bounded_client
-        }
+        self.clients.request(upstream_stream)
     }
 
     pub(crate) fn websocket_client(&self, candidate_id: &str) -> &reqwest::Client {
         self.chatgpt_accounts
             .get(candidate_id)
-            .map(|account| &account.websocket_client)
-            .unwrap_or(&self.websocket_client)
+            .map(|account| &account.clients.websocket)
+            .unwrap_or(&self.clients.websocket)
     }
 
     pub(crate) fn max_retry_candidates(&self) -> usize {
@@ -3068,7 +3072,7 @@ impl ChatGptAccountExecutor {
             return Ok(current);
         }
         let task_id = current
-            .register_task(&self.bounded_client)
+            .register_task(&self.clients.bounded)
             .await
             .map_err(classify_agent_identity_error)?;
         let task_id = self
