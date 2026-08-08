@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zenith_relay_core::{
     normalize_image_base_model, normalize_model_price_overrides,
-    normalize_source_protocol_bindings, normalize_subscription_plan_order,
+    normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
+    normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetApplyInput,
         ConfigurationPresetApplyResult, ConfigurationPresetChange, ConfigurationPresetDocument,
@@ -113,7 +114,7 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
             "configuration preset format is unsupported".to_string(),
         ));
     }
-    if preset.schema_version != CONFIGURATION_PRESET_SCHEMA_VERSION {
+    if !(2..=CONFIGURATION_PRESET_SCHEMA_VERSION).contains(&preset.schema_version) {
         return Err(PresetError::Invalid(format!(
             "configuration preset schema {} is unsupported",
             preset.schema_version
@@ -138,6 +139,9 @@ fn normalize_preset(mut preset: ConfigurationPreset) -> Result<ConfigurationPres
     preset.settings.hidden_models = normalize_models(preset.settings.hidden_models)?;
     preset.settings.model_price_overrides =
         normalize_prices(preset.settings.model_price_overrides)?;
+    preset.settings.model_reasoning_allowed_levels =
+        normalize_model_reasoning_allowed_levels(preset.settings.model_reasoning_allowed_levels)
+            .map_err(|message| PresetError::Invalid(format!("configuration preset {message}")))?;
     Ok(preset)
 }
 
@@ -446,6 +450,7 @@ fn merge_settings(
     merged.quota = requested.quota.clone();
     merged.hidden_models = requested.hidden_models.clone();
     merged.model_price_overrides = requested.model_price_overrides.clone();
+    merged.model_reasoning_allowed_levels = requested.model_reasoning_allowed_levels.clone();
     Ok(merged)
 }
 
@@ -533,6 +538,7 @@ mod tests {
             },
             hidden_models: Vec::new(),
             model_price_overrides: Default::default(),
+            model_reasoning_allowed_levels: Default::default(),
         }
     }
 

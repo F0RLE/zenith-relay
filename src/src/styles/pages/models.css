@@ -212,6 +212,47 @@
   gap: 18px;
 }
 
+.model-reasoning-form {
+  display: grid;
+  gap: 18px;
+}
+
+.model-reasoning-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.model-reasoning-options button {
+  min-height: 38px;
+  padding: 7px 10px;
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  color: var(--relay-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.model-reasoning-options button:hover {
+  border-color: var(--relay-focus);
+  color: var(--relay-text);
+}
+
+.model-reasoning-options button:focus-visible {
+  outline: 0;
+  border-color: var(--relay-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-focus) 22%, transparent);
+}
+
+.model-reasoning-options button.selected {
+  border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
+  background: color-mix(in srgb, var(--relay-accent) 12%, var(--relay-surface));
+  color: var(--relay-accent-hover);
+}
+
 .model-price-context {
   min-width: 0;
   display: grid;

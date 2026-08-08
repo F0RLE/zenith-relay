@@ -702,6 +702,20 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
     assert!(!confirmed_text.contains("synthetic-access-token"));
     let confirmed_json: Value = serde_json::from_str(&confirmed_text).unwrap();
     let account_id = confirmed_json["id"].as_str().unwrap();
+    let mut exhausted_account = first.state.store.account(account_id).unwrap().unwrap();
+    exhausted_account.in_pool = true;
+    exhausted_account.quota.limit_reached = true;
+    first.state.store.save_account(&exhausted_account).unwrap();
+    first.state.rebuild_runtime().await.unwrap();
+    let account_runtime = first.state.runtime().unwrap().unwrap();
+    assert!(
+        !account_runtime
+            .candidate_runtime_order()
+            .iter()
+            .find(|candidate| candidate.candidate_id == account_id)
+            .unwrap()
+            .available
+    );
     let updated: Value = client
         .patch(format!("{}/accounts/{account_id}", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -714,6 +728,10 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap();
     assert_eq!(updated["enabled"], false);
     assert_eq!(updated["draining"], true);
+    assert!(Arc::ptr_eq(
+        &account_runtime,
+        &first.state.runtime().unwrap().unwrap()
+    ));
     let reenabling = client
         .patch(format!("{}/accounts/{account_id}", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -722,6 +740,23 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .await
         .unwrap();
     assert_eq!(reenabling.status(), StatusCode::OK);
+    let updated_account_runtime = first.state.runtime().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&account_runtime, &updated_account_runtime));
+    assert!(
+        !updated_account_runtime
+            .candidate_runtime_order()
+            .iter()
+            .find(|candidate| candidate.candidate_id == account_id)
+            .unwrap()
+            .available
+    );
+    // The unavailable quota state above is only used to prove that a policy
+    // hot update preserves scheduler availability. Restore the fixture before
+    // this integration scenario verifies that the OAuth route is selected.
+    let mut routable_account = first.state.store.account(account_id).unwrap().unwrap();
+    routable_account.quota.limit_reached = false;
+    first.state.store.save_account(&routable_account).unwrap();
+    first.state.rebuild_runtime().await.unwrap();
     let membership = client
         .post(format!("{}/pool/members", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -1313,6 +1348,611 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
+async fn model_reasoning_modes_are_hot_applied_and_only_allow_confirmed_levels() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let management_key = "synthetic-management-token-value";
+
+    let created: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Reasoning source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["models"], json!(["gpt-test"]));
+    let source_id = created["id"].as_str().unwrap();
+    let membership = client
+        .post(format!("{}/pool/members", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"sourceIds": [source_id], "inPool": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(membership.status(), StatusCode::OK);
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_key = profile["secret"].as_str().unwrap();
+    let catalog: Value = client
+        .get(format!("{}/v1/models?client_version=1.0.0", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let catalog_model = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .unwrap();
+    assert_eq!(
+        catalog_model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["low", "medium", "high"]
+    );
+    assert_eq!(catalog_model["default_reasoning_level"], "medium");
+
+    let runtime = server.state.runtime().unwrap().unwrap();
+    let configured_response = client
+        .post(format!("{}/models/reasoning", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"modelId": "gpt-test", "allowedLevels": ["HIGH"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(configured_response.status(), StatusCode::OK);
+    let configured: Value = configured_response.json().await.unwrap();
+    let configured_model = configured["gateway"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-test")
+        .unwrap();
+    assert_eq!(configured_model["reasoningAllowedLevels"], json!(["high"]));
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    assert_eq!(
+        server
+            .state
+            .store
+            .model_reasoning_allowed_levels()
+            .unwrap()
+            .get("gpt-test"),
+        Some(&vec!["high".to_string()])
+    );
+
+    let filtered_catalog: Value = client
+        .get(format!("{}/v1/models?client_version=1.0.0", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filtered_model = filtered_catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .unwrap();
+    assert_eq!(
+        filtered_model["supported_reasoning_levels"],
+        json!([{"effort": "high", "description": "high"}])
+    );
+    assert_eq!(filtered_model["default_reasoning_level"], "high");
+
+    let rejected = client
+        .post(format!("{}/models/reasoning", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"modelId": "gpt-test", "allowedLevels": ["ultra"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        rejected.json::<Value>().await.unwrap()["error"]["code"],
+        "reasoning_levels_unconfirmed"
+    );
+
+    let reset: Value = client
+        .post(format!("{}/models/reasoning", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"modelId": "gpt-test", "allowedLevels": []}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reset_model = reset["gateway"]["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "gpt-test")
+        .unwrap();
+    assert_eq!(reset_model["reasoningAllowedLevels"], json!([]));
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+
+    let automatic_catalog: Value = client
+        .get(format!("{}/v1/models?client_version=1.0.0", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let automatic_model = automatic_catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["slug"] == zenith_relay_core::codex_model_alias("gpt-test"))
+        .unwrap();
+    assert_eq!(automatic_model["default_reasoning_level"], "medium");
+
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn un_draining_source_hot_updates_the_internal_key_scope() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_scope_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let management_key = "synthetic-management-token-value";
+
+    let active: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Active scope source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "allowedModels": ["gpt-active"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let active_id = active["id"].as_str().unwrap().to_string();
+    let draining: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Draining scope source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "allowedModels": ["gpt-draining"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let draining_id = draining["id"].as_str().unwrap().to_string();
+
+    assert_eq!(
+        client
+            .patch(format!("{}/sources/{draining_id}", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"draining": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds": [active_id.as_str(), draining_id.as_str()], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_key = profile["secret"].as_str().unwrap();
+    let before: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let before_ids = before["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect::<HashSet<_>>();
+    assert!(before_ids.contains("gpt-active"));
+    assert!(!before_ids.contains("gpt-draining"));
+
+    let runtime = server.state.runtime().unwrap().unwrap();
+    assert_eq!(
+        client
+            .patch(format!("{}/sources/{draining_id}", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"draining": false}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+
+    let after: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let after_ids = after["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect::<HashSet<_>>();
+    assert!(after_ids.contains("gpt-draining"));
+    assert_eq!(
+        client
+            .post(format!("{}/v1/responses", server.origin))
+            .bearer_auth(pool_key)
+            .json(&json!({"model":"gpt-draining","input":"scope refresh"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds": [draining_id.as_str()], "inPool": false}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    let removed: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!removed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .any(|model| model == "gpt-draining"));
+
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds": [draining_id.as_str()], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
+async fn un_draining_account_hot_updates_the_internal_key_scope() {
+    let root = TempDir::new().unwrap();
+    let (upstream, upstream_task) = spawn_upstream().await;
+    let server = spawn_server(root.path()).await;
+    let client = reqwest::Client::new();
+    let management_key = "synthetic-management-token-value";
+
+    let source: Value = client
+        .post(format!("{}/sources", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "name": "Active account-scope source",
+            "baseUrl": format!("{upstream}/v1"),
+            "apiKey": "synthetic-upstream-api-key",
+            "wireApi": "responses",
+            "allowedModels": ["gpt-test"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let source_id = source["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds": [source_id], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let preview: Value = client
+        .post(format!("{}/accounts/import/preview", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({
+            "label": "Draining account scope",
+            "accessToken": "synthetic-access-token",
+            "refreshToken": "synthetic-refresh-token",
+            "expiresAtMs": 4_000_000_000_000_u64,
+            "chatgptAccountId": "synthetic-chatgpt-account-id",
+            "responsesUrl": format!("{upstream}/account/responses"),
+            "models": ["gpt-account-only"],
+            "priority": 10,
+            "weight": 1
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account: Value = client
+        .post(format!("{}/accounts/import/confirm", server.origin))
+        .bearer_auth(management_key)
+        .json(&json!({"sessionId": preview["sessionId"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_id = account["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        client
+            .patch(format!("{}/accounts/{account_id}", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"draining": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"accountIds": [account_id.as_str()], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    let profile: Value = client
+        .get(format!("{}/profile/credential", server.origin))
+        .bearer_auth(management_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pool_key = profile["secret"].as_str().unwrap();
+    let before: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let before_ids = before["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect::<HashSet<_>>();
+    assert!(before_ids.contains("gpt-test"));
+    assert!(!before_ids.contains("gpt-account-only"));
+
+    let runtime = server.state.runtime().unwrap().unwrap();
+    assert_eq!(
+        client
+            .patch(format!("{}/accounts/{account_id}", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"draining": false}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+
+    let after: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let after_ids = after["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|model| model["id"].as_str())
+        .collect::<HashSet<_>>();
+    assert!(after_ids.contains("gpt-account-only"));
+    assert_eq!(
+        client
+            .post(format!("{}/v1/responses", server.origin))
+            .bearer_auth(pool_key)
+            .json(&json!({
+                "model": "gpt-account-only",
+                "input": "scope refresh",
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Pool membership changes the account candidate itself as well as the
+    // internal key scope. Re-adding an active account must not require a
+    // runtime rebuild: its OAuth executor can continue serving any existing
+    // stream while new requests see the candidate immediately.
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"accountIds": [account_id.as_str()], "inPool": false}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    let removed: Value = client
+        .get(format!("{}/v1/models", server.origin))
+        .bearer_auth(pool_key)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!removed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|model| model["id"] == "gpt-account-only"));
+
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"accountIds": [account_id.as_str()], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(Arc::ptr_eq(
+        &runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
+    assert_eq!(
+        client
+            .post(format!("{}/v1/responses", server.origin))
+            .bearer_auth(pool_key)
+            .json(&json!({
+                "model": "gpt-account-only",
+                "input": "membership hot apply",
+                "stream": true
+            }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    server.task.abort();
+    upstream_task.abort();
+}
+
+#[tokio::test]
 async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
     let root = TempDir::new().unwrap();
     let (upstream, observed, upstream_task) = spawn_source_lifecycle_upstream().await;
@@ -1359,13 +1999,42 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
         .await
         .unwrap();
     let second_source_id = second_created["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{}/pool/members", server.origin))
+            .bearer_auth(management_key)
+            .json(&json!({"sourceIds": [source_id, second_source_id], "inPool": true}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .post(format!("{}/gateway/start", server.origin))
+            .bearer_auth(management_key)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let source_runtime = server.state.runtime().unwrap().unwrap();
+    let retry_at_ms = 4_000_000_000_000_u64;
+    source_runtime.set_candidate_cooldown(source_id, "gpt-source-lifecycle", retry_at_ms);
     let mut source_priorities = serde_json::Map::new();
     source_priorities.insert(source_id.to_string(), json!(2));
     source_priorities.insert(second_source_id.to_string(), json!(1));
     let ordered: Value = client
         .patch(format!("{}/sources/{source_id}", server.origin))
         .bearer_auth(management_key)
-        .json(&json!({ "priority": 2, "sourcePriorities": source_priorities }))
+        .json(&json!({
+            "priority": 2,
+            "sourcePriorities": source_priorities,
+            "allowedModels": ["gpt-source-lifecycle"],
+            "recoveryDelaySeconds": 15
+        }))
         .send()
         .await
         .unwrap()
@@ -1373,6 +2042,16 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
         .await
         .unwrap();
     assert_eq!(ordered["priority"], json!(2));
+    let updated_source_runtime = server.state.runtime().unwrap().unwrap();
+    assert!(Arc::ptr_eq(&source_runtime, &updated_source_runtime));
+    assert_eq!(
+        updated_source_runtime
+            .candidate_runtime_order()
+            .into_iter()
+            .find(|candidate| candidate.candidate_id == source_id)
+            .and_then(|candidate| candidate.next_retry_at_ms),
+        Some(retry_at_ms)
+    );
     let listed: Vec<Value> = client
         .get(format!("{}/sources", server.origin))
         .bearer_auth(management_key)
@@ -1429,6 +2108,10 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
         .unwrap();
     assert_eq!(disabled["name"], "Lifecycle source edited");
     assert_eq!(disabled["enabled"], false);
+    assert!(Arc::ptr_eq(
+        &source_runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
 
     let rotated_response = client
         .patch(format!("{}/sources/{source_id}", server.origin))
@@ -1440,6 +2123,10 @@ async fn user_source_lifecycle_rotates_the_server_secret_and_routes_with_it() {
     let rotated_text = rotated_response.text().await.unwrap();
     assert!(!rotated_text.contains(first_key));
     assert!(!rotated_text.contains(second_key));
+    assert!(!Arc::ptr_eq(
+        &source_runtime,
+        &server.state.runtime().unwrap().unwrap()
+    ));
     assert_eq!(
         client
             .post(format!("{}/sources/{source_id}/test", server.origin))
@@ -2715,7 +3402,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     }
     let document: Value = serde_json::from_str(&document_text).unwrap();
     assert_eq!(document["preset"]["format"], "zenith-relay-configuration");
-    assert_eq!(document["preset"]["schemaVersion"], 2);
+    assert_eq!(document["preset"]["schemaVersion"], 3);
     assert!(document["revision"]
         .as_str()
         .is_some_and(|revision| revision.starts_with("cfg_")));
@@ -2860,7 +3547,7 @@ async fn configuration_presets_preview_apply_reject_stale_and_exclude_secrets() 
     assert_eq!(applied_state["gateway"]["visibleModelIds"], json!([]));
 
     let mut unsupported_schema = fresh_preview["preset"].clone();
-    unsupported_schema["schemaVersion"] = json!(3);
+    unsupported_schema["schemaVersion"] = json!(4);
     let unsupported = client
         .post(format!("{}/configuration/preset/preview", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -3012,6 +3699,18 @@ async fn spawn_upstream() -> (String, tokio::task::JoinHandle<()>) {
         .route("/account/responses", post(account_response))
         .route("/account/responses/compact", post(account_compact))
         .route("/account/alpha/search", post(account_search));
+    let task = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    (format!("http://{address}"), task)
+}
+
+async fn spawn_scope_upstream() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = Router::new()
+        .route("/v1/models", get(scope_models_response))
+        .route("/v1/responses", post(upstream_response));
     let task = tokio::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
@@ -3215,7 +3914,23 @@ async fn models_response(request: Request) -> impl IntoResponse {
             .and_then(|value| value.to_str().ok()),
         Some("Bearer synthetic-upstream-api-key")
     );
-    Json(json!({"data":[{"id":"gpt-test"}]}))
+    Json(json!({
+        "data":[{
+            "id":"gpt-test",
+            "reasoningEffortModes":["low", "medium", "high"]
+        }]
+    }))
+}
+
+async fn scope_models_response(request: Request) -> impl IntoResponse {
+    assert_eq!(
+        request
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer synthetic-upstream-api-key")
+    );
+    Json(json!({"data":[{"id":"gpt-active"},{"id":"gpt-draining"}]}))
 }
 
 async fn upstream_response(request: Request) -> Response {

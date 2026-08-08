@@ -7,7 +7,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_price_overrides, normalize_subscription_plan_order,
+    normalize_image_base_model, normalize_model_price_overrides,
+    normalize_model_reasoning_allowed_levels, normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
         SourcePresetRule,
@@ -277,6 +278,26 @@ impl Store {
             "model_price_overrides",
             &serde_json::to_string(&overrides)
                 .map_err(|_| "model price overrides could not be serialized".to_string())?,
+        )
+    }
+
+    pub fn model_reasoning_allowed_levels(&self) -> Result<BTreeMap<String, Vec<String>>, String> {
+        model_reasoning_allowed_levels_from_metadata(
+            self.metadata("model_reasoning_allowed_levels")?,
+            self.metadata("model_reasoning_overrides")?,
+        )
+    }
+
+    pub fn set_model_reasoning_allowed_levels(
+        &self,
+        allowed_levels: BTreeMap<String, Vec<String>>,
+    ) -> Result<(), String> {
+        let allowed_levels = normalize_model_reasoning_allowed_levels(allowed_levels)?;
+        self.set_metadata(
+            "model_reasoning_allowed_levels",
+            &serde_json::to_string(&allowed_levels).map_err(|_| {
+                "model reasoning allowed levels could not be serialized".to_string()
+            })?,
         )
     }
 
@@ -673,6 +694,10 @@ fn configuration_settings_from_connection(
             },
         )?,
     )?;
+    let model_reasoning_allowed_levels = model_reasoning_allowed_levels_from_metadata(
+        metadata_from(connection, "model_reasoning_allowed_levels")?,
+        metadata_from(connection, "model_reasoning_overrides")?,
+    )?;
     Ok(ConfigurationPresetSettings {
         sources,
         accounts,
@@ -694,6 +719,7 @@ fn configuration_settings_from_connection(
         },
         hidden_models,
         model_price_overrides,
+        model_reasoning_allowed_levels,
     })
 }
 
@@ -836,6 +862,11 @@ fn write_configuration(
             "model_price_overrides",
             to_json(&settings.model_price_overrides).map_err(ConfigurationReplaceError::Store)?,
         ),
+        (
+            "model_reasoning_allowed_levels",
+            to_json(&settings.model_reasoning_allowed_levels)
+                .map_err(ConfigurationReplaceError::Store)?,
+        ),
     ];
     for (key, value) in metadata {
         transaction
@@ -864,6 +895,9 @@ fn validate_configuration_settings(settings: &ConfigurationPresetSettings) -> Re
         || normalize_model_ids(settings.hidden_models.clone())? != settings.hidden_models
         || normalize_model_price_overrides(settings.model_price_overrides.clone())?
             != settings.model_price_overrides
+        || normalize_model_reasoning_allowed_levels(
+            settings.model_reasoning_allowed_levels.clone(),
+        )? != settings.model_reasoning_allowed_levels
     {
         return Err("configuration preset is not normalized".to_string());
     }
@@ -999,6 +1033,28 @@ fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
         }
     }
     Ok(normalized)
+}
+
+fn model_reasoning_allowed_levels_from_metadata(
+    current: Option<String>,
+    legacy: Option<String>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    if let Some(current) = current {
+        let allowed_levels = serde_json::from_str(&current)
+            .map_err(|_| "model reasoning allowed levels are invalid".to_string())?;
+        return normalize_model_reasoning_allowed_levels(allowed_levels).map_err(str::to_string);
+    }
+    let legacy = legacy.map_or(Ok(BTreeMap::new()), |value| {
+        serde_json::from_str::<BTreeMap<String, String>>(&value)
+            .map_err(|_| "model reasoning overrides are invalid".to_string())
+    })?;
+    let allowed_levels = legacy
+        .into_iter()
+        .filter_map(|(model, effort)| {
+            (!effort.eq_ignore_ascii_case("auto")).then_some((model, vec![effort]))
+        })
+        .collect();
+    normalize_model_reasoning_allowed_levels(allowed_levels).map_err(str::to_string)
 }
 
 #[cfg(test)]
@@ -1167,6 +1223,56 @@ mod tests {
             Some(&price)
         );
         drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn model_reasoning_allowed_levels_are_validated_normalized_and_persisted() {
+        let root = test_root("model-reasoning");
+        let path = root.join("relay.sqlite");
+        let store = Store::open(path.clone()).unwrap();
+        store
+            .set_model_reasoning_allowed_levels(BTreeMap::from([(
+                " GPT-Test ".into(),
+                vec![" HIGH ".into(), "high".into(), "ultra".into()],
+            )]))
+            .unwrap();
+        assert!(store
+            .set_model_reasoning_allowed_levels(BTreeMap::from([(
+                "unsafe\nmodel".into(),
+                vec!["high".into()],
+            )]))
+            .is_err());
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(
+            reopened
+                .model_reasoning_allowed_levels()
+                .unwrap()
+                .get("gpt-test"),
+            Some(&vec!["high".to_string(), "ultra".to_string()])
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_model_reasoning_default_is_read_as_a_single_allowed_level() {
+        let root = test_root("legacy-model-reasoning");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        store
+            .set_metadata(
+                "model_reasoning_overrides",
+                r#"{"gpt-test":"HIGH","automatic":"auto"}"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.model_reasoning_allowed_levels().unwrap(),
+            BTreeMap::from([("gpt-test".to_string(), vec!["high".to_string()])])
+        );
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 }

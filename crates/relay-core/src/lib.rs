@@ -18,7 +18,8 @@ pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
 pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    normalize_codex_catalog_priorities, normalize_native_codex_catalog_entry,
+    deserialize_model_reasoning_allowed_levels, normalize_codex_catalog_priorities,
+    normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
     source_model_declares_image_input, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
     CODEX_RELAY_CATALOG_HASH,
@@ -36,7 +37,8 @@ pub use runtime::{
     discover_source_models, discover_source_models_and_protocol_bindings,
     discover_source_models_for_protocol_bindings, normalize_image_base_model, DefaultServiceTier,
     GatewayRuntime, GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore,
-    RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource, SourceDiscovery,
+    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyUpdate, SourceDiscovery,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,

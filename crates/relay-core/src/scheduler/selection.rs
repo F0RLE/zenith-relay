@@ -97,7 +97,6 @@ pub enum SelectionReason {
     SubscriptionExpiry,
     SubscriptionPlan,
     ManualPriority,
-    WeightedRotation,
     FairRotation,
     FallbackAttempt,
     StableTieBreak,

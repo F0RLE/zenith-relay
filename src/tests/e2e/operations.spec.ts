@@ -187,6 +187,13 @@ test("API sources use an explicit fallback order instead of traffic weights", as
     return calls.findLast((call) => call.command === "update_local_source")?.args.input;
   });
   expect(input).toMatchObject({ priority: 1, sourcePriorities: { source_synthetic: 1, source_synthetic_2: 2 }, weight: 1 });
+  const routingOrder = await page.evaluate(async () => {
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string) => Promise<Array<{ candidateId: string; kind: string }>> } }).__TAURI_INTERNALS__;
+    return (await internals.invoke("get_local_runtime_order"))
+      .filter((candidate) => candidate.kind === "api_source")
+      .map((candidate) => candidate.candidateId);
+  });
+  expect(routingOrder).toEqual(["source_synthetic_2", "source_synthetic"]);
 });
 
 test("dialogs keep editable focus and close a nested option list before the dialog", async ({ page }) => {
@@ -2539,6 +2546,56 @@ test("remote model prices use the server-owned override", async ({ page }) => {
   expect(calls.filter((call) => call.command === "execute_remote_server_action" && (call.args.input as { action?: { type?: string } } | undefined)?.action?.type === "set_model_price").map((call) => call.args)).toEqual([
     { input: { action: { type: "set_model_price" }, payload: { modelId: "o3", inputMicroUsdPerMillion: 1_250_000, cachedInputMicroUsdPerMillion: 125_000, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: 7_500_000 } } },
     { input: { action: { type: "set_model_price" }, payload: { modelId: "o3", inputMicroUsdPerMillion: null, cachedInputMicroUsdPerMillion: null, cacheWrite5mMicroUsdPerMillion: null, cacheWrite1hMicroUsdPerMillion: null, outputMicroUsdPerMillion: null } } },
+  ]);
+});
+
+test("local model reasoning uses only confirmed source levels", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["low", "medium", "high", "ultra"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+  await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await expect(dialog.getByRole("checkbox")).toHaveText(["Low", "Medium", "High", "Ultra"]);
+  await dialog.getByRole("checkbox", { name: "High" }).click();
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  await expect(page.locator('[data-model-reasoning-edit="gpt-5.4"]')).toHaveCount(0);
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "set_local_model_reasoning").map((call) => call.args)).toEqual([
+    { input: { modelId: "claude-opus-4-8", allowedLevels: ["high"] } },
+  ]);
+});
+
+test("remote model reasoning is saved through the server action", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "remote",
+    locale: "en",
+    populated: true,
+    mixedModels: true,
+    modelReasoning: { "claude-opus-4-8": ["low", "high", "ultra"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await page.getByRole("tab", { name: "Model Rules" }).click();
+
+  const claude = page.locator('.model-rules tbody tr[data-model-id="claude-opus-4-8"]');
+  await claude.getByRole("button", { name: "Set reasoning modes for claude-opus-4-8" }).click();
+  const dialog = page.getByRole("dialog", { name: "Reasoning modes" });
+  await dialog.getByRole("checkbox", { name: "Ultra" }).click();
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
+  expect(calls.filter((call) => call.command === "execute_remote_server_action" && (call.args.input as { action?: { type?: string } } | undefined)?.action?.type === "set_model_reasoning").map((call) => call.args)).toEqual([
+    { input: { action: { type: "set_model_reasoning" }, payload: { modelId: "claude-opus-4-8", allowedLevels: ["ultra"] } } },
   ]);
 });
 

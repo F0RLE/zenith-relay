@@ -19,20 +19,24 @@ use super::{
         NativeSecretBackend,
     },
     error::{ErrorCode, LocalPoolError, Result},
-    models::{GatewaySettings, LocalGatewayKeyRecord, ProviderSourceRecord},
+    models::{GatewaySettings, LocalAccountRecord, LocalGatewayKeyRecord, ProviderSourceRecord},
     profiles::codex,
     state::DesktopState,
     store::secret_store,
 };
 use std::{collections::HashMap, sync::Arc};
+use tauri::{AppHandle, Manager};
+#[cfg(test)]
+use zenith_relay_core::protocol::AccountRoutingBlockReason;
 use zenith_relay_core::{
     accounts::AccountRecord,
     protocol::{
-        account_operational_state, AccountOperationalInput, AccountOperationalState,
-        AccountRoutingBlockReason, ClientWireApi,
+        account_candidate_enabled, account_operational_state, AccountOperationalInput,
+        AccountOperationalState, ClientWireApi,
     },
-    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeChatGptAccount,
-    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, WireApi, QUOTA_STALE_AFTER_MS,
+    GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeCandidatePolicy,
+    RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource,
+    RuntimeSourcePolicyUpdate, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
@@ -207,6 +211,7 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
         default_service_tier: settings.default_service_tier,
         quota_stale_after_ms,
         image_base_model: None,
+        model_reasoning_allowed_levels: settings.model_reasoning_allowed_levels,
         response_affinity_store: Some(state.response_affinity_store()),
         provider_storm_breaker: false,
     };
@@ -247,18 +252,7 @@ fn account_credential_error(
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
 }
 
-fn account_candidate_enabled(
-    account_enabled: bool,
-    routing_block_reason: Option<AccountRoutingBlockReason>,
-) -> bool {
-    account_enabled
-        && matches!(
-            routing_block_reason,
-            None | Some(AccountRoutingBlockReason::QuotaExhausted)
-        )
-}
-
-fn runtime_account_operational_state(
+pub(super) fn runtime_account_operational_state(
     account: &AccountRecord,
     now_ms: u64,
 ) -> AccountOperationalState {
@@ -276,6 +270,100 @@ fn runtime_account_operational_state(
         now_ms,
         quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
     })
+}
+
+pub(super) async fn apply_source_policy_if_running(
+    state: &DesktopState,
+    source: &ProviderSourceRecord,
+) -> bool {
+    apply_source_policies_if_running(state, std::slice::from_ref(source)).await
+}
+
+pub(super) async fn apply_source_policies_if_running(
+    state: &DesktopState,
+    sources: &[ProviderSourceRecord],
+) -> bool {
+    let Some(runtime) = state.gateway.runtime().await else {
+        return true;
+    };
+    let updates = sources
+        .iter()
+        .map(|source| RuntimeSourcePolicyUpdate {
+            source_id: source.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: source.enabled,
+                draining: source.draining,
+                priority: source.priority,
+                weight: source.weight,
+                allowed_models: source.allowed_models.clone(),
+                excluded_models: source.excluded_models.clone(),
+            },
+            recovery_delay_seconds: source.recovery_delay_seconds,
+        })
+        .collect::<Vec<_>>();
+    runtime.update_source_policies(&updates)
+}
+
+/// Refreshes the managed local key's candidate scope without replacing the
+/// listener or any source/account executor. Source membership is represented
+/// by this scope, so a policy-only source edit that also changes `in_pool`
+/// does not need a gateway restart.
+pub(super) async fn refresh_local_gateway_key_scope_if_running(
+    state: &DesktopState,
+) -> Result<bool> {
+    let Some(runtime) = state.gateway.runtime().await else {
+        return Ok(true);
+    };
+    let system_key = pool::ensure_system_gateway_key(state)?;
+    let (sources, accounts) = {
+        let store = state.store()?;
+        (store.sources().to_vec(), store.accounts().to_vec())
+    };
+    let scope = pool::local_pool_scope(&sources, &accounts)?;
+    Ok(runtime.update_key_scope(&system_key.id, scope))
+}
+
+pub(super) async fn apply_account_policy_if_running(
+    state: &DesktopState,
+    account: &LocalAccountRecord,
+) -> bool {
+    let Some(runtime) = state.gateway.runtime().await else {
+        return true;
+    };
+    runtime.update_account_policy(
+        &account.account.id,
+        runtime_account_policy(account, current_time_ms()),
+    )
+}
+
+/// Maps the persisted account state into the part of a live candidate that can
+/// change without replacing its OAuth executor. Pool membership affects this
+/// policy through `runtime_account_operational_state`, so adding or removing
+/// an account from the local pool can be applied without restarting the
+/// listener or interrupting active streams.
+pub(super) fn runtime_account_policy(
+    account: &LocalAccountRecord,
+    now_ms: u64,
+) -> RuntimeCandidatePolicy {
+    let operational = runtime_account_operational_state(&account.account, now_ms);
+    RuntimeCandidatePolicy {
+        enabled: account_candidate_enabled(
+            account.account.enabled,
+            operational.routing_block_reason,
+        ),
+        draining: account.account.draining,
+        priority: account.priority,
+        weight: account.weight,
+        allowed_models: account.allowed_models.clone(),
+        excluded_models: account.excluded_models.clone(),
+    }
+}
+
+pub(super) fn refresh_active_codex_catalog_in_background(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<DesktopState>();
+        let _ = profiles::refresh_active_codex_catalog(&state).await;
+    });
 }
 
 pub(super) async fn sync_records_or_rollback(

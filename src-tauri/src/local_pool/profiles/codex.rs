@@ -42,6 +42,8 @@ struct ProfileBackup {
     #[serde(default)]
     previous_model_catalog_json: Option<String>,
     #[serde(default)]
+    previous_model_reasoning_effort: Option<String>,
+    #[serde(default)]
     previous_auth_hash: Option<String>,
     previous_auth_secret_ref: Option<String>,
     #[serde(default)]
@@ -56,6 +58,8 @@ struct ProfileBackup {
     managed_bearer_in_config: bool,
     #[serde(default)]
     managed_supports_websockets: bool,
+    #[serde(default)]
+    managed_model_reasoning_effort_cleared: bool,
     #[serde(default)]
     managed_model_catalog_path: Option<String>,
     #[serde(default)]
@@ -499,6 +503,14 @@ fn build_managed_model_catalog(
         let Some(slug) = model_slug(relay_model) else {
             continue;
         };
+        // Direct-source catalogs keep the provider's bare slug for Codex, so
+        // the alias prefix alone cannot distinguish them from native rows.
+        // The Relay catalog marker is the ownership boundary here.
+        let relay_managed = slug.to_ascii_lowercase().starts_with("zenith/")
+            || relay_model
+                .get("comp_hash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash == CODEX_RELAY_CATALOG_HASH);
         let model = if slug.to_ascii_lowercase().starts_with("zenith/") {
             let Some(model) = decode_codex_model_alias(slug) else {
                 continue;
@@ -520,15 +532,14 @@ fn build_managed_model_catalog(
             .and_then(Value::as_i64)
             .and_then(|value| u64::try_from(value).ok())
             .unwrap_or(DIRECT_SOURCE_FALLBACK_PRIORITY + index as u64);
-        // A Relay model row may have come from a real upstream Codex catalog.
+        // A Relay-owned row may have come from a real upstream Codex catalog.
         // Preserve its strictly validated capability data (including arbitrary
         // reasoning levels) instead of inheriting anything from the native
-        // template.  Plain `/v1/models` entries receive the conservative route
-        // defaults instead.
+        // template. Bare rows without the Relay marker are native rows.
         let mut entry = relay_model
             .as_object()
             .and_then(|upstream| {
-                if slug.to_ascii_lowercase().starts_with("zenith/") {
+                if relay_managed {
                     normalize_upstream_codex_catalog_entry(
                         upstream,
                         &model,
@@ -671,11 +682,7 @@ fn snapshot_user_profile_with(
     } else if let Some(backup) = local_backup(codex_home, backup_root)? {
         if managed_config_matches(&document, &backup) {
             let model_catalog = model_catalog_to_restore(&document, &backup);
-            restore_config(
-                &mut document,
-                backup.previous_model_provider.as_deref(),
-                model_catalog.as_deref(),
-            );
+            restore_local_config(&mut document, &backup, model_catalog.as_deref());
             let auth = if managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
                 previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
             } else {
@@ -1546,6 +1553,7 @@ fn attach_local_locked(
         version: 1,
         previous_model_provider: root_model_provider(&document),
         previous_model_catalog_json: root_model_catalog_json(&document),
+        previous_model_reasoning_effort: root_model_reasoning_effort(&document),
         previous_auth_hash: original_auth_bytes.as_deref().map(bytes_hash),
         previous_auth_secret_ref: None,
         managed_key_id: String::new(),
@@ -1555,6 +1563,7 @@ fn attach_local_locked(
         managed_oauth_access_hash: None,
         managed_bearer_in_config: false,
         managed_supports_websockets: false,
+        managed_model_reasoning_effort_cleared: false,
         managed_model_catalog_path: None,
         managed_model_catalog_hash: None,
         managed_model_catalog_pending_hash: None,
@@ -1568,6 +1577,10 @@ fn attach_local_locked(
     {
         backup.previous_model_catalog_json = root_model_catalog_json(&document);
     }
+    if created_backup || external_takeover || !backup.managed_model_reasoning_effort_cleared {
+        backup.previous_model_reasoning_effort = root_model_reasoning_effort(&document);
+    }
+    backup.managed_model_reasoning_effort_cleared = true;
     let rebased_secret = if external_takeover {
         backup.previous_model_provider = root_model_provider(&document);
         backup.previous_model_catalog_json = external_model_catalog(&document, &backup);
@@ -1864,11 +1877,7 @@ fn restore_local_locked(
     }
 
     let model_catalog = backup.previous_model_catalog_json.clone();
-    restore_config(
-        &mut document,
-        backup.previous_model_provider.as_deref(),
-        model_catalog.as_deref(),
-    );
+    restore_local_config(&mut document, &backup, model_catalog.as_deref());
     let restored_config = document.to_string();
     if original_config_bytes.as_deref() != Some(restored_config.as_bytes()) {
         replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
@@ -2460,6 +2469,17 @@ fn validate_config_shape(document: &DocumentMut) -> Result<()> {
             "ChatGPT model_providers must be a table",
         ));
     }
+    if document.get("model_reasoning_effort").is_some()
+        && document
+            .get("model_reasoning_effort")
+            .and_then(Item::as_str)
+            .is_none()
+    {
+        return Err(LocalPoolError::new(
+            ErrorCode::InvalidState,
+            "ChatGPT model_reasoning_effort must be a string",
+        ));
+    }
     Ok(())
 }
 
@@ -2470,6 +2490,10 @@ fn attach_config(
     model_catalog_path: Option<&str>,
     previous_model_catalog: Option<&str>,
 ) {
+    // A global Codex effort overrides each model catalog entry. While Relay is
+    // active it must be absent so automatic models use Relay's `medium`
+    // default and a manual per-model rule remains authoritative.
+    document.remove("model_reasoning_effort");
     document["model_provider"] = value(PROVIDER_ID);
     restore_root_string(
         document,
@@ -2501,6 +2525,25 @@ fn restore_config(
     remove_managed_provider(document);
     restore_root_string(document, "model_provider", previous_model_provider);
     restore_root_string(document, "model_catalog_json", previous_model_catalog);
+}
+
+fn restore_local_config(
+    document: &mut DocumentMut,
+    backup: &ProfileBackup,
+    previous_model_catalog: Option<&str>,
+) {
+    restore_config(
+        document,
+        backup.previous_model_provider.as_deref(),
+        previous_model_catalog,
+    );
+    if backup.managed_model_reasoning_effort_cleared {
+        restore_root_string(
+            document,
+            "model_reasoning_effort",
+            backup.previous_model_reasoning_effort.as_deref(),
+        );
+    }
 }
 
 const MANAGED_SNAPSHOT_AUTH_KEYS: &[&str] =
@@ -2690,6 +2733,13 @@ fn root_model_catalog_json(document: &DocumentMut) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn root_model_reasoning_effort(document: &DocumentMut) -> Option<String> {
+    document
+        .get("model_reasoning_effort")
+        .and_then(Item::as_str)
+        .map(ToOwned::to_owned)
+}
+
 fn external_model_catalog(document: &DocumentMut, backup: &ProfileBackup) -> Option<String> {
     let current = root_model_catalog_json(document);
     if current.as_deref() == backup.managed_model_catalog_path.as_deref() {
@@ -2727,11 +2777,15 @@ fn managed_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> boo
             || root_model_catalog_json(document).as_deref()
                 == backup.managed_model_catalog_path.as_deref())
         && managed_provider_matches(document, backup)
+        && (!backup.managed_model_reasoning_effort_cleared
+            || document.get("model_reasoning_effort").is_none())
 }
 
 fn previous_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document) == backup.previous_model_provider
         && root_model_catalog_json(document) == backup.previous_model_catalog_json
+        && (!backup.managed_model_reasoning_effort_cleared
+            || root_model_reasoning_effort(document) == backup.previous_model_reasoning_effort)
 }
 
 fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
@@ -3514,6 +3568,43 @@ mod tests {
     }
 
     #[test]
+    fn local_gateway_uses_catalog_reasoning_default_and_restores_global_override() {
+        let (root, home, backups) = profile_dirs("reasoning-effort-override");
+        fs::write(
+            home.join(CONFIG_FILE),
+            "model_provider = \"openai\"\nmodel_reasoning_effort = \"ultra\"\n",
+        )
+        .unwrap();
+        let secrets = MemorySecrets::default();
+
+        attach_with(
+            &home,
+            &backups,
+            "http://127.0.0.1:14998/v1",
+            "zlr_key",
+            &secrets,
+        )
+        .unwrap();
+
+        let managed_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(!managed_config.contains("model_reasoning_effort"));
+        let backup = local_backup(&home, &backups)
+            .unwrap()
+            .expect("profile backup");
+        assert_eq!(
+            backup.previous_model_reasoning_effort.as_deref(),
+            Some("ultra")
+        );
+        assert!(backup.managed_model_reasoning_effort_cleared);
+
+        restore_with(&home, &backups, &secrets).unwrap();
+        let restored_config = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+        assert!(restored_config.contains("model_provider = \"openai\""));
+        assert!(restored_config.contains("model_reasoning_effort = \"ultra\""));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
         let (root, home, backups) = profile_dirs("model-catalog-restore");
         let previous_catalog_path = root.join("previous-codex-models.json");
@@ -3670,6 +3761,71 @@ mod tests {
     }
 
     #[test]
+    fn direct_source_catalog_uses_medium_for_automatic_reasoning() {
+        let (root, home, _backups) = profile_dirs("direct-source-reasoning-default");
+        let manifest = json!({
+            "models": [{
+                "slug": "provider/reasoning",
+                "default_reasoning_level": "ultra",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ]
+            }]
+        });
+
+        let catalog = direct_source_model_catalog_with_manifest(
+            &home,
+            &["provider/reasoning".into()],
+            Some(&manifest),
+        )
+        .unwrap()
+        .expect("direct catalog");
+        let model = &serde_json::from_str::<Value>(&catalog).unwrap()["models"][0];
+
+        assert_eq!(model["default_reasoning_level"], "medium");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_direct_source_catalog_does_not_restore_provider_ultra_default() {
+        let (root, home, _backups) = profile_dirs("managed-direct-source-reasoning-default");
+        let manifest = json!({
+            "models": [{
+                "slug": "provider/reasoning",
+                "default_reasoning_level": "ultra",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "Low"},
+                    {"effort": "high", "description": "High"},
+                    {"effort": "ultra", "description": "Ultra"}
+                ]
+            }]
+        });
+        let direct = direct_source_model_catalog_with_manifest(
+            &home,
+            &["provider/reasoning".into()],
+            Some(&manifest),
+        )
+        .unwrap()
+        .expect("direct catalog");
+
+        let managed = build_managed_model_catalog(&home, None, None, &direct).unwrap();
+        let model = &serde_json::from_str::<Value>(&managed).unwrap()["models"][0];
+
+        assert!(model.get("default_reasoning_level").is_none());
+        assert_eq!(
+            model["supported_reasoning_levels"],
+            json!([
+                {"effort": "low", "description": "Low"},
+                {"effort": "high", "description": "High"},
+                {"effort": "ultra", "description": "Ultra"}
+            ])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn direct_source_catalog_resolves_the_configured_relative_template() {
         let (root, home, _backups) = profile_dirs("direct-source-relative-template");
         write_test_catalog_file(&home.join("native-catalog.json"), "gpt-5.6-sol");
@@ -3698,6 +3854,7 @@ mod tests {
         let (root, home, _backups) = profile_dirs("managed-native-settings");
         let mut native = routed_codex_catalog_entry(None, "gpt-native", 1, None);
         native["slug"] = Value::String("gpt-native".into());
+        native["comp_hash"] = Value::String("official".into());
         native["input_modalities"] = json!(["text", "image"]);
         native["default_reasoning_level"] = Value::String("ultra".into());
         native["supported_reasoning_levels"] = json!([

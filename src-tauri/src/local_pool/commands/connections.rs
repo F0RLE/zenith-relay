@@ -1,4 +1,8 @@
-use super::{core_error, restart_after_secret_change, sync_records_or_rollback};
+use super::{
+    apply_source_policies_if_running, apply_source_policy_if_running, core_error,
+    refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
+    restart_after_secret_change, sync_records_or_rollback,
+};
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
     models::{LocalPoolSnapshot, ProviderSourceRecord},
@@ -8,7 +12,7 @@ use crate::local_pool::{
 use chrono::Utc;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
@@ -152,6 +156,7 @@ pub async fn create_local_source(
 #[tauri::command]
 pub async fn update_local_source(
     input: UpdateSourceInput,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
@@ -201,17 +206,38 @@ pub async fn update_local_source(
         .ok_or_else(|| LocalPoolError::new(ErrorCode::NotFound, "source not found"))?;
     *target = updated;
     apply_source_priorities(&mut next_sources, &source_priorities)?;
+    let catalog_changed = source_catalog_visibility_changed(&old_sources, &next_sources);
     state
         .store()?
-        .replace_records(next_sources, old_keys.clone())?;
-    sync_records_or_rollback(&state, old_sources, old_keys).await?;
-    state.snapshot().await.map_err(Into::into)
+        .replace_records(next_sources.clone(), old_keys.clone())?;
+    let updated_in_place = if source_runtime_policy_compatible(&old_sources, &next_sources)
+        && apply_source_policies_if_running(&state, &next_sources).await
+    {
+        // A scope refresh is part of the same hot update. If it cannot be
+        // applied, fall back to the existing restart-or-rollback path rather
+        // than leaving policy and key scope out of sync.
+        refresh_local_gateway_key_scope_if_running(&state)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if !updated_in_place {
+        sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    }
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place && catalog_changed {
+        refresh_active_codex_catalog_in_background(app);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
 pub async fn set_local_source_enabled(
     source_id: String,
     enabled: bool,
+    app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> CommandResult<LocalPoolSnapshot> {
     let _mutation = state.setup_guard().await;
@@ -228,9 +254,24 @@ pub async fn set_local_source_enabled(
     }
     let (old_sources, old_keys) = current_records(&state)?;
     source.enabled = enabled;
-    state.store()?.upsert_source(source)?;
-    sync_records_or_rollback(&state, old_sources, old_keys).await?;
-    state.snapshot().await.map_err(Into::into)
+    let catalog_changed = source.in_pool;
+    state.store()?.upsert_source(source.clone())?;
+    let updated_in_place = if apply_source_policy_if_running(&state, &source).await {
+        refresh_local_gateway_key_scope_if_running(&state)
+            .await
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if !updated_in_place {
+        sync_records_or_rollback(&state, old_sources, old_keys).await?;
+    }
+    let snapshot = state.snapshot().await?;
+    drop(_mutation);
+    if updated_in_place && catalog_changed {
+        refresh_active_codex_catalog_in_background(app);
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -420,6 +461,35 @@ fn source_probe_matches(before: &ProviderSourceRecord, current: &ProviderSourceR
         && before.wire_api == current.wire_api
         && before.protocol_bindings == current.protocol_bindings
         && before.models == current.models
+}
+
+fn source_runtime_policy_compatible(
+    previous: &[ProviderSourceRecord],
+    next: &[ProviderSourceRecord],
+) -> bool {
+    previous.len() == next.len()
+        && previous.iter().all(|source| {
+            next.iter()
+                .find(|candidate| candidate.id == source.id)
+                .is_some_and(|candidate| source_probe_matches(source, candidate))
+        })
+}
+
+fn source_catalog_visibility_changed(
+    previous: &[ProviderSourceRecord],
+    next: &[ProviderSourceRecord],
+) -> bool {
+    previous.iter().any(|source| {
+        let Some(candidate) = next.iter().find(|candidate| candidate.id == source.id) else {
+            return source.in_pool;
+        };
+        (source.in_pool || candidate.in_pool)
+            && (source.in_pool != candidate.in_pool
+                || source.enabled != candidate.enabled
+                || source.draining != candidate.draining
+                || source.allowed_models != candidate.allowed_models
+                || source.excluded_models != candidate.excluded_models)
+    })
 }
 
 #[tauri::command]
@@ -631,5 +701,21 @@ mod tests {
 
         current.models.push("model-b".into());
         assert!(!source_probe_matches(&before, &current));
+    }
+
+    #[test]
+    fn source_catalog_refreshes_for_pool_membership_changes() {
+        let inside = source_record();
+        let mut outside = inside.clone();
+        outside.in_pool = false;
+
+        assert!(source_catalog_visibility_changed(
+            std::slice::from_ref(&inside),
+            std::slice::from_ref(&outside)
+        ));
+        assert!(source_catalog_visibility_changed(
+            std::slice::from_ref(&outside),
+            std::slice::from_ref(&inside)
+        ));
     }
 }

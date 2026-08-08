@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    account_operational_state, operational_status, pool_model_summaries, AccountOperationalInput,
-    AccountSummary, Capabilities, GatewaySummary, OperationalStatus, RuntimeStateSnapshot,
-    RuntimeTargetSummary, SourceSummary,
+    account_operational_state, apply_model_reasoning_summary, operational_status,
+    pool_model_summaries, AccountOperationalInput, AccountSummary, Capabilities, GatewaySummary,
+    OperationalStatus, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
     quota::{
@@ -38,10 +38,12 @@ pub async fn get_local_runtime_state(
     let started = Instant::now();
     let snapshot = state.snapshot().await?;
     let running = snapshot.runtime_target.connected;
-    let routing_order = state
-        .gateway
-        .runtime()
-        .await
+    let runtime = state.gateway.runtime().await;
+    if let Some(runtime) = runtime.as_ref() {
+        runtime.prefetch_source_model_metadata();
+    }
+    let routing_order = runtime
+        .as_ref()
         .map(|runtime| runtime.candidate_runtime_order())
         .unwrap_or_default();
     let source_runtime = routing_order
@@ -119,10 +121,11 @@ pub async fn get_local_runtime_state(
         &snapshot.gateway.hidden_models,
     );
     for model in &mut models {
+        let model_id = model.id.clone();
         if let Some(price) = snapshot
             .gateway
             .model_price_overrides
-            .get(&model.id.to_ascii_lowercase())
+            .get(&model_id.to_ascii_lowercase())
         {
             model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
             model.cached_input_micro_usd_per_million = Some(
@@ -135,6 +138,19 @@ pub async fn get_local_runtime_state(
             model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
             model.custom_price = true;
         }
+        apply_model_reasoning_summary(
+            model,
+            runtime
+                .as_ref()
+                .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
+                .unwrap_or_default(),
+            snapshot
+                .gateway
+                .model_reasoning_allowed_levels
+                .get(&model_id.to_ascii_lowercase())
+                .map(Vec::as_slice),
+            model_has_native_account_route(&account_summaries, &model_id),
+        );
     }
     let visible_model_ids = models
         .iter()
@@ -244,6 +260,16 @@ fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &st
                 || candidate_id
                     .strip_prefix(source_id)
                     .is_some_and(|suffix| suffix.starts_with("::")))
+    })
+}
+
+fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
+    accounts.iter().any(|account| {
+        account.in_pool
+            && account
+                .models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model))
     })
 }
 

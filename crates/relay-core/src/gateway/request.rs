@@ -528,10 +528,11 @@ mod tests {
             json!({
                 "supported_reasoning_levels": [
                     {"effort": "low", "description": "Low"},
+                    {"effort": "medium", "description": "Medium"},
                     {"effort": "high", "description": "High"},
                     {"effort": "ultra", "description": "Ultra"}
                 ],
-                "default_reasoning_level": "high",
+                "default_reasoning_level": "ultra",
                 "supports_reasoning_summary_parameter": true,
                 "supports_reasoning_summaries": true,
                 "default_reasoning_summary": "detailed"
@@ -556,11 +557,12 @@ mod tests {
             model["slug"],
             crate::codex_model_alias("vendor/claude-fable-5")
         );
-        assert_eq!(model["default_reasoning_level"], "high");
+        assert_eq!(model["default_reasoning_level"], "medium");
         assert_eq!(
             model["supported_reasoning_levels"],
             json!([
                 {"effort": "low", "description": "Low"},
+                {"effort": "medium", "description": "Medium"},
                 {"effort": "high", "description": "High"},
                 {"effort": "ultra", "description": "Ultra"}
             ])
@@ -569,6 +571,42 @@ mod tests {
         assert_eq!(model["supports_reasoning_summaries"], true);
         assert_eq!(model["default_reasoning_summary"], "detailed");
         assert!(codex_catalog_entry_is_compatible(model));
+
+        runtime
+            .set_model_reasoning_allowed_levels(std::collections::BTreeMap::from([(
+                "vendor/claude-fable-5".to_string(),
+                vec!["ultra".to_string()],
+            )]))
+            .unwrap();
+        let configured = build_codex_models_response_with_source_reasoning(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            &source_reasoning,
+            None,
+        )
+        .expect("coding model catalog");
+        let configured_model = &configured["models"][0];
+        assert_eq!(configured_model["default_reasoning_level"], "ultra");
+        assert_eq!(
+            configured_model["supported_reasoning_levels"],
+            json!([{"effort": "ultra", "description": "Ultra"}])
+        );
+
+        runtime
+            .set_model_reasoning_allowed_levels(std::collections::BTreeMap::new())
+            .unwrap();
+        let automatic = build_codex_models_response_with_source_reasoning(
+            &runtime,
+            &key,
+            &visible,
+            &Default::default(),
+            &source_reasoning,
+            None,
+        )
+        .expect("coding model catalog");
+        assert_eq!(automatic["models"][0]["default_reasoning_level"], "medium");
     }
 
     #[test]

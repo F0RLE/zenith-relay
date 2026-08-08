@@ -320,6 +320,7 @@ pub fn run() {
             local_pool::commands::pool::set_local_pool_membership,
             local_pool::commands::pool::set_local_model_enabled,
             local_pool::commands::pool::set_local_model_price,
+            local_pool::commands::pool::set_local_model_reasoning,
             local_pool::commands::pool::export_local_configuration_preset,
             local_pool::commands::pool::update_local_routing,
             local_pool::commands::gateway::start_local_gateway,

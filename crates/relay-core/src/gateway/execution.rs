@@ -523,7 +523,24 @@ async fn execute_request(
         DefaultServiceTier::Standard
     };
     let client_tool_use = tool_use_diagnostics(&request);
-    let mut tried = HashSet::new();
+    let mut effort_exclusions = HashSet::new();
+    if let Some(effort) = requested_reasoning_effort(&request, wire_api) {
+        if !runtime.model_reasoning_effort_is_allowed(&resolved_model, &effort)
+            && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model)
+        {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "reasoning effort is not allowed for this model",
+                "reasoning_effort_not_allowed",
+            );
+        }
+        runtime.exclude_api_sources_without_reasoning_effort(
+            &resolved_model,
+            &effort,
+            &mut effort_exclusions,
+        );
+    }
+    let mut tried = effort_exclusions.clone();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
@@ -1375,7 +1392,7 @@ async fn execute_request(
             &key,
             &resolved_model,
             candidate_protocols(wire_api),
-            &HashSet::new(),
+            &effort_exclusions,
             response_affinity_key.as_deref(),
             now_ms(),
         ) {
@@ -1392,6 +1409,19 @@ async fn execute_request(
         return api_error(preserved.status, &preserved.message, &preserved.code);
     }
     api_error(failure.status, failure.message, failure.category)
+}
+
+fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {
+    let effort = match wire_api {
+        WireApi::Responses => request.pointer("/reasoning/effort"),
+        WireApi::ChatCompletions => request.get("reasoning_effort"),
+        WireApi::Messages => None,
+    };
+    effort
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|effort| !effort.is_empty() && !effort.eq_ignore_ascii_case("none"))
+        .map(str::to_ascii_lowercase)
 }
 
 fn adapter_error_response(error: AdapterError) -> Response<Body> {

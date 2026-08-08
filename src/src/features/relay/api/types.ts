@@ -234,6 +234,9 @@ export type ModelSummary = {
   cacheWrite1hMicroUsdPerMillion?: number | null;
   outputMicroUsdPerMillion: number | null;
   customPrice: boolean;
+  reasoningLevels?: string[];
+  reasoningAllowedLevels?: string[];
+  reasoningConfigurable?: boolean;
 };
 
 export type CandidateRuntimeSnapshot = {

@@ -2,8 +2,9 @@ use super::{
     account_summary, clean_label, find_account, normalized_values, runtime_error, store_error,
     valid_weight, validation_error, vault_error, ManagementError,
 };
+use crate::app::account_proxy_config;
 use crate::jobs;
-use crate::state::{now_ms, AccountCredential, AppState};
+use crate::state::{now_ms, AccountCredential, AppState, ServerAccountRecord};
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -15,9 +16,12 @@ use std::sync::Arc;
 use zenith_relay_core::accounts::{
     build_account_export, AccountExportCredential, AccountExportDocument, AccountExportRequest,
 };
-use zenith_relay_core::protocol::{AccountSummary, RevealedAccountIdentity, RuntimeStateSnapshot};
+use zenith_relay_core::protocol::{
+    account_candidate_enabled, account_operational_state, AccountOperationalInput, AccountSummary,
+    RevealedAccountIdentity, RuntimeStateSnapshot,
+};
 use zenith_relay_core::quota::MAX_PURCHASE_COST_MICRO_USD;
-use zenith_relay_core::WireApi;
+use zenith_relay_core::{CandidateKind, RuntimeCandidatePolicy, WireApi};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -194,13 +198,117 @@ pub async fn update_account(
         }
         record.economics.purchase_cost_micro_usd = (value > 0).then_some(value);
     }
+    let policy_changed = account_runtime_policy_changed(&old, &record);
     state.store.save_account(&record).map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        let _ = state.store.save_account(&old);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
+    let runtime_applied = if policy_changed || old.in_pool != record.in_pool {
+        match apply_account_policy_if_running(&state, &record) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let _ = state.store.save_account(&old);
+                let _ = state.rebuild_runtime().await;
+                return Err(runtime_error(error));
+            }
+        }
+    } else {
+        true
+    };
+    if !runtime_applied {
+        if let Err(error) = state.rebuild_runtime().await {
+            let _ = state.store.save_account(&old);
+            let _ = state.rebuild_runtime().await;
+            return Err(runtime_error(error));
+        }
     }
     Ok(Json(account_summary(&state, &record)?))
+}
+
+fn apply_account_policy_if_running(
+    state: &AppState,
+    account: &ServerAccountRecord,
+) -> Result<bool, String> {
+    apply_account_policies_if_running(state, std::slice::from_ref(account))
+}
+
+/// Applies account policies before widening or narrowing the internal key
+/// scope. Account membership is part of an account candidate's operational
+/// state, unlike API-source membership which is enforced solely by the key
+/// scope. Updating the candidate first means a removed account cannot accept a
+/// new request during the scope update, while an in-flight request keeps its
+/// existing executor.
+fn apply_account_policies_if_running(
+    state: &AppState,
+    accounts: &[ServerAccountRecord],
+) -> Result<bool, String> {
+    let Some(runtime) = state.runtime()? else {
+        return Ok(!state.store.gateway_enabled()?);
+    };
+    let candidate_ids = runtime
+        .candidate_runtime_order()
+        .into_iter()
+        .filter(|candidate| candidate.kind == CandidateKind::OAuthAccount)
+        .map(|candidate| candidate.candidate_id)
+        .collect::<BTreeSet<_>>();
+    for account in accounts {
+        let policy = account_runtime_policy(state, account)?;
+        if !candidate_ids.contains(&account.id) {
+            if policy.enabled {
+                return Ok(false);
+            }
+            continue;
+        }
+        if !runtime.update_account_policy(&account.id, policy) {
+            return Ok(false);
+        }
+    }
+    state.refresh_internal_gateway_key_scopes(&runtime)
+}
+
+fn account_runtime_policy(
+    state: &AppState,
+    account: &ServerAccountRecord,
+) -> Result<RuntimeCandidatePolicy, String> {
+    let credential = state
+        .vault
+        .load(&account.secret_ref)?
+        .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+    let secret_available = credential.is_some();
+    let proxy_available = credential
+        .as_ref()
+        .is_some_and(|credential| account_proxy_config(state, account, credential).is_ok());
+    let operational = account_operational_state(AccountOperationalInput {
+        enabled: account.enabled,
+        in_pool: account.in_pool,
+        draining: account.draining,
+        secret_available,
+        proxy_available,
+        auth_state: account.auth_state,
+        health: account.health,
+        subscription: &account.subscription,
+        quota: &account.quota,
+        last_error_code: account.last_error_code.as_deref(),
+        now_ms: now_ms(),
+        quota_stale_after_ms: zenith_relay_core::QUOTA_STALE_AFTER_MS,
+    });
+    Ok(RuntimeCandidatePolicy {
+        enabled: account_candidate_enabled(account.enabled, operational.routing_block_reason),
+        draining: account.draining,
+        priority: account.priority,
+        weight: account.weight,
+        allowed_models: account.allowed_models.clone(),
+        excluded_models: account.excluded_models.clone(),
+    })
+}
+
+fn account_runtime_policy_changed(
+    previous: &ServerAccountRecord,
+    next: &ServerAccountRecord,
+) -> bool {
+    previous.enabled != next.enabled
+        || previous.draining != next.draining
+        || previous.priority != next.priority
+        || previous.weight != next.weight
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
 }
 
 #[derive(Deserialize)]
@@ -288,17 +396,45 @@ pub async fn set_pool_membership(
         .store
         .replace_pool_membership(&next_sources, &next_accounts)
         .map_err(store_error)?;
-    if let Err(error) = state.rebuild_runtime().await {
-        state
-            .store
-            .replace_pool_membership(&old_sources, &old_accounts)
-            .map_err(|rollback| {
-                ManagementError::internal(
-                    "pool_membership_recovery_failed",
-                    format!("{error}; failed to restore pool membership: {rollback}"),
-                )
-            })?;
-        return Err(runtime_error(error));
+    let changed_accounts = accounts
+        .iter()
+        .filter(|account| account_ids.contains(&account.id))
+        .cloned()
+        .map(|mut account| {
+            account.in_pool = input.in_pool;
+            account
+        })
+        .collect::<Vec<_>>();
+    let runtime_applied = match apply_account_policies_if_running(&state, &changed_accounts) {
+        Ok(applied) => applied,
+        Err(error) => {
+            state
+                .store
+                .replace_pool_membership(&old_sources, &old_accounts)
+                .map_err(|rollback| {
+                    ManagementError::internal(
+                        "pool_membership_recovery_failed",
+                        format!("{error}; failed to restore pool membership: {rollback}"),
+                    )
+                })?;
+            let _ = state.rebuild_runtime().await;
+            return Err(runtime_error(error));
+        }
+    };
+    if !runtime_applied {
+        if let Err(error) = state.rebuild_runtime().await {
+            state
+                .store
+                .replace_pool_membership(&old_sources, &old_accounts)
+                .map_err(|rollback| {
+                    ManagementError::internal(
+                        "pool_membership_recovery_failed",
+                        format!("{error}; failed to restore pool membership: {rollback}"),
+                    )
+                })?;
+            let _ = state.rebuild_runtime().await;
+            return Err(runtime_error(error));
+        }
     }
     state.snapshot().map(Json).map_err(store_error)
 }

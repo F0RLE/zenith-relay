@@ -329,6 +329,11 @@ impl LocalPoolStore {
             .into_iter()
             .map(|(model, price)| (model.trim().to_ascii_lowercase(), price))
             .collect();
+        gateway.model_reasoning_allowed_levels =
+            zenith_relay_core::normalize_model_reasoning_allowed_levels(
+                gateway.model_reasoning_allowed_levels,
+            )
+            .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;
         gateway.subscription_plan_order =
             normalize_subscription_plan_order(gateway.subscription_plan_order)
                 .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?;

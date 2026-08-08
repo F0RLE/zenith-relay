@@ -3,9 +3,9 @@ use crate::accounts::{
     TokenRefreshAdapter,
 };
 use crate::catalog::{
-    apply_claude_reasoning_capability_fallback, intersect_source_reasoning_capabilities,
+    apply_claude_reasoning_capability_fallback, normalize_model_reasoning_allowed_levels,
     source_context_windows, source_image_input_capabilities, source_reasoning_capabilities,
-    SourceReasoningCapabilities,
+    union_source_reasoning_capabilities, SourceReasoningCapabilities,
 };
 use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{
@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -45,6 +45,7 @@ pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
 const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
+const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 15 * 1_000;
 
 #[derive(Default)]
 pub(crate) struct CodexSourceModelMetadata {
@@ -115,6 +116,27 @@ impl RuntimeSource {
             last_used_at_ms: None,
         }
     }
+}
+
+/// Mutable routing policy for an already configured candidate.
+///
+/// It deliberately excludes connection details and the configured model
+/// routes. Those require a new runtime because executors are immutable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeCandidatePolicy {
+    pub enabled: bool,
+    pub draining: bool,
+    pub priority: i32,
+    pub weight: u32,
+    pub allowed_models: Vec<String>,
+    pub excluded_models: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSourcePolicyUpdate {
+    pub source_id: String,
+    pub policy: RuntimeCandidatePolicy,
+    pub recovery_delay_seconds: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +229,9 @@ pub struct GatewayRuntimeOptions {
     /// Optional text model used as the Responses image-generation bridge.
     /// `None` selects the cheapest known compatible model per account.
     pub image_base_model: Option<String>,
+    /// Optional source-model allow-lists for reasoning efforts. An absent
+    /// model keeps every effort that its sources have confirmed.
+    pub model_reasoning_allowed_levels: BTreeMap<String, Vec<String>>,
     pub response_affinity_store: Option<Arc<dyn ResponseAffinityStore>>,
     pub provider_storm_breaker: bool,
 }
@@ -228,6 +253,10 @@ impl fmt::Debug for GatewayRuntimeOptions {
             .field("quota_stale_after_ms", &self.quota_stale_after_ms)
             .field("image_base_model", &self.image_base_model)
             .field(
+                "model_reasoning_allowed_levels",
+                &self.model_reasoning_allowed_levels,
+            )
+            .field(
                 "response_affinity_store",
                 &self.response_affinity_store.as_ref().map(|_| "configured"),
             )
@@ -248,6 +277,7 @@ impl Default for GatewayRuntimeOptions {
             default_service_tier: DefaultServiceTier::Standard,
             quota_stale_after_ms: crate::QUOTA_STALE_AFTER_MS,
             image_base_model: None,
+            model_reasoning_allowed_levels: BTreeMap::new(),
             response_affinity_store: None,
             provider_storm_breaker: false,
         }
@@ -262,7 +292,7 @@ pub struct GatewayRuntime {
     sources: BTreeMap<String, SourceConnector>,
     source_candidate_bindings: BTreeMap<String, SourceCandidateBinding>,
     source_endpoint_domains: BTreeMap<String, String>,
-    source_recovery_delays_ms: BTreeMap<String, u64>,
+    source_recovery_delays_ms: Mutex<BTreeMap<String, u64>>,
     chatgpt_accounts: BTreeMap<String, ChatGptAccountExecutor>,
     keys: Vec<RuntimeKey>,
     scheduler: Arc<Mutex<PoolScheduler>>,
@@ -278,6 +308,20 @@ pub struct GatewayRuntime {
     /// legitimately return different payload shapes for the generic endpoint
     /// and for Codex's catalog request.
     source_model_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
+    /// Serializes generic `/models` discovery so a dashboard prefetch cannot
+    /// duplicate a simultaneous Codex catalog request.
+    source_model_metadata_refresh_lock: tokio::sync::Mutex<()>,
+    source_model_metadata_prefetch_pending: AtomicBool,
+    /// Avoid polling an unavailable provider's `/models` endpoint on every
+    /// management-state refresh. Explicit Codex catalog requests still use the
+    /// normal refresh path.
+    source_model_metadata_prefetch_not_before_ms: AtomicU64,
+    /// Confirmed source route -> effort support, populated while refreshing
+    /// the Codex catalog. It is deliberately separate from native account
+    /// catalog metadata, which remains opaque.
+    confirmed_source_reasoning_efforts: Mutex<BTreeMap<String, BTreeMap<String, BTreeSet<String>>>>,
+    confirmed_source_reasoning_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    model_reasoning_allowed_levels: Mutex<BTreeMap<String, Vec<String>>>,
     passive_quotas: Mutex<BTreeMap<String, PassiveQuotaState>>,
     messages_bridge_store: Mutex<crate::MessagesBridgeStore>,
     native_responses_replay_store: Mutex<NativeResponsesReplayStore>,
@@ -570,6 +614,10 @@ impl GatewayRuntime {
                 "cooldown after failures must be between 1 and 8".to_string(),
             ));
         }
+        let model_reasoning_allowed_levels = normalize_model_reasoning_allowed_levels(
+            options.model_reasoning_allowed_levels.clone(),
+        )
+        .map_err(|message| Error::Validation(message.to_string()))?;
 
         let client = runtime_client(None, false)?;
         let bounded_client = runtime_client(None, true)?;
@@ -899,7 +947,7 @@ impl GatewayRuntime {
             sources: source_executors,
             source_candidate_bindings,
             source_endpoint_domains,
-            source_recovery_delays_ms,
+            source_recovery_delays_ms: Mutex::new(source_recovery_delays_ms),
             chatgpt_accounts: account_executors,
             keys: runtime_keys,
             scheduler: Arc::new(Mutex::new(scheduler)),
@@ -908,6 +956,12 @@ impl GatewayRuntime {
             codex_responses_lite_models: Mutex::new(BTreeSet::new()),
             codex_model_manifests: Mutex::new(BTreeMap::new()),
             source_model_manifests: Mutex::new(BTreeMap::new()),
+            source_model_metadata_refresh_lock: tokio::sync::Mutex::new(()),
+            source_model_metadata_prefetch_pending: AtomicBool::new(false),
+            source_model_metadata_prefetch_not_before_ms: AtomicU64::new(0),
+            confirmed_source_reasoning_efforts: Mutex::new(BTreeMap::new()),
+            confirmed_source_reasoning_levels: Mutex::new(BTreeMap::new()),
+            model_reasoning_allowed_levels: Mutex::new(model_reasoning_allowed_levels),
             passive_quotas: Mutex::new(passive_quotas),
             messages_bridge_store: Mutex::new(crate::MessagesBridgeStore::default()),
             native_responses_replay_store: Mutex::new(NativeResponsesReplayStore::default()),
@@ -1108,10 +1162,10 @@ impl GatewayRuntime {
     /// generated Codex catalog.
     ///
     /// Metadata is evaluated per eligible candidate route. A public model may
-    /// have several source candidates behind it, so reasoning controls are
-    /// advertised only when every route proves it supports the same effort.
-    /// This avoids a Codex selection that the scheduler can legally send to an
-    /// incompatible source.
+    /// have several source candidates behind it, so the catalog exposes the
+    /// union of efforts confirmed by at least one source. When a client asks
+    /// for one explicitly, request routing excludes sources that have not
+    /// confirmed that effort.
     pub(crate) async fn codex_source_model_metadata(
         &self,
         key: &AuthenticatedKey,
@@ -1119,6 +1173,76 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
         let scope = key.scope_snapshot();
+        self.source_model_metadata(&key.model_rules, &scope, allowed_protocols, now_ms)
+            .await
+    }
+
+    /// Starts a best-effort metadata refresh for the management UI. The result
+    /// arrives on the next state poll and never delays the current one.
+    pub fn prefetch_source_model_metadata(self: &Arc<Self>) {
+        if runtime_now_ms()
+            < self
+                .source_model_metadata_prefetch_not_before_ms
+                .load(Ordering::Acquire)
+        {
+            return;
+        }
+        if self
+            .source_model_metadata_prefetch_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let rules = ModelRules::default();
+            let scope = runtime.management_source_metadata_scope();
+            runtime
+                .source_model_metadata(&rules, &scope, &[WireApi::Responses], runtime_now_ms())
+                .await;
+            runtime.source_model_metadata_prefetch_not_before_ms.store(
+                runtime_now_ms().saturating_add(SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS),
+                Ordering::Release,
+            );
+            runtime
+                .source_model_metadata_prefetch_pending
+                .store(false, Ordering::Release);
+        });
+    }
+
+    /// Builds the source portion of the scope represented by active gateway
+    /// credentials. Management must not advertise an effort discovered on an
+    /// API source that no active pool key can reach.
+    fn management_source_metadata_scope(&self) -> CandidateScope {
+        let mut source_ids = BTreeSet::new();
+        for key in self.keys.iter().filter(|key| key.enabled) {
+            let scope = key
+                .scope
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if scope.source_ids.is_none() && scope.account_ids.is_none() {
+                return CandidateScope::default();
+            }
+            if let Some(ids) = scope.source_ids.as_ref() {
+                source_ids.extend(ids.iter().cloned());
+            }
+        }
+        CandidateScope {
+            source_ids: Some(source_ids),
+            account_ids: Some(BTreeSet::new()),
+            model_rules: ModelRules::default(),
+        }
+    }
+
+    async fn source_model_metadata(
+        &self,
+        model_rules: &ModelRules,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+        now_ms: u64,
+    ) -> CodexSourceModelMetadata {
+        let _refresh_guard = self.source_model_metadata_refresh_lock.lock().await;
         let routes = {
             let scheduler = self.lock_scheduler();
             let mut routes = Vec::new();
@@ -1137,8 +1261,8 @@ impl GatewayRuntime {
                 };
                 let mut configured_models = BTreeSet::new();
                 for model in models {
-                    if key.model_rules.allows(model)
-                        && candidate.is_catalog_visible(model, allowed_protocols, &scope)
+                    if model_rules.allows(model)
+                        && candidate.is_catalog_visible(model, allowed_protocols, scope)
                     {
                         configured_models.insert(model.clone());
                     }
@@ -1171,45 +1295,60 @@ impl GatewayRuntime {
                 adapter,
                 reasoning_mode,
             )| async move {
-                let manifest = if let Some(value) = self.fresh_source_model_manifest(
-                    &candidate_id,
-                    now_ms,
-                    CODEX_SOURCE_MODEL_MANIFEST_TTL_MS,
-                ) {
-                    Some(value)
+                let cached_manifest = self.cached_source_model_manifest(&candidate_id);
+                let manifest = if cached_manifest.as_ref().is_some_and(|manifest| {
+                    now_ms.saturating_sub(manifest.observed_at_ms)
+                        <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+                }) {
+                    cached_manifest.map(|manifest| manifest.value)
                 } else {
-                    let request = self
-                        .discovery_client
-                        .get(models_url)
-                        .headers(protocol_headers)
-                        .header(authorization_name, authorization)
-                        .timeout(Duration::from_secs(10));
-                    let Some(response) = request.send().await.ok() else {
-                        return (configured_models, adapter, reasoning_mode, None);
-                    };
-                    if !response.status().is_success() {
-                        return (configured_models, adapter, reasoning_mode, None);
+                    let fetched_manifest = async {
+                        let response = self
+                            .discovery_client
+                            .get(models_url)
+                            .headers(protocol_headers)
+                            .header(authorization_name, authorization)
+                            .timeout(Duration::from_secs(10))
+                            .send()
+                            .await
+                            .ok()?;
+                        if !response.status().is_success() {
+                            return None;
+                        }
+                        let body = collect_limited(response, MAX_MODELS_BODY_BYTES)
+                            .await
+                            .ok()?;
+                        serde_json::from_slice::<Value>(&body).ok()
                     }
-                    let Some(body) = collect_limited(response, MAX_MODELS_BODY_BYTES).await.ok()
-                    else {
-                        return (configured_models, adapter, reasoning_mode, None);
-                    };
-                    let Some(value) = serde_json::from_slice::<Value>(&body).ok() else {
-                        return (configured_models, adapter, reasoning_mode, None);
-                    };
-                    self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
-                    Some(value)
+                    .await;
+                    if let Some(value) = fetched_manifest {
+                        self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
+                        Some(value)
+                    } else {
+                        // A transient discovery failure must not make a model
+                        // appear to lose its previously confirmed capabilities.
+                        // Candidate removal and configured model filters still
+                        // take effect before this cache is considered.
+                        cached_manifest.map(|manifest| manifest.value)
+                    }
                 };
-                (configured_models, adapter, reasoning_mode, manifest)
+                (
+                    candidate_id,
+                    configured_models,
+                    adapter,
+                    reasoning_mode,
+                    manifest,
+                )
             },
         ))
         .await;
 
         let mut metadata = CodexSourceModelMetadata::default();
-        let mut reasoning_by_model =
-            BTreeMap::<String, Vec<Option<SourceReasoningCapabilities>>>::new();
+        let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
+        let mut confirmed_efforts = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
+        let mut confirmed_levels = BTreeMap::<String, Vec<String>>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
-        for (configured_models, adapter, reasoning_mode, manifest) in manifests {
+        for (candidate_id, configured_models, adapter, reasoning_mode, manifest) in manifests {
             let reasoning = manifest
                 .as_ref()
                 .map(|manifest| source_reasoning_capabilities(manifest, &configured_models))
@@ -1246,23 +1385,47 @@ impl GatewayRuntime {
                 .and_then(|capabilities| {
                     source_reasoning_for_route(capabilities, adapter, reasoning_mode)
                 });
-                reasoning_by_model
-                    .entry(model_key)
-                    .or_default()
-                    .push(capabilities);
+                if let Some(capabilities) = capabilities {
+                    confirmed_efforts
+                        .entry(model_key.clone())
+                        .or_default()
+                        .entry(candidate_id.clone())
+                        .or_default()
+                        .extend(
+                            capabilities
+                                .effort_ids()
+                                .map(|effort| effort.to_ascii_lowercase()),
+                        );
+                    reasoning_by_model
+                        .entry(model_key)
+                        .or_default()
+                        .push(capabilities);
+                }
             }
         }
         for (model, capabilities) in reasoning_by_model {
-            let Some(capabilities) = capabilities.into_iter().collect::<Option<Vec<_>>>() else {
+            let Some(capabilities) = union_source_reasoning_capabilities(capabilities) else {
                 continue;
             };
-            let Some(capabilities) = intersect_source_reasoning_capabilities(capabilities) else {
-                continue;
-            };
+            confirmed_levels.insert(
+                model.clone(),
+                capabilities
+                    .effort_ids()
+                    .map(str::to_ascii_lowercase)
+                    .collect(),
+            );
             metadata
                 .reasoning_catalog_templates
                 .insert(model, capabilities.codex_catalog_template());
         }
+        *self
+            .confirmed_source_reasoning_efforts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_efforts;
+        *self
+            .confirmed_source_reasoning_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_levels;
         for (model, route_support) in image_support_by_model {
             if route_support.iter().all(|supports_image| *supports_image) {
                 metadata.image_models.insert(model);
@@ -1334,18 +1497,12 @@ impl GatewayRuntime {
             );
     }
 
-    fn fresh_source_model_manifest(
-        &self,
-        candidate_id: &str,
-        now_ms: u64,
-        ttl_ms: u64,
-    ) -> Option<Value> {
+    fn cached_source_model_manifest(&self, candidate_id: &str) -> Option<CachedModelManifest> {
         self.source_model_manifests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(candidate_id)
-            .filter(|manifest| now_ms.saturating_sub(manifest.observed_at_ms) <= ttl_ms)
-            .map(|manifest| manifest.value.clone())
+            .cloned()
     }
 
     pub(crate) fn stale_codex_model_manifests<'a>(
@@ -1418,6 +1575,95 @@ impl GatewayRuntime {
         self.source_candidate_bindings.keys().cloned().collect()
     }
 
+    /// Excludes API routes that have not explicitly confirmed support for an
+    /// effort. Native ChatGPT routes are deliberately not part of this set:
+    /// their request and catalog semantics remain provider-owned.
+    pub(crate) fn exclude_api_sources_without_reasoning_effort(
+        &self,
+        model: &str,
+        effort: &str,
+        tried: &mut HashSet<String>,
+    ) {
+        let model = model.trim().to_ascii_lowercase();
+        let effort = effort.trim().to_ascii_lowercase();
+        if model.is_empty() || effort.is_empty() || effort == "none" {
+            return;
+        }
+        let capabilities = self
+            .confirmed_source_reasoning_efforts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A catalog refresh can be absent or temporarily fail. Until at least
+        // one route has confirmed capabilities for this model, preserve the
+        // normal transparent fallback rather than excluding every source.
+        let Some(confirmed) = capabilities.get(&model) else {
+            return;
+        };
+        for candidate_id in self.source_candidate_bindings.keys() {
+            if !confirmed
+                .get(candidate_id)
+                .is_some_and(|efforts| efforts.contains(&effort))
+            {
+                tried.insert(candidate_id.clone());
+            }
+        }
+    }
+
+    pub fn confirmed_source_reasoning_levels(&self, model: &str) -> Vec<String> {
+        self.confirmed_source_reasoning_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Returns a model's manually allowed reasoning levels. An empty result
+    /// means the catalog remains automatic and exposes every confirmed level.
+    pub fn model_reasoning_allowed_levels(&self, model: &str) -> Vec<String> {
+        self.model_reasoning_allowed_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn model_reasoning_effort_is_allowed(&self, model: &str, effort: &str) -> bool {
+        let model = model.trim().to_ascii_lowercase();
+        let effort = effort.trim().to_ascii_lowercase();
+        self.model_reasoning_allowed_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model)
+            .is_none_or(|allowed| allowed.iter().any(|level| level == &effort))
+    }
+
+    pub fn set_model_reasoning_allowed_levels(
+        &self,
+        allowed_levels: BTreeMap<String, Vec<String>>,
+    ) -> Result<()> {
+        let allowed_levels = normalize_model_reasoning_allowed_levels(allowed_levels)
+            .map_err(|message| Error::Validation(message.to_string()))?;
+        *self
+            .model_reasoning_allowed_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = allowed_levels;
+        Ok(())
+    }
+
+    pub fn supports_source_reasoning_effort(&self, model: &str, effort: &str) -> bool {
+        self.confirmed_source_reasoning_efforts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&model.trim().to_ascii_lowercase())
+            .is_some_and(|routes| {
+                routes
+                    .values()
+                    .any(|efforts| efforts.contains(&effort.trim().to_ascii_lowercase()))
+            })
+    }
+
     pub fn visible_models_for_secret(
         &self,
         secret: &str,
@@ -1471,6 +1717,119 @@ impl GatewayRuntime {
             quota,
             quota_updated_at_ms,
         )
+    }
+
+    /// Applies source routing rules without rebuilding its HTTP executor.
+    ///
+    /// A source can have more than one protocol binding, so every matching
+    /// candidate must receive the same policy atomically from the scheduler's
+    /// point of view.
+    pub fn update_source_policy(
+        &self,
+        source_id: &str,
+        policy: RuntimeCandidatePolicy,
+        recovery_delay_seconds: u64,
+    ) -> bool {
+        self.update_source_policies(&[RuntimeSourcePolicyUpdate {
+            source_id: source_id.to_string(),
+            policy,
+            recovery_delay_seconds,
+        }])
+    }
+
+    /// Applies several source policies as one scheduler update. This keeps a
+    /// reordered fallback group consistent even when its sources expose
+    /// multiple protocol bindings.
+    pub fn update_source_policies(&self, updates: &[RuntimeSourcePolicyUpdate]) -> bool {
+        if updates
+            .iter()
+            .any(|update| update.policy.weight == 0 || update.recovery_delay_seconds > 24 * 60 * 60)
+        {
+            return false;
+        }
+        let mut seen = BTreeSet::new();
+        if updates
+            .iter()
+            .any(|update| !seen.insert(update.source_id.as_str()))
+        {
+            return false;
+        }
+
+        let mut scheduler = self.lock_scheduler();
+        let mut candidates = Vec::new();
+        let mut recovery_updates = Vec::new();
+        for update in updates {
+            let rules = model_rules(
+                update.policy.allowed_models.clone(),
+                update.policy.excluded_models.clone(),
+            );
+            let mut matched = false;
+            for (candidate_id, binding) in &self.source_candidate_bindings {
+                if binding.source_id != update.source_id {
+                    continue;
+                }
+                matched = true;
+                let Some(mut candidate) = scheduler.candidate(candidate_id).cloned() else {
+                    return false;
+                };
+                if candidate.kind != CandidateKind::ApiSource
+                    || candidate.source_id != update.source_id
+                {
+                    return false;
+                }
+                apply_candidate_policy(&mut candidate, &update.policy, &rules);
+                recovery_updates.push((candidate_id.clone(), update.recovery_delay_seconds));
+                candidates.push(candidate);
+            }
+            if !matched {
+                return false;
+            }
+        }
+        for candidate in candidates {
+            scheduler.upsert(candidate);
+        }
+        drop(scheduler);
+
+        let mut recovery_delays = self
+            .source_recovery_delays_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (candidate_id, recovery_delay_seconds) in recovery_updates {
+            if recovery_delay_seconds == 0 {
+                recovery_delays.remove(&candidate_id);
+            } else {
+                recovery_delays.insert(candidate_id, recovery_delay_seconds.saturating_mul(1_000));
+            }
+        }
+        drop(recovery_delays);
+        self.candidate_availability.notify_waiters();
+        true
+    }
+
+    /// Applies an account's scheduling policy without replacing its OAuth
+    /// executor or interrupting in-flight streams.
+    pub fn update_account_policy(&self, account_id: &str, policy: RuntimeCandidatePolicy) -> bool {
+        if policy.weight == 0 {
+            return false;
+        }
+        let rules = model_rules(
+            policy.allowed_models.clone(),
+            policy.excluded_models.clone(),
+        );
+        let mut scheduler = self.lock_scheduler();
+        let Some(mut candidate) = scheduler.candidate(account_id).cloned() else {
+            return false;
+        };
+        if candidate.kind != CandidateKind::OAuthAccount
+            || candidate.account_id.as_deref() != Some(account_id)
+        {
+            return false;
+        }
+        apply_candidate_policy(&mut candidate, &policy, &rules);
+        scheduler.upsert(candidate);
+        drop(scheduler);
+        self.candidate_availability.notify_waiters();
+        true
     }
 
     pub fn update_key_scope(&self, key_id: &str, scope: CandidateScope) -> bool {
@@ -2309,7 +2668,11 @@ impl GatewayRuntime {
     }
 
     pub(crate) fn source_recovery_delay_ms(&self, candidate_id: &str) -> Option<u64> {
-        self.source_recovery_delays_ms.get(candidate_id).copied()
+        self.source_recovery_delays_ms
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(candidate_id)
+            .copied()
     }
 
     /// Keeps a retry from fanning an endpoint-wide failure out to every
@@ -3020,6 +3383,18 @@ fn model_rules(allowed: Vec<String>, excluded: Vec<String>) -> ModelRules {
     }
 }
 
+fn apply_candidate_policy(
+    candidate: &mut RuntimeCandidate,
+    policy: &RuntimeCandidatePolicy,
+    rules: &ModelRules,
+) {
+    candidate.enabled = policy.enabled;
+    candidate.draining = policy.draining;
+    candidate.priority = policy.priority;
+    candidate.weight = policy.weight;
+    candidate.model_rules = rules.clone();
+}
+
 fn normalize_prefix(prefix: Option<String>) -> Option<String> {
     prefix
         .map(|value| value.trim().trim_matches('/').to_string())
@@ -3176,6 +3551,98 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[test]
+    fn runtime_updates_source_policy_without_rebuilding_candidate_state() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["model-a", "model-b"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let retry_at = current_time_ms() + 60_000;
+        runtime.set_candidate_cooldown("source-1", "model-a", retry_at);
+
+        assert!(runtime.update_source_policy(
+            "source-1",
+            RuntimeCandidatePolicy {
+                enabled: true,
+                draining: false,
+                priority: 7,
+                weight: 3,
+                allowed_models: vec!["model-b".into()],
+                excluded_models: Vec::new(),
+            },
+            30,
+        ));
+        assert_eq!(
+            runtime.visible_models_for_secret(
+                "local-secret",
+                &[WireApi::Responses],
+                current_time_ms()
+            ),
+            vec!["model-b"]
+        );
+        let candidate = runtime
+            .lock_scheduler()
+            .candidate("source-1")
+            .cloned()
+            .unwrap();
+        assert_eq!(candidate.priority, 7);
+        assert_eq!(candidate.weight, 3);
+        assert_eq!(candidate.cooldowns.get("model-a"), Some(&retry_at));
+        assert_eq!(runtime.source_recovery_delay_ms("source-1"), Some(30_000));
+    }
+
+    #[test]
+    fn runtime_rejects_policy_updates_for_missing_candidates() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["model-a"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let policy = RuntimeCandidatePolicy {
+            enabled: true,
+            draining: false,
+            priority: 7,
+            weight: 3,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+        };
+
+        assert!(!runtime.update_source_policies(&[
+            RuntimeSourcePolicyUpdate {
+                source_id: "source-1".into(),
+                policy: policy.clone(),
+                recovery_delay_seconds: 30,
+            },
+            RuntimeSourcePolicyUpdate {
+                source_id: "missing".into(),
+                policy: policy.clone(),
+                recovery_delay_seconds: 30,
+            },
+        ]));
+        assert_eq!(
+            runtime
+                .lock_scheduler()
+                .candidate("source-1")
+                .expect("source candidate")
+                .priority,
+            0
+        );
+        assert!(!runtime.update_account_policy("missing", policy));
     }
 
     #[test]
@@ -3389,8 +3856,7 @@ mod tests {
                 "supported_reasoning_levels": [
                     {"effort": "low", "description": "low"},
                     {"effort": "high", "description": "high"}
-                ],
-                "default_reasoning_level": "high"
+                ]
             })
             .as_object()
             .unwrap()
@@ -3399,7 +3865,247 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_claude_source_catalog_preserves_source_declared_efforts() {
+    async fn management_prefetch_populates_reasoning_before_codex_catalog_request() {
+        let runtime = Arc::new(
+            GatewayRuntime::from_pool(
+                vec![RuntimeSource::unrestricted(source(
+                    "source-1",
+                    "upstream-secret",
+                    &["provider/fable"],
+                ))],
+                vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+                GatewayRuntimeOptions::default(),
+                Arc::new(|_| {}),
+            )
+            .unwrap(),
+        );
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low", "medium", "high"]
+                }]
+            }),
+            current_time_ms(),
+        );
+
+        runtime.prefetch_source_model_metadata();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime
+                .confirmed_source_reasoning_levels("provider/fable")
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("management prefetch completes");
+
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
+        let not_before = runtime
+            .source_model_metadata_prefetch_not_before_ms
+            .load(Ordering::Acquire);
+        assert!(not_before > runtime_now_ms());
+        runtime.prefetch_source_model_metadata();
+        assert_eq!(
+            runtime
+                .source_model_metadata_prefetch_not_before_ms
+                .load(Ordering::Acquire),
+            not_before
+        );
+    }
+
+    #[tokio::test]
+    async fn management_prefetch_ignores_sources_outside_the_active_key_scope() {
+        let runtime = Arc::new(
+            GatewayRuntime::from_pool(
+                vec![
+                    RuntimeSource::unrestricted(source(
+                        "source-in-pool",
+                        "in-pool-secret",
+                        &["provider/fable"],
+                    )),
+                    RuntimeSource::unrestricted(source(
+                        "source-outside-pool",
+                        "outside-pool-secret",
+                        &["provider/fable"],
+                    )),
+                ],
+                vec![RuntimeLocalKey {
+                    key: key("key-1", "local-secret"),
+                    enabled: true,
+                    source_ids: Some(vec!["source-in-pool".into()]),
+                    allowed_models: Vec::new(),
+                    excluded_models: Vec::new(),
+                    model_prefix: None,
+                }],
+                GatewayRuntimeOptions::default(),
+                Arc::new(|_| {}),
+            )
+            .unwrap(),
+        );
+        let now_ms = current_time_ms();
+        runtime.remember_source_model_manifest(
+            "source-in-pool",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low"]
+                }]
+            }),
+            now_ms,
+        );
+        runtime.remember_source_model_manifest(
+            "source-outside-pool",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["ultra"]
+                }]
+            }),
+            now_ms,
+        );
+
+        runtime.prefetch_source_model_metadata();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime
+                .confirmed_source_reasoning_levels("provider/fable")
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("management prefetch completes");
+
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_source_metadata_survives_a_transient_models_failure() {
+        let mut unavailable_source = source("source-1", "upstream-secret", &["provider/fable"]);
+        unavailable_source.base_url = "http://127.0.0.1:1/v1".to_string();
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(unavailable_source)],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low", "medium", "high"]
+                }]
+            }),
+            now_ms.saturating_sub(CODEX_SOURCE_MODEL_MANIFEST_TTL_MS + 1),
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert!(metadata
+            .reasoning_catalog_templates
+            .contains_key("provider/fable"));
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string(), "medium".to_string(), "high".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn source_reasoning_union_keeps_confirmed_route_and_excludes_unknown_route() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![
+                RuntimeSource::unrestricted(source(
+                    "source-confirmed",
+                    "confirmed-secret",
+                    &["provider/fable"],
+                )),
+                RuntimeSource::unrestricted(source(
+                    "source-unknown",
+                    "unknown-secret",
+                    &["provider/fable"],
+                )),
+            ],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+        let mut before_catalog = HashSet::new();
+        runtime.exclude_api_sources_without_reasoning_effort(
+            "provider/fable",
+            "high",
+            &mut before_catalog,
+        );
+        assert!(before_catalog.is_empty());
+        runtime.remember_source_model_manifest(
+            "source-confirmed",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low", "high"]
+                }]
+            }),
+            now_ms,
+        );
+        runtime.remember_source_model_manifest(
+            "source-unknown",
+            serde_json::json!({"data": [{"id": "provider/fable"}]}),
+            now_ms,
+        );
+
+        let metadata = runtime
+            .codex_source_model_metadata(&key, &[WireApi::Responses], now_ms)
+            .await;
+
+        assert!(metadata
+            .reasoning_catalog_templates
+            .contains_key("provider/fable"));
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string(), "high".to_string()]
+        );
+        runtime
+            .set_model_reasoning_allowed_levels(BTreeMap::from([(
+                "provider/fable".to_string(),
+                vec!["high".to_string()],
+            )]))
+            .unwrap();
+        assert!(runtime.model_reasoning_effort_is_allowed("provider/fable", "high"));
+        assert!(!runtime.model_reasoning_effort_is_allowed("provider/fable", "low"));
+        let mut excluded = HashSet::new();
+        runtime.exclude_api_sources_without_reasoning_effort(
+            "provider/fable",
+            "high",
+            &mut excluded,
+        );
+        assert!(!excluded.contains("source-confirmed"));
+        assert!(excluded.contains("source-unknown"));
+    }
+
+    #[tokio::test]
+    async fn non_claude_source_catalog_preserves_source_declared_efforts_and_uses_medium_auto_default(
+    ) {
         let runtime = GatewayRuntime::from_pool(
             vec![RuntimeSource::unrestricted(source(
                 "source-1",
@@ -3453,7 +4159,7 @@ mod tests {
                         {"effort": "max", "description": "max"},
                         {"effort": "very_high", "description": "very_high"}
                     ],
-                    "default_reasoning_level": "very_high"
+                    "default_reasoning_level": "medium"
                 }),
             ),
             (
@@ -3466,7 +4172,7 @@ mod tests {
                         {"effort": "xhigh", "description": "xhigh"},
                         {"effort": "max", "description": "max"}
                     ],
-                    "default_reasoning_level": "max"
+                    "default_reasoning_level": "medium"
                 }),
             ),
         ] {

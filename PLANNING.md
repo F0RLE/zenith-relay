@@ -172,25 +172,34 @@ their values and default. Relay reads either OpenAI-style <code>data</code>
 rows or a top-level <code>models</code> catalog. A bare
 <code>supportsReasoningEffort</code> flag never invents levels, and an
 explicit false flag suppresses stale option lists. Relay does not infer
-reasoning from a provider or model name. It advertises an effort to
-Codex only when every eligible Responses route for that model explicitly
-confirms it; a Responses-to-Messages bridge further removes efforts it cannot
-translate and never advertises reasoning summaries. The generic source catalog
-is cached separately from the provider's Codex-specific catalog, so refreshing
-one endpoint cannot erase the other endpoint's confirmed capabilities.
+reasoning from a provider or model name. It advertises the union of efforts
+confirmed by eligible Responses routes; when the client explicitly chooses an
+effort, routing excludes API-source candidates that did not confirm that
+effort. If no fresh capability snapshot exists, normal transparent fallback
+continues instead of excluding every candidate. A Responses-to-Messages bridge
+further removes efforts it cannot translate and never advertises reasoning
+summaries. The generic source catalog is cached separately from the provider's
+Codex-specific catalog, so refreshing one endpoint cannot erase the other
+endpoint's confirmed capabilities.
 The native Messages route preserves successful JSON/SSE bodies verbatim. Chat
 Completions rejects tool definitions and tool-call history instead of
 pretending to translate them. Responses WebSocket remains native-only until a
 separate bidirectional bridge is designed and tested.
 
 For routed API-source rows, Relay does not infer or blacklist reasoning effort
-names from a provider or model name. Native Responses routes preserve the
-current per-model source declaration, including effort names Relay did not
-know in advance; when a route does not explicitly confirm reasoning metadata,
-Relay does not advertise a selector for that model. Claude's separate
-compatibility fallback remains limited to the previously documented sparse
-Claude metadata case. Native ChatGPT catalog rows remain authoritative and are
-not rewritten by this policy.
+names from a provider or model name. Model Rules may narrow a model to an
+operator-selected allow-list of confirmed levels: an empty allow-list exposes
+all detected levels, and one allowed level becomes the sole catalog choice.
+This changes catalog availability only; Relay does not overwrite the effort
+chosen by Codex or another Responses client. In automatic mode, `medium` is
+the catalog default when that confirmed level exists; otherwise Relay advertises
+no default rather than inheriting a provider-specific value such as `ultra`.
+Native Responses routes preserve the current per-model source
+declaration, including effort names Relay did not know in advance; when a
+route does not explicitly confirm reasoning metadata, Relay does not advertise
+a selector for that route. Claude's separate compatibility fallback remains
+limited to the previously documented sparse Claude metadata case. Native
+ChatGPT catalog rows remain authoritative and are not rewritten by this policy.
 
 ## Usage and economics
 

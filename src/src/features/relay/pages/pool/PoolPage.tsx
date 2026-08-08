@@ -679,6 +679,7 @@ function ModelsView() {
   const { t, i18n } = useTranslation();
   const { mode, runtime, perform, busy } = useRelayState();
   const [priceModel, setPriceModel] = useState<ModelSummary | null>(null);
+  const [reasoningModel, setReasoningModel] = useState<ModelSummary | null>(null);
   const models = runtime ? modelSummaries(runtime) : [];
   const modelGroups = groupModelSummariesForLauncher(models, runtime?.accounts ?? []);
   const canEditPrice = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("model_pricing"));
@@ -717,11 +718,36 @@ function ModelsView() {
         <td data-column="codex"><div className={`model-codex-state ${model.codexVisible ? "visible" : "hidden"}`}><BrainCircuit aria-hidden /><span><strong>{t(model.codexVisible ? "models.codexVisible" : model.enabled ? "models.codexUnsupported" : "models.codexDisabled")}</strong></span></div></td>
         <td data-column="price"><div className="model-price">{hasPrice ? <>{priceParts.map((part) => <span className="model-price-value" key={part.label}><small>{part.label}</small><strong>{part.value}</strong></span>)}{model.customPrice ? <small className="model-price-note custom">{t("models.customPrice")}</small> : null}</> : <span className="model-price-empty muted">{t("models.priceUnavailable")}</span>}</div></td>
         <td data-column="members"><span className="model-members">{t("pool.membersCount", { count: model.memberCount })}</span></td>
-        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
+        <td data-column="actions"><div className="model-rule-actions">{canEditPrice ? <IconButton data-model-price-edit={model.id} label={t("models.editPrice", { model: model.id })} icon={<Pencil aria-hidden />} onClick={() => setPriceModel(model)} /> : null}{model.reasoningConfigurable ? <IconButton data-model-reasoning-edit={model.id} label={t("models.editReasoning", { model: model.id })} icon={<BrainCircuit aria-hidden />} onClick={() => setReasoningModel(model)} /> : null}<IconButton data-model-toggle={model.id} label={toggleLabel} icon={toggling ? <Loader2 className="spin" aria-hidden /> : <Power aria-hidden />} className="model-toggle" aria-pressed={model.enabled} disabled={toggling} onClick={() => void toggleModel(model)} /></div></td>
       </tr>;
     })}</tbody>)}
     </table></div>
-  </section>{priceModel ? <ModelPriceDialog key={priceModel.id} model={priceModel} onClose={() => setPriceModel(null)} /> : null}</>;
+  </section>{priceModel ? <ModelPriceDialog key={priceModel.id} model={priceModel} onClose={() => setPriceModel(null)} /> : null}{reasoningModel ? <ModelReasoningDialog key={reasoningModel.id} model={reasoningModel} onClose={() => setReasoningModel(null)} /> : null}</>;
+}
+
+function ModelReasoningDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
+  const { t } = useTranslation();
+  const { mode, perform, busy } = useRelayState();
+  const [allowedLevels, setAllowedLevels] = useState(model.reasoningAllowedLevels ?? []);
+  const operation = `model-reasoning-${model.id}`;
+  const levels = model.reasoningLevels ?? [];
+  const save = async () => {
+    const ok = await perform(operation, () => mode === "local"
+      ? relayCommands.setModelReasoning(model.id, allowedLevels)
+      : relayCommands.remoteAction({ type: "set_model_reasoning" }, { modelId: model.id, allowedLevels }), "feedback.saved");
+    if (ok) onClose();
+  };
+  const automatic = allowedLevels.length === 0;
+  const toggleAllowedLevel = (level: string) => setAllowedLevels((current) => current.length ? toggle(current, level) : [level]);
+  return <Dialog title={t("models.reasoningTitle")} onClose={onClose} footer={<><Button variant="secondary" disabled={busy === operation} onClick={onClose}>{t("common.cancel")}</Button><Button variant="primary" busy={busy === operation} onClick={() => void save()}>{t("common.save")}</Button></>}>
+    <div className="model-reasoning-form">
+      <div className="model-price-context"><code title={model.id}>{model.id}</code><span>{t("models.reasoningHint")}</span></div>
+      <div className="model-reasoning-options" role="group" aria-label={t("models.reasoningTitle")}>
+        <button type="button" aria-pressed={automatic} className={automatic ? "selected" : undefined} onClick={() => setAllowedLevels([])}>{t("models.reasoningAuto")}</button>
+        {levels.map((level) => <button key={level} type="button" role="checkbox" aria-checked={!automatic && allowedLevels.includes(level)} className={!automatic && allowedLevels.includes(level) ? "selected" : undefined} onClick={() => toggleAllowedLevel(level)}>{formatReasoningEffort(level)}</button>)}
+      </div>
+    </div>
+  </Dialog>;
 }
 
 function ModelPriceDialog({ model, onClose }: { model: ModelSummary; onClose: () => void }) {
@@ -782,11 +808,15 @@ function toggle(values: string[], value: string) { return values.includes(value)
 function formatApiEquivalent(microUsd: number, locale: string) { return `≈${new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
 function formatProviderMicroUsd(value: number, locale: string) { return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000); }
 function formatModelPrice(microUsd: number, locale: string) { return `$${new Intl.NumberFormat(locale, { maximumFractionDigits: 6 }).format(microUsd / 1_000_000)}`; }
+function formatReasoningEffort(effort: string) { return effort.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["runtime"]>): ModelSummary[] {
   if (runtime.gateway.models?.length) return runtime.gateway.models.map((model) => ({
     ...model,
     codexVisible: model.codexVisible ?? false,
     codexDisplayName: model.codexDisplayName || model.id,
+    reasoningLevels: model.reasoningLevels ?? [],
+    reasoningAllowedLevels: model.reasoningAllowedLevels ?? [],
+    reasoningConfigurable: model.reasoningConfigurable ?? false,
   }));
   return runtime.gateway.visibleModelIds.map((id) => ({
     id,
@@ -801,6 +831,9 @@ function modelSummaries(runtime: NonNullable<ReturnType<typeof useRelayState>["r
     cacheWrite1hMicroUsdPerMillion: null,
     outputMicroUsdPerMillion: null,
     customPrice: false,
+    reasoningLevels: [],
+    reasoningAllowedLevels: [],
+    reasoningConfigurable: false,
   }));
 }
 function groupModelSummariesForLauncher(models: ModelSummary[], accounts: AccountSummary[]) {

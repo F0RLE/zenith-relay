@@ -643,13 +643,22 @@ async fn official_codex_model_keeps_native_tiers_reasoning_and_parallel_tools_in
     let authority = ready_authority("relay-account", "account-access").await;
     let mut official_account = account("relay-account", "provider-account", &upstream, 10);
     official_account.models = vec![OFFICIAL_CODEX_MODEL.to_string()];
-    let (gateway, _, _, _) = spawn_mixed_gateway(
+    let (gateway, _, _, _) = spawn_mixed_gateway_with_options(
         Vec::new(),
         vec![official_account],
         vec![mixed_key(None, None)],
         authority,
         refresh_adapter(),
         Arc::new(PersistenceAdapter::default()),
+        GatewayRuntimeOptions {
+            // A saved source-policy rule must not restrict the same bare
+            // model when a native ChatGPT account serves it.
+            model_reasoning_allowed_levels: std::collections::BTreeMap::from([(
+                OFFICIAL_CODEX_MODEL.to_string(),
+                vec!["low".to_string()],
+            )]),
+            ..GatewayRuntimeOptions::default()
+        },
     )
     .await;
 

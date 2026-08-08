@@ -73,6 +73,9 @@ pub async fn capabilities(
 pub async fn state_snapshot(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    if let Ok(Some(runtime)) = state.runtime() {
+        runtime.prefetch_source_model_metadata();
+    }
     Ok(Json(state.snapshot().map_err(store_error)?))
 }
 

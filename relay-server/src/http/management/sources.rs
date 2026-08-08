@@ -14,7 +14,8 @@ use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
     normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, ProviderSource, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
+    SourceDiscovery, SourceProtocolBinding, WireApi,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -203,6 +204,15 @@ pub async fn update_source(
         apply_source_priorities(&mut next_sources, &source_priorities)?;
         Some((old_sources, next_sources))
     };
+    let (previous_sources, next_sources) = match &source_order {
+        Some((previous, next)) => (previous.as_slice(), next.as_slice()),
+        None => (
+            std::slice::from_ref(&old_record),
+            std::slice::from_ref(&record),
+        ),
+    };
+    let policy_only_update =
+        input.api_key.is_none() && source_runtime_policy_compatible(previous_sources, next_sources);
     if let Some(secret) = input.api_key.as_deref() {
         validate_secret(secret, "source API key")?;
         state
@@ -218,20 +228,102 @@ pub async fn update_source(
         let _ = state.vault.save(&record.secret_ref, &old_secret);
         return Err(store_error(error));
     }
-    if let Err(error) = state.rebuild_runtime().await {
-        match &source_order {
-            Some((sources, _)) => {
-                let _ = state.store.save_sources(sources);
-            }
-            None => {
-                let _ = state.store.save_source(&old_record);
+    let runtime_applied = if policy_only_update {
+        match apply_source_policies_if_running(&state, previous_sources, next_sources) {
+            Ok(applied) => applied,
+            Err(error) => {
+                match &source_order {
+                    Some((sources, _)) => {
+                        let _ = state.store.save_sources(sources);
+                    }
+                    None => {
+                        let _ = state.store.save_source(&old_record);
+                    }
+                }
+                let _ = state.vault.save(&old_record.secret_ref, &old_secret);
+                let _ = state.rebuild_runtime().await;
+                return Err(runtime_error(error));
             }
         }
-        let _ = state.vault.save(&old_record.secret_ref, &old_secret);
-        let _ = state.rebuild_runtime().await;
-        return Err(runtime_error(error));
+    } else {
+        false
+    };
+    if !runtime_applied {
+        if let Err(error) = state.rebuild_runtime().await {
+            match &source_order {
+                Some((sources, _)) => {
+                    let _ = state.store.save_sources(sources);
+                }
+                None => {
+                    let _ = state.store.save_source(&old_record);
+                }
+            }
+            let _ = state.vault.save(&old_record.secret_ref, &old_secret);
+            let _ = state.rebuild_runtime().await;
+            return Err(runtime_error(error));
+        }
     }
     Ok(Json(source_summary(&state, &record)?))
+}
+
+fn apply_source_policies_if_running(
+    state: &AppState,
+    previous: &[SourceRecord],
+    next: &[SourceRecord],
+) -> Result<bool, String> {
+    let updates = next
+        .iter()
+        .filter(|source| {
+            previous
+                .iter()
+                .find(|previous| previous.id == source.id)
+                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
+        })
+        .map(|source| RuntimeSourcePolicyUpdate {
+            source_id: source.id.clone(),
+            policy: RuntimeCandidatePolicy {
+                enabled: source.enabled,
+                draining: source.draining,
+                priority: source.priority,
+                weight: source.weight,
+                allowed_models: source.allowed_models.clone(),
+                excluded_models: source.excluded_models.clone(),
+            },
+            recovery_delay_seconds: source.recovery_delay_seconds,
+        })
+        .collect::<Vec<_>>();
+    let Some(runtime) = state.runtime()? else {
+        return Ok(!state.store.gateway_enabled()?);
+    };
+    if !updates.is_empty() && !runtime.update_source_policies(&updates) {
+        return Ok(false);
+    }
+    state.refresh_internal_gateway_key_scopes(&runtime)
+}
+
+fn source_runtime_policy_compatible(previous: &[SourceRecord], next: &[SourceRecord]) -> bool {
+    previous.len() == next.len()
+        && previous.iter().all(|source| {
+            next.iter()
+                .find(|candidate| candidate.id == source.id)
+                .is_some_and(|candidate| {
+                    source.base_url == candidate.base_url
+                        && source.secret_ref == candidate.secret_ref
+                        && source.wire_api == candidate.wire_api
+                        && source.protocol_bindings == candidate.protocol_bindings
+                        && source.models == candidate.models
+                })
+        })
+}
+
+fn source_runtime_policy_changed(previous: &SourceRecord, next: &SourceRecord) -> bool {
+    previous.enabled != next.enabled
+        || previous.draining != next.draining
+        || previous.priority != next.priority
+        || previous.weight != next.weight
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
+        || previous.recovery_delay_seconds != next.recovery_delay_seconds
 }
 
 fn apply_source_priorities(

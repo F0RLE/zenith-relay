@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use reqwest::{header::HeaderValue, redirect::Policy};
 use serde::Deserialize;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{atomic::Ordering, mpsc, Arc},
     time::Duration,
 };
@@ -20,17 +20,18 @@ use zenith_relay_core::{
         TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
     },
     protocol::{
-        account_operational_state, operational_status, AccountOperationalInput, AccountSummary,
-        GatewaySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
-        SourceSummary,
+        account_candidate_enabled, account_operational_state, apply_model_reasoning_summary,
+        operational_status, AccountOperationalInput, AccountSummary, GatewaySummary,
+        OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
     },
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
         quota_reference_value, quota_valuation_revision,
     },
-    ApiEquivalentSummary, CandidateKind, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
-    LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount, RuntimeChatGptAuth,
-    RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, WireApi, QUOTA_STALE_AFTER_MS,
+    ApiEquivalentSummary, CandidateKind, CandidateScope, DefaultServiceTier, GatewayRuntime,
+    GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, ProxyConfig, RuntimeChatGptAccount,
+    RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource, UsageCallback, UsageEvent, WireApi,
+    QUOTA_STALE_AFTER_MS,
 };
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -186,6 +187,7 @@ impl AppState {
             .filter(|key| key.enabled && is_internal_gateway_key(key))
             .collect::<Vec<_>>();
         let hidden_models = self.store.hidden_models()?;
+        let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
         let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
         let (
             max_retry_candidates,
@@ -335,6 +337,7 @@ impl AppState {
                 default_service_tier,
                 quota_stale_after_ms,
                 image_base_model: None,
+                model_reasoning_allowed_levels,
                 response_affinity_store: Some(self.store.clone()),
                 provider_storm_breaker: true,
             },
@@ -342,6 +345,78 @@ impl AppState {
         )
         .map_err(|error| error.to_string())?;
         self.replace_runtime(Some(Arc::new(runtime)))
+    }
+
+    /// Updates the scopes of all active internal profile keys after a candidate
+    /// policy changes in place. This keeps an enabled or un-drained pool member
+    /// reachable without replacing the runtime that owns active streams.
+    pub(crate) fn refresh_internal_gateway_key_scopes(
+        &self,
+        runtime: &GatewayRuntime,
+    ) -> Result<bool, String> {
+        let sources = self.store.sources()?;
+        let accounts = self.store.accounts()?;
+        let keys = self
+            .store
+            .keys()?
+            .into_iter()
+            .filter(|key| key.enabled && is_internal_gateway_key(key))
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            // There is no internal profile scope to synchronize. The policy
+            // has already been applied to the live runtime, so this is a
+            // successful no-op rather than a reason to replace it.
+            return Ok(true);
+        }
+        let scope = self.active_internal_gateway_scope(&sources, &accounts)?;
+        Ok(keys
+            .iter()
+            .all(|key| runtime.update_key_scope(&key.id, scope.clone())))
+    }
+
+    fn active_internal_gateway_scope(
+        &self,
+        sources: &[SourceRecord],
+        accounts: &[ServerAccountRecord],
+    ) -> Result<CandidateScope, String> {
+        let mut source_ids = BTreeSet::new();
+        for source in sources {
+            if !source.in_pool
+                || !source.enabled
+                || source.draining
+                || !source
+                    .supports_wire_api(WireApi::Responses)
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+            if self.vault.load(&source.secret_ref)?.is_some() {
+                source_ids.insert(source.id.clone());
+            }
+        }
+
+        let mut account_ids = BTreeSet::new();
+        for account in accounts.iter().filter(|account| account.in_pool) {
+            let Some(secret) = self.vault.load(&account.secret_ref)? else {
+                continue;
+            };
+            let credential: AccountCredential = serde_json::from_str(&secret)
+                .map_err(|_| "stored account credential is invalid".to_string())?;
+            let Ok(proxy) = account_proxy_config(self, account, &credential) else {
+                continue;
+            };
+            let candidate =
+                runtime_account(account.clone(), &credential, proxy, QUOTA_STALE_AFTER_MS);
+            if candidate.enabled && !candidate.draining {
+                account_ids.insert(account.id.clone());
+            }
+        }
+
+        Ok(CandidateScope {
+            source_ids: Some(source_ids),
+            account_ids: Some(account_ids),
+            model_rules: Default::default(),
+        })
     }
 
     fn usage_callback(self: &Arc<Self>) -> Result<UsageCallback, String> {
@@ -391,6 +466,7 @@ impl AppState {
         ) = self.store.routing_policy()?;
         let hidden_models = self.store.hidden_models()?;
         let model_price_overrides = self.store.model_price_overrides()?;
+        let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
         let configuration_revision = configuration_revision(&self.store.configuration_settings()?)?;
         let equivalents = self.store.api_equivalents()?;
         let runtime = self.runtime()?;
@@ -488,7 +564,8 @@ impl AppState {
             &hidden_models,
         );
         for model in &mut models {
-            if let Some(price) = model_price_overrides.get(&model.id.to_ascii_lowercase()) {
+            let model_id = model.id.clone();
+            if let Some(price) = model_price_overrides.get(&model_id.to_ascii_lowercase()) {
                 model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
                 model.cached_input_micro_usd_per_million = Some(
                     price
@@ -502,6 +579,17 @@ impl AppState {
                 model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
                 model.custom_price = true;
             }
+            apply_model_reasoning_summary(
+                model,
+                runtime
+                    .as_ref()
+                    .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
+                    .unwrap_or_default(),
+                model_reasoning_allowed_levels
+                    .get(&model_id.to_ascii_lowercase())
+                    .map(Vec::as_slice),
+                model_has_native_account_route(&account_summaries, &model_id),
+            );
         }
         let visible_model_ids = models
             .iter()
@@ -886,6 +974,16 @@ fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &st
     })
 }
 
+fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
+    accounts.iter().any(|account| {
+        account.in_pool
+            && account
+                .models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model))
+    })
+}
+
 fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {
     RuntimeSource {
         source: ProviderSource {
@@ -934,7 +1032,7 @@ fn runtime_account(
         chatgpt_account_id: credential.chatgpt_account_id.clone(),
         responses_url: credential.responses_url.clone(),
         models: record.models,
-        enabled: operational.routing_eligible,
+        enabled: account_candidate_enabled(record.enabled, operational.routing_block_reason),
         draining: record.draining,
         priority: record.priority,
         weight: record.weight,
@@ -1524,6 +1622,30 @@ mod tests {
                 zenith_relay_core::QUOTA_STALE_AFTER_MS,
             )
             .enabled
+        );
+        let mut exhausted = record.clone();
+        exhausted.quota = QuotaSnapshot {
+            primary: Some(QuotaWindow {
+                kind: QuotaWindowKind::Primary,
+                available_basis_points: Some(0),
+                explicitly_full: None,
+                reset_at_ms: Some(60_000),
+                window_minutes: None,
+                observed_at_ms: 1_000,
+                full_transition_fingerprint: None,
+            }),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        };
+        assert!(
+            runtime_account(
+                exhausted,
+                &credential,
+                None,
+                zenith_relay_core::QUOTA_STALE_AFTER_MS,
+            )
+            .enabled,
+            "a quota wait must stay instantiated so a refresh can re-enable it"
         );
         let summary = account_summary(
             &record,
