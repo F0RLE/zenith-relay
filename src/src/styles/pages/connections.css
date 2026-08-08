@@ -512,6 +512,11 @@
 
 @media (max-width: 620px) {
   .account-list { grid-template-columns: minmax(0, 1fr); }
+
+  .account-plan-group-heading + .account-card:has(+ .account-plan-group-heading),
+  .account-plan-group-heading + .account-card:last-child {
+    grid-column: auto;
+  }
 }
 
 .account-plan-group-heading {
@@ -526,6 +531,11 @@
   color: var(--relay-muted);
   font-size: 11px;
   font-weight: 600;
+}
+
+.account-plan-group-heading + .account-card:has(+ .account-plan-group-heading),
+.account-plan-group-heading + .account-card:last-child {
+  grid-column: span 2;
 }
 
 .account-plan-group-heading > span:last-child {

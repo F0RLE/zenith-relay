@@ -980,27 +980,22 @@ textarea:focus-visible {
 }
 
 .global-feedback {
-  position: fixed;
+  position: sticky;
   z-index: 300;
-  bottom: 16px;
-  left: 248px;
-  width: min(340px, calc(100vw - 264px));
+  top: 8px;
+  width: min(340px, calc(100% - 48px));
   min-height: 36px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
+  margin: 8px 24px 0 auto;
   padding: 4px 6px 4px 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
   font-size: 12px;
   pointer-events: none;
-}
-
-.relay-shell.sidebar-collapsed .global-feedback {
-  left: 72px;
-  width: min(340px, calc(100vw - 88px));
 }
 
 .global-feedback-copy {
@@ -1072,9 +1067,16 @@ textarea:focus-visible {
 }
 
 .global-feedback .relay-action-menu > div {
-  top: auto;
+  top: 34px;
   right: 0;
-  bottom: 34px;
+  bottom: auto;
+}
+
+@media (max-width: 760px) {
+  .global-feedback {
+    width: min(340px, calc(100% - 32px));
+    margin-right: 16px;
+  }
 }
 
 .global-feedback-copy-state {
