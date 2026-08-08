@@ -162,6 +162,46 @@ impl GatewayRuntime {
         true
     }
 
+    /// Builds a Responses-only scope from the current scheduler state without
+    /// reopening secrets or replacing a runtime that owns active streams.
+    pub fn active_responses_scope(
+        &self,
+        allowed_source_ids: &BTreeSet<String>,
+        allowed_account_ids: &BTreeSet<String>,
+    ) -> CandidateScope {
+        let mut source_ids = BTreeSet::new();
+        let mut account_ids = BTreeSet::new();
+        for candidate in self.lock_scheduler().candidates() {
+            if candidate.protocol != crate::WireApi::Responses
+                || !candidate.enabled
+                || candidate.draining
+                || !candidate.secret_available
+            {
+                continue;
+            }
+            match candidate.kind {
+                CandidateKind::ApiSource if allowed_source_ids.contains(&candidate.source_id) => {
+                    source_ids.insert(candidate.source_id.clone());
+                }
+                CandidateKind::OAuthAccount => {
+                    if let Some(account_id) = candidate
+                        .account_id
+                        .as_ref()
+                        .filter(|id| allowed_account_ids.contains(*id))
+                    {
+                        account_ids.insert(account_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        CandidateScope {
+            source_ids: Some(source_ids),
+            account_ids: Some(account_ids),
+            model_rules: Default::default(),
+        }
+    }
+
     pub fn set_candidate_health(&self, candidate_id: &str, health: CandidateHealth) -> bool {
         self.lock_scheduler()
             .set_candidate_health(candidate_id, health)
@@ -179,29 +219,23 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
-        let previous_levels = self
-            .model_metadata
-            .confirmed_reasoning_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let confirmed_levels = {
-            let mut efforts = self
+        {
+            let mut confirmed = self
                 .model_metadata
-                .confirmed_reasoning_efforts
+                .confirmed_reasoning
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for routes in efforts.values_mut() {
+            for routes in confirmed.efforts.values_mut() {
                 routes.remove(candidate_id);
             }
-            efforts.retain(|_, routes| !routes.is_empty());
-            confirmed_source_reasoning_levels(&efforts, &previous_levels, &BTreeMap::new())
-        };
-        *self
-            .model_metadata
-            .confirmed_reasoning_levels
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_levels;
+            confirmed.efforts.retain(|_, routes| !routes.is_empty());
+            let previous_levels = confirmed.levels.clone();
+            confirmed.levels = confirmed_source_reasoning_levels(
+                &confirmed.efforts,
+                &previous_levels,
+                &BTreeMap::new(),
+            );
+        }
         self.passive_quotas
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

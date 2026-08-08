@@ -231,23 +231,16 @@ pub async fn update_source(
         let _ = state.vault.save(&record.secret_ref, &old_secret);
         return Err(store_error(error));
     }
+    let restore =
+        || || restore_source_update(&state, source_order.as_ref(), &old_record, &old_secret);
     let runtime_applied = if policy_only_update {
         match apply_source_policies_if_running(&state, previous_sources, next_sources) {
             Ok(applied) => applied,
             Err(error) => {
-                let restore = state
-                    .rollback_and_rebuild_runtime(|| {
-                        match &source_order {
-                            Some((sources, _)) => state.store.save_sources(sources)?,
-                            None => state.store.save_source(&old_record)?,
-                        }
-                        state.vault.save(&old_record.secret_ref, &old_secret)?;
-                        Ok(())
-                    })
-                    .await;
-                return match restore {
+                let recovery = state.rollback_and_rebuild_runtime(restore()).await;
+                return match recovery {
                     Ok(()) => Err(runtime_error(error)),
-                    Err(restore) => Err(runtime_error(format!("{error}; {restore}"))),
+                    Err(recovery) => Err(runtime_error(format!("{error}; {recovery}"))),
                 };
             }
         }
@@ -256,18 +249,24 @@ pub async fn update_source(
     };
     if !runtime_applied {
         state
-            .rebuild_runtime_or_rollback(|| {
-                match &source_order {
-                    Some((sources, _)) => state.store.save_sources(sources)?,
-                    None => state.store.save_source(&old_record)?,
-                }
-                state.vault.save(&old_record.secret_ref, &old_secret)?;
-                Ok(())
-            })
+            .rebuild_runtime_or_rollback(restore())
             .await
             .map_err(runtime_error)?;
     }
     Ok(Json(source_summary(&state, &record)?))
+}
+
+fn restore_source_update(
+    state: &AppState,
+    source_order: Option<&(Vec<SourceRecord>, Vec<SourceRecord>)>,
+    old_record: &SourceRecord,
+    old_secret: &str,
+) -> Result<(), String> {
+    match source_order {
+        Some((sources, _)) => state.store.save_sources(sources)?,
+        None => state.store.save_source(old_record)?,
+    }
+    state.vault.save(&old_record.secret_ref, old_secret)
 }
 
 fn apply_source_policies_if_running(

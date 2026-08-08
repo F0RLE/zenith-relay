@@ -117,11 +117,12 @@ pub async fn set_account_proxy(
     record.proxy_id = next;
     record.bypass_common_proxy = input.bypass_common_proxy;
     state.store.save_account(&record).map_err(store_error)?;
+    let mut restored = record.clone();
     state
         .rebuild_runtime_or_rollback(|| {
-            record.proxy_id = previous.0.clone();
-            record.bypass_common_proxy = previous.1;
-            state.store.save_account(&record)
+            restored.proxy_id = previous.0.clone();
+            restored.bypass_common_proxy = previous.1;
+            state.store.save_account(&restored)
         })
         .await
         .map_err(runtime_error)?;

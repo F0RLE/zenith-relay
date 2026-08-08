@@ -295,55 +295,33 @@ impl AppState {
             // successful no-op rather than a reason to replace it.
             return Ok(true);
         }
-        let scope = self.active_internal_gateway_scope(&sources, &accounts)?;
+        let scope = Self::active_internal_gateway_scope(&sources, &accounts, runtime);
         Ok(keys
             .iter()
             .all(|key| runtime.update_key_scope(&key.id, scope.clone())))
     }
 
     fn active_internal_gateway_scope(
-        &self,
         sources: &[SourceRecord],
         accounts: &[ServerAccountRecord],
-    ) -> Result<CandidateScope, String> {
-        let mut source_ids = BTreeSet::new();
-        for source in sources {
-            if !source.in_pool
-                || !source.enabled
-                || source.draining
-                || !source
-                    .supports_wire_api(WireApi::Responses)
-                    .unwrap_or(false)
-            {
-                continue;
-            }
-            if self.vault.load(&source.secret_ref)?.is_some() {
-                source_ids.insert(source.id.clone());
-            }
-        }
-
-        let mut account_ids = BTreeSet::new();
-        for account in accounts.iter().filter(|account| account.in_pool) {
-            let Some(secret) = self.vault.load(&account.secret_ref)? else {
-                continue;
-            };
-            let credential: AccountCredential = serde_json::from_str(&secret)
-                .map_err(|_| "stored account credential is invalid".to_string())?;
-            let Ok(proxy) = account_proxy_config(self, account, &credential) else {
-                continue;
-            };
-            let candidate =
-                runtime_account(account.clone(), &credential, proxy, QUOTA_STALE_AFTER_MS);
-            if candidate.enabled && !candidate.draining {
-                account_ids.insert(account.id.clone());
-            }
-        }
-
-        Ok(CandidateScope {
-            source_ids: Some(source_ids),
-            account_ids: Some(account_ids),
-            model_rules: Default::default(),
-        })
+        runtime: &GatewayRuntime,
+    ) -> CandidateScope {
+        let source_ids = sources
+            .iter()
+            .filter(|source| {
+                source.in_pool
+                    && source
+                        .supports_wire_api(WireApi::Responses)
+                        .unwrap_or(false)
+            })
+            .map(|source| source.id.clone())
+            .collect::<BTreeSet<_>>();
+        let account_ids = accounts
+            .iter()
+            .filter(|account| account.in_pool)
+            .map(|account| account.id.clone())
+            .collect::<BTreeSet<_>>();
+        runtime.active_responses_scope(&source_ids, &account_ids)
     }
 
     fn usage_callback(self: &Arc<Self>) -> Result<UsageCallback, String> {

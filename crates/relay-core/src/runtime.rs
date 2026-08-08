@@ -361,6 +361,12 @@ struct CachedModelManifest {
     observed_at_ms: u64,
 }
 
+#[derive(Default)]
+struct ConfirmedSourceReasoning {
+    efforts: BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    levels: BTreeMap<String, Vec<String>>,
+}
+
 struct SourceModelMetadataState {
     /// Native Codex catalog rows returned by `/models?client_version=...`.
     codex_manifests: Mutex<BTreeMap<String, CachedModelManifest>>,
@@ -372,10 +378,9 @@ struct SourceModelMetadataState {
     refresh_lock: tokio::sync::Mutex<()>,
     prefetch_pending: AtomicBool,
     prefetch_not_before_ms: AtomicU64,
-    /// Confirmed source route -> effort support. Native account metadata is
-    /// intentionally kept out of this state.
-    confirmed_reasoning_efforts: Mutex<BTreeMap<String, BTreeMap<String, BTreeSet<String>>>>,
-    confirmed_reasoning_levels: Mutex<BTreeMap<String, Vec<String>>>,
+    /// Confirmed source route -> effort support and its derived model-level
+    /// catalog. Native account metadata is intentionally kept out of this state.
+    confirmed_reasoning: Mutex<ConfirmedSourceReasoning>,
 }
 
 impl Default for SourceModelMetadataState {
@@ -386,8 +391,7 @@ impl Default for SourceModelMetadataState {
             refresh_lock: tokio::sync::Mutex::new(()),
             prefetch_pending: AtomicBool::new(false),
             prefetch_not_before_ms: AtomicU64::new(0),
-            confirmed_reasoning_efforts: Mutex::new(BTreeMap::new()),
-            confirmed_reasoning_levels: Mutex::new(BTreeMap::new()),
+            confirmed_reasoning: Mutex::new(ConfirmedSourceReasoning::default()),
         }
     }
 }
@@ -2824,6 +2828,69 @@ mod tests {
         );
     }
 
+    #[test]
+    fn active_responses_scope_uses_live_candidate_policy() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-a",
+                "upstream-secret",
+                &["model-a"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let mut account = runtime
+            .lock_scheduler()
+            .candidate("source-a")
+            .cloned()
+            .unwrap();
+        account.id = "account-a".into();
+        account.kind = CandidateKind::OAuthAccount;
+        account.source_id = "codex".into();
+        account.account_id = Some("account-a".into());
+        runtime.lock_scheduler().upsert(account);
+
+        let source_ids = BTreeSet::from(["source-a".to_string()]);
+        let account_ids = BTreeSet::from(["account-a".to_string()]);
+        assert_eq!(
+            runtime.active_responses_scope(&source_ids, &account_ids),
+            CandidateScope {
+                source_ids: Some(source_ids.clone()),
+                account_ids: Some(account_ids.clone()),
+                model_rules: ModelRules::default(),
+            }
+        );
+
+        assert!(runtime.update_source_policy(
+            "source-a",
+            RuntimeCandidatePolicy {
+                enabled: false,
+                draining: false,
+                priority: 0,
+                weight: 1,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+            },
+            0,
+        ));
+        assert!(runtime.update_account_policy(
+            "account-a",
+            RuntimeCandidatePolicy {
+                enabled: false,
+                draining: false,
+                priority: 0,
+                weight: 1,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+            },
+        ));
+        let scope = runtime.active_responses_scope(&source_ids, &account_ids);
+        assert_eq!(scope.source_ids, Some(BTreeSet::new()));
+        assert_eq!(scope.account_ids, Some(BTreeSet::new()));
+    }
+
     #[tokio::test]
     async fn source_capability_failure_does_not_permanently_hide_a_declared_model() {
         let runtime = GatewayRuntime::from_pool(
@@ -2995,6 +3062,48 @@ mod tests {
             .unwrap()
             .clone()
         );
+    }
+
+    #[tokio::test]
+    async fn fresh_source_metadata_does_not_wait_for_another_refresh() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["provider/fable"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let now_ms = current_time_ms();
+        runtime.remember_source_model_manifest(
+            "source-1",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low", "high"]
+                }]
+            }),
+            now_ms,
+        );
+
+        let guard = runtime.model_metadata.refresh_lock.lock().await;
+        let metadata = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            runtime.codex_source_model_metadata(&key, &[WireApi::Responses], now_ms),
+        )
+        .await
+        .expect("fresh metadata must not wait for the refresh lock");
+        drop(guard);
+
+        assert!(metadata
+            .reasoning_catalog_templates
+            .contains_key("provider/fable"));
     }
 
     #[tokio::test]
