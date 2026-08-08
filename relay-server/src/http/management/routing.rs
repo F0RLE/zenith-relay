@@ -1,4 +1,4 @@
-use super::{store_error, ManagementError};
+use super::{runtime_error, store_error, ManagementError};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::routing::post;
@@ -77,6 +77,6 @@ pub async fn set_routing_policy(
     state
         .rebuild_runtime_or_rollback(|| state.store.set_routing_policy(&previous))
         .await
-        .map_err(store_error)?;
+        .map_err(runtime_error)?;
     state.snapshot().map(Json).map_err(store_error)
 }

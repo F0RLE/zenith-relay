@@ -31,18 +31,13 @@ use zenith_relay_server::{
     store::{Store, Vault},
 };
 
-#[tokio::test]
-async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
-    let root = TempDir::new().unwrap();
-    let server = spawn_server(root.path()).await;
-    server.state.store.set_gateway_enabled(false).unwrap();
-    server
-        .state
+fn add_rebuild_failing_source(state: &AppState) {
+    state
         .vault
         .save("source:broken", "synthetic-source-key")
         .unwrap();
-    server
-        .state
+    // A zero weight fails GatewayRuntime::build, which forces the rebuild to fail.
+    state
         .store
         .save_source(&SourceRecord {
             id: "broken-source".into(),
@@ -64,6 +59,14 @@ async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
             last_error_code: None,
         })
         .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    server.state.store.set_gateway_enabled(false).unwrap();
+    add_rebuild_failing_source(&server.state);
 
     let response = reqwest::Client::new()
         .post(format!("{}/gateway/start", server.origin))
@@ -74,6 +77,29 @@ async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
 
     assert!(!response.status().is_success());
     assert!(!server.state.store.gateway_enabled().unwrap());
+    assert!(server.state.runtime().unwrap().is_none());
+    server.task.abort();
+}
+
+#[tokio::test]
+async fn routing_policy_reload_failure_has_runtime_error_code() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    let previous = server.state.store.routing_policy().unwrap();
+    add_rebuild_failing_source(&server.state);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/routing/settings", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({ "maxRetryCandidates": 5 }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "runtime_reload_failed");
+    assert_eq!(server.state.store.routing_policy().unwrap(), previous);
     server.task.abort();
 }
 

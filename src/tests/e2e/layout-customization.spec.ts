@@ -80,6 +80,12 @@ test("account grouping is explicit and saved on connections", async ({ page }) =
     const rect = card.getBoundingClientRect();
     return rect.width >= grid.width * 0.64;
   }))).toBe(true);
+  await page.setViewportSize({ width: 600, height: 760 });
+  expect(await page.locator(".account-plan-group-heading + .account-card").evaluateAll((cards) => cards.every((card) => {
+    const style = getComputedStyle(card);
+    return style.gridColumnStart === "auto" && style.gridColumnEnd === "auto";
+  }))).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await page.mouse.move(1, 1);
   await page.screenshot({ path: "output/playwright/account-groups-en-1160x760.png" });
 
