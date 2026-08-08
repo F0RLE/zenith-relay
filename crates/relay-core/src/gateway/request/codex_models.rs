@@ -436,10 +436,7 @@ fn apply_source_reasoning_allowed_levels(model: &mut Value, allowed_levels: &[St
         (!levels.is_empty(), default_reasoning_level)
     };
     if !has_levels {
-        model
-            .as_object_mut()
-            .expect("normalized catalog entry is an object")
-            .remove("supported_reasoning_levels");
+        model["supported_reasoning_levels"] = Value::Array(Vec::new());
         model
             .as_object_mut()
             .expect("normalized catalog entry is an object")
@@ -531,6 +528,19 @@ mod tests {
             &["low".to_string(), "high".to_string(), "ultra".to_string()],
         );
 
+        assert!(model.get("default_reasoning_level").is_none());
+    }
+
+    #[test]
+    fn manual_reasoning_modes_keep_an_empty_supported_levels_array_without_a_match() {
+        let mut model = json!({
+            "default_reasoning_level": "high",
+            "supported_reasoning_levels": [{"effort": "low"}]
+        });
+
+        apply_source_reasoning_allowed_levels(&mut model, &["medium".to_string()]);
+
+        assert_eq!(model["supported_reasoning_levels"], json!([]));
         assert!(model.get("default_reasoning_level").is_none());
     }
 

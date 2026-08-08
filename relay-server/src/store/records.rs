@@ -720,6 +720,7 @@ fn configuration_settings_from_connection(
         hidden_models,
         model_price_overrides,
         model_reasoning_allowed_levels,
+        model_reasoning_allowed_levels_present: true,
     })
 }
 

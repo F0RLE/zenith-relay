@@ -126,6 +126,7 @@ pub fn export_local_configuration_preset(
             hidden_models: gateway.hidden_models,
             model_price_overrides: gateway.model_price_overrides,
             model_reasoning_allowed_levels: gateway.model_reasoning_allowed_levels,
+            model_reasoning_allowed_levels_present: true,
         },
     };
     write_configuration_preset(&preset, &app)
