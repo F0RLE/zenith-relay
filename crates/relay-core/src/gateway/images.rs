@@ -552,7 +552,7 @@ async fn execute_prepared(
 
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes = match crate::runtime::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
+        let bytes = match crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
             .await
         {
             Ok(bytes) => bytes,

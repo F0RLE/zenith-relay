@@ -1,7 +1,13 @@
 mod connector;
+mod discovery;
 mod stats;
 
 pub use connector::SourceConnector;
+pub(crate) use discovery::discover_models_with_client;
+pub use discovery::{
+    discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, SourceDiscovery,
+};
 pub use stats::{fetch_source_provider_stats, SourceProviderStats, SourceStatsProvider};
 #[cfg(test)]
 use stats::{openrouter_stats, source_stats_endpoint, source_stats_provider, zenith_stats};

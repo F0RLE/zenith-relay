@@ -10,6 +10,7 @@ pub mod quota;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
+mod transport;
 pub mod usage;
 
 pub const DEFAULT_COOLDOWN_AFTER_FAILURES: u8 = 3;
@@ -34,11 +35,9 @@ pub use protocol::{
 pub use providers::chatgpt::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use proxy::{normalize_proxy_url, proxy_reference_id, ProxyConfig};
 pub use runtime::{
-    discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, normalize_image_base_model, DefaultServiceTier,
-    GatewayRuntime, GatewayRuntimeOptions, ResponseAffinityBinding, ResponseAffinityStore,
-    RuntimeCandidatePolicy, RuntimeLocalKey, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyUpdate, SourceDiscovery,
+    normalize_image_base_model, DefaultServiceTier, GatewayRuntime, GatewayRuntimeOptions,
+    ResponseAffinityBinding, ResponseAffinityStore, RuntimeCandidatePolicy, RuntimeLocalKey,
+    RuntimeMixedLocalKey, RuntimeSource, RuntimeSourcePolicyUpdate,
 };
 pub use scheduler::{
     account_candidate_health, normalize_subscription_plan_order, ActiveModelRuntime,
@@ -47,9 +46,11 @@ pub use scheduler::{
     SelectionReason, SelectionRequest, QUOTA_STALE_AFTER_MS, RESPONSE_AFFINITY_TTL_MS,
 };
 pub use sources::{
-    fetch_source_provider_stats, normalize_source_protocol_bindings, source_points_to_gateway,
-    LocalGatewayKey, ProviderSource, SourceConnector, SourceProtocolBinding,
-    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
+    discover_source_models, discover_source_models_and_protocol_bindings,
+    discover_source_models_for_protocol_bindings, fetch_source_provider_stats,
+    normalize_source_protocol_bindings, source_points_to_gateway, LocalGatewayKey, ProviderSource,
+    SourceConnector, SourceDiscovery, SourceProtocolBinding, SourceProtocolBindingKey,
+    SourceProviderStats, SourceStatsProvider, WireApi,
 };
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,

@@ -121,7 +121,7 @@ async fn codex_models_response(
                 continue;
             }
             let Ok(body) =
-                crate::runtime::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES).await
+                crate::transport::collect_limited(response, MAX_CODEX_MODELS_BODY_BYTES).await
             else {
                 continue;
             };

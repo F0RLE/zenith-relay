@@ -404,7 +404,7 @@ async fn connect_upstream(
             let response = upgrade.into_inner();
             let body = timeout(
                 UPSTREAM_CONNECT_TIMEOUT,
-                crate::runtime::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
+                crate::transport::collect_limited(response, MAX_WEBSOCKET_ERROR_BYTES),
             )
             .await
             .ok()

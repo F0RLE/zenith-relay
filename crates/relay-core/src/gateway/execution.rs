@@ -194,38 +194,38 @@ pub(super) async fn execute_account_endpoint(
         };
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes = match crate::runtime::collect_limited(upstream, endpoint.response_limit()).await
-        {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                let failure = AttemptFailure::body();
-                let state = apply_cooldown_for_model(
-                    &runtime,
-                    &route.candidate_id,
-                    "*",
-                    &route.source_model,
-                    TRANSIENT_COOLDOWN_MS,
-                    &cooldown_context,
-                    route.half_open_probe,
-                );
-                let mut event = usage_event(
-                    &request_id,
-                    attempt,
-                    &key.id,
-                    &route,
-                    &requested_model,
-                    false,
-                    failure.status.as_u16(),
-                    Some(failure.category.to_string()),
-                    started.elapsed().as_millis() as u64,
-                    tool_use.clone(),
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                continue;
-            }
-        };
+        let bytes =
+            match crate::transport::collect_limited(upstream, endpoint.response_limit()).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    let failure = AttemptFailure::body();
+                    let state = apply_cooldown_for_model(
+                        &runtime,
+                        &route.candidate_id,
+                        "*",
+                        &route.source_model,
+                        TRANSIENT_COOLDOWN_MS,
+                        &cooldown_context,
+                        route.half_open_probe,
+                    );
+                    let mut event = usage_event(
+                        &request_id,
+                        attempt,
+                        &key.id,
+                        &route,
+                        &requested_model,
+                        false,
+                        failure.status.as_u16(),
+                        Some(failure.category.to_string()),
+                        started.elapsed().as_millis() as u64,
+                        tool_use.clone(),
+                    );
+                    apply_failure_state(&mut event, state);
+                    emit_usage(&runtime, event);
+                    last_failure = Some(failure);
+                    continue;
+                }
+            };
         if !status.is_success() {
             if !function_item_id_repair_attempted
                 && responses_function_item_id_requires_fc_prefix(&bytes)
@@ -771,7 +771,7 @@ async fn execute_request(
                 started.elapsed().as_millis() as u64,
                 tool_use.clone(),
             );
-            let bytes = match crate::runtime::collect_limited(
+            let bytes = match crate::transport::collect_limited(
                 upstream,
                 crate::runtime::MAX_NON_STREAM_BODY_BYTES,
             )
@@ -931,7 +931,7 @@ async fn execute_request(
         }
 
         if !upstream_stream {
-            let bytes = match crate::runtime::collect_limited(
+            let bytes = match crate::transport::collect_limited(
                 upstream,
                 crate::runtime::MAX_NON_STREAM_BODY_BYTES,
             )
