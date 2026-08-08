@@ -170,8 +170,12 @@ fn valid_diagnostic_model(value: &str) -> bool {
 pub async fn start_gateway(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<RuntimeStateSnapshot>, ManagementError> {
+    let previous_enabled = state.store.gateway_enabled().map_err(store_error)?;
     state.store.set_gateway_enabled(true).map_err(store_error)?;
-    state.rebuild_runtime().await.map_err(runtime_error)?;
+    state
+        .rebuild_runtime_or_rollback(|| state.store.set_gateway_enabled(previous_enabled))
+        .await
+        .map_err(runtime_error)?;
     Ok(Json(state.snapshot().map_err(store_error)?))
 }
 

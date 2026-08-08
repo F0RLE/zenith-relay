@@ -211,7 +211,7 @@ pub async fn update_local_source(
         .store()?
         .replace_records(next_sources.clone(), old_keys.clone())?;
     let updated_in_place = if source_runtime_policy_compatible(&old_sources, &next_sources)
-        && apply_source_policies_if_running(&state, &next_sources).await
+        && apply_source_policies_if_running(&state, &old_sources, &next_sources).await
     {
         // A scope refresh is part of the same hot update. If it cannot be
         // applied, fall back to the existing restart-or-rollback path rather
@@ -256,7 +256,7 @@ pub async fn set_local_source_enabled(
     source.enabled = enabled;
     let catalog_changed = source.in_pool;
     state.store()?.upsert_source(source.clone())?;
-    let updated_in_place = if apply_source_policy_if_running(&state, &source).await {
+    let updated_in_place = if apply_source_policy_if_running(&state, &old_sources, &source).await {
         refresh_local_gateway_key_scope_if_running(&state)
             .await
             .unwrap_or(false)

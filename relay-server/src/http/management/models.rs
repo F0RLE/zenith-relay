@@ -1,5 +1,5 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::state::AppState;
+use crate::{app::model_has_native_account_route, state::AppState};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -7,9 +7,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
-    normalize_model_reasoning_allowed_levels,
-    protocol::{AccountSummary, RuntimeStateSnapshot},
-    ApiModelPriceOverride,
+    normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot, ApiModelPriceOverride,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -150,7 +148,7 @@ pub async fn set_model_reasoning(
         .unwrap_or_default();
     let runtime = state.runtime().map_err(runtime_error)?;
     if !allowed_levels.is_empty() {
-        if has_native_account_route(&snapshot.accounts, &canonical) {
+        if model_has_native_account_route(&snapshot.accounts, &canonical) {
             return Err(ManagementError::new(
                 StatusCode::CONFLICT,
                 "native_reasoning_managed",
@@ -214,16 +212,6 @@ pub async fn set_model_reasoning(
         }
     }
     state.snapshot().map(Json).map_err(store_error)
-}
-
-fn has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
-    accounts.iter().any(|account| {
-        account.in_pool
-            && account
-                .models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
 }
 
 fn canonical_model_id(

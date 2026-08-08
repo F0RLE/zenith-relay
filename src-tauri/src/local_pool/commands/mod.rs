@@ -274,13 +274,15 @@ pub(super) fn runtime_account_operational_state(
 
 pub(super) async fn apply_source_policy_if_running(
     state: &DesktopState,
+    previous: &[ProviderSourceRecord],
     source: &ProviderSourceRecord,
 ) -> bool {
-    apply_source_policies_if_running(state, std::slice::from_ref(source)).await
+    apply_source_policies_if_running(state, previous, std::slice::from_ref(source)).await
 }
 
 pub(super) async fn apply_source_policies_if_running(
     state: &DesktopState,
+    previous: &[ProviderSourceRecord],
     sources: &[ProviderSourceRecord],
 ) -> bool {
     let Some(runtime) = state.gateway.runtime().await else {
@@ -288,6 +290,12 @@ pub(super) async fn apply_source_policies_if_running(
     };
     let updates = sources
         .iter()
+        .filter(|source| {
+            previous
+                .iter()
+                .find(|previous| previous.id == source.id)
+                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
+        })
         .map(|source| RuntimeSourcePolicyUpdate {
             source_id: source.id.clone(),
             policy: RuntimeCandidatePolicy {
@@ -301,7 +309,20 @@ pub(super) async fn apply_source_policies_if_running(
             recovery_delay_seconds: source.recovery_delay_seconds,
         })
         .collect::<Vec<_>>();
-    runtime.update_source_policies(&updates)
+    updates.is_empty() || runtime.update_source_policies(&updates)
+}
+
+fn source_runtime_policy_changed(
+    previous: &ProviderSourceRecord,
+    next: &ProviderSourceRecord,
+) -> bool {
+    previous.enabled != next.enabled
+        || previous.draining != next.draining
+        || previous.priority != next.priority
+        || previous.weight != next.weight
+        || previous.allowed_models != next.allowed_models
+        || previous.excluded_models != next.excluded_models
+        || previous.recovery_delay_seconds != next.recovery_delay_seconds
 }
 
 /// Refreshes the managed local key's candidate scope without replacing the

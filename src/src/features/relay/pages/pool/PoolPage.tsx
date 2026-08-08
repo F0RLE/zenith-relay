@@ -543,10 +543,10 @@ function MemberEditor({ member, onClose }: { member: Member; onClose: () => void
         <header className="source-routing-heading"><div><h3>{t("sources.poolRole")}</h3><p className="sr-only">{t("sources.routingHint")}</p></div></header>
         <div className="source-route-order" role="group" aria-label={t("sources.fallbackOrder")}>
           <span>{t("sources.fallbackOrder")}</span>
-          <div className="source-route-map" role="radiogroup" aria-label={t("sources.poolRole")}>
+          <div className="source-route-map" role="group" aria-label={t("sources.poolRole")}>
             {sourceStages.map((stage, index) => stage.role === "accounts"
               ? <div className="source-route-stage accounts" key={stage.role} aria-label={`${stage.label}: ${stage.count}`}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></div>
-              : <button className="source-route-stage" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} type="button" role="radio" aria-checked={stage.role === sourceRole} aria-label={`${stage.label}: ${t(`sources.roleHints.${stage.role}`)}`} onClick={() => chooseSourceRole(stage.role)}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></button>)}
+              : <button className="source-route-stage" data-current={stage.role === sourceRole ? "true" : undefined} key={stage.role} type="button" aria-pressed={stage.role === sourceRole} aria-label={`${stage.label}: ${t(`sources.roleHints.${stage.role}`)}`} onClick={() => chooseSourceRole(stage.role)}><small>{index + 1}</small><strong>{stage.label}</strong><span>{stage.count}</span></button>)}
           </div>
         </div>
         <p className="source-role-help">{t(`sources.roleHints.${sourceRole}`)}</p>
@@ -589,11 +589,11 @@ function sourceOrderForRole(sources: SourceSummary[], role: ApiSourceRole, sourc
   const current = sources.find((source) => source.id === sourceId);
   const ordered = sources
     .filter((source) => source.inPool && source.id !== sourceId && apiSourceRole(source.priority) === role)
-    .sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    .sort((left, right) => right.priority - left.priority || compareStableText(left.name, right.name) || compareStableText(left.id, right.id));
   if (!current) return ordered.map((source) => source.id);
   if (apiSourceRole(current.priority) === role) {
     ordered.push(current);
-    ordered.sort((left, right) => right.priority - left.priority || left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    ordered.sort((left, right) => right.priority - left.priority || compareStableText(left.name, right.name) || compareStableText(left.id, right.id));
   } else {
     ordered.push(current);
   }
@@ -639,7 +639,7 @@ function AddMembersDialog({ onClose, onAddSource }: { onClose: () => void; onAdd
   const accounts = allAccounts
     .filter((account) => activePlan === "all" || accountPlanOption(account.subscription.planType, t("common.unknown")).id === activePlan)
     .filter((account) => !normalizedQuery || [account.identityHint, account.label, account.subscription.planType].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery)))
-    .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || left.label.localeCompare(right.label));
+    .sort((left, right) => compareAccountPlans(accountPlanOption(left.subscription.planType, t("common.unknown")), accountPlanOption(right.subscription.planType, t("common.unknown"))) || compareStableText(left.label, right.label));
   const sources = (runtime?.sources ?? []).filter((source) => !source.inPool);
   const selectedCount = accountIds.length + sourceIds.length;
   const availableCount = allAccounts.length + sources.length;
@@ -850,7 +850,10 @@ function comparePoolMembers(left: Member, right: Member, order: Map<string, numb
   const unavailable = (member: Member) => member.operationalStatus === "unavailable" || member.operationalStatus === "disabled" ? 1 : 0;
   return unavailable(left) - unavailable(right)
     || compareRoutingOrder(left.id, right.id, order)
-    || memberName(left).localeCompare(memberName(right));
+    || compareStableText(memberName(left), memberName(right));
+}
+function compareStableText(left: string, right: string) {
+  return left === right ? 0 : left < right ? -1 : 1;
 }
 function memberName(member: Member) { return member.kind === "source" ? member.name : member.identityHint || member.label; }
 type RoutingPolicyPayload = {

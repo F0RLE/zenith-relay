@@ -12,7 +12,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     net::SocketAddr,
     path::Path,
     sync::{
@@ -23,12 +23,59 @@ use std::{
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zenith_relay_core::WireApi;
 use zenith_relay_server::{
     config::Config,
     http,
-    state::{AppState, GatewayKeyRecord},
+    state::{AppState, GatewayKeyRecord, SourceRecord},
     store::{Store, Vault},
 };
+
+#[tokio::test]
+async fn gateway_start_rolls_back_enabled_flag_when_runtime_rebuild_fails() {
+    let root = TempDir::new().unwrap();
+    let server = spawn_server(root.path()).await;
+    server.state.store.set_gateway_enabled(false).unwrap();
+    server
+        .state
+        .vault
+        .save("source:broken", "synthetic-source-key")
+        .unwrap();
+    server
+        .state
+        .store
+        .save_source(&SourceRecord {
+            id: "broken-source".into(),
+            name: "Broken source".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: "source:broken".into(),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["broken-model".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 0,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            last_error_code: None,
+        })
+        .unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/gateway/start", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .send()
+        .await
+        .unwrap();
+
+    assert!(!response.status().is_success());
+    assert!(!server.state.store.gateway_enabled().unwrap());
+    server.task.abort();
+}
 
 #[tokio::test]
 async fn profile_can_be_prepared_before_the_first_account_transfer() {

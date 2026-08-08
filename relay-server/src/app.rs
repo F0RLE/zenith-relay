@@ -1011,7 +1011,7 @@ fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &st
     })
 }
 
-fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
+pub(crate) fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
     accounts.iter().any(|account| {
         account.in_pool
             && account

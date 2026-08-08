@@ -81,6 +81,41 @@ fn source_reasoning_for_route(
     Some(capabilities)
 }
 
+fn confirmed_source_reasoning_levels(
+    efforts_by_model: &BTreeMap<String, BTreeMap<String, BTreeSet<String>>>,
+    previous_levels: &BTreeMap<String, Vec<String>>,
+    preferred_levels: &BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut levels_by_model = BTreeMap::new();
+    for (model, routes) in efforts_by_model {
+        let supported = routes
+            .values()
+            .flat_map(|efforts| efforts.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if supported.is_empty() {
+            continue;
+        }
+        let mut ordered = Vec::new();
+        for levels in [preferred_levels.get(model), previous_levels.get(model)] {
+            let Some(levels) = levels else {
+                continue;
+            };
+            for effort in levels {
+                if supported.contains(effort) && !ordered.contains(effort) {
+                    ordered.push(effort.clone());
+                }
+            }
+        }
+        for effort in supported {
+            if !ordered.contains(&effort) {
+                ordered.push(effort);
+            }
+        }
+        levels_by_model.insert(model.clone(), ordered);
+    }
+    levels_by_model
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeSource {
     pub source: ProviderSource,
@@ -344,6 +379,18 @@ struct PassiveQuotaState {
 struct CachedModelManifest {
     value: Value,
     observed_at_ms: u64,
+}
+
+struct SourceModelMetadataPrefetchGuard {
+    runtime: Arc<GatewayRuntime>,
+}
+
+impl Drop for SourceModelMetadataPrefetchGuard {
+    fn drop(&mut self) {
+        self.runtime
+            .source_model_metadata_prefetch_pending
+            .store(false, Ordering::Release);
+    }
 }
 
 pub(crate) struct CandidateLease {
@@ -1194,8 +1241,12 @@ impl GatewayRuntime {
         {
             return;
         }
+        let pending_guard = SourceModelMetadataPrefetchGuard {
+            runtime: Arc::clone(self),
+        };
         let runtime = Arc::clone(self);
         tokio::spawn(async move {
+            let _pending_guard = pending_guard;
             let rules = ModelRules::default();
             let scope = runtime.management_source_metadata_scope();
             runtime
@@ -1205,9 +1256,6 @@ impl GatewayRuntime {
                 runtime_now_ms().saturating_add(SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS),
                 Ordering::Release,
             );
-            runtime
-                .source_model_metadata_prefetch_pending
-                .store(false, Ordering::Release);
         });
     }
 
@@ -1345,8 +1393,7 @@ impl GatewayRuntime {
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
-        let mut confirmed_efforts = BTreeMap::<String, BTreeMap<String, BTreeSet<String>>>::new();
-        let mut confirmed_levels = BTreeMap::<String, Vec<String>>::new();
+        let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
         for (candidate_id, configured_models, adapter, reasoning_mode, manifest) in manifests {
             let reasoning = manifest
@@ -1385,17 +1432,22 @@ impl GatewayRuntime {
                 .and_then(|capabilities| {
                     source_reasoning_for_route(capabilities, adapter, reasoning_mode)
                 });
+                if manifest.is_some() {
+                    evaluated_reasoning.push((
+                        model_key.clone(),
+                        candidate_id.clone(),
+                        capabilities
+                            .as_ref()
+                            .map(|capabilities| {
+                                capabilities
+                                    .effort_ids()
+                                    .map(str::to_ascii_lowercase)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    ));
+                }
                 if let Some(capabilities) = capabilities {
-                    confirmed_efforts
-                        .entry(model_key.clone())
-                        .or_default()
-                        .entry(candidate_id.clone())
-                        .or_default()
-                        .extend(
-                            capabilities
-                                .effort_ids()
-                                .map(|effort| effort.to_ascii_lowercase()),
-                        );
                     reasoning_by_model
                         .entry(model_key)
                         .or_default()
@@ -1403,11 +1455,12 @@ impl GatewayRuntime {
                 }
             }
         }
+        let mut current_reasoning_levels = BTreeMap::new();
         for (model, capabilities) in reasoning_by_model {
             let Some(capabilities) = union_source_reasoning_capabilities(capabilities) else {
                 continue;
             };
-            confirmed_levels.insert(
+            current_reasoning_levels.insert(
                 model.clone(),
                 capabilities
                     .effort_ids()
@@ -1418,10 +1471,38 @@ impl GatewayRuntime {
                 .reasoning_catalog_templates
                 .insert(model, capabilities.codex_catalog_template());
         }
-        *self
-            .confirmed_source_reasoning_efforts
+        let previous_levels = self
+            .confirmed_source_reasoning_levels
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_efforts;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let confirmed_levels = {
+            let mut confirmed_efforts = self
+                .confirmed_source_reasoning_efforts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (model, candidate_id, efforts) in evaluated_reasoning {
+                if efforts.is_empty() {
+                    let remove_model = confirmed_efforts.get_mut(&model).is_some_and(|routes| {
+                        routes.remove(&candidate_id);
+                        routes.is_empty()
+                    });
+                    if remove_model {
+                        confirmed_efforts.remove(&model);
+                    }
+                } else {
+                    confirmed_efforts
+                        .entry(model)
+                        .or_default()
+                        .insert(candidate_id, efforts);
+                }
+            }
+            confirmed_source_reasoning_levels(
+                &confirmed_efforts,
+                &previous_levels,
+                &current_reasoning_levels,
+            )
+        };
         *self
             .confirmed_source_reasoning_levels
             .lock()
@@ -1861,6 +1942,26 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(candidate_id);
+        let previous_levels = self
+            .confirmed_source_reasoning_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let confirmed_levels = {
+            let mut efforts = self
+                .confirmed_source_reasoning_efforts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for routes in efforts.values_mut() {
+                routes.remove(candidate_id);
+            }
+            efforts.retain(|_, routes| !routes.is_empty());
+            confirmed_source_reasoning_levels(&efforts, &previous_levels, &BTreeMap::new())
+        };
+        *self
+            .confirmed_source_reasoning_levels
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = confirmed_levels;
         self.passive_quotas
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3976,6 +4077,88 @@ mod tests {
         assert_eq!(
             runtime.confirmed_source_reasoning_levels("provider/fable"),
             vec!["low".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn scoped_catalog_refresh_keeps_reasoning_confirmed_by_another_route() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![
+                RuntimeSource::unrestricted(source(
+                    "source-a",
+                    "source-a-secret",
+                    &["provider/fable"],
+                )),
+                RuntimeSource::unrestricted(source(
+                    "source-b",
+                    "source-b-secret",
+                    &["provider/fable"],
+                )),
+            ],
+            vec![
+                RuntimeLocalKey::unrestricted(key("key-all", "all-secret")),
+                RuntimeLocalKey {
+                    key: key("key-a", "source-a-only-secret"),
+                    enabled: true,
+                    source_ids: Some(vec!["source-a".to_string()]),
+                    allowed_models: Vec::new(),
+                    excluded_models: Vec::new(),
+                    model_prefix: None,
+                },
+            ],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let all_key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer all-secret")))
+            .unwrap();
+        let source_a_key = runtime
+            .authenticate(Some(&HeaderValue::from_static(
+                "Bearer source-a-only-secret",
+            )))
+            .unwrap();
+        let now_ms = current_time_ms();
+        runtime.remember_source_model_manifest(
+            "source-a",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low"]
+                }]
+            }),
+            now_ms,
+        );
+        runtime.remember_source_model_manifest(
+            "source-b",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["ultra"]
+                }]
+            }),
+            now_ms,
+        );
+
+        runtime
+            .codex_source_model_metadata(&all_key, &[WireApi::Responses], now_ms)
+            .await;
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string(), "ultra".to_string()]
+        );
+
+        let scoped_metadata = runtime
+            .codex_source_model_metadata(&source_a_key, &[WireApi::Responses], now_ms)
+            .await;
+        assert_eq!(
+            scoped_metadata.reasoning_catalog_templates["provider/fable"]
+                ["supported_reasoning_levels"],
+            serde_json::json!([{"effort": "low", "description": "low"}])
+        );
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string(), "ultra".to_string()]
         );
     }
 
