@@ -196,7 +196,9 @@ pub async fn update_account(
                 "account purchase cost is too large",
             ));
         }
-        record.economics.purchase_cost_micro_usd = (value > 0).then_some(value);
+        record
+            .economics
+            .set_purchase_cost_micro_usd((value > 0).then_some(value));
     }
     let policy_changed = account_runtime_policy_changed(&old, &record);
     state.store.save_account(&record).map_err(store_error)?;

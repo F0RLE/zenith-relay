@@ -997,7 +997,10 @@ fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     assert_eq!(account.weight, 2);
     assert_eq!(account.allowed_models, ["gpt-test"]);
     assert_eq!(account.excluded_models, ["gpt-old"]);
-    assert_eq!(account.economics.purchase_cost_micro_usd, Some(12_500_000));
+    assert_eq!(
+        account.economics.purchase_cost_micro_usd(),
+        Some(12_500_000)
+    );
     assert!(account.account.draining);
     assert!(apply_account_patch(
         &mut account,

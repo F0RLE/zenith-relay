@@ -2197,7 +2197,9 @@ pub(super) fn apply_account_patch(
                 "account purchase cost is too large",
             ));
         }
-        account.economics.purchase_cost_micro_usd = (purchase_cost > 0).then_some(purchase_cost);
+        account
+            .economics
+            .set_purchase_cost_micro_usd((purchase_cost > 0).then_some(purchase_cost));
     }
     account.normalize();
     Ok(())
