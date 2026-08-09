@@ -550,6 +550,58 @@ fn active_managed_catalog_refreshes_without_replacing_the_profile() {
 }
 
 #[test]
+fn catalog_refresh_recovers_an_interrupted_catalog_commit() {
+    let (root, home, backups) = profile_dirs("model-catalog-interrupted-refresh");
+    let secrets = MemorySecrets::default();
+    let next_source_catalog = r#"{"models":[{"slug":"new-model"}]}"#;
+    attach_with_catalog_for_test(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        "zlr_key",
+        r#"{"models":[{"slug":"old-model"}]}"#,
+        &secrets,
+    )
+    .unwrap();
+
+    let catalog_path = managed_model_catalog_path(&backups).unwrap();
+    let backup_path = backup_path(&backups);
+    let previous_catalog = fs::read(&catalog_path).unwrap();
+    let backup_bytes = read_optional_bytes(&backup_path).unwrap();
+    let mut backup = parse_backup_snapshot(&backup_bytes, &backup_path)
+        .unwrap()
+        .expect("profile backup");
+    let next_catalog = catalog::build_managed_model_catalog(
+        &home,
+        backup.previous_model_catalog_json.as_deref(),
+        Some(&previous_catalog),
+        next_source_catalog,
+    )
+    .unwrap();
+
+    // Simulate a process stop after the catalog is written but before its
+    // pending backup metadata is committed.
+    backup.managed_model_catalog_pending_hash = Some(key_hash(&next_catalog));
+    backup.managed_model_catalog_pending_remove = false;
+    fs::write(&catalog_path, &next_catalog).unwrap();
+    fs::write(&backup_path, serialize_backup(&backup).unwrap()).unwrap();
+
+    assert!(
+        !refresh_managed_model_catalog(&home, &backups, next_source_catalog).unwrap(),
+        "the recovered catalog already matches the requested catalog"
+    );
+    let recovered = local_backup(&home, &backups)
+        .unwrap()
+        .expect("recovered backup");
+    assert_eq!(
+        recovered.managed_model_catalog_hash.as_deref(),
+        Some(key_hash(&next_catalog).as_str())
+    );
+    assert!(recovered.managed_model_catalog_pending_hash.is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn first_catalog_upgrade_preserves_legacy_user_catalog() {
     let (root, home, backups) = profile_dirs("legacy-model-catalog");
     let previous_catalog_path = root.join("legacy-models.json");
