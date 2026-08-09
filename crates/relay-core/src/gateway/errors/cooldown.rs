@@ -68,11 +68,7 @@ pub(crate) fn apply_status_cooldown_with_hint(
 ) -> FailureState {
     let consecutive_failures = runtime.record_failure(candidate_id);
     let now_system = SystemTime::now();
-    let now = now_system
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64;
+    let now = crate::unix_time_ms_at(now_system);
     let header_retry_after_ms = retry_after_ms(headers, now_system);
     let has_explicit_retry_after = header_retry_after_ms.is_some() || hint.retry_after_ms.is_some();
     let (scope, automatic_duration_ms) = match status {

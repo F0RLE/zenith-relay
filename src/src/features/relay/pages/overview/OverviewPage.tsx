@@ -193,10 +193,6 @@ function chartWindows(range: Range, locale: string, now = new Date()): WindowBuc
   });
 }
 
-function analyticsFromSamples(windows: WindowBucket[], samples: UsageSample[]): Analytics {
-  return { totals: totalsFromSamples(samples.filter((sample) => sample.createdAtMs >= windows[0].startMs && sample.createdAtMs <= windows[windows.length - 1].endMs)), buckets: bucketsFromSamples(windows, samples) };
-}
-
 function analyticsFromPage(totals: UsageTotals | undefined, buckets: UsageBucket[] | undefined, samples: UsageSample[], windows: WindowBucket[]): Analytics {
   return { totals: totals ?? totalsFromSamples(samples), buckets: buckets?.length ? buckets : bucketsFromSamples(windows, samples) };
 }

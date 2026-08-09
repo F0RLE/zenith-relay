@@ -54,7 +54,7 @@ pub use sources::{
     LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
 };
-pub use time::unix_time_ms;
+pub use time::{unix_time_ms, unix_time_ms_at};
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,

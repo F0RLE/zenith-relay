@@ -573,7 +573,3 @@ function DeployDialog({ onClose }: { onClose: () => void }) {
 function safeHost(value: string) {
   try { return new URL(value).host; } catch { return value; }
 }
-
-function parseList(value: string) {
-  return [...new Set(value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean))];
-}

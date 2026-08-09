@@ -1,4 +1,7 @@
-use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
+use crate::local_pool::{
+    error::{ErrorCode, LocalPoolError, Result},
+    random_urlsafe,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::Rng;
 use serde::Serialize;
@@ -68,12 +71,6 @@ fn validate_public_base_url(value: &str) -> Result<String> {
         ));
     }
     Ok(url.origin().ascii_serialization())
-}
-
-fn random_urlsafe(bytes: usize) -> String {
-    let mut value = vec![0_u8; bytes];
-    rand::rng().fill_bytes(&mut value);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value)
 }
 
 fn io_error(error: std::io::Error) -> LocalPoolError {

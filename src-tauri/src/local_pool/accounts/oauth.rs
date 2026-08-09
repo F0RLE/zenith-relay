@@ -1,6 +1,5 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::Rng;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +17,8 @@ use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
 };
 use zenith_relay_core::{normalize_error_code, ProxyConfig};
+
+use crate::local_pool::random_urlsafe;
 
 use super::{collect_limited, LimitedBodyError};
 
@@ -92,9 +93,9 @@ impl CodexOAuthClient {
         }
 
         let redirect_uri = format!("http://localhost:{callback_port}{CALLBACK_PATH}");
-        let code_verifier = random_urlsafe::<64>();
+        let code_verifier = random_urlsafe(64);
         let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
-        let state = random_urlsafe::<32>();
+        let state = random_urlsafe(32);
         let pending = OAuthPendingSession {
             redirect_uri,
             state,
@@ -686,12 +687,6 @@ fn set_once(slot: &mut Option<String>, value: String) -> Result<(), OAuthError> 
     } else {
         Ok(())
     }
-}
-
-fn random_urlsafe<const N: usize>() -> String {
-    let mut bytes = [0_u8; N];
-    rand::rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 #[cfg(test)]
