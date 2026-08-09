@@ -23,8 +23,6 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    env:
-      RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -35,6 +33,8 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
       - name: Prepare RustSec advisory database
         run: |
+          RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
+          echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
           git clone --depth=1 https://github.com/RustSec/advisory-db.git "$RUSTSEC_ADVISORY_DB"
           advisory="$RUSTSEC_ADVISORY_DB/crates/gettext-rs/RUSTSEC-0000-0000.md"
           # The published advisory is stored under gettext-rs but names gettext-sys.
