@@ -57,7 +57,7 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
             }
             _ => {
                 clauses.push("wire_api = ?");
-                values.push(SqlValue::Text(wire_api_name(value).to_string()));
+                values.push(SqlValue::Text(value.as_str().to_string()));
             }
         }
     }
@@ -358,8 +358,10 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         requested_model: row.get(8)?,
         resolved_model: row.get(9)?,
         wire_api: normalize_wire_api(row.get(10)?),
-        service_tier: parse_service_tier(&service_tier),
-        applied_service_tier: applied_service_tier.as_deref().map(parse_service_tier),
+        service_tier: DefaultServiceTier::from_storage_value(&service_tier),
+        applied_service_tier: applied_service_tier
+            .as_deref()
+            .map(DefaultServiceTier::from_storage_value),
         success: row.get(11)?,
         http_status: row.get(12)?,
         error_category: row.get(13)?,
@@ -390,29 +392,6 @@ fn like_pattern(value: &str) -> String {
     }
     escaped.push('%');
     escaped
-}
-
-pub(super) fn wire_api_name(value: WireApi) -> &'static str {
-    match value {
-        WireApi::Responses => "responses",
-        WireApi::ChatCompletions => "chat_completions",
-        WireApi::Messages => "messages",
-    }
-}
-
-pub(super) fn service_tier_name(value: DefaultServiceTier) -> &'static str {
-    match value {
-        DefaultServiceTier::Standard => "standard",
-        DefaultServiceTier::Fast => "fast",
-    }
-}
-
-fn parse_service_tier(value: &str) -> DefaultServiceTier {
-    if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
-        DefaultServiceTier::Fast
-    } else {
-        DefaultServiceTier::Standard
-    }
 }
 
 fn normalize_wire_api(value: String) -> String {

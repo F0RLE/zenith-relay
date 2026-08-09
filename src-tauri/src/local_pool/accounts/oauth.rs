@@ -19,6 +19,8 @@ use zenith_relay_core::providers::chatgpt::{
 };
 use zenith_relay_core::{normalize_error_code, ProxyConfig};
 
+use super::{collect_limited, LimitedBodyError};
+
 pub const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 pub const CODEX_OAUTH_SCOPE: &str =
@@ -690,36 +692,6 @@ fn random_urlsafe<const N: usize>() -> String {
     let mut bytes = [0_u8; N];
     rand::rng().fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LimitedBodyError {
-    Transport,
-    TooLarge,
-}
-
-pub(crate) async fn collect_limited(
-    mut response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, LimitedBodyError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(LimitedBodyError::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| LimitedBodyError::Transport)?
-    {
-        if body.len().saturating_add(chunk.len()) > limit {
-            return Err(LimitedBodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 #[cfg(test)]

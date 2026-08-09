@@ -13,6 +13,36 @@ pub(crate) mod quota_service;
 pub(crate) mod records;
 pub(crate) mod wake;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LimitedBodyError {
+    Transport,
+    TooLarge,
+}
+
+pub(crate) async fn collect_limited(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, LimitedBodyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(LimitedBodyError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| LimitedBodyError::Transport)?
+    {
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(LimitedBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 #[cfg(test)]
 mod operation_tests;
 

@@ -13,11 +13,11 @@ use crate::local_pool::accounts::credentials::{
 use crate::local_pool::accounts::import_session::{
     ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
 };
-use crate::local_pool::accounts::oauth::{collect_limited, CodexOAuthClient, LimitedBodyError};
 use crate::local_pool::accounts::proxy::{
     common_proxy_config, effective_proxy_config, ensure_account_proxy,
 };
 use crate::local_pool::accounts::quota_service::{apply_quota_failure, apply_quota_success};
+use crate::local_pool::accounts::{collect_limited, oauth::CodexOAuthClient, LimitedBodyError};
 use crate::local_pool::accounts::{records, NativeSecretBackend};
 use crate::local_pool::commands::{
     current_time_ms, sync_accounts_or_rollback, sync_records_or_rollback,

@@ -28,8 +28,8 @@ mod usage;
 
 use migrations::*;
 use usage::{
-    configured_model_price, rust_u64, service_tier_name, sql_u64, usage_buckets, usage_filter,
-    usage_groups, usage_log_from_row, usage_model_equivalents, usage_totals, wire_api_name,
+    configured_model_price, rust_u64, sql_u64, usage_buckets, usage_filter, usage_groups,
+    usage_log_from_row, usage_model_equivalents, usage_totals,
 };
 
 pub type SourcePriceOverrides = BTreeMap<String, BTreeMap<String, ApiModelPriceOverride>>;
@@ -400,7 +400,7 @@ impl TelemetryDb {
                     event.account_id,
                     event.requested_model,
                     event.resolved_model,
-                    wire_api_name(event.wire_api),
+                    event.wire_api.as_str(),
                     event.success,
                     event.http_status,
                     event.error_category,
@@ -413,8 +413,8 @@ impl TelemetryDb {
                     event.reasoning_tokens.map(sql_u64),
                     event.output_tokens.map(sql_u64),
                     event.total_tokens.map(sql_u64),
-                    service_tier_name(event.service_tier),
-                    event.applied_service_tier.map(service_tier_name),
+                    event.service_tier.as_str(),
+                    event.applied_service_tier.map(DefaultServiceTier::as_str),
                     routing_json,
                     tool_use_json,
                 ],

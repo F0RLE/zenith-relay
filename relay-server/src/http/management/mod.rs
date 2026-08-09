@@ -19,7 +19,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use std::collections::HashSet;
 use std::sync::Arc;
 use zenith_relay_core::protocol::{
     AccountSummary, ConfigurationPresetApplyInput, ConfigurationPresetApplyResult,
@@ -157,14 +156,7 @@ fn clean_label(value: &str, name: &str) -> Result<String, ManagementError> {
     }
 }
 
-fn normalized_values(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty() && seen.insert(value.to_ascii_lowercase()))
-        .collect()
-}
+pub(super) use zenith_relay_core::normalize_model_ids as normalized_values;
 
 fn default_weight() -> u32 {
     1

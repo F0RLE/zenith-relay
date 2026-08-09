@@ -19,7 +19,6 @@ pub use context::{
     deserialize_model_reasoning_allowed_levels, normalize_model_reasoning_allowed_levels,
     source_model_declares_image_input,
 };
-pub use order::canonicalize_model_ids;
-pub(crate) use order::normalize_model_ids;
+pub use order::{canonicalize_model_ids, normalize_model_ids};
 pub use registry::ModelRegistry;
 pub use rules::ModelRules;

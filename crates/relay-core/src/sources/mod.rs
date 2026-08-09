@@ -27,6 +27,16 @@ pub enum WireApi {
     Messages,
 }
 
+impl WireApi {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Responses => "responses",
+            Self::ChatCompletions => "chat_completions",
+            Self::Messages => "messages",
+        }
+    }
+}
+
 /// Associates a client-facing wire contract, an explicit adapter, and the
 /// models that are known to work through that route.
 ///
@@ -151,6 +161,24 @@ pub fn normalize_source_protocol_bindings(
     Ok(normalized)
 }
 
+/// Returns the normalized source models available through one client protocol.
+pub fn source_models_for_wire_api(
+    protocol_bindings: &[SourceProtocolBinding],
+    fallback_wire_api: WireApi,
+    source_models: &[String],
+    wire_api: WireApi,
+) -> Result<Vec<String>> {
+    Ok(normalize_source_protocol_bindings(
+        protocol_bindings.to_vec(),
+        fallback_wire_api,
+        source_models,
+    )?
+    .into_iter()
+    .filter(|binding| binding.wire_api == wire_api)
+    .flat_map(|binding| binding.model_ids)
+    .collect())
+}
+
 #[derive(Clone)]
 pub struct ProviderSource {
     pub id: String,
@@ -235,7 +263,7 @@ pub(crate) fn normalized_base_url(value: &str) -> Result<Url> {
             "source base URL must use HTTP or HTTPS".to_string(),
         ));
     }
-    if url.scheme() == "http" && !is_loopback(&url) {
+    if url.scheme() == "http" && !is_loopback_url(&url) {
         return Err(Error::Validation(
             "unencrypted source base URLs are allowed only on loopback".to_string(),
         ));
@@ -263,7 +291,7 @@ pub fn source_points_to_gateway(source_base_url: &str, gateway_base_url: &str) -
             .zip(gateway.host_str())
             .is_some_and(|(source_host, gateway_host)| {
                 source_host.eq_ignore_ascii_case(gateway_host)
-                    || (is_loopback(&source) && is_loopback(&gateway))
+                    || (is_loopback_url(&source) && is_loopback_url(&gateway))
             });
     hosts_match
         && source.scheme() == gateway.scheme()
@@ -271,7 +299,7 @@ pub fn source_points_to_gateway(source_base_url: &str, gateway_base_url: &str) -
         && source.path() == gateway.path()
 }
 
-fn is_loopback(url: &Url) -> bool {
+pub fn is_loopback_url(url: &Url) -> bool {
     match url.host() {
         Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
         Some(Host::Ipv4(address)) => address.is_loopback(),
@@ -481,6 +509,44 @@ mod tests {
         source.base_url = "http://127.0.0.1:14998/v1".to_string();
         assert!(source.validate().is_ok());
         assert!(!format!("{source:?}").contains("upstream-secret"));
+    }
+
+    #[test]
+    fn source_protocol_helpers_preserve_canonical_models_and_loopback_rules() {
+        let source_models = ["gpt-test".to_string(), "claude-test".to_string()];
+        let bindings = [
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::Native,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["gpt-test".to_string()],
+            },
+            SourceProtocolBinding {
+                wire_api: WireApi::Responses,
+                adapter: SourceAdapter::ResponsesToMessages,
+                reasoning_mode: MessagesReasoningMode::Disabled,
+                model_ids: vec!["claude-test".to_string()],
+            },
+        ];
+
+        assert_eq!(WireApi::Responses.as_str(), "responses");
+        assert_eq!(WireApi::ChatCompletions.as_str(), "chat_completions");
+        assert_eq!(WireApi::Messages.as_str(), "messages");
+        assert_eq!(
+            source_models_for_wire_api(
+                &bindings,
+                WireApi::Responses,
+                &source_models,
+                WireApi::Responses,
+            )
+            .unwrap(),
+            ["gpt-test", "claude-test"]
+        );
+        assert!(is_loopback_url(&Url::parse("http://localhost").unwrap()));
+        assert!(is_loopback_url(&Url::parse("http://[::1]").unwrap()));
+        assert!(!is_loopback_url(
+            &Url::parse("https://example.test").unwrap()
+        ));
     }
 
     #[test]

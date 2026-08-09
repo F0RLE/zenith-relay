@@ -1,5 +1,6 @@
 use std::fmt;
-use url::{Host, Url};
+use url::Url;
+use zenith_relay_core::is_loopback_url;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PinnedOrigin {
@@ -40,7 +41,7 @@ impl PinnedOrigin {
         if !matches!(base.path(), "" | "/") || base.query().is_some() || base.fragment().is_some() {
             return Err(OriginError::PathNotAllowed);
         }
-        if base.scheme() == "http" && !is_loopback(&base) && !allow_insecure_http {
+        if base.scheme() == "http" && !is_loopback_url(&base) && !allow_insecure_http {
             return Err(OriginError::InsecureHttpBlocked);
         }
         base.set_path("/");
@@ -61,15 +62,6 @@ impl PinnedOrigin {
 
     pub fn as_str(&self) -> &str {
         &self.origin
-    }
-}
-
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(address)) => address.is_loopback(),
-        Some(Host::Ipv6(address)) => address.is_loopback(),
-        None => false,
     }
 }
 

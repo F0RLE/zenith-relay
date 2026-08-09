@@ -80,7 +80,7 @@ where
 /// source order. This is the storage-normalization step shared by source
 /// bindings and the runtime registry; it deliberately does not apply picker
 /// grouping.
-pub(crate) fn normalize_model_ids<I, S>(models: I) -> Vec<String>
+pub fn normalize_model_ids<I, S>(models: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,

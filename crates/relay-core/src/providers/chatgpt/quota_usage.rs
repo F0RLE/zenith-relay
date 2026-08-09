@@ -1,5 +1,9 @@
-use super::agent_identity::is_agent_identity_task_invalid_response;
-use super::quota_subscription::{merge_subscription_metadata, CodexSubscriptionClient};
+use super::{
+    agent_identity::is_agent_identity_task_invalid_response,
+    collect_response_body,
+    quota_subscription::{merge_subscription_metadata, CodexSubscriptionClient},
+    valid_access_token, ResponseBodyError,
+};
 use crate::quota::{
     QuotaAdapter, QuotaAdapterCapabilities, QuotaAdapterContext, QuotaRefreshData,
     QuotaRefreshFailure, QuotaRefreshResult, QuotaWindowInput, QuotaWindowKind, ResetTime,
@@ -7,7 +11,6 @@ use crate::quota::{
 };
 use crate::{providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
 use futures_util::future::BoxFuture;
-use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderValue, ACCEPT, AUTHORIZATION},
     redirect::Policy,
@@ -20,7 +23,6 @@ pub const CODEX_QUOTA_ENDPOINT: &str = "https://chatgpt.com/backend-api/wham/usa
 #[cfg(test)]
 const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
-const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_QUOTA_RESPONSE_BYTES: usize = 256 * 1024;
 const MAX_ADDITIONAL_LIMITS: usize = 15;
 
@@ -197,7 +199,14 @@ impl CodexQuotaClient {
             .await
             .map_err(|_| QuotaRefreshFailure::new("quota_transport", true))?;
         let status = response.status();
-        let body = collect_limited(response).await?;
+        let body = collect_response_body(response, MAX_QUOTA_RESPONSE_BYTES)
+            .await
+            .map_err(|error| match error {
+                ResponseBodyError::Transport => QuotaRefreshFailure::new("quota_transport", true),
+                ResponseBodyError::TooLarge => {
+                    QuotaRefreshFailure::new("quota_response_too_large", false)
+                }
+            })?;
         if !status.is_success() {
             return Err(classify_quota_failure(status.as_u16(), &body));
         }
@@ -329,7 +338,9 @@ fn classify_quota_failure(status: u16, body: &[u8]) -> QuotaRefreshFailure {
 }
 
 fn bearer_authorization(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
-    validate_access_token(access_token)?;
+    if !valid_access_token(access_token) {
+        return Err(QuotaRefreshFailure::new("invalid_access_token", false));
+    }
     let mut authorization = HeaderValue::from_str(&format!("Bearer {access_token}"))
         .map_err(|_| QuotaRefreshFailure::new("invalid_access_token", false))?;
     authorization.set_sensitive(true);
@@ -343,30 +354,6 @@ pub enum QuotaRefreshOutcome {
         failure: QuotaRefreshFailure,
         subscription: Subscription,
     },
-}
-
-async fn collect_limited(response: reqwest::Response) -> Result<Vec<u8>, QuotaRefreshFailure> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| QuotaRefreshFailure::new("quota_transport", true))?;
-        if body.len().saturating_add(chunk.len()) > MAX_QUOTA_RESPONSE_BYTES {
-            return Err(QuotaRefreshFailure::new("quota_response_too_large", false));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-fn validate_access_token(access_token: &str) -> Result<(), QuotaRefreshFailure> {
-    if access_token.is_empty()
-        || access_token.len() > MAX_ACCESS_TOKEN_BYTES
-        || access_token.bytes().any(|byte| byte.is_ascii_control())
-    {
-        Err(QuotaRefreshFailure::new("invalid_access_token", false))
-    } else {
-        Ok(())
-    }
 }
 
 #[derive(Deserialize)]

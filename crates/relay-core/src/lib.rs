@@ -20,10 +20,10 @@ pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
     deserialize_model_reasoning_allowed_levels, normalize_codex_catalog_priorities,
-    normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
-    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
-    source_model_declares_image_input, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
-    CODEX_RELAY_CATALOG_HASH,
+    normalize_model_ids, normalize_model_reasoning_allowed_levels,
+    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
+    routed_codex_catalog_entry, source_model_declares_image_input, ModelRegistry, ModelRules,
+    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{
@@ -47,10 +47,10 @@ pub use scheduler::{
 };
 pub use sources::{
     discover_source_models, discover_source_models_and_protocol_bindings,
-    discover_source_models_for_protocol_bindings, fetch_source_provider_stats,
-    normalize_source_protocol_bindings, source_points_to_gateway, LocalGatewayKey, ProviderSource,
-    SourceConnector, SourceDiscovery, SourceProtocolBinding, SourceProtocolBindingKey,
-    SourceProviderStats, SourceStatsProvider, WireApi,
+    discover_source_models_for_protocol_bindings, fetch_source_provider_stats, is_loopback_url,
+    normalize_source_protocol_bindings, source_models_for_wire_api, source_points_to_gateway,
+    LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
+    SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
 };
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,

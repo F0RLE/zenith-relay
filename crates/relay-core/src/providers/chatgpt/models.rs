@@ -1,5 +1,6 @@
 use super::{
-    is_agent_identity_task_invalid_response, valid_codex_client_version, CodexIdentityEnvelope,
+    is_agent_identity_task_invalid_response, valid_access_token, valid_codex_client_version,
+    CodexIdentityEnvelope,
 };
 use crate::{transport::collect_limited, Error, ProxyConfig};
 use reqwest::{
@@ -12,7 +13,6 @@ use url::Url;
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
-const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 const MAX_MODELS: usize = 4_096;
@@ -285,10 +285,7 @@ fn validate_endpoint(endpoint: &Url) -> Result<(), ModelDiscoveryFailure> {
 }
 
 fn validate_access_token(access_token: &str) -> Result<(), ModelDiscoveryFailure> {
-    if access_token.is_empty()
-        || access_token.len() > MAX_ACCESS_TOKEN_BYTES
-        || access_token.bytes().any(|byte| byte.is_ascii_control())
-    {
+    if !valid_access_token(access_token) {
         Err(ModelDiscoveryFailure::new(
             ModelDiscoveryFailureCode::InvalidAccessToken,
         ))

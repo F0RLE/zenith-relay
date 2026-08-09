@@ -5,21 +5,20 @@ use std::collections::HashMap;
 use zenith_relay_core::{
     estimate_api_equivalent_with_price_override,
     protocol::{UsagePage, UsageQuery, UsageSummary},
-    ApiEquivalentSummary, UsageEvent,
+    ApiEquivalentSummary, DefaultServiceTier, UsageEvent,
 };
 
 mod query;
 
 use query::{
-    configured_model_price, parse_service_tier, parse_wire_api, service_tier_name, usage_buckets,
-    usage_filter, usage_groups, usage_model_equivalents, usage_totals, wire_api_name,
-    USAGE_TOTAL_COLUMNS,
+    configured_model_price, parse_wire_api, usage_buckets, usage_filter, usage_groups,
+    usage_model_equivalents, usage_totals, USAGE_TOTAL_COLUMNS,
 };
 
 #[cfg(test)]
 use std::collections::BTreeMap;
 #[cfg(test)]
-use zenith_relay_core::{ApiModelPriceOverride, DefaultServiceTier, ToolUseDiagnostics, WireApi};
+use zenith_relay_core::{ApiModelPriceOverride, ToolUseDiagnostics, WireApi};
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1_000;
 
@@ -148,7 +147,7 @@ impl Store {
                         candidate_hint,
                         event.requested_model,
                         event.resolved_model,
-                        wire_api_name(event.wire_api),
+                        event.wire_api.as_str(),
                         i64::from(event.success),
                         i64::from(event.http_status),
                         event.error_category,
@@ -163,8 +162,8 @@ impl Store {
                         event.total_tokens.map(|value| value as i64),
                         *created_at_ms as i64,
                         routing_json,
-                        service_tier_name(event.service_tier),
-                        event.applied_service_tier.map(service_tier_name),
+                        event.service_tier.as_str(),
+                        event.applied_service_tier.map(DefaultServiceTier::as_str),
                         tool_use_json,
                         candidate_id,
                     ])
@@ -243,11 +242,13 @@ impl Store {
                     requested_model: row.get(5)?,
                     resolved_model: row.get(6)?,
                     wire_api: parse_wire_api(&wire_api),
-                    service_tier: parse_service_tier(&row.get::<_, String>(22)?),
+                    service_tier: DefaultServiceTier::from_storage_value(
+                        &row.get::<_, String>(22)?,
+                    ),
                     applied_service_tier: row
                         .get::<_, Option<String>>(23)?
                         .as_deref()
-                        .map(parse_service_tier),
+                        .map(DefaultServiceTier::from_storage_value),
                     tool_use: row
                         .get::<_, Option<String>>(24)?
                         .as_deref()

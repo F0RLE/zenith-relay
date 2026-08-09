@@ -143,7 +143,7 @@ pub fn quota_plan_benchmarks<'a>(
                     plan: plan.clone(),
                     window_kind: cycle.window_kind,
                     window_minutes,
-                    service_tier: service_tier_name(service_tier).to_string(),
+                    service_tier: service_tier.as_str().to_string(),
                     pricing_revision: pricing_revision.to_string(),
                 };
                 grouped
@@ -220,7 +220,7 @@ pub fn quota_plan_benchmarks<'a>(
                 plan: key.plan,
                 window_kind: key.window_kind,
                 window_minutes: key.window_minutes,
-                service_tier: parse_service_tier(&key.service_tier),
+                service_tier: DefaultServiceTier::from_storage_value(&key.service_tier),
                 pricing_revision: key.pricing_revision,
                 account_count: account_api_values.len(),
                 cycle_count,
@@ -741,21 +741,6 @@ fn unweighted_quantile(values: &[u64], numerator: usize, denominator: usize) -> 
         .div_ceil(denominator)
         .saturating_sub(1);
     values.get(index).copied()
-}
-
-fn service_tier_name(tier: DefaultServiceTier) -> &'static str {
-    match tier {
-        DefaultServiceTier::Standard => "standard",
-        DefaultServiceTier::Fast => "fast",
-    }
-}
-
-fn parse_service_tier(value: &str) -> DefaultServiceTier {
-    if value == "fast" {
-        DefaultServiceTier::Fast
-    } else {
-        DefaultServiceTier::Standard
-    }
 }
 
 fn scale_duration(value: u64, target_minutes: u32, source_minutes: u32) -> u64 {

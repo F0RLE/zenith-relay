@@ -10,7 +10,6 @@ use zenith_relay_core::protocol::{
     ProfileKeyRotation, RevealedAccountIdentity, RuntimeStateSnapshot, UsagePage, UsageQuery,
     UsageRange, PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
-use zenith_relay_core::WireApi;
 use zenith_relay_core::{CandidateRuntimeSnapshot, SourceProviderStats};
 
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -454,7 +453,7 @@ fn usage_path(query: &UsageQuery) -> String {
         query.source_or_account_query.as_deref(),
     );
     if let Some(value) = query.wire_api {
-        parameters.append_pair("wireApi", wire_api_name(value));
+        parameters.append_pair("wireApi", value.as_str());
     }
     if let Some(value) = query.success {
         parameters.append_pair("success", if value { "true" } else { "false" });
@@ -498,14 +497,6 @@ fn usage_range_name(value: UsageRange) -> &'static str {
         UsageRange::Weekly => "weekly",
         UsageRange::Monthly => "monthly",
         UsageRange::Custom => "custom",
-    }
-}
-
-fn wire_api_name(value: WireApi) -> &'static str {
-    match value {
-        WireApi::Responses => "responses",
-        WireApi::ChatCompletions => "chat_completions",
-        WireApi::Messages => "messages",
     }
 }
 

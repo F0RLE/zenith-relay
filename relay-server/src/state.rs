@@ -14,12 +14,11 @@ use std::{
 };
 use zenith_relay_core::{
     accounts::{AccountAuthState, AccountHealthState, TokenAuthority, TokenSet},
-    normalize_source_protocol_bindings,
     protocol::Capabilities,
     providers::chatgpt::AgentIdentityCredential,
     quota::{QuotaEconomicsState, QuotaSnapshot, Subscription},
-    ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime, SourceProtocolBinding,
-    WireApi,
+    source_models_for_wire_api, ApiModelPriceOverride, CandidateRuntimeSnapshot, GatewayRuntime,
+    SourceProtocolBinding, WireApi,
 };
 
 pub const SERVER_SCHEMA_VERSION: u32 = 31;
@@ -65,25 +64,13 @@ pub struct SourceRecord {
 
 impl SourceRecord {
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        let bindings = normalize_source_protocol_bindings(
-            self.protocol_bindings.clone(),
+        source_models_for_wire_api(
+            &self.protocol_bindings,
             self.wire_api,
             &self.models,
+            wire_api,
         )
-        .map_err(|error| error.to_string())?;
-        let mut seen = HashSet::new();
-        let mut models = Vec::new();
-        for binding in bindings
-            .into_iter()
-            .filter(|binding| binding.wire_api == wire_api)
-        {
-            for model in binding.model_ids {
-                if seen.insert(model.to_ascii_lowercase()) {
-                    models.push(model);
-                }
-            }
-        }
-        Ok(models)
+        .map_err(|error| error.to_string())
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {

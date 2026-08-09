@@ -9,9 +9,12 @@ use zenith_relay_core::{
     normalize_subscription_plan_order,
     protocol::RemoteAccountLocation,
     quota::QuotaEconomicsState,
-    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, SourceProtocolBinding, WireApi,
-    DEFAULT_COOLDOWN_AFTER_FAILURES, DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
+    source_models_for_wire_api, ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy,
+    SourceProtocolBinding, WireApi, DEFAULT_COOLDOWN_AFTER_FAILURES,
+    DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE,
 };
+
+pub(crate) use zenith_relay_core::normalize_model_ids as normalized_values;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 14;
 pub const DEFAULT_GATEWAY_PORT: u16 = 14998;
@@ -435,20 +438,13 @@ impl ProviderSourceRecord {
     }
 
     pub fn models_for_wire_api(&self, wire_api: WireApi) -> Result<Vec<String>, String> {
-        let mut seen = HashSet::new();
-        let mut models = Vec::new();
-        for binding in self
-            .effective_protocol_bindings()?
-            .into_iter()
-            .filter(|binding| binding.wire_api == wire_api)
-        {
-            for model in binding.model_ids {
-                if seen.insert(model.to_ascii_lowercase()) {
-                    models.push(model);
-                }
-            }
-        }
-        Ok(models)
+        source_models_for_wire_api(
+            &self.protocol_bindings,
+            self.wire_api,
+            &self.models,
+            wire_api,
+        )
+        .map_err(|error| error.to_string())
     }
 
     pub fn supports_wire_api(&self, wire_api: WireApi) -> Result<bool, String> {
@@ -460,16 +456,6 @@ fn validate_model_price_overrides(
     overrides: &BTreeMap<String, ApiModelPriceOverride>,
 ) -> Result<(), &'static str> {
     normalize_model_price_overrides(overrides.clone()).map(drop)
-}
-
-pub(crate) fn normalized_values(values: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    values
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .filter(|value| seen.insert(value.to_ascii_lowercase()))
-        .collect()
 }
 
 fn default_max_retry_candidates() -> u8 {

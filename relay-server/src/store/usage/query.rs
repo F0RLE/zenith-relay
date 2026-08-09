@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
     estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, WireApi,
+    ApiEquivalentSummary, ApiModelPriceOverride, WireApi,
 };
 
 pub(super) const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -50,7 +50,7 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     }
     if let Some(value) = query.wire_api {
         clauses.push("wire_api = ?");
-        values.push(SqlValue::Text(wire_api_name(value).to_string()));
+        values.push(SqlValue::Text(value.as_str().to_string()));
     }
     if let Some(value) = query.success {
         clauses.push("success = ?");
@@ -299,21 +299,6 @@ fn usage_totals_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Re
     })
 }
 
-pub(super) fn service_tier_name(value: DefaultServiceTier) -> &'static str {
-    match value {
-        DefaultServiceTier::Standard => "standard",
-        DefaultServiceTier::Fast => "fast",
-    }
-}
-
-pub(super) fn parse_service_tier(value: &str) -> DefaultServiceTier {
-    if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
-        DefaultServiceTier::Fast
-    } else {
-        DefaultServiceTier::Standard
-    }
-}
-
 fn nonnegative_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or_default()
 }
@@ -329,14 +314,6 @@ fn like_pattern(value: &str) -> String {
     }
     escaped.push('%');
     escaped
-}
-
-pub(super) fn wire_api_name(value: WireApi) -> &'static str {
-    match value {
-        WireApi::Responses => "responses",
-        WireApi::ChatCompletions => "chat_completions",
-        WireApi::Messages => "messages",
-    }
 }
 
 pub(super) fn parse_wire_api(value: &str) -> WireApi {

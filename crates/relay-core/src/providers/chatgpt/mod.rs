@@ -7,6 +7,8 @@ mod quota_usage;
 mod runtime;
 mod token_errors;
 
+use futures_util::StreamExt;
+
 pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
 };
@@ -30,3 +32,46 @@ pub use runtime::{RuntimeChatGptAccount, RuntimeChatGptAuth};
 pub use token_errors::{token_refresh_failure_kind, token_refresh_provider_error_code};
 
 pub const CODEX_MODELS_CLIENT_VERSION: &str = CODEX_CLIENT_VERSION;
+
+const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
+
+pub(super) fn valid_access_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ACCESS_TOKEN_BYTES
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ResponseBodyError {
+    Transport,
+    TooLarge,
+}
+
+pub(super) async fn collect_response_body(
+    response: reqwest::Response,
+    limit: usize,
+) -> std::result::Result<Vec<u8>, ResponseBodyError> {
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| ResponseBodyError::Transport)?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(ResponseBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_tokens_are_bounded_and_header_safe() {
+        assert!(valid_access_token("token"));
+        assert!(!valid_access_token(""));
+        assert!(!valid_access_token("token\nvalue"));
+        assert!(!valid_access_token(&"x".repeat(MAX_ACCESS_TOKEN_BYTES + 1)));
+    }
+}

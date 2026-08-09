@@ -1,6 +1,6 @@
+use super::{collect_response_body, valid_access_token, ResponseBodyError};
 use crate::quota::QuotaRefreshFailure;
 use chrono::{DateTime, Local, TimeZone, Utc};
-use futures_util::StreamExt;
 use reqwest::{
     header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, REFERER, USER_AGENT},
     Client, StatusCode,
@@ -14,7 +14,6 @@ pub const CODEX_SUBSCRIPTIONS_ENDPOINT: &str = "https://chatgpt.com/backend-api/
 pub const SUBSCRIPTION_REFRESH_INTERVAL_MS: u64 = 30 * 60 * 1_000;
 
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
 // These ChatGPT Web endpoints require browser-shaped headers, not the Codex API identity envelope.
 const CHATGPT_WEB_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
@@ -181,10 +180,7 @@ pub fn merge_subscription_metadata(
 }
 
 fn authorization_header(access_token: &str) -> Result<HeaderValue, QuotaRefreshFailure> {
-    if access_token.is_empty()
-        || access_token.len() > MAX_TOKEN_BYTES
-        || access_token.bytes().any(|byte| byte.is_ascii_control())
-    {
+    if !valid_access_token(access_token) {
         return Err(failure("subscription_access_token_invalid", false));
     }
     HeaderValue::from_str(&format!("Bearer {access_token}"))
@@ -221,24 +217,16 @@ fn subscription_headers(
 
 async fn response_json(response: reqwest::Response) -> Result<Value, QuotaRefreshFailure> {
     let status = response.status();
-    let body = collect_limited(response).await?;
+    let body = collect_response_body(response, MAX_RESPONSE_BYTES)
+        .await
+        .map_err(|error| match error {
+            ResponseBodyError::Transport => failure("subscription_transport", true),
+            ResponseBodyError::TooLarge => failure("subscription_response_too_large", false),
+        })?;
     if !status.is_success() {
         return Err(http_failure(status));
     }
     serde_json::from_slice(&body).map_err(|_| failure("subscription_invalid_response", false))
-}
-
-async fn collect_limited(response: reqwest::Response) -> Result<Vec<u8>, QuotaRefreshFailure> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| failure("subscription_transport", true))?;
-        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(failure("subscription_response_too_large", false));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 fn http_failure(status: StatusCode) -> QuotaRefreshFailure {

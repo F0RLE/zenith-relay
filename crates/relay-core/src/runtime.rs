@@ -8,7 +8,7 @@ use crate::providers::chatgpt::{
 };
 use crate::quota::QuotaSnapshot;
 use crate::scheduler::{CooldownReason, CooldownRequest};
-use crate::sources::discover_models_with_client;
+use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
     decode_codex_model_alias, CandidateHealth, CandidateQuota, CandidateScope, Error,
@@ -238,6 +238,25 @@ pub enum DefaultServiceTier {
     #[default]
     Standard,
     Fast,
+}
+
+impl DefaultServiceTier {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+        }
+    }
+
+    /// Parses the durable service-tier spelling, including the legacy Codex
+    /// `priority` alias for Relay's fast tier.
+    pub fn from_storage_value(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("fast") || value.eq_ignore_ascii_case("priority") {
+            Self::Fast
+        } else {
+            Self::Standard
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1884,14 +1903,6 @@ fn runtime_websocket_client(proxy: Option<&ProxyConfig>) -> Result<reqwest::Clie
         .map_err(Error::from)
 }
 
-fn is_loopback_url(url: &Url) -> bool {
-    url.host().is_some_and(|host| match host {
-        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
-    })
-}
-
 fn require_runtime_value(name: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         Err(Error::Validation(format!("{name} must not be empty")))
@@ -1959,6 +1970,20 @@ mod tests {
         assert_eq!(runtime.default_service_tier(), DefaultServiceTier::Fast);
         assert!(runtime.remove_candidate("source-1"));
         assert!(runtime.candidate_runtime_order().is_empty());
+    }
+
+    #[test]
+    fn service_tier_storage_values_keep_fast_aliases_compatible() {
+        assert_eq!(DefaultServiceTier::Standard.as_str(), "standard");
+        assert_eq!(DefaultServiceTier::Fast.as_str(), "fast");
+        assert_eq!(
+            DefaultServiceTier::from_storage_value("priority"),
+            DefaultServiceTier::Fast
+        );
+        assert_eq!(
+            DefaultServiceTier::from_storage_value("unknown"),
+            DefaultServiceTier::Standard
+        );
     }
 
     #[test]

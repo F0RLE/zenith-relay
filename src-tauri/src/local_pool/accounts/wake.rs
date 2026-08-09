@@ -7,7 +7,9 @@ use url::Url;
 use zenith_relay_core::automations::{
     WakeCompletion, WakeCompletionOutcome, WakeExecutionRequest, WakeVerificationOutcome,
 };
-use zenith_relay_core::{providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
+use zenith_relay_core::{is_loopback_url, providers::chatgpt::CodexIdentityEnvelope, ProxyConfig};
+
+use super::{collect_limited, LimitedBodyError};
 
 pub const DEFAULT_CODEX_WAKE_RESPONSES_ENDPOINT: &str = super::records::CODEX_RESPONSES_URL;
 
@@ -347,36 +349,6 @@ struct WakeUsage {
     total_tokens: Option<u64>,
 }
 
-#[derive(Clone, Copy)]
-enum LimitedBodyError {
-    Transport,
-    TooLarge,
-}
-
-async fn collect_limited(
-    mut response: reqwest::Response,
-    limit: usize,
-) -> Result<Vec<u8>, LimitedBodyError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > limit as u64)
-    {
-        return Err(LimitedBodyError::TooLarge);
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| LimitedBodyError::Transport)?
-    {
-        if body.len().saturating_add(chunk.len()) > limit {
-            return Err(LimitedBodyError::TooLarge);
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
 fn validate_endpoint(endpoint: &Url) -> Result<(), WakeExecutionFailure> {
     if !matches!(endpoint.scheme(), "http" | "https")
         || endpoint.host_str().is_none()
@@ -389,20 +361,12 @@ fn validate_endpoint(endpoint: &Url) -> Result<(), WakeExecutionFailure> {
             WakeExecutionErrorCode::InvalidEndpoint,
         ));
     }
-    if endpoint.scheme() == "http" && !is_loopback(endpoint) {
+    if endpoint.scheme() == "http" && !is_loopback_url(endpoint) {
         return Err(WakeExecutionFailure::invalid(
             WakeExecutionErrorCode::InvalidEndpoint,
         ));
     }
     Ok(())
-}
-
-fn is_loopback(endpoint: &Url) -> bool {
-    endpoint.host().is_some_and(|host| match host {
-        url::Host::Domain(host) => host.eq_ignore_ascii_case("localhost"),
-        url::Host::Ipv4(address) => address.is_loopback(),
-        url::Host::Ipv6(address) => address.is_loopback(),
-    })
 }
 
 fn validate_secret(
