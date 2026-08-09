@@ -954,6 +954,28 @@ fn provider_identity_hash_matches_import_parser_without_exposing_id() {
     assert!(!key.contains("provider"));
 }
 #[test]
+fn account_check_parser_honors_order_and_bounds_identity_values() {
+    let payload = serde_json::json!({
+        "account_ordering": ["preferred", "fallback"],
+        "accounts": {
+            "preferred": {"account": {"workspace_id": "preferred-id"}},
+            "fallback": {"account": {"workspace_id": "fallback-id"}}
+        }
+    });
+
+    assert_eq!(
+        account_id_from_check_response(&payload).as_deref(),
+        Some("preferred-id")
+    );
+    assert_eq!(
+        normalized_profile_account_id("  account-id  ").as_deref(),
+        Some("account-id")
+    );
+    assert!(normalized_profile_account_id("bad\0id").is_none());
+    assert!(normalized_profile_account_id(&"x".repeat(513)).is_none());
+    assert_eq!(masked_account_identity("provider-1234"), "Account ****1234");
+}
+#[test]
 fn account_patch_normalizes_metadata_and_rejects_zero_weight() {
     let credentials = StoredCodexCredentials::new(
         "account_local",
