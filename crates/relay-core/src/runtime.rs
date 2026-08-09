@@ -7,15 +7,15 @@ use crate::providers::chatgpt::{
     AgentIdentityCredential, CodexIdentityEnvelope, RuntimeChatGptAccount, RuntimeChatGptAuth,
 };
 use crate::quota::QuotaSnapshot;
-use crate::scheduler::{CooldownReason, CooldownRequest};
+use crate::scheduler::CooldownRequest;
 use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
     decode_codex_model_alias, CandidateHealth, CandidateQuota, CandidateScope, Error,
     LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore,
     PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    Selection, SelectionRequest, SourceAdapter, SourceConnector, SourceProtocolBinding,
-    SourceProtocolBindingKey, UsageCallback, UsageEvent, WireApi,
+    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
+    UsageEvent, WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
@@ -34,6 +34,7 @@ mod authorization;
 mod build;
 mod candidates;
 mod images;
+mod selection;
 mod session_state;
 mod source_metadata;
 
@@ -1017,200 +1018,6 @@ impl GatewayRuntime {
         )
     }
 
-    pub(crate) async fn select_and_reserve(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        affinity_keys: (Option<&str>, Option<&str>),
-        now_ms: u64,
-    ) -> Option<(Selection, CandidateLease)> {
-        let (response_affinity_key, prompt_affinity_key) = affinity_keys;
-        let mut selection_now_ms = now_ms;
-        loop {
-            // Register before evaluating candidates so a completed request cannot
-            // release the only OAuth account between the failed selection and wait.
-            let notified = self.candidate_availability.notified();
-            let (reserved, wait_for_release) = self.try_select_and_reserve_for(
-                key,
-                model,
-                allowed_protocols,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                selection_now_ms,
-                CandidateLeaseLane::Text,
-            );
-            if let Some(reserved) = reserved {
-                return Some(reserved);
-            }
-            if !wait_for_release {
-                return None;
-            }
-            notified.await;
-            selection_now_ms = runtime_now_ms();
-        }
-    }
-
-    pub(crate) fn select_and_reserve_image(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        now_ms: u64,
-    ) -> Option<(Selection, CandidateLease)> {
-        self.try_select_and_reserve_for(
-            key,
-            model,
-            allowed_protocols,
-            tried,
-            None,
-            None,
-            now_ms,
-            CandidateLeaseLane::Image,
-        )
-        .0
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn try_select_and_reserve_for(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
-        prompt_affinity_key: Option<&str>,
-        now_ms: u64,
-        lane: CandidateLeaseLane,
-    ) -> (Option<(Selection, CandidateLease)>, bool) {
-        if let (Some(key), Some(store)) =
-            (response_affinity_key, self.response_affinity_store.as_ref())
-        {
-            let cached = self.lock_scheduler().has_response_affinity(key, now_ms);
-            if !cached {
-                if let Ok(Some(binding)) = store.find(key, now_ms) {
-                    self.lock_scheduler().restore_response_affinity(
-                        binding.key,
-                        &binding.candidate_id,
-                        binding.expires_at_ms,
-                        now_ms,
-                    );
-                }
-            }
-        }
-        // Keep authorization live through selection and reservation. A pool
-        // mutation waits for this read lock, so it cannot race a stale scope
-        // into a newly reserved lease.
-        let scope = key.scope_read();
-        let mut scheduler = self.lock_scheduler();
-        let selection = match lane {
-            CandidateLeaseLane::Text => scheduler.select(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-            CandidateLeaseLane::Image => scheduler.select_image(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            }),
-        };
-        let reserved = selection.and_then(|selection| {
-            let reserved = match lane {
-                CandidateLeaseLane::Text => {
-                    scheduler.reserve_for(&selection.candidate_id, model, now_ms)
-                }
-                CandidateLeaseLane::Image => {
-                    scheduler.reserve_image_for(&selection.candidate_id, model, now_ms)
-                }
-            };
-            reserved.then(|| {
-                let lease = CandidateLease {
-                    scheduler: self.scheduler.clone(),
-                    availability: self.candidate_availability.clone(),
-                    candidate_id: selection.candidate_id.clone(),
-                    model: model.to_string(),
-                    lane,
-                    released: AtomicBool::new(false),
-                };
-                (selection, lease)
-            })
-        });
-        let wait_for_release = matches!(lane, CandidateLeaseLane::Text)
-            && reserved.is_none()
-            && scheduler.has_waitable_text_candidate(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key,
-                now_ms,
-            });
-        drop(scheduler);
-        drop(scope);
-        if let (Some((selection, _)), Some(key)) = (reserved.as_ref(), response_affinity_key) {
-            if selection.response_affinity_hit {
-                self.persist_response_affinity(key, &selection.candidate_id, now_ms);
-            }
-        }
-        (reserved, wait_for_release)
-    }
-
-    pub(crate) fn earliest_retry_at(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
-        now_ms: u64,
-    ) -> Option<u64> {
-        let scope = key.scope_snapshot();
-        self.lock_scheduler().earliest_retry_at(SelectionRequest {
-            model,
-            allowed_protocols,
-            scope: &scope,
-            tried,
-            response_affinity_key,
-            prompt_affinity_key: None,
-            now_ms,
-        })
-    }
-
-    pub(crate) fn all_applicable_cooldown(
-        &self,
-        key: &AuthenticatedKey,
-        model: &str,
-        allowed_protocols: &[WireApi],
-        tried: &HashSet<String>,
-        response_affinity_key: Option<&str>,
-        now_ms: u64,
-    ) -> Option<(u64, CooldownReason)> {
-        let scope = key.scope_snapshot();
-        self.lock_scheduler()
-            .all_applicable_cooldown(SelectionRequest {
-                model,
-                allowed_protocols,
-                scope: &scope,
-                tried,
-                response_affinity_key,
-                prompt_affinity_key: None,
-                now_ms,
-            })
-    }
-
     pub(crate) fn executor_route(
         &self,
         candidate_id: &str,
@@ -1805,6 +1612,8 @@ mod tests {
 
     #[derive(Default)]
     struct RecordedResponseAffinityStore {
+        found: Mutex<Vec<String>>,
+        restored_binding: Mutex<Option<ResponseAffinityBinding>>,
         upserts: Mutex<Vec<ResponseAffinityBinding>>,
         deletes: Mutex<Vec<String>>,
     }
@@ -1816,10 +1625,18 @@ mod tests {
 
         fn find(
             &self,
-            _key: &str,
+            key: &str,
             _now_ms: u64,
         ) -> std::result::Result<Option<ResponseAffinityBinding>, String> {
-            Ok(None)
+            self.found
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.to_string());
+            Ok(self
+                .restored_binding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone())
         }
 
         fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String> {
@@ -1885,6 +1702,71 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![affinity_key]
         );
+    }
+
+    #[tokio::test]
+    async fn selection_restores_persisted_response_affinity_before_reserving() {
+        let store = Arc::new(RecordedResponseAffinityStore::default());
+        let runtime = GatewayRuntime::from_pool(
+            vec![
+                RuntimeSource::unrestricted(source("source-a", "secret-a", &["gpt-test"])),
+                RuntimeSource::unrestricted(source("source-b", "secret-b", &["gpt-test"])),
+            ],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions {
+                response_affinity_store: Some(store.clone()),
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let response_id = "resp-restored";
+        let affinity_key = runtime.response_affinity_key(Some(response_id)).unwrap();
+        *store
+            .restored_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ResponseAffinityBinding {
+            key: affinity_key.clone(),
+            candidate_id: "source-b".to_string(),
+            expires_at_ms: 123 + crate::RESPONSE_AFFINITY_TTL_MS,
+        });
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+
+        let (selection, lease) = runtime
+            .select_and_reserve(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (Some(&affinity_key), None),
+                123,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(selection.candidate_id, "source-b");
+        assert!(selection.response_affinity_hit);
+        assert_eq!(
+            *store
+                .found
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![affinity_key.clone()]
+        );
+        assert_eq!(
+            *store
+                .upserts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![ResponseAffinityBinding {
+                key: affinity_key,
+                candidate_id: "source-b".to_string(),
+                expires_at_ms: 123 + crate::RESPONSE_AFFINITY_TTL_MS,
+            }]
+        );
+        drop(lease);
     }
 
     #[test]

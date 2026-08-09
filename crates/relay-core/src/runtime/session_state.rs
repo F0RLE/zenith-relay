@@ -128,7 +128,7 @@ impl GatewayRuntime {
         })
     }
 
-    pub(super) fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
+    pub(crate) fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
         if let Some(store) = self.response_affinity_store.as_ref() {
             let _ = store.upsert(&ResponseAffinityBinding {
                 key: key.to_string(),
