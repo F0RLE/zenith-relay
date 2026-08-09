@@ -1022,7 +1022,7 @@ const relayEn = {
   modelGroups: {
     chatgpt: "ChatGPT",
     openai: "OpenAI",
-    anthropic: "Claude",
+    anthropic: "Anthropic",
     other: "Other",
   },
   models: {

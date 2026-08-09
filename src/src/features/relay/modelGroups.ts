@@ -1,37 +1,7 @@
-export type ModelProviderGroup = "chatgpt" | "openai" | "anthropic" | "google" | "zhipu" | "xai" | "other";
+export type ModelProviderGroup = "chatgpt" | "openai" | "anthropic" | "other";
 
-const groupOrder: ModelProviderGroup[] = ["chatgpt", "openai", "anthropic", "google", "zhipu", "xai", "other"];
-
-const knownModelOrder = [
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-image-2",
-  "claude-fable-5",
-  "claude-opus-5",
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-opus-4-6",
-  "claude-sonnet-5",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-  "gemini-3.1-pro-preview",
-  "gemini-3.6-flash-high",
-  "gemini-3.6-flash-medium",
-  "gemini-3.6-flash-low",
-  "glm-5.2",
-  "glm-5.1",
-  "glm-5-turbo",
-  "glm-4.7",
-] as const;
-
+const groupOrder: ModelProviderGroup[] = ["chatgpt", "openai", "anthropic", "other"];
 const groupRank = new Map(groupOrder.map((group, index) => [group, index]));
-const knownRank = new Map<string, number>(
-  knownModelOrder.map((model, index): [string, number] => [model, index]),
-);
 
 function modelLeaf(model: string) {
   const id = model.trim().toLowerCase();
@@ -46,9 +16,6 @@ export function modelProviderGroup(model: string, nativeChatGpt = false): ModelP
   const id = modelLeaf(model);
   if (nativeChatGpt && isOpenAiModel(id)) return "chatgpt";
   if (id.startsWith("claude-")) return "anthropic";
-  if (id.startsWith("gemini-")) return "google";
-  if (id.startsWith("glm-")) return "zhipu";
-  if (id.startsWith("grok-")) return "xai";
   if (isOpenAiModel(id)) return "openai";
   return "other";
 }
@@ -61,9 +28,7 @@ function compareModelIdsForLauncher(
 ) {
   const leftGroup = groupRank.get(modelProviderGroup(left, leftNativeChatGpt)) ?? Number.MAX_SAFE_INTEGER;
   const rightGroup = groupRank.get(modelProviderGroup(right, rightNativeChatGpt)) ?? Number.MAX_SAFE_INTEGER;
-  const leftKnown = knownRank.get(modelLeaf(left)) ?? Number.MAX_SAFE_INTEGER;
-  const rightKnown = knownRank.get(modelLeaf(right)) ?? Number.MAX_SAFE_INTEGER;
-  return leftGroup - rightGroup || leftKnown - rightKnown;
+  return leftGroup - rightGroup;
 }
 
 /// Launcher-only presentation ordering. Sources stay provider-agnostic and

@@ -3,11 +3,14 @@ import { groupModels, modelProviderGroup, supportsCacheWritePricing } from "../s
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../src/features/relay/modelPricing";
 
 describe("model pricing", () => {
-  test("groups provider families without hardcoding model versions", () => {
+  test("recognizes only OpenAI and Claude aliases", () => {
     expect(modelProviderGroup("gpt-5.7-future")).toBe("openai");
     expect(modelProviderGroup("claude-opus-4-8")).toBe("anthropic");
     expect(supportsCacheWritePricing("claude-sonnet-next")).toBe(true);
-    expect(groupModels(["glm-5", "gpt-5", "gemini-3", "new-provider"], (model) => model).map((group) => group.id)).toEqual(["openai", "google", "zhipu", "other"]);
+    expect(groupModels(["glm-5", "gpt-5", "gemini-3", "new-provider"], (model) => model).map((group) => [group.id, group.items])).toEqual([
+      ["openai", ["gpt-5"]],
+      ["other", ["glm-5", "gemini-3", "new-provider"]],
+    ]);
   });
 
   test("keeps native ChatGPT account models in the first dedicated group", () => {

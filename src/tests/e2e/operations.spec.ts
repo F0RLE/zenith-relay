@@ -316,11 +316,11 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await dialog.locator(".source-price-section > summary").click();
-  await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "ClaudeModels: 1", "OtherModels: 4"]);
+  await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "AnthropicModels: 1", "OtherModels: 4"]);
 
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await expect(dialog.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
-  await dialog.locator(".source-price-group > summary").filter({ hasText: "Claude" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
   await dialog.getByRole("textbox", { name: "Input token price for claude-opus-4-8", exact: true }).fill("1.4");
   await dialog.getByRole("textbox", { name: "Output token price for claude-opus-4-8", exact: true }).fill("7");
   await dialog.getByRole("textbox", { name: "Cached input token price for claude-opus-4-8", exact: true }).fill("1.6");
