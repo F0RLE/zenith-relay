@@ -1,17 +1,23 @@
 use super::errors::{
-    api_error_type, canonical_upstream_status, preserved_upstream_error_value,
+    api_error_type, apply_failure_cooldown_with_hint, apply_failure_state,
+    canonical_upstream_status, failure_category_requires_cooldown, preserved_upstream_error_value,
     rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, AttemptFailure, PreservedUpstreamError, RateLimitBodyHint,
+    upstream_status_from_value, AttemptFailure, CooldownContext, PreservedUpstreamError,
+    RateLimitBodyHint,
 };
+use super::now_ms;
 use super::response::{
-    apply_usage, emit_callback, emit_usage, find_usage, response_id, response_service_tier,
-    CompletionCallback,
+    apply_usage, emit_callback, emit_usage, find_usage, proxy_sse_response, response_id,
+    response_service_tier, usage_event, CompletionCallback,
 };
 use crate::protocol::sse_event_end;
-use crate::runtime::DefaultServiceTier;
-use crate::{GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, UsageEvent, WireApi};
-use axum::body::Bytes;
-use axum::http::StatusCode;
+use crate::runtime::{CandidateLease, DefaultServiceTier, ExecutorRoute};
+use crate::{
+    GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, NativeResponsesReplayState,
+    PreparedAdapterRequest, ToolUseDiagnostics, UsageEvent, WireApi,
+};
+use axum::body::{Body, Bytes};
+use axum::http::{Response, StatusCode};
 use futures_util::{stream, Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -92,6 +98,187 @@ pub(super) async fn bootstrap_stream(
         }
         Ok(Some(Err(error))) => Err(AttemptFailure::transport(&error).into()),
         Ok(None) => Err(AttemptFailure::stream("stream_incomplete").into()),
+    }
+}
+
+/// Owns the work that starts after an upstream stream has emitted safe first
+/// bytes. From this point the response is committed and no fallback is legal.
+pub(in crate::gateway) struct StreamExecution {
+    pub(in crate::gateway) runtime: Arc<GatewayRuntime>,
+    pub(in crate::gateway) route: ExecutorRoute,
+    pub(in crate::gateway) lease: CandidateLease,
+    pub(in crate::gateway) adapter_request: PreparedAdapterRequest,
+    pub(in crate::gateway) request: Value,
+    pub(in crate::gateway) request_id: String,
+    pub(in crate::gateway) local_key_id: String,
+    pub(in crate::gateway) requested_model: String,
+    pub(in crate::gateway) source_model: String,
+    pub(in crate::gateway) prompt_affinity_key: Option<String>,
+    pub(in crate::gateway) wire_api: WireApi,
+    pub(in crate::gateway) tool_use: ToolUseDiagnostics,
+    pub(in crate::gateway) attempt: u16,
+    pub(in crate::gateway) started: Instant,
+}
+
+impl StreamExecution {
+    pub(in crate::gateway) fn into_response(
+        self,
+        status: StatusCode,
+        headers: reqwest::header::HeaderMap,
+        first: Bytes,
+        remaining: UpstreamStream,
+    ) -> Response<Body> {
+        let Self {
+            runtime,
+            route,
+            lease,
+            adapter_request,
+            request,
+            request_id,
+            local_key_id,
+            requested_model,
+            source_model,
+            prompt_affinity_key,
+            wire_api,
+            tool_use,
+            attempt,
+            started,
+        } = self;
+        let adapter_is_passthrough = adapter_request.is_passthrough();
+        let completion_runtime = runtime.clone();
+        let completion_source = route.candidate_id.clone();
+        let completion_model = source_model.clone();
+        let completion_prompt_affinity = prompt_affinity_key.clone();
+        let completion_half_open_probe = route.half_open_probe;
+        let completion_headers = headers.clone();
+        let completion_uses_response_affinity = wire_api == WireApi::Responses;
+        let completion_bridge_state =
+            (!adapter_is_passthrough).then(|| Arc::new(Mutex::new(None::<MessagesBridgeResponse>)));
+        let completion_bridge_state_for_callback = completion_bridge_state.clone();
+        let completion_native_response = (wire_api == WireApi::Responses && adapter_is_passthrough)
+            .then(|| Arc::new(Mutex::new(None::<Value>)));
+        let completion_native_response_for_callback = completion_native_response.clone();
+        let completion_native_template = request;
+        let completion_local_key = local_key_id.clone();
+        let completion_scope = route.scope.clone();
+        let completion_allowed_protocols = route.allowed_protocols.clone();
+        let completion: CompletionCallback = Arc::new(move |event, response_id, hint| {
+            lease.release();
+            let response_delivered =
+                event.success || event.error_category.as_deref() == Some("response_incomplete");
+            if response_delivered {
+                let recovered = completion_runtime.record_success_with_metrics(
+                    &completion_source,
+                    &completion_model,
+                    now_ms(),
+                    event.output_tokens,
+                    event.generation_ms.unwrap_or(event.latency_ms),
+                );
+                event.consecutive_failures = recovered.then_some(0);
+                completion_runtime.bind_prompt_affinity(
+                    completion_prompt_affinity.as_deref(),
+                    &completion_source,
+                    now_ms(),
+                );
+                if completion_uses_response_affinity {
+                    completion_runtime.bind_response_affinity(
+                        response_id,
+                        &completion_source,
+                        now_ms(),
+                    );
+                }
+                if let Some(shared) = completion_bridge_state_for_callback.as_ref() {
+                    if let Some(response) = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        completion_runtime.save_messages_bridge_response(
+                            &completion_local_key,
+                            &completion_source,
+                            &response,
+                            now_ms(),
+                        );
+                    }
+                }
+                if let Some(shared) = completion_native_response_for_callback.as_ref() {
+                    if let Some(response) = shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        if let Some((response_id, replay)) =
+                            NativeResponsesReplayState::from_response(
+                                &completion_native_template,
+                                &completion_model,
+                                &response,
+                            )
+                        {
+                            completion_runtime.save_native_responses_replay(
+                                &completion_local_key,
+                                &completion_source,
+                                &response_id,
+                                replay,
+                                now_ms(),
+                            );
+                        }
+                    }
+                }
+            } else if let Some(category) = event
+                .error_category
+                .as_deref()
+                .filter(|category| failure_category_requires_cooldown(category))
+            {
+                let status =
+                    StatusCode::from_u16(event.http_status).unwrap_or(StatusCode::BAD_GATEWAY);
+                let cooldown_context = CooldownContext {
+                    scope: &completion_scope,
+                    allowed_protocols: &completion_allowed_protocols,
+                };
+                let state = apply_failure_cooldown_with_hint(
+                    &completion_runtime,
+                    &completion_source,
+                    &completion_model,
+                    status,
+                    category,
+                    &completion_headers,
+                    hint,
+                    &cooldown_context,
+                    completion_half_open_probe,
+                );
+                apply_failure_state(event, state);
+            }
+        });
+        let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
+            if let Some(bridge) = adapter_request.into_stream_bridge() {
+                let completed =
+                    completion_bridge_state.expect("bridge state is configured for bridge routes");
+                Box::pin(bridge_messages_stream(first, remaining, bridge, completed))
+            } else {
+                Box::pin(
+                    stream::once(async move { Ok::<_, reqwest::Error>(first) }).chain(remaining),
+                )
+            };
+        let usage_stream = UsageStream::with_runtime(
+            combined,
+            runtime,
+            usage_event(
+                &request_id,
+                attempt,
+                &local_key_id,
+                &route,
+                &requested_model,
+                true,
+                status.as_u16(),
+                None,
+                0,
+                tool_use,
+            ),
+            started,
+            completion,
+            completion_native_response,
+        );
+        proxy_sse_response(status, &headers, Body::from_stream(usage_stream))
     }
 }
 
