@@ -2848,6 +2848,71 @@ test("account identities are controlled only from the global action", async ({ p
   expect(call?.args).toEqual({ accountId: "account_synthetic" });
 });
 
+test("stale identity reveal cannot replace or finish a newer mode request", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true });
+  await page.goto("/");
+  await page.evaluate(() => {
+    type RevealMode = "local" | "remote";
+    type PendingReveal = { accountId: string; resolve: (value: unknown) => void };
+    const pending: Record<RevealMode, PendingReveal[]> = { local: [], remote: [] };
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__: {
+        invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown>;
+      };
+    }).__TAURI_INTERNALS__;
+    const originalInvoke = internals.invoke.bind(internals);
+    internals.invoke = (command, args, options) => {
+      const mode = command === "reveal_local_account_identity" ? "local"
+        : command === "reveal_remote_account_identity" ? "remote"
+        : null;
+      if (!mode) return originalInvoke(command, args, options);
+      const accountId = String((args as { accountId?: unknown } | undefined)?.accountId ?? "");
+      return new Promise((resolve) => pending[mode].push({ accountId, resolve }));
+    };
+    Object.defineProperty(window, "__RESOLVE_IDENTITY_REVEAL__", {
+      configurable: true,
+      value: (mode: RevealMode, identity: string) => {
+        const request = pending[mode].shift();
+        if (!request) throw new Error(`no pending ${mode} identity reveal`);
+        request.resolve({ accountId: request.accountId, identity });
+      },
+    });
+    Object.defineProperty(window, "__PENDING_IDENTITY_REVEALS__", {
+      configurable: true,
+      value: (mode: RevealMode) => pending[mode].length,
+    });
+  });
+
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("button", { name: "Show all account identities" }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __PENDING_IDENTITY_REVEALS__: (mode: "local" | "remote") => number }).__PENDING_IDENTITY_REVEALS__("local"))).toBe(1);
+
+  await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
+  await page.getByRole("menuitemradio", { name: "On your server", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("remote");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __PENDING_IDENTITY_REVEALS__: (mode: "local" | "remote") => number }).__PENDING_IDENTITY_REVEALS__("remote"))).toBe(1);
+
+  await page.evaluate(() => (window as unknown as { __RESOLVE_IDENTITY_REVEAL__: (mode: "local" | "remote", identity: string) => void }).__RESOLVE_IDENTITY_REVEAL__("local", "stale@example.test"));
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  const identityAction = page.getByRole("button", { name: "Hide all account identities", exact: true });
+  await expect(identityAction).toBeVisible();
+  await expect(identityAction).toBeDisabled();
+  await expect(page.getByText("stale@example.test", { exact: true })).toHaveCount(0);
+
+  await page.evaluate(() => (window as unknown as { __RESOLVE_IDENTITY_REVEAL__: (mode: "local" | "remote", identity: string) => void }).__RESOLVE_IDENTITY_REVEAL__("remote", "remote@example.test"));
+  await expect(identityAction).toBeEnabled();
+  await expect(page.locator(".account-identity > strong").first()).toHaveText("remote@example.test");
+
+  await page.locator('.mode-picker > button[aria-haspopup="menu"]').click();
+  await page.getByRole("menuitemradio", { name: "Computer", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.mode"))).toBe("local");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __PENDING_IDENTITY_REVEALS__: (mode: "local" | "remote") => number }).__PENDING_IDENTITY_REVEALS__("local"))).toBe(1);
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(page.getByText("stale@example.test", { exact: true })).toHaveCount(0);
+  await page.evaluate(() => (window as unknown as { __RESOLVE_IDENTITY_REVEAL__: (mode: "local" | "remote", identity: string) => void }).__RESOLVE_IDENTITY_REVEAL__("local", "fresh@example.test"));
+  await expect(page.locator(".account-identity > strong").first()).toHaveText("fresh@example.test");
+});
+
 test("account identity visibility applies across the workspace and survives reloads", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 3 });
   await page.goto("/");

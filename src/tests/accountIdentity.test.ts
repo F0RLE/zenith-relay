@@ -6,6 +6,13 @@ import {
   replaceRevealedAccountIdentities,
   revealableAccountIds,
 } from "../src/features/relay/state/accountIdentity";
+import { runAccountIdentityReveal } from "../src/features/relay/state/useAccountIdentityReveal";
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
 
 function account(overrides: Partial<AccountSummary>): AccountSummary {
   return {
@@ -78,4 +85,25 @@ describe("account identity display", () => {
     ], true)).toEqual(["available"]);
     expect(revealableAccountIds([account({ id: "available" })], false)).toEqual([]);
   });
+});
+
+test("stale account identity reveals do not mutate state or clear busy status", async () => {
+  const request = deferred<{ accountId: string; identity: string }>();
+  const revealed: Array<{ accountId: string; identity: string }> = [];
+  let completed = 0;
+  let active = true;
+  const run = runAccountIdentityReveal({
+    accountIds: ["one"],
+    isActive: () => active,
+    reveal: () => request.promise,
+    onRevealed: (identities) => revealed.push(...identities),
+    onComplete: () => { completed += 1; },
+  });
+
+  active = false;
+  request.resolve({ accountId: "one", identity: "stale@example.test" });
+  await run;
+
+  expect(revealed).toEqual([]);
+  expect(completed).toBe(0);
 });

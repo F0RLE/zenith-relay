@@ -1,6 +1,6 @@
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { relayCommands } from "../api/commands";
-import type { AccountSummary, RelayMode } from "../api/types";
+import type { AccountSummary, RelayMode, RevealedAccountIdentity } from "../api/types";
 import { replaceRevealedAccountIdentities, revealableAccountIds } from "./accountIdentity";
 
 type UseAccountIdentityRevealInput = {
@@ -10,6 +10,27 @@ type UseAccountIdentityRevealInput = {
   mode: RelayMode;
   setRevealedIdentities: Dispatch<SetStateAction<Record<string, string>>>;
 };
+
+type AccountIdentityRevealRun = {
+  accountIds: readonly string[];
+  isActive: () => boolean;
+  reveal: (accountId: string) => Promise<RevealedAccountIdentity>;
+  onRevealed: (identities: RevealedAccountIdentity[]) => void;
+  onComplete: () => void;
+};
+
+export async function runAccountIdentityReveal({
+  accountIds,
+  isActive,
+  reveal,
+  onRevealed,
+  onComplete,
+}: AccountIdentityRevealRun) {
+  const results = await Promise.allSettled(accountIds.map(reveal));
+  if (!isActive()) return;
+  onRevealed(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+  if (isActive()) onComplete();
+}
 
 export function useAccountIdentityReveal({
   accounts,
@@ -34,17 +55,17 @@ export function useAccountIdentityReveal({
     let active = true;
     const revealableIds = accountSignature.split("\0");
     setBusy(true);
-    void Promise.allSettled(revealableIds.map((accountId) => mode === "local"
-      ? relayCommands.revealLocalAccountIdentity(accountId)
-      : relayCommands.revealRemoteAccountIdentity(accountId)))
-      .then((results) => {
-        if (!active) return;
-        const identities = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+    void runAccountIdentityReveal({
+      accountIds: revealableIds,
+      isActive: () => active,
+      reveal: (accountId) => mode === "local"
+        ? relayCommands.revealLocalAccountIdentity(accountId)
+        : relayCommands.revealRemoteAccountIdentity(accountId),
+      onRevealed: (identities) => {
         setRevealedIdentities((current) => replaceRevealedAccountIdentities(current, mode, identities));
-      })
-      .finally(() => {
-        if (active) setBusy(false);
-      });
+      },
+      onComplete: () => setBusy(false),
+    });
     return () => {
       active = false;
     };
