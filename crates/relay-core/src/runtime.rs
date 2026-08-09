@@ -11,13 +11,13 @@ use crate::scheduler::CooldownRequest;
 use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
-    decode_codex_model_alias, CandidateHealth, CandidateQuota, CandidateScope, Error,
-    LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore,
-    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
-    SourceAdapter, SourceConnector, SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback,
-    UsageEvent, WireApi,
+    decode_codex_model_alias, CandidateScope, Error, LocalGatewayKey, MessagesReasoningMode,
+    ModelRegistry, ModelRules, NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result,
+    RoutingDiagnostics, RoutingStrategy, RuntimeCandidate, SourceAdapter, SourceConnector,
+    SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+#[cfg(test)]
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -44,7 +44,9 @@ use build::{
 };
 
 #[cfg(test)]
-use crate::{normalize_source_protocol_bindings, unix_time_ms as current_time_ms, CandidateKind};
+use crate::{
+    normalize_source_protocol_bindings, unix_time_ms as current_time_ms, CandidateKind, UsageEvent,
+};
 pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
@@ -52,7 +54,6 @@ use images::{cheapest_image_main_model, select_image_main_model};
 pub(crate) const MAX_NON_STREAM_BODY_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) const IMAGE_API_MODEL: &str = "gpt-image-2";
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
-const PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS: u64 = 5_000;
 const CODEX_SOURCE_MODEL_MANIFEST_TTL_MS: u64 = 5 * 60 * 1_000;
 const SOURCE_MODEL_METADATA_PREFETCH_INTERVAL_MS: u64 = 15 * 1_000;
 
@@ -1115,190 +1116,6 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn fence_execution(&self, candidate_id: &str) -> Option<ExecutionFence> {
-        self.lock_scheduler()
-            .set_execution_fence(candidate_id, true)
-            .then(|| ExecutionFence {
-                scheduler: self.scheduler.clone(),
-                candidate_id: candidate_id.to_string(),
-                released: AtomicBool::new(false),
-            })
-    }
-
-    pub(crate) fn block_candidate_capability(&self, candidate_id: &str, model: &str) -> bool {
-        self.lock_scheduler().block_capability(candidate_id, model)
-    }
-
-    pub(crate) fn clear_candidate_capability_blocks(&self, candidate_id: &str) -> bool {
-        self.lock_scheduler().clear_capability_blocks(candidate_id)
-    }
-
-    pub(crate) fn record_provider_rate_limit(
-        &self,
-        candidate_id: &str,
-        model: &str,
-        now_ms: u64,
-    ) -> bool {
-        self.lock_scheduler()
-            .record_provider_rate_limit(candidate_id, model, now_ms)
-    }
-
-    pub(crate) fn observe_codex_quota_headers(
-        &self,
-        candidate_id: &str,
-        status: StatusCode,
-        headers: &HeaderMap,
-        observed_at_ms: u64,
-    ) -> bool {
-        if !(status.is_success()
-            || status == StatusCode::SWITCHING_PROTOCOLS
-            || status == StatusCode::TOO_MANY_REQUESTS)
-            || !self.chatgpt_accounts.contains_key(candidate_id)
-        {
-            return false;
-        }
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = quotas.get_mut(candidate_id) else {
-            return false;
-        };
-        let Some(merged) = crate::providers::chatgpt::merge_codex_quota_headers(
-            &state.snapshot,
-            headers,
-            observed_at_ms,
-        ) else {
-            return false;
-        };
-        if merged == state.snapshot {
-            return false;
-        }
-        let previous_quota = CandidateQuota::from_snapshot(
-            &state.snapshot,
-            observed_at_ms,
-            self.quota_stale_after_ms,
-        );
-        let quota =
-            CandidateQuota::from_snapshot(&merged, observed_at_ms, self.quota_stale_after_ms);
-        state.force_persist |= previous_quota != quota
-            && matches!(
-                (previous_quota, quota),
-                (CandidateQuota::Exhausted, _) | (_, CandidateQuota::Exhausted)
-            );
-        state.snapshot = merged;
-        state.dirty = true;
-        self.lock_scheduler().update_candidate_quota_at(
-            candidate_id,
-            quota,
-            state.snapshot.updated_at_ms,
-            state.snapshot.limiting_reset_at_ms(),
-        )
-    }
-
-    pub(crate) fn take_passive_quota_snapshot(
-        &self,
-        candidate_id: &str,
-        now_ms: u64,
-    ) -> Option<QuotaSnapshot> {
-        let mut quotas = self
-            .passive_quotas
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = quotas.get_mut(candidate_id)?;
-        if !state.dirty
-            || (!state.force_persist
-                && now_ms.saturating_sub(state.last_persist_hint_ms)
-                    < PASSIVE_QUOTA_PERSIST_DEBOUNCE_MS)
-        {
-            return None;
-        }
-        state.dirty = false;
-        state.force_persist = false;
-        state.last_persist_hint_ms = now_ms;
-        Some(state.snapshot.clone())
-    }
-
-    pub(crate) fn apply_usage_event(&self, event: &UsageEvent, observed_at_ms: u64) {
-        let Some(candidate_id) = event.candidate_id.as_deref() else {
-            return;
-        };
-        if let Some(snapshot) = event.quota_snapshot.as_ref() {
-            self.lock_scheduler().update_candidate_quota_at(
-                candidate_id,
-                CandidateQuota::from_snapshot(snapshot, observed_at_ms, self.quota_stale_after_ms),
-                snapshot.updated_at_ms,
-                snapshot.limiting_reset_at_ms(),
-            );
-        }
-        if event.success {
-            self.set_candidate_health(candidate_id, CandidateHealth::Healthy);
-            return;
-        }
-
-        let category = event.error_category.as_deref().unwrap_or_default();
-        let model = if category == "image_generation_not_enabled" {
-            event.requested_model.as_deref()
-        } else {
-            event
-                .resolved_model
-                .as_deref()
-                .or(event.requested_model.as_deref())
-        }
-        .unwrap_or("*");
-        // A direct API source may advertise a model while its upstream is
-        // being replaced or temporarily unable to serve it. The request path
-        // already applies a model-scoped cooldown for that failure; turning it
-        // into a permanent capability block makes every later retry look like
-        // there is no route at all. Native account capabilities are stable
-        // enough to retain the explicit block until their catalog is refreshed.
-        if event.account_id.is_some() && is_model_capability_failure(category) {
-            self.block_candidate_capability(candidate_id, model);
-            return;
-        }
-        if event.account_id.is_none() {
-            if event.http_status == StatusCode::TOO_MANY_REQUESTS.as_u16() {
-                self.record_provider_rate_limit(candidate_id, model, observed_at_ms);
-            }
-            return;
-        }
-
-        match category {
-            "upstream_quota_exhausted" => {
-                let reset_at_ms = {
-                    let mut quotas = self
-                        .passive_quotas
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    quotas.get_mut(candidate_id).and_then(|state| {
-                        state.snapshot.limit_reached = true;
-                        state.snapshot.updated_at_ms = Some(observed_at_ms);
-                        state.snapshot.error = None;
-                        state.dirty = true;
-                        state.force_persist = true;
-                        state.snapshot.limiting_reset_at_ms()
-                    })
-                };
-                self.lock_scheduler().update_candidate_quota_at(
-                    candidate_id,
-                    CandidateQuota::Exhausted,
-                    Some(observed_at_ms),
-                    reset_at_ms,
-                );
-            }
-            "upstream_unauthorized" | "account_auth" => {
-                self.set_candidate_health(candidate_id, CandidateHealth::ReauthRequired);
-            }
-            "upstream_account_disabled" => {
-                self.set_candidate_health(candidate_id, CandidateHealth::Blocked);
-            }
-            "upstream_account_verification_required" => {
-                self.set_candidate_health(candidate_id, CandidateHealth::Checkpoint);
-            }
-            _ => {}
-        }
-    }
-
     pub(crate) fn request_client(
         &self,
         candidate_id: &str,
@@ -1432,16 +1249,6 @@ fn client_wire_apis_to_native(client_wire_apis: &[ClientWireApi]) -> Vec<WireApi
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
-}
-
-fn is_model_capability_failure(category: &str) -> bool {
-    matches!(
-        category,
-        "upstream_model_not_found"
-            | "upstream_model_unsupported"
-            | "upstream_usage_not_included"
-            | "image_generation_not_enabled"
-    )
 }
 
 fn runtime_now_ms() -> u64 {
