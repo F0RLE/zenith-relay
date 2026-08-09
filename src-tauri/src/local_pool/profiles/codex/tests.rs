@@ -1368,6 +1368,21 @@ fn external_config_change_during_attach_is_not_overwritten() {
 }
 
 #[test]
+fn profile_file_replace_refuses_an_outdated_snapshot() {
+    let (root, home, _backups) = profile_dirs("outdated-file-snapshot");
+    let path = home.join(CONFIG_FILE);
+    let expected = Some(b"original".to_vec());
+    let current = b"external".to_vec();
+    fs::write(&path, &current).unwrap();
+
+    let error = replace_if_unchanged(&path, &expected, "managed").unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::ProfileRestoreBlocked);
+    assert_eq!(fs::read(&path).unwrap(), current);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn failed_reattach_restores_previous_backup_metadata() {
     let (root, home, backups) = profile_dirs("backup-rollback");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
