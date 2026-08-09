@@ -14,9 +14,12 @@ use zenith_relay_core::protocol::SourceSummary;
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, fetch_source_provider_stats,
     normalize_model_price_overrides, normalize_source_protocol_bindings, source_points_to_gateway,
-    ApiModelPriceOverride, ProviderSource, RuntimeCandidatePolicy, RuntimeSourcePolicyUpdate,
-    SourceDiscovery, SourceProtocolBinding, WireApi,
+    ApiModelPriceOverride, ProviderSource, SourceDiscovery, SourceProtocolBinding, WireApi,
 };
+
+mod policy;
+
+use policy::source_runtime_policy_compatible;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -274,27 +277,7 @@ fn apply_source_policies_if_running(
     previous: &[SourceRecord],
     next: &[SourceRecord],
 ) -> Result<bool, String> {
-    let updates = next
-        .iter()
-        .filter(|source| {
-            previous
-                .iter()
-                .find(|previous| previous.id == source.id)
-                .is_none_or(|previous| source_runtime_policy_changed(previous, source))
-        })
-        .map(|source| RuntimeSourcePolicyUpdate {
-            source_id: source.id.clone(),
-            policy: RuntimeCandidatePolicy {
-                enabled: source.enabled,
-                draining: source.draining,
-                priority: source.priority,
-                weight: source.weight,
-                allowed_models: source.allowed_models.clone(),
-                excluded_models: source.excluded_models.clone(),
-            },
-            recovery_delay_seconds: source.recovery_delay_seconds,
-        })
-        .collect::<Vec<_>>();
+    let updates = policy::updates(previous, next);
     let Some(runtime) = state.runtime()? else {
         return Ok(!state.store.gateway_enabled()?);
     };
@@ -302,31 +285,6 @@ fn apply_source_policies_if_running(
         return Ok(false);
     }
     state.refresh_internal_gateway_key_scopes(&runtime)
-}
-
-fn source_runtime_policy_compatible(previous: &[SourceRecord], next: &[SourceRecord]) -> bool {
-    previous.len() == next.len()
-        && previous.iter().all(|source| {
-            next.iter()
-                .find(|candidate| candidate.id == source.id)
-                .is_some_and(|candidate| {
-                    source.base_url == candidate.base_url
-                        && source.secret_ref == candidate.secret_ref
-                        && source.wire_api == candidate.wire_api
-                        && source.protocol_bindings == candidate.protocol_bindings
-                        && source.models == candidate.models
-                })
-        })
-}
-
-fn source_runtime_policy_changed(previous: &SourceRecord, next: &SourceRecord) -> bool {
-    previous.enabled != next.enabled
-        || previous.draining != next.draining
-        || previous.priority != next.priority
-        || previous.weight != next.weight
-        || previous.allowed_models != next.allowed_models
-        || previous.excluded_models != next.excluded_models
-        || previous.recovery_delay_seconds != next.recovery_delay_seconds
 }
 
 fn apply_source_priorities(
