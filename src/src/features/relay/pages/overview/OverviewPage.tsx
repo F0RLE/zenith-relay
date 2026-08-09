@@ -5,6 +5,7 @@ import { relayCommands } from "../../api/commands";
 import type { LocalUsage, RemoteUsage, SourceStats, SourceSummary, UsageBucket, UsageTotals } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader, StatusIcon } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
+import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 
 const AnalyticsPanel = lazy(() => import("./OverviewAnalytics"));
 
@@ -103,7 +104,7 @@ export function OverviewPage() {
 
   if (mode === "zenith") return <DirectApiOverview sources={runtime?.sources ?? []} onOpen={() => setPage("connections")} />;
 
-  const totals = analytics?.totals ?? emptyTotals();
+  const totals = analytics?.totals ?? emptyUsageTotals();
   const requests = totals.requests;
   const models = runtime?.gateway.visibleModelIds.length ?? 0;
   const healthy = [...(runtime?.sources ?? []), ...(runtime?.accounts ?? [])].filter((item) => item.enabled).length;
@@ -226,7 +227,7 @@ function totalsFromSamples(samples: UsageSample[]) {
     }
     if (visibleOutput > 0 && sample.latencyMs > 0) { totals.speedOutputTokens += visibleOutput; totals.speedDurationMs += sample.latencyMs; }
     return totals;
-  }, emptyTotals());
+  }, emptyUsageTotals());
 }
 
 function localSamples(events: LocalUsage[]): UsageSample[] {
@@ -239,14 +240,6 @@ function remoteSamples(events: RemoteUsage[]): UsageSample[] {
 
 function activityFromUsage(item: LocalUsage | RemoteUsage): ActivityItem {
   return { id: item.id, success: item.success, model: item.resolvedModel ?? item.requestedModel, latencyMs: item.latencyMs };
-}
-
-function emptyTotals(): UsageTotals {
-  return { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } };
-}
-
-function formatCompactNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { notation: Math.abs(value) >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
 }
 
 function sourceHost(value: string) {

@@ -7,7 +7,8 @@ import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader,
 import { sortModelIdsForLauncher } from "../../modelGroups";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { formatTokenSpeed } from "../../usageSpeed";
-import { AccountUsageEconomics, AggregateView, CompactNumber, ErrorsView, formatApiEquivalent, formatCompactNumber, formatFullNumber, RequestDetails, RequestsView, totalsFromRows, type UsageRow, UsageMetric } from "./UsageReportViews";
+import { AccountUsageEconomics, AggregateView, CompactNumber, ErrorsView, formatApiEquivalent, RequestDetails, RequestsView, totalsFromRows, type UsageRow, UsageMetric } from "./UsageReportViews";
+import { formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
 type View = "requests" | "models" | "connections" | "errors";
 type Range = "all" | "daily" | "weekly" | "monthly";

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import type { UsageBucket, UsageTotals } from "../../api/types";
 import { Tabs } from "../../components/Ui";
 import { formatTokenSpeed } from "../../usageSpeed";
+import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 
 type Range = "today" | "week" | "month";
 type WindowBucket = { startMs: number; endMs: number; label: string; fullLabel: string; showLabel: boolean };
@@ -13,12 +14,12 @@ export default function AnalyticsPanel({ range, setRange, windows, analytics, lo
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const hasAnalytics = analytics !== null;
-  const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(() => emptyTotals());
+  const buckets = analytics ? fillBuckets(windows, analytics.buckets) : windows.map(emptyUsageTotals);
   const tokenValues = buckets.map((totals) => totals.totalTokens || null);
   const apiValues = buckets.map((totals) => totals.apiEquivalent.pricedTokens ? totals.apiEquivalent.microUsd / 1_000_000 : null);
   const responseValues = buckets.map((totals) => totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null);
   const speedValues = buckets.map((totals) => totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null);
-  const totals = analytics?.totals ?? emptyTotals();
+  const totals = analytics?.totals ?? emptyUsageTotals();
   const averageResponse = totals.ttftSamples ? totals.ttftMs / totals.ttftSamples : null;
   const averageSpeed = totals.generationMs && totals.generationOutputTokens ? totals.generationOutputTokens * 1_000 / totals.generationMs : null;
   const apiTotal = totals.apiEquivalent;
@@ -66,7 +67,7 @@ function OverviewChart({ icon, title, hint, summary, values, windows, variant, t
 
 function fillBuckets(windows: WindowBucket[], buckets: UsageBucket[]) {
   const byStart = new Map(buckets.map((bucket) => [bucket.startMs, bucket.totals]));
-  return windows.map((window) => byStart.get(window.startMs) ?? emptyTotals());
+  return windows.map((window) => byStart.get(window.startMs) ?? emptyUsageTotals());
 }
 
 function lineSegments(values: Array<number | null>, max: number) {
@@ -84,18 +85,6 @@ function lineSegments(values: Array<number | null>, max: number) {
   });
   if (current) segments.push(current);
   return segments;
-}
-
-function emptyTotals(): UsageTotals {
-  return { requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0, generationMs: 0, generationSamples: 0, generationOutputTokens: 0, inputTokens: 0, cachedInputTokens: 0, cachedInputSamples: 0, cacheWriteInputTokens: 0, cacheWriteInputSamples: 0, reasoningTokens: 0, outputTokens: 0, totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0, apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 } };
-}
-
-function formatCompactNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { notation: Math.abs(value) >= 1_000 ? "compact" : "standard", maximumFractionDigits: 1 }).format(value);
-}
-
-function formatFullNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
 }
 
 function formatDuration(value: number | null, locale: string) {

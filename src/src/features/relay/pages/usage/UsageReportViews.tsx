@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { AccountSummary, DefaultServiceTier, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { Button, CopyButton, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
+import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
   CONNECTION_COLUMN_IDS,
   ERROR_COLUMN_IDS,
@@ -335,18 +336,7 @@ export function totalsFromRows(rows: UsageRow[]): UsageTotals {
       totals.apiEquivalent.unpricedTokens += row.tokens ?? 0;
     }
     return totals;
-  }, emptyTotals());
-}
-
-function emptyTotals(): UsageTotals {
-  return {
-    requests: 0, successfulRequests: 0, latencyMs: 0, ttftMs: 0, ttftSamples: 0,
-    generationMs: 0, generationSamples: 0, generationOutputTokens: 0,
-    inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, reasoningTokens: 0, outputTokens: 0,
-    cachedInputSamples: 0, cacheWriteInputSamples: 0,
-    totalTokens: 0, speedOutputTokens: 0, speedDurationMs: 0,
-    apiEquivalent: { microUsd: 0, pricedTokens: 0, unpricedTokens: 0 },
-  };
+  }, emptyUsageTotals());
 }
 
 function aggregateRowsFromUsage(rows: UsageRow[], field: "model" | "connection", unknown: string): AggregateRow[] {
@@ -380,17 +370,6 @@ function aggregateRowFromTotals(name: string, totals: UsageTotals): AggregateRow
 
 export function CompactNumber({ value, locale }: { value: number; locale: string }) {
   return <span title={formatFullNumber(value, locale)}>{formatCompactNumber(value, locale)}</span>;
-}
-
-export function formatCompactNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, {
-    notation: Math.abs(value) >= 1_000 ? "compact" : "standard",
-    maximumFractionDigits: 1,
-  }).format(value);
-}
-
-export function formatFullNumber(value: number, locale: string) {
-  return new Intl.NumberFormat(locale, { maximumFractionDigits: 0 }).format(value);
 }
 
 export function formatApiEquivalent(value: UsageTotals["apiEquivalent"], locale: string) {
