@@ -5,7 +5,7 @@ mod wake_automation;
 
 use crate::state::{AppState, ServerAccountRecord};
 use futures_util::{stream, StreamExt};
-use std::sync::Arc;
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::accounts::automatic_quota_monitoring_eligible;
 
@@ -24,6 +24,35 @@ impl BackgroundJobs {
         }
         Ok(())
     }
+}
+
+pub(super) fn start_periodic<F, Fut>(
+    state: Arc<AppState>,
+    mut shutdown: watch::Receiver<bool>,
+    interval_duration: Duration,
+    mut run: F,
+) -> JoinHandle<()>
+where
+    F: Send + 'static + FnMut(Arc<AppState>) -> Fut,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(interval_duration);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = async {
+                    interval.tick().await;
+                    run(Arc::clone(&state)).await;
+                } => {}
+            }
+        }
+    })
 }
 
 pub fn start(state: Arc<AppState>, shutdown: watch::Receiver<bool>) -> BackgroundJobs {
