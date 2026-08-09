@@ -60,6 +60,27 @@ fn select_image(scheduler: &mut PoolScheduler, tried: &HashSet<String>) -> Optio
 }
 
 #[test]
+fn runtime_snapshot_keeps_the_management_wire_shape() {
+    let snapshot = CandidateRuntimeSnapshot {
+        candidate_id: "source".into(),
+        kind: CandidateKind::ApiSource,
+        available: true,
+        in_flight: 0,
+        active_request_count: 0,
+        active_models: Vec::new(),
+        last_used_at_ms: None,
+        next_retry_at_ms: None,
+        half_open: false,
+        dispatches: 0,
+    };
+
+    let value = serde_json::to_value(snapshot).unwrap();
+    assert_eq!(value["activeRequestCount"], 0);
+    assert_eq!(value["activeModels"], serde_json::json!([]));
+    assert!(value.get("active_request_count").is_none());
+}
+
+#[test]
 fn image_lane_is_separate_from_text_load_and_caps_each_oauth_account() {
     let mut first = oauth_candidate("first");
     first.models.insert("gpt-image-2".to_string());
