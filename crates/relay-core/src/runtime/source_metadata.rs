@@ -33,6 +33,14 @@ struct SourceMetadataRoute {
     reasoning_mode: MessagesReasoningMode,
 }
 
+struct SourceMetadataManifest {
+    candidate_id: String,
+    configured_models: BTreeSet<String>,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
+    manifest: Option<Value>,
+}
+
 impl GatewayRuntime {
     /// Starts a best-effort metadata refresh for the management UI. The result
     /// arrives on the next state poll and never delays the current one.
@@ -103,87 +111,20 @@ impl GatewayRuntime {
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
         let routes = self.source_metadata_routes(model_rules, scope, allowed_protocols);
-        // A catalog request with fresh manifests must not queue behind an
-        // unrelated best-effort refresh. Stale callers still serialize their
-        // upstream discovery so they coalesce onto one cache refill.
-        let refresh_required = routes.iter().any(|route| {
-            self.cached_source_model_manifest(&route.candidate_id)
-                .is_none_or(|manifest| {
-                    now_ms.saturating_sub(manifest.observed_at_ms)
-                        > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
-                })
-        });
-        let refresh_guard = if refresh_required {
-            Some(self.model_metadata.refresh_lock.lock().await)
-        } else {
-            None
-        };
-        let manifest_requests = routes.into_iter().map(|route| {
-            async move {
-                let SourceMetadataRoute {
-                    candidate_id,
-                    models_url,
-                    authorization_name,
-                    authorization,
-                    protocol_headers,
-                    configured_models,
-                    adapter,
-                    reasoning_mode,
-                } = route;
-                let cached_manifest = self.cached_source_model_manifest(&candidate_id);
-                let manifest = if cached_manifest.as_ref().is_some_and(|manifest| {
-                    now_ms.saturating_sub(manifest.observed_at_ms)
-                        <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
-                }) {
-                    cached_manifest.map(|manifest| manifest.value)
-                } else {
-                    let fetched_manifest = async {
-                        let response = self
-                            .discovery_client
-                            .get(models_url)
-                            .headers(protocol_headers)
-                            .header(authorization_name, authorization)
-                            .timeout(Duration::from_secs(10))
-                            .send()
-                            .await
-                            .ok()?;
-                        if !response.status().is_success() {
-                            return None;
-                        }
-                        let body = collect_limited(response, MAX_MODEL_CATALOG_BODY_BYTES)
-                            .await
-                            .ok()?;
-                        serde_json::from_slice::<Value>(&body).ok()
-                    }
-                    .await;
-                    if let Some(value) = fetched_manifest {
-                        self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
-                        Some(value)
-                    } else {
-                        // A transient discovery failure must not make a model
-                        // appear to lose its previously confirmed capabilities.
-                        // Candidate removal and configured model filters still
-                        // take effect before this cache is considered.
-                        cached_manifest.map(|manifest| manifest.value)
-                    }
-                };
-                (
-                    candidate_id,
-                    configured_models,
-                    adapter,
-                    reasoning_mode,
-                    manifest,
-                )
-            }
-        });
-        let manifests = join_all(manifest_requests).await;
-        drop(refresh_guard);
+        let manifests = self.source_metadata_manifests(routes, now_ms).await;
 
         let mut metadata = CodexSourceModelMetadata::default();
         let mut reasoning_by_model = BTreeMap::<String, Vec<SourceReasoningCapabilities>>::new();
         let mut evaluated_reasoning = Vec::<(String, String, BTreeSet<String>)>::new();
         let mut image_support_by_model = BTreeMap::<String, Vec<bool>>::new();
-        for (candidate_id, configured_models, adapter, reasoning_mode, manifest) in manifests {
+        for SourceMetadataManifest {
+            candidate_id,
+            configured_models,
+            adapter,
+            reasoning_mode,
+            manifest,
+        } in manifests
+        {
             let reasoning = manifest
                 .as_ref()
                 .map(|manifest| source_reasoning_capabilities(manifest, &configured_models))
@@ -346,6 +287,96 @@ impl GatewayRuntime {
             });
         }
         routes
+    }
+
+    async fn source_metadata_manifests(
+        &self,
+        routes: Vec<SourceMetadataRoute>,
+        now_ms: u64,
+    ) -> Vec<SourceMetadataManifest> {
+        // A catalog request with fresh manifests must not queue behind an
+        // unrelated best-effort refresh. Stale callers still serialize their
+        // upstream discovery so they coalesce onto one cache refill.
+        let refresh_required = routes.iter().any(|route| {
+            self.cached_source_model_manifest(&route.candidate_id)
+                .is_none_or(|manifest| {
+                    now_ms.saturating_sub(manifest.observed_at_ms)
+                        > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+                })
+        });
+        let refresh_guard = if refresh_required {
+            Some(self.model_metadata.refresh_lock.lock().await)
+        } else {
+            None
+        };
+        let manifests = join_all(
+            routes
+                .into_iter()
+                .map(|route| self.source_metadata_manifest(route, now_ms)),
+        )
+        .await;
+        drop(refresh_guard);
+        manifests
+    }
+
+    async fn source_metadata_manifest(
+        &self,
+        route: SourceMetadataRoute,
+        now_ms: u64,
+    ) -> SourceMetadataManifest {
+        let SourceMetadataRoute {
+            candidate_id,
+            models_url,
+            authorization_name,
+            authorization,
+            protocol_headers,
+            configured_models,
+            adapter,
+            reasoning_mode,
+        } = route;
+        let cached_manifest = self.cached_source_model_manifest(&candidate_id);
+        let manifest = if cached_manifest.as_ref().is_some_and(|manifest| {
+            now_ms.saturating_sub(manifest.observed_at_ms) <= CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
+        }) {
+            cached_manifest.map(|manifest| manifest.value)
+        } else {
+            let fetched_manifest = async {
+                let response = self
+                    .discovery_client
+                    .get(models_url)
+                    .headers(protocol_headers)
+                    .header(authorization_name, authorization)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await
+                    .ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                let body = collect_limited(response, MAX_MODEL_CATALOG_BODY_BYTES)
+                    .await
+                    .ok()?;
+                serde_json::from_slice::<Value>(&body).ok()
+            }
+            .await;
+            if let Some(value) = fetched_manifest {
+                self.remember_source_model_manifest(&candidate_id, value.clone(), now_ms);
+                Some(value)
+            } else {
+                // A transient discovery failure must not make a model appear to
+                // lose its previously confirmed capabilities. Candidate removal
+                // and configured model filters still take effect before this
+                // cache is considered.
+                cached_manifest.map(|manifest| manifest.value)
+            }
+        };
+        SourceMetadataManifest {
+            candidate_id,
+            configured_models,
+            adapter,
+            reasoning_mode,
+            manifest,
+        }
     }
 
     pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
