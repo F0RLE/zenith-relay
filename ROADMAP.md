@@ -1,6 +1,6 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-05.
+Last reviewed: 2026-08-09.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its

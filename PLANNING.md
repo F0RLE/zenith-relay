@@ -1,6 +1,6 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-08-05.
+Last reviewed: 2026-08-09.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
