@@ -2070,6 +2070,42 @@ mod tests {
         assert!(selection.is_some());
     }
 
+    #[tokio::test]
+    async fn direct_source_rate_limit_uses_the_shared_model_storm_breaker() {
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions {
+                provider_storm_breaker: true,
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+        let authenticated = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+
+        assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 123));
+        assert!(!runtime.record_provider_rate_limit("source-1", "gpt-test", 124));
+        assert!(runtime.record_provider_rate_limit("source-1", "gpt-test", 125));
+        assert!(runtime
+            .select_and_reserve(
+                &authenticated,
+                "gpt-test",
+                &[WireApi::Responses],
+                &HashSet::new(),
+                (None, None),
+                125,
+            )
+            .await
+            .is_none());
+    }
+
     #[test]
     fn source_connector_preserves_normalized_binding_and_model_order() {
         let source = source(
