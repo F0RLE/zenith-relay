@@ -3,6 +3,7 @@ use super::{
     UsageEvent, ARCHIVE_USAGE_SQL,
 };
 use rusqlite::params;
+use std::sync::atomic::Ordering;
 
 impl TelemetryDb {
     pub fn record(&self, event: &UsageEvent) -> Result<()> {
@@ -114,5 +115,22 @@ impl TelemetryDb {
             self.invalidate_usage_cache();
         }
         Ok(())
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        self.connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
+            .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
+            .map_err(db_error)?;
+        self.invalidate_usage_cache();
+        Ok(())
+    }
+
+    pub(super) fn invalidate_usage_cache(&self) {
+        self.usage_revision.fetch_add(1, Ordering::AcqRel);
+        if let Ok(mut cached) = self.api_equivalent_cache.lock() {
+            *cached = None;
+        }
     }
 }

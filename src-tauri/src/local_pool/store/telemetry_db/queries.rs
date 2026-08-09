@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::atomic::Ordering;
 
 impl TelemetryDb {
     pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
@@ -142,5 +143,130 @@ impl TelemetryDb {
             pool_members,
             buckets,
         })
+    }
+
+    #[cfg(test)]
+    pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
+        self.api_equivalents_with_price_overrides(&BTreeMap::new(), &BTreeMap::new())
+    }
+
+    pub fn api_equivalents_with_price_overrides(
+        &self,
+        price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
+        source_price_overrides: &SourcePriceOverrides,
+    ) -> Result<UsageEquivalents> {
+        let usage_revision = self.usage_revision.load(Ordering::Acquire);
+        let pricing_revision = serde_json::to_string(&(
+            api_pricing_revision(),
+            price_overrides,
+            source_price_overrides,
+        ))
+        .map_err(|error| {
+            LocalPoolError::new(
+                ErrorCode::InvalidState,
+                format!("usage pricing revision serialization failed: {error}"),
+            )
+        })?;
+        if let Some(cached) = self
+            .api_equivalent_cache
+            .lock()
+            .map_err(lock_error)?
+            .as_ref()
+            .filter(|cached| {
+                cached.usage_revision == usage_revision
+                    && cached.pricing_revision == pricing_revision
+            })
+        {
+            return Ok(cached.value.clone());
+        }
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT candidate_kind, candidate_id, model,
+                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
+                    SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
+                    SUM(cached_input_samples), SUM(cache_write_input_samples)
+                 FROM (
+                    SELECT candidate_kind, candidate_id, model,
+                        input_tokens, cached_input_tokens, cache_write_input_tokens,
+                        output_tokens, total_tokens, input_samples,
+                        cached_input_samples, cache_write_input_samples
+                    FROM usage_candidate_rollups
+                    UNION ALL
+                    SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
+                        COALESCE(account_id, source_id),
+                        COALESCE(resolved_model, requested_model, ''),
+                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
+                        COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                        COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
+                        COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
+                    FROM request_logs GROUP BY 1, 2, 3
+                 ) GROUP BY candidate_kind, candidate_id, model",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                let input_tokens: Option<i64> = row.get(3)?;
+                let cached_input_tokens: Option<i64> = row.get(4)?;
+                let cache_write_input_tokens: Option<i64> = row.get(5)?;
+                let output_tokens: Option<i64> = row.get(6)?;
+                let total_tokens: Option<i64> = row.get(7)?;
+                let input_samples: i64 = row.get(8)?;
+                let cached_samples: i64 = row.get(9)?;
+                let cache_write_samples: i64 = row.get(10)?;
+                let model = row.get::<_, Option<String>>(2)?;
+                let kind = row.get::<_, String>(0)?;
+                let id = row.get::<_, String>(1)?;
+                Ok((
+                    kind.clone(),
+                    id.clone(),
+                    estimate_api_equivalent_with_price_override(
+                        model.as_deref(),
+                        input_tokens.map(rust_u64),
+                        (input_samples > 0 && cached_samples == input_samples)
+                            .then(|| cached_input_tokens.map(rust_u64))
+                            .flatten(),
+                        (input_samples > 0 && cache_write_samples == input_samples)
+                            .then(|| cache_write_input_tokens.map(rust_u64))
+                            .flatten(),
+                        output_tokens.map(rust_u64),
+                        total_tokens.map(rust_u64),
+                        configured_model_price(
+                            price_overrides,
+                            source_price_overrides,
+                            &kind,
+                            &id,
+                            model.as_deref(),
+                        ),
+                    ),
+                ))
+            })
+            .map_err(db_error)?;
+        let mut equivalents = UsageEquivalents::default();
+        for row in rows {
+            let (kind, id, estimate) = row.map_err(db_error)?;
+            let values = if kind == "account" {
+                &mut equivalents.accounts
+            } else {
+                &mut equivalents.sources
+            };
+            values.entry(id).or_default().merge(estimate);
+        }
+        drop(statement);
+        drop(connection);
+        if self.usage_revision.load(Ordering::Acquire) == usage_revision {
+            self.api_equivalent_cache
+                .lock()
+                .map_err(lock_error)?
+                .replace(CachedUsageEquivalents {
+                    usage_revision,
+                    pricing_revision,
+                    value: equivalents.clone(),
+                });
+        }
+        Ok(equivalents)
     }
 }
