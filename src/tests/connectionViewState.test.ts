@@ -19,6 +19,11 @@ describe("connection view state", () => {
     expect(connectionInitialView("zenith", "accounts", "sources")).toBe("sources");
   });
 
+  test("does not render an unavailable remote view before capabilities reconcile", () => {
+    expect(connectionInitialView("remote", "accounts", null, [])).toBe("remote");
+    expect(connectionInitialView("remote", "accounts", null, ["sources"])).toBe("sources");
+  });
+
   test("falls back to remote while no remote runtime is connected", () => {
     expect(reconcileRemoteConnectionView("remote", true, "sources")).toBe("sources");
     expect(reconcileRemoteConnectionView("remote", false, "accounts")).toBe("remote");

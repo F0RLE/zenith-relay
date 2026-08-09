@@ -47,7 +47,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
 
   useEffect(() => {
     const requested = mode === "zenith" ? null : sessionStorage.getItem(CONNECTIONS_VIEW_REQUEST);
-    setView((current) => connectionInitialView(mode, current, requested));
+    setView((current) => connectionInitialView(mode, current, requested, runtime?.capabilities.features ?? []));
     setDialog(null);
     setEditingSource(null);
     setEditingAutomation(null);

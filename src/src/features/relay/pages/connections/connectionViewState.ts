@@ -20,9 +20,12 @@ export function connectionInitialView(
   mode: RelayMode,
   current: ConnectionView,
   requested: string | null,
+  features: readonly string[] = [],
 ): ConnectionView {
   if (mode === "zenith") return "sources";
-  return requested === "sources" || current === "sources" ? "sources" : "accounts";
+  const available = connectionViews(mode, features);
+  const requestedView = requested === "sources" ? "sources" : current;
+  return available.includes(requestedView) ? requestedView : available[0] ?? "remote";
 }
 
 export function reconcileRemoteConnectionView(
