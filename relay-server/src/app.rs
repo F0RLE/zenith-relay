@@ -1,26 +1,21 @@
 use crate::state::{
     is_internal_gateway_key, now_ms, AccountCredential, AppState, ServerAccountRecord, SourceRecord,
 };
-use crate::token_refresh::{
-    find_account, CodexRefreshClient, ServerRefreshClients, ServerTokenPersistence,
-};
+use crate::token_refresh::{find_account, CodexRefreshClient, ServerTokenPersistence};
 use crate::usage_writer::UsageWriter;
-use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 #[cfg(test)]
 use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
     accounts::TokenSet, protocol::RuntimeStateSnapshot, CandidateScope, GatewayRuntime,
-    GatewayRuntimeOptions, RuntimeChatGptAuth, UsageCallback, WireApi, QUOTA_STALE_AFTER_MS,
+    UsageCallback, WireApi,
 };
 
 mod account_runtime;
+mod runtime_build;
 mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
-use account_runtime::{runtime_account, runtime_key, runtime_source};
 
 impl AppState {
     pub async fn prepare_account_tokens(
@@ -64,164 +59,7 @@ impl AppState {
     }
 
     pub async fn rebuild_runtime(self: &Arc<Self>) -> Result<(), String> {
-        let source_records = self.store.sources()?;
-        let account_records = self.store.accounts()?;
-        let key_records = self
-            .store
-            .keys()?
-            .into_iter()
-            .filter(|key| key.enabled && is_internal_gateway_key(key))
-            .collect::<Vec<_>>();
-        let hidden_models = self.store.hidden_models()?;
-        let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
-        let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
-        let routing_policy = self.store.routing_policy()?;
-        // Candidate state remains available to management, while the internal
-        // profile credential derives its request scope solely from pool membership.
-        let mut pool_source_ids = source_records
-            .iter()
-            .filter(|record| {
-                record.in_pool
-                    && record
-                        .supports_wire_api(WireApi::Responses)
-                        .unwrap_or(false)
-            })
-            .map(|record| record.id.clone())
-            .collect::<Vec<_>>();
-        let mut pool_account_ids = account_records
-            .iter()
-            .filter(|record| record.in_pool)
-            .map(|record| record.id.clone())
-            .collect::<Vec<_>>();
-        if key_records.is_empty() || (source_records.is_empty() && account_records.is_empty()) {
-            return self.replace_runtime(None);
-        }
-
-        let mut sources = Vec::new();
-        for record in source_records {
-            let Some(api_key) = self.vault.load(&record.secret_ref)? else {
-                continue;
-            };
-            sources.push(runtime_source(record, api_key));
-        }
-
-        let mut accounts = Vec::new();
-        let mut direct_refresh_accounts = HashSet::new();
-        let mut refresh_clients = HashMap::new();
-        let mut agent_identities = HashMap::new();
-        for record in account_records {
-            let Some(secret) = self.vault.load(&record.secret_ref)? else {
-                continue;
-            };
-            let credential: AccountCredential = serde_json::from_str(&secret)
-                .map_err(|_| "stored account credential is invalid".to_string())?;
-            let Ok(proxy) = account_proxy_config(self, &record, &credential) else {
-                continue;
-            };
-            if let Some(agent) = credential.agent_identity()? {
-                agent_identities.insert(record.id.clone(), agent);
-            }
-            if credential.has_oauth() {
-                self.token_authority
-                    .register(&record.id, credential.tokens()?, record.auth_state)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                if proxy.is_some() {
-                    refresh_clients.insert(
-                        record.id.clone(),
-                        CodexRefreshClient::new_with_proxy(proxy.as_ref())?,
-                    );
-                } else {
-                    direct_refresh_accounts.insert(record.id.clone());
-                }
-            }
-            accounts.push(runtime_account(
-                record,
-                &credential,
-                proxy,
-                quota_stale_after_ms,
-            ));
-        }
-
-        if !sources
-            .iter()
-            .any(|source| source.enabled && !source.draining)
-            && !accounts
-                .iter()
-                .any(|account| account.enabled && !account.draining)
-        {
-            return self.replace_runtime(None);
-        }
-        let active_source_ids = sources
-            .iter()
-            .filter(|source| source.enabled && !source.draining)
-            .map(|source| source.source.id.as_str())
-            .collect::<HashSet<_>>();
-        pool_source_ids.retain(|id| active_source_ids.contains(id.as_str()));
-        let active_account_ids = accounts
-            .iter()
-            .filter(|account| account.enabled && !account.draining)
-            .map(|account| account.id.as_str())
-            .collect::<HashSet<_>>();
-        pool_account_ids.retain(|id| active_account_ids.contains(id.as_str()));
-
-        let mut keys = Vec::new();
-        for record in key_records {
-            let Some(secret) = self.vault.load(&record.secret_ref)? else {
-                continue;
-            };
-            if pool_source_ids.is_empty() && pool_account_ids.is_empty() {
-                continue;
-            }
-            keys.push(runtime_key(
-                record,
-                secret,
-                &pool_source_ids,
-                &pool_account_ids,
-            ));
-        }
-        if keys.is_empty() || (sources.is_empty() && accounts.is_empty()) {
-            return self.replace_runtime(None);
-        }
-
-        let refresh = Arc::new(ServerRefreshClients {
-            direct: CodexRefreshClient::new_with_proxy(None)?,
-            direct_accounts: direct_refresh_accounts,
-            clients: refresh_clients,
-        });
-        let persistence = Arc::new(ServerTokenPersistence {
-            state: self.clone(),
-        });
-        let usage = self.usage_callback()?;
-        let runtime = GatewayRuntime::from_mixed_pool(
-            sources,
-            accounts,
-            keys,
-            RuntimeChatGptAuth {
-                token_authority: self.token_authority.clone(),
-                refresh_adapter: refresh,
-                persistence_adapter: persistence,
-                refresh_skew_ms: 60_000,
-                agent_identities,
-            },
-            GatewayRuntimeOptions {
-                max_retry_candidates: usize::from(routing_policy.max_retry_candidates),
-                cooldown_after_failures: routing_policy.cooldown_after_failures,
-                keep_last_candidate_available: routing_policy.keep_last_candidate_available,
-                routing_strategy: routing_policy.routing_strategy,
-                subscription_plan_order: routing_policy.subscription_plan_order,
-                hidden_models,
-                default_service_tier: routing_policy.default_service_tier,
-                quota_stale_after_ms,
-                image_base_model: None,
-                model_reasoning_allowed_levels,
-                response_affinity_store: Some(self.store.clone()),
-                provider_storm_breaker: true,
-            },
-            usage,
-        )
-        .map_err(|error| error.to_string())?;
-        self.replace_runtime(Some(Arc::new(runtime)))
+        runtime_build::rebuild(self).await
     }
 
     /// Rebuilds the runtime from persisted state and restores the previous
@@ -345,7 +183,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::account_runtime::account_summary;
+    use super::account_runtime::{account_summary, runtime_account};
     use super::*;
     use crate::{
         config::Config,
@@ -505,6 +343,37 @@ mod tests {
             snapshot.sources[0].operational_status,
             OperationalStatus::Rotation
         );
+
+        state.shutdown_runtime().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rebuild_runtime_requires_a_responses_pool_member_for_the_system_key() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let mut messages = snapshot_test_source("source-messages", "claude-native-test");
+        messages.wire_api = WireApi::Messages;
+        state.store.save_source(&messages).unwrap();
+        state
+            .vault
+            .save(&messages.secret_ref, "synthetic-source-key")
+            .unwrap();
+
+        state.rebuild_runtime().await.unwrap();
+        assert!(state.runtime().unwrap().is_none());
+
+        let responses = snapshot_test_source("source-responses", "gpt-runtime-test");
+        state.store.save_source(&responses).unwrap();
+        state
+            .vault
+            .save(&responses.secret_ref, "synthetic-source-key")
+            .unwrap();
+
+        state.rebuild_runtime().await.unwrap();
+        let snapshot = state.snapshot().unwrap();
+        assert!(snapshot.gateway.running);
+        assert_eq!(snapshot.gateway.candidate_count, 1);
+        assert_eq!(snapshot.gateway.visible_model_ids, ["gpt-runtime-test"]);
 
         state.shutdown_runtime().await.unwrap();
     }
