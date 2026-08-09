@@ -35,13 +35,10 @@ jobs:
         run: |
           RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
           echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
-          git clone --depth=1 https://github.com/RustSec/advisory-db.git "$RUSTSEC_ADVISORY_DB"
-          advisory="$RUSTSEC_ADVISORY_DB/crates/gettext-rs/RUSTSEC-0000-0000.md"
-          # The published advisory is stored under gettext-rs but names gettext-sys.
-          # Correct it locally so cargo-audit can validate and scan the database.
-          if [[ -f "$advisory" ]]; then
-            sed -i 's/^package = "gettext-sys"$/package = "gettext-rs"/' "$advisory"
-          fi
+          git init --quiet "$RUSTSEC_ADVISORY_DB"
+          git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
+          git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings

@@ -1510,6 +1510,21 @@ mod tests {
     }
 
     #[test]
+    fn restores_legacy_pending_usage_request_fields() {
+        let mut fixture = serde_json::to_value(QuotaEconomicsState::default()).unwrap();
+        let pending = fixture["secondary"]["pending"].as_object_mut().unwrap();
+        pending.remove("standardObservations");
+        pending.remove("fastObservations");
+        pending.insert("standardRequests".to_string(), serde_json::json!(3));
+        pending.insert("fastRequests".to_string(), serde_json::json!(5));
+
+        let restored: QuotaEconomicsState = serde_json::from_value(fixture).unwrap();
+
+        assert_eq!(restored.secondary.pending.standard_observations, 3);
+        assert_eq!(restored.secondary.pending.fast_observations, 5);
+    }
+
+    #[test]
     fn repeated_quota_polls_do_not_duplicate_observation_history() {
         let mut state = QuotaEconomicsState::default();
         state.observe_quota(&snapshot(10_000, 300_000, 1_000));

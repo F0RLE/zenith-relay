@@ -216,7 +216,8 @@ fn persist_usage_batch(
             Ok(natural_use_at_ms)
         }) {
             Ok(Some(value)) => value,
-            _ => {
+            Ok(None) => continue,
+            Err(_) => {
                 state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
@@ -256,4 +257,148 @@ fn mark_natural_use(
             let _ = state.store.save_wake_state(coordinator.state());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::Config,
+        state::{AccountCredential, ServerAccountRecord},
+        store::{Store, Vault},
+    };
+    use std::sync::atomic::Ordering;
+    use tempfile::TempDir;
+    use zenith_relay_core::{
+        accounts::{AccountAuthState, AccountHealthState},
+        quota::Subscription,
+        DefaultServiceTier, ToolUseDiagnostics, UsageEvent, WireApi,
+    };
+
+    fn test_account(id: &str) -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: id.to_string(),
+            label: id.to_string(),
+            identity_hint: id.to_string(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "openai_codex".to_string(),
+            secret_ref: format!("account:{id}"),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".to_string()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Subscription::default(),
+            quota: Default::default(),
+            economics: Default::default(),
+            cooldowns: Default::default(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        }
+    }
+
+    fn usage_event(request_id: &str, account_id: &str) -> UsageEvent {
+        UsageEvent {
+            request_id: request_id.to_string(),
+            attempt: 1,
+            local_key_id: "key_test".to_string(),
+            source_id: "openai_codex".to_string(),
+            candidate_id: Some(account_id.to_string()),
+            account_id: Some(account_id.to_string()),
+            routing: None,
+            requested_model: Some("gpt-test".to_string()),
+            resolved_model: Some("gpt-test".to_string()),
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: true,
+            http_status: 200,
+            error_category: None,
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: Some(0),
+            latency_ms: 1,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: Some(1),
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: Some(1),
+            total_tokens: Some(2),
+            quota_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn missing_account_does_not_block_other_usage_updates_or_count_as_a_write_failure() {
+        let root = TempDir::new().unwrap();
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        let state = AppState::new(config, store.clone(), vault.clone()).unwrap();
+        for id in ["account_a", "account_b"] {
+            let account = test_account(id);
+            store.save_account(&account).unwrap();
+            vault
+                .save(
+                    &account.secret_ref,
+                    &serde_json::to_string(&AccountCredential {
+                        access_token: "test-token".to_string(),
+                        refresh_token: None,
+                        id_token: None,
+                        expires_at_ms: None,
+                        issued_at_ms: 0,
+                        generation: 0,
+                        chatgpt_account_id: id.to_string(),
+                        responses_url: "https://example.test/v1/responses".to_string(),
+                        proxy_url: None,
+                        agent_private_key: None,
+                        agent_runtime_id: None,
+                        agent_task_id: None,
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let batch = [
+            QueuedUsage {
+                event: usage_event("request_a", "account_a"),
+                observed_at_ms: 10,
+            },
+            QueuedUsage {
+                event: usage_event("request_missing", "account_missing"),
+                observed_at_ms: 20,
+            },
+            QueuedUsage {
+                event: usage_event("request_b", "account_b"),
+                observed_at_ms: 30,
+            },
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        persist_usage_batch(&state, &batch, runtime.handle());
+
+        assert_eq!(
+            store.account("account_a").unwrap().unwrap().last_used_at_ms,
+            Some(10)
+        );
+        assert_eq!(
+            store.account("account_b").unwrap().unwrap().last_used_at_ms,
+            Some(30)
+        );
+        assert_eq!(state.failed_usage_writes.load(Ordering::Relaxed), 0);
+    }
 }
