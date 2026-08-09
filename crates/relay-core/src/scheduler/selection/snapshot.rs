@@ -1,0 +1,56 @@
+use super::super::candidate::CandidateKind;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveModelRuntime {
+    pub model: String,
+    pub request_count: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateRuntimeSnapshot {
+    pub candidate_id: String,
+    pub kind: CandidateKind,
+    pub available: bool,
+    pub in_flight: u32,
+    #[serde(default)]
+    pub active_request_count: u32,
+    #[serde(default)]
+    pub active_models: Vec<ActiveModelRuntime>,
+    pub last_used_at_ms: Option<u64>,
+    pub next_retry_at_ms: Option<u64>,
+    pub half_open: bool,
+    pub dispatches: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionReason {
+    ResponseAffinity,
+    PromptCacheAffinity,
+    OnlyEligible,
+    RoutingTier,
+    SourceRole,
+    ParallelLoad,
+    SourceLoad,
+    PoolPolicy,
+    QuotaHeadroom,
+    SubscriptionExpiry,
+    SubscriptionPlan,
+    ManualPriority,
+    FairRotation,
+    FallbackAttempt,
+    StableTieBreak,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingDiagnostics {
+    pub reason: SelectionReason,
+    pub eligible_candidates: u32,
+    pub quota_remaining_basis_points: Option<u64>,
+    pub in_flight_before: u32,
+    pub dispatches_before: u64,
+}
