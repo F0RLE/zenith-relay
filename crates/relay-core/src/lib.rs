@@ -25,7 +25,7 @@ pub use catalog::{
     source_model_declares_image_input, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
     CODEX_RELAY_CATALOG_HASH,
 };
-pub use error::{Error, Result};
+pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{
     bridged_response_id_scoped, prepare_responses_to_messages_scoped, AdapterError, AdapterResult,
     MessagesBridgeRequest, MessagesBridgeResponse, MessagesBridgeState, MessagesBridgeStore,

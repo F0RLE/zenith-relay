@@ -12,6 +12,23 @@ pub(crate) mod usage;
 
 mod runtime;
 
+use crate::local_pool::{
+    error::{ErrorCode, LocalPoolError, Result as LocalResult},
+    store::secret_store,
+};
+
+pub(super) fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
+    secret_store::delete(secret_ref).map_err(|cleanup| {
+        LocalPoolError::new(
+            ErrorCode::RecoveryRequired,
+            format!(
+                "{}; secret cleanup failed: {}",
+                cause.message, cleanup.message
+            ),
+        )
+    })
+}
+
 pub(in crate::local_pool) use runtime::{
     apply_account_policy_if_running, apply_local_gateway_key_scope,
     apply_source_policies_if_running, apply_source_policy_if_running, core_error, current_time_ms,

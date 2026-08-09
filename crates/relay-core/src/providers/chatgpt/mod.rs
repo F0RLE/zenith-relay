@@ -4,6 +4,7 @@ mod passive_quota;
 mod quota_subscription;
 mod quota_usage;
 mod runtime;
+mod token_errors;
 
 pub use agent_identity::{
     is_agent_identity_task_invalid_response, AgentIdentityCredential, AgentIdentityError,
@@ -22,5 +23,6 @@ pub use quota_usage::{
     QuotaRefreshOutcome, CODEX_QUOTA_ENDPOINT,
 };
 pub use runtime::{RuntimeChatGptAccount, RuntimeChatGptAuth};
+pub use token_errors::{token_refresh_failure_kind, token_refresh_provider_error_code};
 
 pub const CODEX_MODELS_CLIENT_VERSION: &str = CODEX_CLIENT_VERSION;

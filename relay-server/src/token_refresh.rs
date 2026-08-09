@@ -10,6 +10,9 @@ use zenith_relay_core::accounts::{
     AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
+use zenith_relay_core::providers::chatgpt::{
+    token_refresh_failure_kind, token_refresh_provider_error_code,
+};
 use zenith_relay_core::ProxyConfig;
 
 const CODEX_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -208,7 +211,7 @@ impl TokenRefreshAdapter for CodexRefreshClient {
                 ));
             }
             if !status.is_success() {
-                let code = provider_error_code(&body)
+                let code = token_refresh_provider_error_code(&body)
                     .unwrap_or_else(|| "token_refresh_failed".to_string());
                 let kind = token_refresh_failure_kind(&code);
                 return Err(TokenRefreshFailure::new(kind, &code));
@@ -242,90 +245,10 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-pub(crate) fn token_refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
-    match code.trim().to_ascii_lowercase().as_str() {
-        "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
-        "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
-        "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
-        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
-            TokenRefreshFailureKind::InvalidatedRefreshToken
-        }
-        _ => TokenRefreshFailureKind::Transient,
-    }
-}
-
-pub(crate) fn provider_error_code(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let code = [
-        value
-            .pointer("/error/code")
-            .and_then(serde_json::Value::as_str),
-        value.get("code").and_then(serde_json::Value::as_str),
-        value.get("error").and_then(serde_json::Value::as_str),
-        value
-            .pointer("/error/type")
-            .and_then(serde_json::Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(safe_provider_code);
-    code
-}
-
-fn safe_provider_code(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
-    .then(|| value.to_ascii_lowercase())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zenith_relay_core::accounts::{TokenRefreshAdapter, TokenRefreshFailureKind};
-
-    #[test]
-    fn refresh_errors_keep_distinct_reauthentication_reasons() {
-        assert_eq!(
-            token_refresh_failure_kind("invalid_grant"),
-            TokenRefreshFailureKind::InvalidGrant
-        );
-        assert_eq!(
-            token_refresh_failure_kind("refresh_token_reused"),
-            TokenRefreshFailureKind::ReusedRefreshToken
-        );
-        assert_eq!(
-            token_refresh_failure_kind("refresh_token_expired"),
-            TokenRefreshFailureKind::ExpiredRefreshToken
-        );
-        assert_eq!(
-            token_refresh_failure_kind("refresh_token_invalidated"),
-            TokenRefreshFailureKind::InvalidatedRefreshToken
-        );
-        assert_eq!(
-            token_refresh_failure_kind("unsupported_country_region_territory"),
-            TokenRefreshFailureKind::Transient
-        );
-    }
-
-    #[test]
-    fn provider_refresh_error_prefers_specific_rotation_code() {
-        assert_eq!(
-            provider_error_code(br#"{"error":"invalid_grant","code":"refresh_token_reused"}"#)
-                .as_deref(),
-            Some("refresh_token_reused")
-        );
-        assert_eq!(
-            provider_error_code(
-                br#"{"error":{"type":"invalid_request_error","code":"refresh_token_expired"}}"#
-            )
-            .as_deref(),
-            Some("refresh_token_expired")
-        );
-    }
+    use zenith_relay_core::accounts::TokenRefreshAdapter;
 
     #[tokio::test]
     async fn refresh_client_never_falls_back_to_direct_for_unknown_account() {

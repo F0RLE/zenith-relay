@@ -3,6 +3,7 @@ use super::{
     QuotaNormalizationError, QuotaSnapshot, QuotaWindow, QuotaWindowInput, QuotaWindowKind,
     Subscription, SubscriptionInput, SupplementalQuotaWindow,
 };
+use crate::error::{normalize_error_code, safe_error_code};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashSet};
@@ -185,7 +186,7 @@ pub struct QuotaRefreshFailure {
 impl QuotaRefreshFailure {
     pub fn new(code: &str, retryable: bool) -> Self {
         Self {
-            code: safe_code(code),
+            code: safe_error_code(code),
             retryable,
             http_status: None,
         }
@@ -228,15 +229,7 @@ fn provider_error_code(body: &[u8]) -> Option<String> {
     ]
     .into_iter()
     .filter_map(|pointer| value.pointer(pointer).and_then(serde_json::Value::as_str))
-    .find_map(|code| {
-        let code = code.trim();
-        (!code.is_empty()
-            && code.len() <= 64
-            && code
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
-        .then(|| code.to_ascii_lowercase())
-    })
+    .find_map(normalize_error_code)
 }
 
 fn normalize_window(
@@ -252,20 +245,6 @@ fn normalize_window(
     }
     let window = QuotaWindow::normalize(input, previous)?;
     Ok((!window.is_empty_provider_placeholder()).then_some(window))
-}
-
-fn safe_code(value: &str) -> String {
-    let value = value.trim();
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        value.to_string()
-    } else {
-        "redacted".to_string()
-    }
 }
 
 #[cfg(test)]

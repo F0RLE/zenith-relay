@@ -1,3 +1,4 @@
+use crate::error::safe_error_code;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -246,7 +247,7 @@ pub struct QuotaErrorState {
 impl QuotaErrorState {
     pub fn new(code: &str, occurred_at_ms: u64) -> Self {
         Self {
-            code: safe_code(code),
+            code: safe_error_code(code),
             occurred_at_ms,
         }
     }
@@ -332,20 +333,6 @@ fn transition_fingerprint(
         )
         .as_bytes(),
     ))
-}
-
-fn safe_code(value: &str) -> String {
-    let value = value.trim();
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        value.to_string()
-    } else {
-        "redacted".to_string()
-    }
 }
 
 #[cfg(test)]

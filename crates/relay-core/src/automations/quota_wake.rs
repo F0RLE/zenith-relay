@@ -1,4 +1,5 @@
 use crate::accounts::{AccountAuthMode, AccountRecord};
+use crate::error::safe_error_code;
 use crate::quota::{QuotaTransition, QuotaWindow, QuotaWindowKind};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -214,7 +215,7 @@ impl WakeCoordinator {
             }
         }
         for history in &mut state.history {
-            history.error_code = history.error_code.take().map(|code| safe_code(&code));
+            history.error_code = history.error_code.take().map(|code| safe_error_code(&code));
         }
         let mut coordinator = Self { state };
         coordinator.cancel_matching(
@@ -497,7 +498,7 @@ impl WakeCoordinator {
                 latency_ms: completion.latency_ms,
                 input_tokens: completion.input_tokens,
                 output_tokens: completion.output_tokens,
-                error_code: completion.error_code.map(|code| safe_code(&code)),
+                error_code: completion.error_code.map(|code| safe_error_code(&code)),
             }
         };
         self.push_history(history);
@@ -717,7 +718,7 @@ fn canceled_history(cycle: &WakeCycle, completed_at_ms: u64, error_code: &str) -
         latency_ms: None,
         input_tokens: None,
         output_tokens: None,
-        error_code: Some(safe_code(error_code)),
+        error_code: Some(safe_error_code(error_code)),
     }
 }
 
@@ -760,20 +761,6 @@ pub(super) fn is_safe_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-}
-
-fn safe_code(value: &str) -> String {
-    let value = value.trim();
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        value.to_string()
-    } else {
-        "redacted".to_string()
-    }
 }
 
 #[cfg(test)]

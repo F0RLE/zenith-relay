@@ -1,4 +1,6 @@
-use super::{restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback};
+use super::{
+    cleanup_created_secret, restart_or_rollback, runtime_account_policy, sync_gateway_or_rollback,
+};
 use crate::{
     files::atomic_write,
     local_pool::{
@@ -349,18 +351,6 @@ pub(crate) fn has_usable_pool_candidate(state: &DesktopState) -> LocalResult<boo
         }
     }
     Ok(false)
-}
-
-fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
-    secret_store::delete(secret_ref).map_err(|cleanup| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; secret cleanup failed: {}",
-                cause.message, cleanup.message
-            ),
-        )
-    })
 }
 
 #[derive(Deserialize)]

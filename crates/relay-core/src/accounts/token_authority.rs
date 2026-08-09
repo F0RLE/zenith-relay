@@ -1,4 +1,5 @@
 use super::{AccountAuthState, ReauthReason};
+use crate::error::safe_error_code;
 use futures_util::future::BoxFuture;
 use futures_util::lock::Mutex as AsyncMutex;
 use std::collections::HashMap;
@@ -178,7 +179,7 @@ pub struct TokenPersistenceFailure {
 impl TokenPersistenceFailure {
     pub fn new(code: &str) -> Self {
         Self {
-            code: safe_code(code),
+            code: safe_error_code(code),
         }
     }
 }
@@ -202,7 +203,7 @@ impl TokenRefreshFailure {
     pub fn new(kind: TokenRefreshFailureKind, code: &str) -> Self {
         Self {
             kind,
-            code: safe_code(code),
+            code: safe_error_code(code),
         }
     }
 
@@ -558,20 +559,6 @@ async fn persist_auth_state(
 
 fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
-}
-
-fn safe_code(value: &str) -> String {
-    let value = value.trim();
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        value.to_string()
-    } else {
-        "redacted".to_string()
-    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

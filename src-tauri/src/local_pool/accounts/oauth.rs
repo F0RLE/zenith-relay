@@ -13,7 +13,10 @@ use url::Url;
 use zenith_relay_core::accounts::{
     TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind,
 };
-use zenith_relay_core::ProxyConfig;
+use zenith_relay_core::providers::chatgpt::{
+    token_refresh_failure_kind, token_refresh_provider_error_code,
+};
+use zenith_relay_core::{normalize_error_code, ProxyConfig};
 
 pub const CODEX_OAUTH_ISSUER: &str = "https://auth.openai.com";
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -149,7 +152,7 @@ impl CodexOAuthClient {
         if !status.is_success() {
             return Err(OAuthError {
                 code: OAuthErrorCode::TokenEndpointRejected,
-                provider_code: provider_error_code(&body),
+                provider_code: token_refresh_provider_error_code(&body),
                 http_status: Some(status.as_u16()),
                 retryable: status.is_server_error() || status.as_u16() == 429,
             });
@@ -192,8 +195,12 @@ impl CodexOAuthClient {
                 ),
             })?;
         if !status.is_success() {
-            let code = provider_error_code(&body).unwrap_or_else(|| "token_refresh_failed".into());
-            return Err(TokenRefreshFailure::new(refresh_failure_kind(&code), &code));
+            let code = token_refresh_provider_error_code(&body)
+                .unwrap_or_else(|| "token_refresh_failed".into());
+            return Err(TokenRefreshFailure::new(
+                token_refresh_failure_kind(&code),
+                &code,
+            ));
         }
 
         parse_token_response(&body, now_ms).map_err(|_| {
@@ -289,7 +296,7 @@ impl OAuthPendingSession {
         if let Some(provider_error) = provider_error {
             return Err(OAuthError {
                 code: OAuthErrorCode::AuthorizationDenied,
-                provider_code: safe_provider_code(&provider_error),
+                provider_code: normalize_error_code(&provider_error),
                 http_status: None,
                 retryable: false,
             });
@@ -689,42 +696,6 @@ fn nonempty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.trim().is_empty())
 }
 
-fn provider_error_code(body: &[u8]) -> Option<String> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let code = [
-        value.pointer("/error/code").and_then(Value::as_str),
-        value.get("code").and_then(Value::as_str),
-        value.get("error").and_then(Value::as_str),
-        value.pointer("/error/type").and_then(Value::as_str),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(safe_provider_code);
-    code
-}
-
-fn safe_provider_code(value: &str) -> Option<String> {
-    let value = value.trim();
-    (!value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
-    .then(|| value.to_ascii_lowercase())
-}
-
-fn refresh_failure_kind(code: &str) -> TokenRefreshFailureKind {
-    match code.to_ascii_lowercase().as_str() {
-        "invalid_grant" => TokenRefreshFailureKind::InvalidGrant,
-        "refresh_token_reused" => TokenRefreshFailureKind::ReusedRefreshToken,
-        "refresh_token_expired" => TokenRefreshFailureKind::ExpiredRefreshToken,
-        "invalid_refresh_token" | "refresh_token_invalidated" | "token_invalidated" => {
-            TokenRefreshFailureKind::InvalidatedRefreshToken
-        }
-        _ => TokenRefreshFailureKind::Transient,
-    }
-}
-
 fn set_once(slot: &mut Option<String>, value: String) -> Result<(), OAuthError> {
     if slot.replace(value).is_some() {
         Err(OAuthError::new(OAuthErrorCode::InvalidCallback, false))
@@ -938,42 +909,6 @@ mod tests {
         let error = parse_identity_claims(&token).unwrap_err();
         assert_eq!(error.code, OAuthErrorCode::InvalidJwt);
         assert!(!format!("{error:?}").contains(&"x".repeat(128)));
-    }
-
-    #[test]
-    fn refresh_failure_codes_map_to_reauthentication_states() {
-        assert_eq!(
-            refresh_failure_kind("invalid_grant"),
-            TokenRefreshFailureKind::InvalidGrant
-        );
-        assert_eq!(
-            refresh_failure_kind("refresh_token_reused"),
-            TokenRefreshFailureKind::ReusedRefreshToken
-        );
-        assert_eq!(
-            refresh_failure_kind("refresh_token_expired"),
-            TokenRefreshFailureKind::ExpiredRefreshToken
-        );
-        assert_eq!(
-            refresh_failure_kind("refresh_token_invalidated"),
-            TokenRefreshFailureKind::InvalidatedRefreshToken
-        );
-    }
-
-    #[test]
-    fn provider_refresh_error_prefers_specific_rotation_code() {
-        assert_eq!(
-            provider_error_code(br#"{"error":"invalid_grant","code":"refresh_token_reused"}"#)
-                .as_deref(),
-            Some("refresh_token_reused")
-        );
-        assert_eq!(
-            provider_error_code(
-                br#"{"error":{"type":"invalid_request_error","code":"refresh_token_expired"}}"#
-            )
-            .as_deref(),
-            Some("refresh_token_expired")
-        );
     }
 
     async fn exchange(headers: HeaderMap, body: Bytes) -> impl IntoResponse {

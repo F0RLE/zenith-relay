@@ -41,3 +41,38 @@ impl From<reqwest::Error> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub(crate) fn safe_error_code(value: &str) -> String {
+    let value = value.trim();
+    if valid_error_code(value) {
+        value.to_string()
+    } else {
+        "redacted".to_string()
+    }
+}
+
+pub fn normalize_error_code(value: &str) -> Option<String> {
+    let value = value.trim();
+    valid_error_code(value).then(|| value.to_ascii_lowercase())
+}
+
+fn valid_error_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_error_code, safe_error_code};
+
+    #[test]
+    fn error_codes_are_bounded_and_redacted() {
+        assert_eq!(safe_error_code(" code-1 "), "code-1");
+        assert_eq!(normalize_error_code(" CODE-1 ").as_deref(), Some("code-1"));
+        assert_eq!(safe_error_code("contains whitespace"), "redacted");
+        assert_eq!(normalize_error_code("<script>"), None);
+    }
+}

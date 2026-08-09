@@ -53,7 +53,9 @@ use zenith_relay_core::providers::chatgpt::{
     AgentIdentityCredential, CodexQuotaClient, QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
-use zenith_relay_core::{discover_source_models, ProviderSource, ProxyConfig, WireApi};
+use zenith_relay_core::{
+    discover_source_models, normalize_error_code, ProviderSource, ProxyConfig, WireApi,
+};
 
 mod claims;
 mod sources;
@@ -151,7 +153,7 @@ pub struct ImportItemError {
 impl ImportItemError {
     pub(super) fn new(code: &str, message: &str) -> Self {
         Self {
-            code: safe_code(code),
+            code: normalize_error_code(code).unwrap_or_else(|| "operation_failed".to_string()),
             message: message.to_string(),
         }
     }
@@ -2464,20 +2466,6 @@ pub(super) fn import_session_error(error: ImportSessionError) -> CommandError {
         _ => ErrorCode::InvalidState,
     };
     LocalPoolError::new(code, error.message).into()
-}
-
-pub(super) fn safe_code(value: &str) -> String {
-    let value = value.trim();
-    if !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
-    {
-        value.to_ascii_lowercase()
-    } else {
-        "operation_failed".to_string()
-    }
 }
 
 pub(super) fn default_true() -> bool {

@@ -1,7 +1,8 @@
 use super::{
-    apply_source_policies_if_running, apply_source_policy_if_running, core_error,
-    refresh_active_codex_catalog_in_background, refresh_local_gateway_key_scope_if_running,
-    restart_after_secret_change, sync_records_or_rollback,
+    apply_source_policies_if_running, apply_source_policy_if_running, cleanup_created_secret,
+    core_error, refresh_active_codex_catalog_in_background,
+    refresh_local_gateway_key_scope_if_running, restart_after_secret_change,
+    sync_records_or_rollback,
 };
 use crate::local_pool::{
     error::{CommandError, ErrorCode, LocalPoolError, Result as LocalResult},
@@ -562,18 +563,6 @@ fn current_records(
 )> {
     let store = state.store()?;
     Ok((store.sources().to_vec(), store.keys().to_vec()))
-}
-
-fn cleanup_created_secret(secret_ref: &str, cause: &LocalPoolError) -> LocalResult<()> {
-    secret_store::delete(secret_ref).map_err(|cleanup| {
-        LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; secret cleanup failed: {}",
-                cause.message, cleanup.message
-            ),
-        )
-    })
 }
 
 fn responses_wire_api() -> WireApi {
