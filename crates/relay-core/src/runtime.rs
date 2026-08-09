@@ -12,11 +12,10 @@ use crate::sources::{discover_models_with_client, is_loopback_url};
 use crate::ProxyConfig;
 use crate::{
     decode_codex_model_alias, CandidateHealth, CandidateQuota, CandidateScope, Error,
-    LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayState,
-    NativeResponsesReplayStore, PoolScheduler, ProviderSource, Result, RoutingDiagnostics,
-    RoutingStrategy, RuntimeCandidate, Selection, SelectionRequest, SourceAdapter, SourceConnector,
-    SourceProtocolBinding, SourceProtocolBindingKey, UsageCallback, UsageEvent, WireApi,
-    RESPONSE_AFFINITY_TTL_MS,
+    LocalGatewayKey, MessagesReasoningMode, ModelRegistry, ModelRules, NativeResponsesReplayStore,
+    PoolScheduler, ProviderSource, Result, RoutingDiagnostics, RoutingStrategy, RuntimeCandidate,
+    Selection, SelectionRequest, SourceAdapter, SourceConnector, SourceProtocolBinding,
+    SourceProtocolBindingKey, UsageCallback, UsageEvent, WireApi,
 };
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::StatusCode;
@@ -35,6 +34,7 @@ mod authorization;
 mod build;
 mod candidates;
 mod images;
+mod session_state;
 mod source_metadata;
 
 use build::{
@@ -1556,141 +1556,6 @@ impl GatewayRuntime {
         }
     }
 
-    pub(crate) fn load_messages_bridge_state(
-        &self,
-        local_key_id: &str,
-        response_id: &str,
-        candidate_id: &str,
-        now_ms: u64,
-    ) -> crate::AdapterResult<crate::MessagesBridgeState> {
-        self.messages_bridge_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(local_key_id, response_id, candidate_id, now_ms)
-    }
-
-    pub(crate) fn save_messages_bridge_response(
-        &self,
-        local_key_id: &str,
-        candidate_id: &str,
-        response: &crate::MessagesBridgeResponse,
-        now_ms: u64,
-    ) {
-        self.messages_bridge_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                local_key_id,
-                &response.response_id,
-                candidate_id,
-                response.continuation.clone(),
-                now_ms,
-            );
-    }
-
-    pub(crate) fn load_native_responses_replay(
-        &self,
-        local_key_id: &str,
-        response_id: &str,
-        candidate_id: &str,
-        now_ms: u64,
-    ) -> Option<NativeResponsesReplayState> {
-        self.native_responses_replay_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(local_key_id, response_id, candidate_id, now_ms)
-    }
-
-    pub(crate) fn save_native_responses_replay(
-        &self,
-        local_key_id: &str,
-        candidate_id: &str,
-        response_id: &str,
-        state: NativeResponsesReplayState,
-        now_ms: u64,
-    ) {
-        self.native_responses_replay_store
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(local_key_id, response_id, candidate_id, state, now_ms);
-    }
-
-    pub(crate) fn response_affinity_key(&self, response_id: Option<&str>) -> Option<String> {
-        let response_id = response_id?.trim();
-        if response_id.is_empty() {
-            return None;
-        }
-        Some(hex::encode(Sha256::digest(
-            format!("response\0{response_id}").as_bytes(),
-        )))
-    }
-
-    pub(crate) fn prompt_affinity_key(
-        &self,
-        local_key_id: &str,
-        model: &str,
-        prompt_cache_key: Option<&str>,
-    ) -> Option<String> {
-        let prompt_cache_key = prompt_cache_key?.trim();
-        if prompt_cache_key.is_empty() {
-            return None;
-        }
-        Some(hex::encode(Sha256::digest(
-            format!(
-                "prompt\0{}\0{}\0{}",
-                local_key_id,
-                model.to_ascii_lowercase(),
-                prompt_cache_key
-            )
-            .as_bytes(),
-        )))
-    }
-
-    pub(crate) fn bind_prompt_affinity(&self, key: Option<&str>, candidate_id: &str, now_ms: u64) {
-        if let Some(key) = key {
-            self.lock_scheduler()
-                .bind_prompt_affinity(key, candidate_id, now_ms);
-        }
-    }
-
-    pub(crate) fn bind_response_affinity(
-        &self,
-        response_id: Option<&str>,
-        candidate_id: &str,
-        now_ms: u64,
-    ) {
-        if let Some(key) = self.response_affinity_key(response_id) {
-            if self
-                .lock_scheduler()
-                .bind_response_affinity(key.clone(), candidate_id, now_ms)
-            {
-                self.persist_response_affinity(&key, candidate_id, now_ms);
-            }
-        }
-    }
-
-    pub(crate) fn invalidate_response_affinity(&self, key: Option<&str>) -> bool {
-        key.is_some_and(|key| {
-            let invalidated = self.lock_scheduler().invalidate_response_affinity(key);
-            if invalidated {
-                if let Some(store) = self.response_affinity_store.as_ref() {
-                    let _ = store.delete(key);
-                }
-            }
-            invalidated
-        })
-    }
-
-    fn persist_response_affinity(&self, key: &str, candidate_id: &str, now_ms: u64) {
-        if let Some(store) = self.response_affinity_store.as_ref() {
-            let _ = store.upsert(&ResponseAffinityBinding {
-                key: key.to_string(),
-                candidate_id: candidate_id.to_string(),
-                expires_at_ms: now_ms.saturating_add(RESPONSE_AFFINITY_TTL_MS),
-            });
-        }
-    }
-
     pub(crate) fn record_success_with_metrics(
         &self,
         candidate_id: &str,
@@ -1936,6 +1801,90 @@ mod tests {
             id: id.to_string(),
             secret: secret.to_string(),
         }
+    }
+
+    #[derive(Default)]
+    struct RecordedResponseAffinityStore {
+        upserts: Mutex<Vec<ResponseAffinityBinding>>,
+        deletes: Mutex<Vec<String>>,
+    }
+
+    impl ResponseAffinityStore for RecordedResponseAffinityStore {
+        fn load(&self, _now_ms: u64) -> std::result::Result<Vec<ResponseAffinityBinding>, String> {
+            Ok(Vec::new())
+        }
+
+        fn find(
+            &self,
+            _key: &str,
+            _now_ms: u64,
+        ) -> std::result::Result<Option<ResponseAffinityBinding>, String> {
+            Ok(None)
+        }
+
+        fn upsert(&self, binding: &ResponseAffinityBinding) -> std::result::Result<(), String> {
+            self.upserts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(binding.clone());
+            Ok(())
+        }
+
+        fn delete(&self, key: &str) -> std::result::Result<(), String> {
+            self.deletes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.to_string());
+            Ok(())
+        }
+
+        fn delete_candidate(&self, _candidate_id: &str) -> std::result::Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn response_affinity_persists_and_removes_the_same_scheduler_binding() {
+        let store = Arc::new(RecordedResponseAffinityStore::default());
+        let runtime = GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(source(
+                "source-1",
+                "upstream-secret",
+                &["gpt-test"],
+            ))],
+            vec![RuntimeLocalKey::unrestricted(key("key-1", "local-secret"))],
+            GatewayRuntimeOptions {
+                response_affinity_store: Some(store.clone()),
+                ..GatewayRuntimeOptions::default()
+            },
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        let response_id = "resp-1";
+        let affinity_key = runtime.response_affinity_key(Some(response_id)).unwrap();
+        runtime.bind_response_affinity(Some(response_id), "source-1", 123);
+
+        assert_eq!(
+            *store
+                .upserts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![ResponseAffinityBinding {
+                key: affinity_key.clone(),
+                candidate_id: "source-1".to_string(),
+                expires_at_ms: 123 + crate::RESPONSE_AFFINITY_TTL_MS,
+            }]
+        );
+        assert!(runtime.invalidate_response_affinity(Some(&affinity_key)));
+        assert!(!runtime.invalidate_response_affinity(Some(&affinity_key)));
+        assert_eq!(
+            *store
+                .deletes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![affinity_key]
+        );
     }
 
     #[test]
