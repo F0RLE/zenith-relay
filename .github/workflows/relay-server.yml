@@ -23,6 +23,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      RUSTSEC_ADVISORY_DB: ${{ runner.temp }}/rustsec-advisory-db
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -31,11 +33,20 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-audit
+      - name: Prepare RustSec advisory database
+        run: |
+          git clone --depth=1 https://github.com/RustSec/advisory-db.git "$RUSTSEC_ADVISORY_DB"
+          advisory="$RUSTSEC_ADVISORY_DB/crates/gettext-rs/RUSTSEC-0000-0000.md"
+          # The published advisory is stored under gettext-rs but names gettext-sys.
+          # Correct it locally so cargo-audit can validate and scan the database.
+          if [[ -f "$advisory" ]]; then
+            sed -i 's/^package = "gettext-sys"$/package = "gettext-rs"/' "$advisory"
+          fi
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
-      - run: cargo audit --file relay-server/Cargo.lock
+      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
 
   container:
     needs: check
