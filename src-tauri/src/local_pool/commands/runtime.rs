@@ -28,6 +28,8 @@ use zenith_relay_core::{
 #[cfg(test)]
 use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 
+pub(in crate::local_pool) use zenith_relay_core::unix_time_ms as current_time_ms;
+
 pub(in crate::local_pool) async fn runtime_from_store(
     state: &DesktopState,
 ) -> Result<Arc<GatewayRuntime>> {
@@ -218,10 +220,6 @@ fn timestamp_ms(value: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
-}
-
-pub(in crate::local_pool) fn current_time_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
 fn account_credential_error(

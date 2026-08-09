@@ -10,6 +10,7 @@ use uuid::Uuid;
 use zenith_relay_core::{
     automations::{AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask, WakeTrigger},
     quota::QuotaWindowKind,
+    unix_time_ms as current_time_ms,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -297,10 +298,6 @@ fn trim_model_policy(policy: WakeModelPolicy) -> WakeModelPolicy {
         WakeModelPolicy::Explicit(model) => WakeModelPolicy::Explicit(model.trim().to_string()),
         WakeModelPolicy::LightestSupported => WakeModelPolicy::LightestSupported,
     }
-}
-
-fn current_time_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
 fn enabled_by_default() -> bool {

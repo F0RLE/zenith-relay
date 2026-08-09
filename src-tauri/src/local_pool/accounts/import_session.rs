@@ -4,13 +4,13 @@ use std::{
     fmt, fs,
     io::Write,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 use zenith_relay_core::accounts::{
     parse_import, ImportError, ImportErrorCode, ImportPreview, ParsedImport, ParsedImportItem,
     MAX_IMPORT_ITEMS,
 };
+use zenith_relay_core::unix_time_ms;
 
 const SNAPSHOT_VERSION: u32 = 1;
 const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
@@ -904,11 +904,7 @@ fn validate_session_id(session_id: &str) -> Result<String, ImportSessionError> {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(1)
-        .max(1)
+    unix_time_ms().max(1)
 }
 
 #[cfg(test)]

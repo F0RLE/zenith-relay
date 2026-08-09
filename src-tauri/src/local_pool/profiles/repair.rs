@@ -11,8 +11,9 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
+use zenith_relay_core::unix_time_ms as now_ms;
 
 const SNAPSHOT_VERSION: u32 = 1;
 const PREVIEW_TTL_MS: u64 = 30 * 60 * 1_000;
@@ -1027,13 +1028,6 @@ fn path_string(path: &Path) -> String {
 
 fn hex_hash(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 fn db_error(error: rusqlite::Error) -> String {

@@ -43,7 +43,7 @@ use build::{
 };
 
 #[cfg(test)]
-use crate::{normalize_source_protocol_bindings, CandidateKind};
+use crate::{normalize_source_protocol_bindings, unix_time_ms as current_time_ms, CandidateKind};
 pub use images::normalize_image_base_model;
 #[cfg(test)]
 use images::{cheapest_image_main_model, select_image_main_model};
@@ -1912,15 +1912,6 @@ fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'
         .get(..prefix.len())
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
         .then(|| &value[prefix.len()..])
-}
-
-#[cfg(test)]
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ use zenith_relay_core::{
     },
     providers::chatgpt::CodexQuotaClient,
     quota::QuotaAdapterCapabilities,
+    unix_time_ms as current_time_ms,
 };
 
 const QUOTA_BATCH_SIZE: usize = 5;
@@ -507,10 +508,6 @@ fn due_wait(next_due_at_ms: Option<u64>, now_ms: u64) -> DueWait {
         Some(due_at_ms) if due_at_ms <= now_ms => DueWait::Ready,
         Some(due_at_ms) => DueWait::Sleep(Duration::from_millis(due_at_ms - now_ms)),
     }
-}
-
-fn current_time_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
 #[cfg(test)]

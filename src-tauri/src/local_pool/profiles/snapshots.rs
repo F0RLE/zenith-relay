@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
+use zenith_relay_core::unix_time_ms as now_ms;
 
 const SNAPSHOT_VERSION: u32 = 1;
 const PAYLOAD_VERSION: u32 = 1;
@@ -412,15 +412,6 @@ fn read_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
         ));
     }
     fs::read(path).map_err(io_error)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> LocalPoolError {

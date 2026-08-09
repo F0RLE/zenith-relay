@@ -26,6 +26,8 @@ use zenith_relay_core::{
     accounts::TokenAuthority, automations::WakeCoordinator, quota::QuotaRefreshQueue,
 };
 
+pub(super) use zenith_relay_core::unix_time_ms as now_ms;
+
 #[cfg(test)]
 use zenith_relay_core::DefaultServiceTier;
 
@@ -196,10 +198,6 @@ impl DesktopState {
 
 fn invalid_core_state(error: impl std::fmt::Display) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::InvalidState, error.to_string())
-}
-
-pub(super) fn now_ms() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or_default()
 }
 
 #[cfg(test)]

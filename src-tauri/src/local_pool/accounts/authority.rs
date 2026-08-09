@@ -12,7 +12,6 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
@@ -21,6 +20,7 @@ use zenith_relay_core::accounts::{
     TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
 };
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
+use zenith_relay_core::unix_time_ms as now_ms;
 
 const MAX_LOCK_BYTES: u64 = 4 * 1024;
 
@@ -488,13 +488,6 @@ fn lock_refresh_failure(error: ProcessLockError) -> TokenRefreshFailure {
         ProcessLockError::Io | ProcessLockError::UnsafePath => "refresh_lock_unavailable",
     };
     TokenRefreshFailure::new(TokenRefreshFailureKind::Transient, code)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
