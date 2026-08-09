@@ -1354,6 +1354,26 @@ mod tests {
     }
 
     #[test]
+    fn limit_reached_does_not_complete_a_window_when_another_window_is_unknown() {
+        let mut state = QuotaEconomicsState::default();
+        configure_account(&mut state, "plus", "test-revision");
+        state.observe_quota(&two_window_snapshot(10_000, 10_000, 1_000));
+        state.observe_usage(
+            usage(4_000_000, 10, 100_000, DefaultServiceTier::Standard),
+            None,
+        );
+        let mut uncertain = two_window_snapshot(350, 10_000, 2_000);
+        uncertain.primary.as_mut().unwrap().available_basis_points = None;
+        uncertain.limit_reached = true;
+        state.observe_quota(&uncertain);
+
+        assert!(state.primary.cycles.is_empty());
+        assert!(state.secondary.cycles.is_empty());
+        assert!(state.primary.active_cycle.is_some());
+        assert!(state.secondary.active_cycle.is_some());
+    }
+
+    #[test]
     fn reset_before_exhaustion_records_a_censored_cycle() {
         let mut state = QuotaEconomicsState::default();
         configure_account(&mut state, "plus", "test-revision");

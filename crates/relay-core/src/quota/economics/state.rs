@@ -82,12 +82,19 @@ impl QuotaEconomicsState {
             .chain(quota.secondary.iter())
             .filter_map(|window| window.available_basis_points)
             .min();
+        let all_windows_are_known = quota
+            .primary
+            .iter()
+            .chain(quota.secondary.iter())
+            .all(|window| window.available_basis_points.is_some());
         if let Some(window) = quota.primary.as_ref() {
             self.primary.observe_quota(
                 window,
                 &context,
                 source,
-                quota.limit_reached && window.available_basis_points == limiting_available,
+                quota.limit_reached
+                    && all_windows_are_known
+                    && window.available_basis_points == limiting_available,
             );
         }
         if let Some(window) = quota.secondary.as_ref() {
@@ -95,7 +102,9 @@ impl QuotaEconomicsState {
                 window,
                 &context,
                 source,
-                quota.limit_reached && window.available_basis_points == limiting_available,
+                quota.limit_reached
+                    && all_windows_are_known
+                    && window.available_basis_points == limiting_available,
             );
         }
     }

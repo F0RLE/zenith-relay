@@ -60,12 +60,14 @@ impl TokenPersistenceAdapter for ServerTokenPersistence {
         auth_state: AccountAuthState,
     ) -> BoxFuture<'a, Result<(), TokenPersistenceFailure>> {
         Box::pin(async move {
-            let mut record = find_account(&self.state, account_id).map_err(persistence_error)?;
-            record.auth_state = auth_state;
             self.state
                 .store
-                .save_account(&record)
-                .map_err(persistence_error)
+                .update_account(account_id, |record| {
+                    record.auth_state = auth_state;
+                    Ok(())
+                })
+                .map_err(persistence_error)?
+                .ok_or_else(|| TokenPersistenceFailure::new("account_missing"))
         })
     }
 

@@ -135,97 +135,95 @@ fn persist_usage_batch(
                 .push(queued);
         }
     }
-    let mut updated_accounts = Vec::with_capacity(account_events.len());
     let mut natural_uses = Vec::new();
     for (account_id, events) in account_events {
-        let Ok(Some(mut account)) = state.store.account(&account_id) else {
-            state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
-            continue;
-        };
-        let credential = state
-            .vault
-            .load(&account.secret_ref)
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
-        let access_state = credential
-            .as_ref()
-            .map_or(AccountAccessState::Failed, |value| {
+        let natural_use_at_ms = match state.store.update_account(&account_id, |account| {
+            let credential = state
+                .vault
+                .load(&account.secret_ref)
+                .ok()
+                .flatten()
+                .and_then(|value| serde_json::from_str::<AccountCredential>(&value).ok());
+            let access_state = credential
+                .as_ref()
+                .map_or(AccountAccessState::Failed, |value| {
+                    if value.refresh_token.is_some() {
+                        AccountAccessState::Refreshable
+                    } else {
+                        AccountAccessState::AccessOnly
+                    }
+                });
+            let successful_auth_state = credential.as_ref().map(|value| {
                 if value.refresh_token.is_some() {
-                    AccountAccessState::Refreshable
+                    AccountAuthState::Active
                 } else {
-                    AccountAccessState::AccessOnly
+                    AccountAuthState::DegradedAccessOnly
                 }
             });
-        let successful_auth_state = credential.as_ref().map(|value| {
-            if value.refresh_token.is_some() {
-                AccountAuthState::Active
-            } else {
-                AccountAuthState::DegradedAccessOnly
-            }
-        });
-        let mut natural_use_at_ms = None;
-        for queued in events {
-            let event = &queued.event;
-            account
-                .economics
-                .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
-            account
-                .economics
-                .set_value_revision(quota_valuation_revision());
-            account.economics.observe_event_at(
-                event,
-                quota_reference_value(event),
-                queued.observed_at_ms,
-            );
-            if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
-                snapshot.updated_at_ms.unwrap_or_default()
-                    >= account.quota.updated_at_ms.unwrap_or_default()
-            }) {
-                account.quota = snapshot.clone();
-            }
-            let update = reduce_account_usage(
-                AccountUsageState {
-                    auth_state: account.auth_state,
-                    health: account.health,
-                    last_error_code: account.last_error_code.clone(),
-                    last_used_at_ms: account.last_used_at_ms,
-                },
-                AccountUsageObservation {
-                    success: event.success,
-                    http_status: event.http_status,
-                    error_category: event.error_category.as_deref(),
-                    affects_account: event.affects_account_state(),
-                },
-                queued.observed_at_ms,
-                (event.http_status == 401).then_some(access_state),
+            let mut natural_use_at_ms = None;
+            for queued in &events {
+                let event = &queued.event;
+                account
+                    .economics
+                    .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
+                account
+                    .economics
+                    .set_value_revision(quota_valuation_revision());
+                account.economics.observe_event_at(
+                    event,
+                    quota_reference_value(event),
+                    queued.observed_at_ms,
+                );
+                if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
+                    snapshot.updated_at_ms.unwrap_or_default()
+                        >= account.quota.updated_at_ms.unwrap_or_default()
+                }) {
+                    account.quota = snapshot.clone();
+                }
+                let update = reduce_account_usage(
+                    AccountUsageState {
+                        auth_state: account.auth_state,
+                        health: account.health,
+                        last_error_code: account.last_error_code.clone(),
+                        last_used_at_ms: account.last_used_at_ms,
+                    },
+                    AccountUsageObservation {
+                        success: event.success,
+                        http_status: event.http_status,
+                        error_category: event.error_category.as_deref(),
+                        affects_account: event.affects_account_state(),
+                    },
+                    queued.observed_at_ms,
+                    (event.http_status == 401).then_some(access_state),
+                    if event.success {
+                        successful_auth_state
+                    } else {
+                        None
+                    },
+                );
+                account.auth_state = update.state.auth_state;
+                account.health = update.state.health;
+                account.last_error_code = update.state.last_error_code;
+                account.last_used_at_ms = update.state.last_used_at_ms;
+                if update.reset_runtime_failures {
+                    account.cooldowns.clear();
+                    account.consecutive_failures = 0;
+                }
                 if event.success {
-                    successful_auth_state
-                } else {
-                    None
-                },
-            );
-            account.auth_state = update.state.auth_state;
-            account.health = update.state.health;
-            account.last_error_code = update.state.last_error_code;
-            account.last_used_at_ms = update.state.last_used_at_ms;
-            if update.reset_runtime_failures {
-                account.cooldowns.clear();
-                account.consecutive_failures = 0;
+                    natural_use_at_ms = Some(queued.observed_at_ms);
+                }
             }
-            if event.success {
-                natural_use_at_ms = Some(queued.observed_at_ms);
+            Ok(natural_use_at_ms)
+        }) {
+            Ok(Some(value)) => value,
+            _ => {
+                state.failed_usage_writes.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
-        }
-        updated_accounts.push(account);
+        };
         if let Some(observed_at_ms) = natural_use_at_ms {
             natural_uses.push((account_id, observed_at_ms));
         }
-    }
-    if !updated_accounts.is_empty() && state.store.save_accounts(&updated_accounts).is_err() {
-        state
-            .failed_usage_writes
-            .fetch_add(updated_accounts.len() as u64, Ordering::Relaxed);
     }
     mark_natural_use(state.clone(), natural_uses, runtime);
 }
