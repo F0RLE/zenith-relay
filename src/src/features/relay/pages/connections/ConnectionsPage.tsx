@@ -20,7 +20,12 @@ const CONNECTIONS_VIEW_REQUEST = "relay.connections.requestedView";
 export function ConnectionsPage({ onImport }: { onImport: () => void }) {
   const { t } = useTranslation();
   const { mode, runtime, busy, perform, refresh } = useRelayState();
-  const [view, setView] = useState<ConnectionView>(mode === "zenith" ? "sources" : "accounts");
+  const [view, setView] = useState<ConnectionView>(() => connectionInitialView(
+    mode,
+    mode === "zenith" ? "sources" : "accounts",
+    null,
+    runtime?.capabilities.features ?? [],
+  ));
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [query, setQuery] = useState("");
   const [editingSource, setEditingSource] = useState<SourceSummary | null>(null);
