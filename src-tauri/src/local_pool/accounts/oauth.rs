@@ -11,7 +11,8 @@ use std::pin::Pin;
 use std::time::Duration;
 use url::Url;
 use zenith_relay_core::accounts::{
-    TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind,
+    decode_unverified_jwt_payload, TokenRefresh, TokenRefreshAdapter, TokenRefreshFailure,
+    TokenRefreshFailureKind,
 };
 use zenith_relay_core::providers::chatgpt::{
     token_refresh_failure_kind, token_refresh_provider_error_code,
@@ -27,8 +28,6 @@ pub(super) const CODEX_OAUTH_CALLBACK_PORTS: [u16; 2] = [1455, 1457];
 
 const CALLBACK_PATH: &str = "/auth/callback";
 const MAX_CALLBACK_URL_BYTES: usize = 8 * 1024;
-const MAX_JWT_BYTES: usize = 64 * 1024;
-const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 const MAX_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
 const PENDING_TTL_MS: u64 = 15 * 60 * 1_000;
@@ -653,25 +652,8 @@ fn jwt_expiration_ms(jwt: &str) -> Result<Option<u64>, OAuthError> {
 }
 
 fn decode_jwt_payload<T: for<'de> Deserialize<'de>>(jwt: &str) -> Result<T, OAuthError> {
-    if jwt.is_empty() || jwt.len() > MAX_JWT_BYTES {
-        return Err(OAuthError::new(OAuthErrorCode::InvalidJwt, false));
-    }
-    let mut parts = jwt.split('.');
-    let (Some(header), Some(payload), Some(signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(OAuthError::new(OAuthErrorCode::InvalidJwt, false));
-    };
-    if header.is_empty() || payload.is_empty() || signature.is_empty() {
-        return Err(OAuthError::new(OAuthErrorCode::InvalidJwt, false));
-    }
-    let decoded = URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| OAuthError::new(OAuthErrorCode::InvalidJwt, false))?;
-    if decoded.len() > MAX_JWT_PAYLOAD_BYTES {
-        return Err(OAuthError::new(OAuthErrorCode::InvalidJwt, false));
-    }
-    serde_json::from_slice(&decoded).map_err(|_| OAuthError::new(OAuthErrorCode::InvalidJwt, false))
+    decode_unverified_jwt_payload(jwt)
+        .ok_or_else(|| OAuthError::new(OAuthErrorCode::InvalidJwt, false))
 }
 
 fn validate_token(token: &str) -> Result<(), OAuthError> {
@@ -904,7 +886,7 @@ mod tests {
 
     #[test]
     fn oversized_jwt_payload_is_rejected() {
-        let oversized = json!({ "padding": "x".repeat(MAX_JWT_PAYLOAD_BYTES + 1) });
+        let oversized = json!({ "padding": "x".repeat(16 * 1024 + 1) });
         let token = jwt(oversized);
         let error = parse_identity_claims(&token).unwrap_err();
         assert_eq!(error.code, OAuthErrorCode::InvalidJwt);

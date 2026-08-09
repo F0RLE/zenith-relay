@@ -1,8 +1,5 @@
 use super::sanitization::*;
 use super::*;
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-
-const MAX_JWT_PAYLOAD_BYTES: usize = 16 * 1024;
 
 pub(super) fn parse_item(
     value: &Value,
@@ -443,7 +440,9 @@ fn imported_jwt_metadata(
 ) -> ImportedJwtMetadata {
     let mut metadata = ImportedJwtMetadata::default();
     for token in [id_token, access_token].into_iter().flatten() {
-        let Some(claims) = decode_jwt_payload(token) else {
+        let Some(claims) =
+            crate::accounts::decode_unverified_jwt_payload::<Value>(token).filter(Value::is_object)
+        else {
             continue;
         };
         let auth = claims
@@ -482,27 +481,6 @@ fn imported_jwt_metadata(
             .or_else(|| safe_expiry(claims.get("exp")));
     }
     metadata
-}
-
-fn decode_jwt_payload(token: &str) -> Option<Value> {
-    if token.is_empty() || token.len() > MAX_RAW_TOKEN_BYTES {
-        return None;
-    }
-    let mut parts = token.split('.');
-    let (Some(header), Some(payload), Some(signature), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return None;
-    };
-    if header.is_empty() || payload.is_empty() || signature.is_empty() {
-        return None;
-    }
-    let payload = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    if payload.len() > MAX_JWT_PAYLOAD_BYTES {
-        return None;
-    }
-    let value: Value = serde_json::from_slice(&payload).ok()?;
-    value.is_object().then_some(value)
 }
 
 fn is_oauth_mode(value: &str) -> bool {

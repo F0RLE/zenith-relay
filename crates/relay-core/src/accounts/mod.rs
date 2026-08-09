@@ -1,5 +1,6 @@
 mod export;
 mod import;
+mod jwt;
 mod quota_state;
 mod record;
 mod token_authority;
@@ -15,6 +16,7 @@ pub use import::{
     ImportPreviewStatus, ImportQuotaStatus, ImportSecretMaterial, ImportWarning, ImportWarningCode,
     ParsedImport, ParsedImportItem, MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS, MAX_JSON_DEPTH,
 };
+pub use jwt::decode_unverified_jwt_payload;
 pub use quota_state::{reduce_account_quota, AccountQuotaOutcome, AccountQuotaUpdate};
 pub use record::{
     automatic_quota_monitoring_eligible, provider_account_failure, reduce_account_usage,
