@@ -1028,8 +1028,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       return {
         sessionId,
         results: itemIds.map((itemId, index) => input.importResult === "item_failure" && index === 0
-          ? { itemId, status: "failed", error: { code: input.importFailureCode ?? "provider_account_id_missing", message: "secret=synthetic-access-token provider=raw-provider-id" } }
-          : { itemId, status: "succeeded", account: { account: { id: `account_imported_${index + 1}` } } }),
+          ? { itemId, status: "failed", created: false, error: { code: input.importFailureCode ?? "provider_account_id_missing", message: "secret=synthetic-access-token provider=raw-provider-id" } }
+          : { itemId, status: "succeeded", created: itemId !== "import_fedcba9876543210", account: { account: { id: `account_imported_${index + 1}` } } }),
       };
     }
 

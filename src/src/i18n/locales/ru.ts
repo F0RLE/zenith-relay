@@ -1023,9 +1023,6 @@ const relayRu = {
     chatgpt: "ChatGPT",
     openai: "OpenAI",
     anthropic: "Claude",
-    google: "Google Gemini",
-    xai: "xAI Grok",
-    zhipu: "Zhipu GLM",
     other: "Другие",
   },
   models: {

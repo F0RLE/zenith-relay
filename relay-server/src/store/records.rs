@@ -71,9 +71,10 @@ impl Store {
         self.save_record("accounts", &record.id, &record.secret_ref, record)
     }
 
-    pub fn save_account_and_report_created(
+    pub fn save_account_and_consume_pending_import(
         &self,
         record: &ServerAccountRecord,
+        pending_import_id: &str,
     ) -> Result<bool, String> {
         let data_json = to_json(record)?;
         let mut connection = self.lock()?;
@@ -95,6 +96,16 @@ impl Store {
                 params![record.id, data_json, record.secret_ref],
             )
             .map_err(db_error)?;
+        if transaction
+            .execute(
+                "DELETE FROM pending_imports WHERE id = ?1",
+                [pending_import_id],
+            )
+            .map_err(db_error)?
+            != 1
+        {
+            return Err("pending import no longer exists".to_string());
+        }
         transaction.commit().map_err(db_error)?;
         Ok(!existed)
     }
@@ -307,7 +318,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::test_support::test_root;
+    use crate::store::{test_support::test_root, PendingImport};
     use std::fs;
     use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
 
@@ -361,6 +372,35 @@ mod tests {
         let stored = store.account("account_1").unwrap().unwrap();
         assert_eq!(stored.proxy_id.as_deref(), Some("proxy_1"));
         assert_eq!(stored.last_used_at_ms, Some(2));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_import_commit_consumes_its_pending_record_atomically() {
+        let root = test_root("account-import-commit");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        let pending = PendingImport {
+            id: "import_pending".into(),
+            preview_json: "{}".into(),
+            secret_ref: "account:pending".into(),
+            created_at_ms: 1,
+        };
+        store.save_pending_import(&pending).unwrap();
+
+        assert!(store
+            .save_account_and_consume_pending_import(&account(), &pending.id)
+            .unwrap());
+        assert!(store.account("account_1").unwrap().is_some());
+        assert!(store.pending_import(&pending.id).unwrap().is_none());
+
+        let mut missing = account();
+        missing.id = "account_missing".into();
+        assert!(store
+            .save_account_and_consume_pending_import(&missing, "import_missing")
+            .is_err());
+        assert!(store.account(&missing.id).unwrap().is_none());
+
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }

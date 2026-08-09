@@ -607,7 +607,7 @@ pub struct BatchImportConfirmResponse {
 }
 
 struct ConfirmedAccountImport {
-    account: AccountSummary,
+    account: ServerAccountRecord,
     created: bool,
 }
 
@@ -656,11 +656,11 @@ pub async fn confirm_account_batch_import(
         )
         .await
         {
-            Ok(confirmed) => BatchImportResult {
+            Ok(ConfirmedAccountImport { account, created }) => BatchImportResult {
                 item_id,
                 status: "succeeded".to_string(),
-                account_id: Some(confirmed.account.id),
-                created: confirmed.created,
+                account_id: Some(account.id),
+                created,
                 error: None,
             },
             Err(error) => BatchImportResult {
@@ -704,7 +704,7 @@ pub async fn confirm_account_import(
         input.probe_metadata,
     )
     .await
-    .map(|confirmed| Json(confirmed.account))
+    .and_then(|confirmed| account_summary(&state, &confirmed.account).map(Json))
 }
 
 async fn confirm_one_account_import(
@@ -825,7 +825,7 @@ async fn confirm_one_account_import(
     };
     let created = state
         .store
-        .save_account_and_report_created(&record)
+        .save_account_and_consume_pending_import(&record, session_id)
         .map_err(store_error)?;
     if probe_metadata {
         match jobs::refresh_account_now(state, record.clone()).await {
@@ -841,16 +841,15 @@ async fn confirm_one_account_import(
         record.last_error_code = Some("runtime_rebuild_failed".to_string());
         let _ = state.store.save_account(&record);
     }
-    state
-        .store
-        .delete_pending_import(session_id)
-        .map_err(store_error)?;
     if let Some(previous) = existing {
         if previous.secret_ref != record.secret_ref {
             let _ = state.vault.delete(&previous.secret_ref);
         }
     }
-    account_summary(state, &record).map(|account| ConfirmedAccountImport { account, created })
+    Ok(ConfirmedAccountImport {
+        account: record,
+        created,
+    })
 }
 
 fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {

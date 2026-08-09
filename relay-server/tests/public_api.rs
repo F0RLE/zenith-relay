@@ -2725,7 +2725,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
 
     let existing_preview: Value = client
         .post(format!("{}/accounts/import/batch/preview", server.origin))
-        .bearer_auth("synthetic-management-token-value")
+        .bearer_auth(&server.state.config.management_token)
         .json(&json!({"content": content}))
         .send()
         .await
@@ -2736,7 +2736,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
     assert_eq!(existing_preview["preview"]["rows"][0]["existing"], true);
     let existing_confirm: Value = client
         .post(format!("{}/accounts/import/batch/confirm", server.origin))
-        .bearer_auth("synthetic-management-token-value")
+        .bearer_auth(&server.state.config.management_token)
         .json(&json!({
             "sessionId": existing_preview["sessionId"],
             "selectedItemIds": [existing_preview["preview"]["rows"][0]["itemId"]],
