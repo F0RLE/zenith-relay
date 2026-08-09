@@ -1,5 +1,6 @@
 mod agent_identity;
 mod codex_identity;
+mod models;
 mod passive_quota;
 mod quota_subscription;
 mod quota_usage;
@@ -11,6 +12,9 @@ pub use agent_identity::{
 };
 pub use codex_identity::{
     valid_codex_client_version, CodexIdentityEnvelope, CODEX_CLIENT_VERSION, CODEX_ORIGINATOR,
+};
+pub use models::{
+    CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode, CODEX_MODELS_ENDPOINT,
 };
 pub use passive_quota::merge_codex_quota_headers;
 pub use quota_subscription::{

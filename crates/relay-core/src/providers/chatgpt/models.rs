@@ -1,27 +1,19 @@
-use super::oauth::{collect_limited, LimitedBodyError};
-use reqwest::header::{HeaderValue, AUTHORIZATION};
-use reqwest::redirect::Policy;
-use serde::Deserialize;
-use std::collections::HashSet;
-use std::fmt;
-use std::time::Duration;
-use url::Url;
-use zenith_relay_core::{
-    providers::chatgpt::{is_agent_identity_task_invalid_response, CodexIdentityEnvelope},
-    ProxyConfig,
+use super::{
+    is_agent_identity_task_invalid_response, valid_codex_client_version, CodexIdentityEnvelope,
 };
+use crate::{transport::collect_limited, Error, ProxyConfig};
+use reqwest::{
+    header::{HeaderValue, AUTHORIZATION},
+    redirect::Policy,
+};
+use serde::Deserialize;
+use std::{collections::HashSet, fmt, time::Duration};
+use url::Url;
 
 pub const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
-#[cfg(test)]
-const ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
-#[cfg(test)]
-const ORIGINATOR_HEADER: &str = "originator";
-#[cfg(test)]
-const CODEX_ORIGINATOR: &str = zenith_relay_core::providers::chatgpt::CODEX_ORIGINATOR;
 const MAX_ACCESS_TOKEN_BYTES: usize = 64 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 512;
-const MAX_CLIENT_VERSION_BYTES: usize = 64;
 const MAX_MODEL_SLUG_BYTES: usize = 256;
 const MAX_MODELS: usize = 4_096;
 const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
@@ -34,25 +26,49 @@ pub struct CodexModelsClient {
 
 impl CodexModelsClient {
     pub fn new_with_proxy(proxy: Option<&ProxyConfig>) -> Result<Self, ModelDiscoveryFailure> {
+        Self::new_with_proxy_and_timeout_and_user_agent(
+            proxy,
+            Duration::from_secs(10),
+            "Zenith Relay",
+        )
+    }
+
+    pub fn new_with_proxy_and_timeout_and_user_agent(
+        proxy: Option<&ProxyConfig>,
+        request_timeout: Duration,
+        user_agent: &'static str,
+    ) -> Result<Self, ModelDiscoveryFailure> {
         let endpoint = Url::parse(CODEX_MODELS_ENDPOINT)
             .map_err(|_| ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::InvalidEndpoint))?;
-        Self::with_endpoint_and_proxy(endpoint, proxy)
+        Self::with_endpoint_proxy_timeout_and_user_agent(
+            endpoint,
+            proxy,
+            request_timeout,
+            user_agent,
+        )
     }
 
     #[cfg(test)]
     pub fn with_endpoint(endpoint: Url) -> Result<Self, ModelDiscoveryFailure> {
-        Self::with_endpoint_and_proxy(endpoint, None)
+        Self::with_endpoint_proxy_timeout_and_user_agent(
+            endpoint,
+            None,
+            Duration::from_secs(10),
+            "Zenith Relay",
+        )
     }
 
-    fn with_endpoint_and_proxy(
+    fn with_endpoint_proxy_timeout_and_user_agent(
         endpoint: Url,
         proxy: Option<&ProxyConfig>,
+        request_timeout: Duration,
+        user_agent: &'static str,
     ) -> Result<Self, ModelDiscoveryFailure> {
         validate_endpoint(&endpoint)?;
         let builder = reqwest::Client::builder()
             .redirect(Policy::none())
-            .timeout(Duration::from_secs(10))
-            .user_agent("Zenith Relay");
+            .timeout(request_timeout)
+            .user_agent(user_agent);
         let http = match proxy {
             Some(proxy) => proxy.apply(builder),
             None => builder,
@@ -105,12 +121,10 @@ impl CodexModelsClient {
         let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES)
             .await
             .map_err(|error| match error {
-                LimitedBodyError::Transport => {
-                    ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport)
-                }
-                LimitedBodyError::TooLarge => {
+                Error::UpstreamBodyTooLarge => {
                     ModelDiscoveryFailure::new(ModelDiscoveryFailureCode::ResponseTooLarge)
                 }
+                _ => ModelDiscoveryFailure::retryable(ModelDiscoveryFailureCode::Transport),
             })?;
         if !status.is_success() {
             let (code, retryable) =
@@ -297,17 +311,12 @@ fn validate_account_id(account_id: &str) -> Result<(), ModelDiscoveryFailure> {
 }
 
 fn validate_client_version(client_version: &str) -> Result<(), ModelDiscoveryFailure> {
-    if client_version.is_empty()
-        || client_version.len() > MAX_CLIENT_VERSION_BYTES
-        || !client_version
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
-    {
+    if valid_codex_client_version(client_version) {
+        Ok(())
+    } else {
         Err(ModelDiscoveryFailure::new(
             ModelDiscoveryFailureCode::InvalidClientVersion,
         ))
-    } else {
-        Ok(())
     }
 }
 
@@ -329,7 +338,7 @@ mod tests {
             .discover(
                 "access-secret",
                 "account-123",
-                zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+                super::super::CODEX_MODELS_CLIENT_VERSION,
             )
             .await
             .unwrap();
@@ -367,7 +376,7 @@ mod tests {
                 .discover(
                     "access-secret",
                     "account-123",
-                    zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION,
+                    super::super::CODEX_MODELS_CLIENT_VERSION,
                 )
                 .await
                 .unwrap_err();
@@ -396,24 +405,24 @@ mod tests {
         );
         assert_eq!(
             headers
-                .get(ACCOUNT_ID_HEADER)
+                .get("chatgpt-account-id")
                 .and_then(|value| value.to_str().ok()),
             Some("account-123")
         );
         assert_eq!(
             headers
-                .get(ORIGINATOR_HEADER)
+                .get("originator")
                 .and_then(|value| value.to_str().ok()),
-            Some(CODEX_ORIGINATOR)
+            Some(super::super::CODEX_ORIGINATOR)
         );
         let expected_query = format!(
             "client_version={}",
-            zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION
+            super::super::CODEX_MODELS_CLIENT_VERSION
         );
         assert_eq!(uri.query(), Some(expected_query.as_str()));
         assert_eq!(
             headers.get("version").and_then(|value| value.to_str().ok()),
-            Some(zenith_relay_core::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION)
+            Some(super::super::CODEX_MODELS_CLIENT_VERSION)
         );
         Json(json!({
             "models": [

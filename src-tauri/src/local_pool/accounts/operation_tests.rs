@@ -3,7 +3,6 @@ use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCrede
 use crate::local_pool::accounts::import_session::{
     ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
 };
-use crate::local_pool::accounts::models::{ModelDiscoveryFailure, ModelDiscoveryFailureCode};
 use crate::local_pool::accounts::{records, NativeSecretBackend};
 use crate::local_pool::commands::current_time_ms;
 use crate::local_pool::error::{ErrorCode, LocalPoolError};
@@ -29,7 +28,10 @@ use zenith_relay_core::automations::{
     AccountSelector, WakeExecutionPolicy, WakeModelPolicy, WakeTask, WakeTrigger,
 };
 use zenith_relay_core::protocol::RemoteAccountLocation;
-use zenith_relay_core::providers::chatgpt::{CodexSubscriptionMetadata, QuotaRefreshOutcome};
+use zenith_relay_core::providers::chatgpt::{
+    CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
+    QuotaRefreshOutcome,
+};
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindow, QuotaWindowKind, Subscription};
 use zenith_relay_core::{ProviderSource, WireApi};
 

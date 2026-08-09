@@ -4,9 +4,6 @@ use super::import_orchestrator::{
 };
 use crate::local_pool::accounts::authority::{CredentialPersistence, StoredRefreshAdapter};
 use crate::local_pool::accounts::credentials::{CredentialStore, StoredCodexCredentials};
-use crate::local_pool::accounts::models::{
-    CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-};
 use crate::local_pool::accounts::oauth::CodexOAuthClient;
 use crate::local_pool::accounts::proxy::effective_proxy_config;
 use crate::local_pool::accounts::quota_service::apply_quota_failure;
@@ -27,7 +24,8 @@ use tauri::State;
 use zenith_relay_core::accounts::{AccountAuthState, TokenPersistenceAdapter, TokenSet};
 use zenith_relay_core::providers::chatgpt::{
     is_agent_identity_task_invalid_failure, merge_subscription_metadata, subscription_refresh_due,
-    AgentIdentityCredential, CodexQuotaClient, CodexSubscriptionClient, CodexSubscriptionMetadata,
+    AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, CodexSubscriptionClient,
+    CodexSubscriptionMetadata, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
     QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaTransition, Subscription};

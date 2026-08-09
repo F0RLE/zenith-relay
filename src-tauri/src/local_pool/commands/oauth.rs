@@ -5,7 +5,6 @@ use crate::local_pool::{
             CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
         },
         import_session::SecretBackend,
-        models::{CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode},
         oauth::{
             CodexOAuthClient, OAuthError, OAuthTokenSet, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_SCOPE,
         },
@@ -32,8 +31,10 @@ use url::Url;
 use uuid::Uuid;
 use zenith_relay_core::{
     accounts::{AccountAuthMode, AccountAuthState, AccountHealthState},
-    providers::chatgpt::AgentIdentityCredential,
-    providers::chatgpt::CodexQuotaClient,
+    providers::chatgpt::{
+        AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
+        ModelDiscoveryFailureCode,
+    },
     quota::QuotaRefreshFailure,
     ProxyConfig,
 };

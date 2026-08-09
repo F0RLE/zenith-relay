@@ -13,9 +13,6 @@ use crate::local_pool::accounts::credentials::{
 use crate::local_pool::accounts::import_session::{
     ImportSession, ImportSessionError, ImportSessionErrorCode, ImportSessionStore,
 };
-use crate::local_pool::accounts::models::{
-    CodexModelsClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
-};
 use crate::local_pool::accounts::oauth::{collect_limited, CodexOAuthClient, LimitedBodyError};
 use crate::local_pool::accounts::proxy::{
     common_proxy_config, effective_proxy_config, ensure_account_proxy,
@@ -50,7 +47,8 @@ use zenith_relay_core::accounts::{
 };
 use zenith_relay_core::accounts::{AccountAuthMode, AccountAuthState, AccountHealthState};
 use zenith_relay_core::providers::chatgpt::{
-    AgentIdentityCredential, CodexQuotaClient, QuotaRefreshOutcome,
+    AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
+    ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::{
@@ -2430,9 +2428,7 @@ pub(super) fn proxy_item_error(error: LocalPoolError) -> ImportItemError {
     ImportItemError::new("proxy_unavailable", &error.message)
 }
 
-pub(super) fn model_item_error(
-    error: crate::local_pool::accounts::models::ModelDiscoveryFailure,
-) -> ImportItemError {
+pub(super) fn model_item_error(error: ModelDiscoveryFailure) -> ImportItemError {
     ImportItemError::new(model_failure_code(&error), &error.to_string())
 }
 

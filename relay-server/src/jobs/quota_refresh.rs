@@ -2,29 +2,20 @@ use crate::{
     app::{account_proxy_config, prepare_server_account_authorization},
     state::{now_ms, AccountCredential, AppState, ServerAccountRecord},
 };
-use futures_util::StreamExt;
-use reqwest::{
-    header::{HeaderValue, AUTHORIZATION},
-    redirect::Policy,
-};
-use serde::Deserialize;
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use reqwest::header::HeaderValue;
+use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use zenith_relay_core::{
     accounts::{reduce_account_quota, AccountAuthState, AccountHealthState, AccountQuotaOutcome},
     providers::chatgpt::{
-        is_agent_identity_task_invalid_failure, subscription_refresh_due, CodexIdentityEnvelope,
-        CodexQuotaClient, CODEX_MODELS_CLIENT_VERSION,
+        is_agent_identity_task_invalid_failure, subscription_refresh_due, CodexModelsClient,
+        CodexQuotaClient, ModelDiscoveryFailure, ModelDiscoveryFailureCode,
+        CODEX_MODELS_CLIENT_VERSION,
     },
     quota::{QuotaRefreshFailure, QuotaRefreshResult, QuotaTransition},
 };
 
 const IDLE_QUOTA_REFRESH_SECONDS: u64 = 15 * 60;
-
-const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
-const MAX_MODELS_RESPONSE_BYTES: usize = 512 * 1024;
-const MAX_MODELS: usize = 4_096;
-const MAX_MODEL_SLUG_BYTES: usize = 256;
 
 pub fn start(state: Arc<AppState>, mut shutdown: watch::Receiver<bool>) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -285,34 +276,36 @@ async fn discover_account_models(
         .ok_or_else(|| ("models_secret_missing".to_string(), false))?;
     let credential: AccountCredential =
         serde_json::from_str(&secret).map_err(|_| ("models_secret_invalid".to_string(), false))?;
-    let (credential, authorization) =
+    let (mut credential, mut authorization) =
         prepare_server_account_authorization(state, account, credential, None)
             .await
             .map_err(|_| ("models_authorization_prepare".to_string(), true))?;
-    let identity =
-        CodexIdentityEnvelope::new(&credential.chatgpt_account_id, CODEX_MODELS_CLIENT_VERSION)
-            .map_err(|_| ("models_invalid_account_id".to_string(), false))?;
     let proxy = account_proxy_config(state, account, &credential)
         .map_err(|_| ("models_proxy_unavailable".to_string(), false))?;
-    let builder = reqwest::Client::builder()
-        .redirect(Policy::none())
-        .timeout(Duration::from_secs(20))
-        .user_agent("Zenith Relay Server");
-    let client = match proxy.as_ref() {
-        Some(proxy) => proxy.apply(builder),
-        None => builder,
-    }
-    .build()
+    let client = CodexModelsClient::new_with_proxy_and_timeout_and_user_agent(
+        proxy.as_ref(),
+        Duration::from_secs(20),
+        "Zenith Relay Server",
+    )
     .map_err(|_| ("models_client_init".to_string(), false))?;
-    let (mut status, mut body) = request_models(&client, &identity, authorization).await?;
+    let mut result = client
+        .discover_authorized(
+            authorization,
+            &credential.chatgpt_account_id,
+            CODEX_MODELS_CLIENT_VERSION,
+        )
+        .await;
     if credential.is_agent_identity()
-        && zenith_relay_core::providers::chatgpt::is_agent_identity_task_invalid_response(
-            status.as_u16(),
-            &body,
+        && matches!(
+            result.as_ref(),
+            Err(ModelDiscoveryFailure {
+                code: ModelDiscoveryFailureCode::AgentTaskInvalid,
+                ..
+            })
         )
     {
         let expected_task_id = credential.agent_task_id.clone().unwrap_or_default();
-        let prepared = prepare_server_account_authorization(
+        (credential, authorization) = prepare_server_account_authorization(
             state,
             account,
             credential,
@@ -320,39 +313,36 @@ async fn discover_account_models(
         )
         .await
         .map_err(|_| ("models_authorization_prepare".to_string(), true))?;
-        let authorization = prepared.1;
-        (status, body) = request_models(&client, &identity, authorization).await?;
+        result = client
+            .discover_authorized(
+                authorization,
+                &credential.chatgpt_account_id,
+                CODEX_MODELS_CLIENT_VERSION,
+            )
+            .await;
     }
-    if !status.is_success() {
-        return Err(match status.as_u16() {
-            401 => ("models_unauthorized".to_string(), false),
-            403 => ("models_forbidden".to_string(), false),
-            429 => ("models_rate_limited".to_string(), true),
-            _ if status.is_server_error() => ("models_upstream".to_string(), true),
-            _ => ("models_http_status".to_string(), false),
-        });
-    }
-    parse_models(&body).map_err(|code| (code, false))
+    result.map_err(model_discovery_error)
 }
 
-async fn request_models(
-    client: &reqwest::Client,
-    identity: &CodexIdentityEnvelope,
-    authorization: HeaderValue,
-) -> Result<(reqwest::StatusCode, Vec<u8>), (String, bool)> {
-    let response = identity
-        .apply(
-            client
-                .get(CODEX_MODELS_ENDPOINT)
-                .query(&[("client_version", CODEX_MODELS_CLIENT_VERSION)])
-                .header(AUTHORIZATION, authorization),
-        )
-        .send()
-        .await
-        .map_err(|_| ("models_transport".to_string(), true))?;
-    let status = response.status();
-    let body = collect_limited(response, MAX_MODELS_RESPONSE_BYTES).await?;
-    Ok((status, body))
+fn model_discovery_error(error: ModelDiscoveryFailure) -> (String, bool) {
+    let code = match error.code {
+        // The server retries agent task registration once. A second failed
+        // attempt used to be handled as its 401 response category.
+        ModelDiscoveryFailureCode::AgentTaskInvalid => "models_unauthorized",
+        ModelDiscoveryFailureCode::Forbidden => "models_forbidden",
+        ModelDiscoveryFailureCode::HttpStatus => "models_http_status",
+        ModelDiscoveryFailureCode::InvalidAccessToken => "models_invalid_access_token",
+        ModelDiscoveryFailureCode::InvalidAccountId => "models_invalid_account_id",
+        ModelDiscoveryFailureCode::InvalidClientVersion => "models_invalid_client_version",
+        ModelDiscoveryFailureCode::InvalidEndpoint => "models_client_init",
+        ModelDiscoveryFailureCode::InvalidResponse => "models_invalid_response",
+        ModelDiscoveryFailureCode::RateLimited => "models_rate_limited",
+        ModelDiscoveryFailureCode::ResponseTooLarge => "models_response_too_large",
+        ModelDiscoveryFailureCode::Transport => "models_transport",
+        ModelDiscoveryFailureCode::Unauthorized => "models_unauthorized",
+        ModelDiscoveryFailureCode::Upstream => "models_upstream",
+    };
+    (code.to_string(), error.retryable)
 }
 
 fn bearer_authorization(access_token: &str) -> Result<HeaderValue, ()> {
@@ -360,67 +350,6 @@ fn bearer_authorization(access_token: &str) -> Result<HeaderValue, ()> {
         HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|_| ())?;
     authorization.set_sensitive(true);
     Ok(authorization)
-}
-
-async fn collect_limited(
-    response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, (String, bool)> {
-    let mut body = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| ("models_transport".to_string(), true))?;
-        if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(("models_response_too_large".to_string(), false));
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-#[derive(Deserialize)]
-struct ModelsPayload {
-    models: Vec<ModelPayload>,
-}
-
-#[derive(Deserialize)]
-struct ModelPayload {
-    slug: String,
-    #[serde(default)]
-    supported_in_api: Option<bool>,
-    #[serde(default)]
-    visibility: Option<String>,
-    #[serde(default)]
-    upgrade: Option<serde_json::Value>,
-}
-
-fn parse_models(body: &[u8]) -> Result<Vec<String>, String> {
-    let response: ModelsPayload =
-        serde_json::from_slice(body).map_err(|_| "models_invalid_response".to_string())?;
-    if response.models.len() > MAX_MODELS {
-        return Err("models_invalid_response".to_string());
-    }
-    let mut seen = HashSet::new();
-    Ok(response
-        .models
-        .into_iter()
-        .filter(|model| model.supported_in_api != Some(false))
-        .filter(|model| {
-            !model
-                .visibility
-                .as_deref()
-                .is_some_and(|visibility| visibility.eq_ignore_ascii_case("hide"))
-                || model.upgrade.is_some()
-        })
-        .filter_map(|model| {
-            let slug = model.slug.trim();
-            (!slug.is_empty()
-                && slug.len() <= MAX_MODEL_SLUG_BYTES
-                && !slug.chars().any(char::is_control)
-                && seen.insert(slug.to_string()))
-            .then(|| slug.to_string())
-        })
-        .collect())
 }
 
 fn apply_model_failure(account: &mut ServerAccountRecord, code: &str, retryable: bool) {
@@ -473,23 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn model_payload_keeps_only_safe_supported_unique_slugs() {
-        let models = parse_models(
-            br#"{"models":[
-                {"slug":"gpt-test","supported_in_api":true},
-                {"slug":" gpt-test "},
-                {"slug":"hidden","supported_in_api":false},
-                {"slug":"internal","visibility":"hide"},
-                {"slug":"legacy","visibility":"hide","upgrade":{"model":"gpt-test"}},
-                {"slug":"bad\nslug"},
-                {"slug":"gpt-mini"}
-            ]}"#,
-        )
-        .unwrap();
-        assert_eq!(models, vec!["gpt-test", "legacy", "gpt-mini"]);
-    }
-
-    #[test]
     fn model_refresh_replaces_live_slugs_but_keeps_last_good_list_on_failure() {
         let mut record = account(&["gpt-old"]);
         apply_discovered_models(&mut record, Ok(vec!["gpt-future-codex".into()]));
@@ -525,5 +437,22 @@ mod tests {
             record.last_error_code.as_deref(),
             Some("models_unauthorized")
         );
+    }
+
+    #[test]
+    fn shared_model_discovery_failures_keep_server_error_categories() {
+        let agent_task = model_discovery_error(ModelDiscoveryFailure {
+            code: ModelDiscoveryFailureCode::AgentTaskInvalid,
+            retryable: false,
+            http_status: Some(401),
+        });
+        assert_eq!(agent_task, ("models_unauthorized".to_string(), false));
+
+        let rate_limit = model_discovery_error(ModelDiscoveryFailure {
+            code: ModelDiscoveryFailureCode::RateLimited,
+            retryable: true,
+            http_status: Some(429),
+        });
+        assert_eq!(rate_limit, ("models_rate_limited".to_string(), true));
     }
 }
