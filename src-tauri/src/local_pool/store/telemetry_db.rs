@@ -1,8 +1,5 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension,
-    TransactionBehavior,
-};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -24,6 +21,7 @@ use zenith_relay_core::{
 
 mod affinity;
 mod migrations;
+mod state;
 mod usage;
 
 use migrations::*;
@@ -226,99 +224,6 @@ impl TelemetryDb {
                 params![name, duration_ms, context],
             )
             .map_err(db_error)?;
-        Ok(())
-    }
-
-    pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
-        validate_state_key(key)?;
-        self.connection
-            .lock()
-            .map_err(lock_error)?
-            .query_row(
-                "SELECT value_json FROM app_state WHERE key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_error)
-    }
-
-    pub(crate) fn state_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .connection
-            .lock()
-            .map_err(lock_error)?
-            .query_row("SELECT COUNT(*) FROM app_state", [], |row| row.get(0))
-            .map_err(db_error)?;
-        usize::try_from(count).map_err(|_| {
-            LocalPoolError::new(ErrorCode::RecoveryRequired, "local state count is invalid")
-        })
-    }
-
-    pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, None)
-    }
-
-    pub(crate) fn replace_state_json_and_delete_account_data(
-        &self,
-        values: &[(&str, String)],
-        account_id: &str,
-    ) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, Some(account_id))
-    }
-
-    fn replace_state_json_with_account_purge(
-        &self,
-        values: &[(&str, String)],
-        account_id: Option<&str>,
-    ) -> Result<()> {
-        for (key, value) in values {
-            validate_state_key(key)?;
-            if value.len() > MAX_STATE_JSON_BYTES {
-                return Err(LocalPoolError::new(
-                    ErrorCode::InvalidState,
-                    "local state value is too large",
-                ));
-            }
-        }
-        let mut connection = self.connection.lock().map_err(lock_error)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db_error)?;
-        for (key, value) in values {
-            transaction
-                .execute(
-                    "INSERT INTO app_state(key, value_json) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-                    params![key, value],
-                )
-                .map_err(db_error)?;
-        }
-        if let Some(account_id) = account_id {
-            transaction
-                .execute(
-                    "DELETE FROM request_logs WHERE account_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM usage_candidate_rollups
-                     WHERE candidate_kind = 'account' AND candidate_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM response_affinity WHERE candidate_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-        }
-        transaction.commit().map_err(db_error)?;
-        if account_id.is_some() {
-            self.invalidate_usage_cache();
-        }
         Ok(())
     }
 
@@ -735,21 +640,6 @@ fn valid_performance_name(name: &str) -> bool {
     )
 }
 
-fn validate_state_key(key: &str) -> Result<()> {
-    if key.is_empty()
-        || key.len() > 64
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "local state key is invalid",
-        ));
-    }
-    Ok(())
-}
-
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> LocalPoolError {
     LocalPoolError::new(ErrorCode::Io, "local database lock poisoned")
 }
@@ -959,6 +849,60 @@ mod tests {
             database.state_json("accounts").unwrap().as_deref(),
             Some("[]")
         );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_state_batch_does_not_partially_save_or_purge_account_data() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-delete-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .replace_state_json(&[("accounts", "[\"before\"]".to_string())])
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO request_logs(
+                    request_id, local_key_id, source_id, candidate_id, account_id,
+                    wire_api, success, http_status, latency_ms
+                 ) VALUES ('request-rollback', 'key', 'codex', 'account-rollback',
+                    'account-rollback', 'responses', 1, 200, 1)",
+                [],
+            )
+            .unwrap();
+
+        let error = database
+            .replace_state_json_and_delete_account_data(
+                &[
+                    ("accounts", "[]".to_string()),
+                    ("invalid-key", "{}".to_string()),
+                ],
+                "account-rollback",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert_eq!(
+            database.state_json("accounts").unwrap().as_deref(),
+            Some("[\"before\"]")
+        );
+        let remaining: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM request_logs WHERE account_id = 'account-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
