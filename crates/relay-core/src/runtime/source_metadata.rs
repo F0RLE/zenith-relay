@@ -10,13 +10,28 @@ use crate::catalog::{
     union_source_reasoning_capabilities, SourceReasoningCapabilities,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
-use crate::{CandidateScope, Error, ModelRules, Result, SourceAdapter, WireApi};
+use crate::{
+    CandidateScope, Error, MessagesReasoningMode, ModelRules, Result, SourceAdapter, WireApi,
+};
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use futures_util::future::join_all;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use url::Url;
+
+struct SourceMetadataRoute {
+    candidate_id: String,
+    models_url: Url,
+    authorization_name: HeaderName,
+    authorization: HeaderValue,
+    protocol_headers: HeaderMap,
+    configured_models: BTreeSet<String>,
+    adapter: SourceAdapter,
+    reasoning_mode: MessagesReasoningMode,
+}
 
 impl GatewayRuntime {
     /// Starts a best-effort metadata refresh for the management UI. The result
@@ -87,53 +102,12 @@ impl GatewayRuntime {
         allowed_protocols: &[WireApi],
         now_ms: u64,
     ) -> CodexSourceModelMetadata {
-        let routes = {
-            let scheduler = self.lock_scheduler();
-            let mut routes = Vec::new();
-            for (candidate_id, binding) in &self.source_candidate_bindings {
-                if binding.wire_api != WireApi::Responses {
-                    continue;
-                }
-                let Some(candidate) = scheduler.candidate(candidate_id) else {
-                    continue;
-                };
-                let Some(source) = self.sources.get(&binding.source_id) else {
-                    continue;
-                };
-                let Some(models) = source.models_for(binding.binding_key) else {
-                    continue;
-                };
-                let mut configured_models = BTreeSet::new();
-                for model in models {
-                    if model_rules.allows(model)
-                        && candidate.is_catalog_visible(model, allowed_protocols, scope)
-                    {
-                        configured_models.insert(model.clone());
-                    }
-                }
-                if configured_models.is_empty() {
-                    continue;
-                }
-                let Some(source_binding) = source.binding_for(binding.binding_key) else {
-                    continue;
-                };
-                routes.push((
-                    candidate_id.clone(),
-                    source.models_url.clone(),
-                    source.authorization_for_binding(source_binding),
-                    source.protocol_headers_for_binding(source_binding),
-                    configured_models,
-                    binding.adapter,
-                    binding.reasoning_mode,
-                ));
-            }
-            routes
-        };
+        let routes = self.source_metadata_routes(model_rules, scope, allowed_protocols);
         // A catalog request with fresh manifests must not queue behind an
         // unrelated best-effort refresh. Stale callers still serialize their
         // upstream discovery so they coalesce onto one cache refill.
-        let refresh_required = routes.iter().any(|(candidate_id, ..)| {
-            self.cached_source_model_manifest(candidate_id)
+        let refresh_required = routes.iter().any(|route| {
+            self.cached_source_model_manifest(&route.candidate_id)
                 .is_none_or(|manifest| {
                     now_ms.saturating_sub(manifest.observed_at_ms)
                         > CODEX_SOURCE_MODEL_MANIFEST_TTL_MS
@@ -144,16 +118,18 @@ impl GatewayRuntime {
         } else {
             None
         };
-        let manifests = join_all(routes.into_iter().map(
-            |(
-                candidate_id,
-                models_url,
-                (authorization_name, authorization),
-                protocol_headers,
-                configured_models,
-                adapter,
-                reasoning_mode,
-            )| async move {
+        let manifest_requests = routes.into_iter().map(|route| {
+            async move {
+                let SourceMetadataRoute {
+                    candidate_id,
+                    models_url,
+                    authorization_name,
+                    authorization,
+                    protocol_headers,
+                    configured_models,
+                    adapter,
+                    reasoning_mode,
+                } = route;
                 let cached_manifest = self.cached_source_model_manifest(&candidate_id);
                 let manifest = if cached_manifest.as_ref().is_some_and(|manifest| {
                     now_ms.saturating_sub(manifest.observed_at_ms)
@@ -198,9 +174,9 @@ impl GatewayRuntime {
                     reasoning_mode,
                     manifest,
                 )
-            },
-        ))
-        .await;
+            }
+        });
+        let manifests = join_all(manifest_requests).await;
         drop(refresh_guard);
 
         let mut metadata = CodexSourceModelMetadata::default();
@@ -319,6 +295,57 @@ impl GatewayRuntime {
             }
         }
         metadata
+    }
+
+    fn source_metadata_routes(
+        &self,
+        model_rules: &ModelRules,
+        scope: &CandidateScope,
+        allowed_protocols: &[WireApi],
+    ) -> Vec<SourceMetadataRoute> {
+        let scheduler = self.lock_scheduler();
+        let mut routes = Vec::new();
+        for (candidate_id, binding) in &self.source_candidate_bindings {
+            if binding.wire_api != WireApi::Responses {
+                continue;
+            }
+            let Some(candidate) = scheduler.candidate(candidate_id) else {
+                continue;
+            };
+            let Some(source) = self.sources.get(&binding.source_id) else {
+                continue;
+            };
+            let Some(models) = source.models_for(binding.binding_key) else {
+                continue;
+            };
+            let configured_models = models
+                .iter()
+                .filter(|model| {
+                    model_rules.allows(model)
+                        && candidate.is_catalog_visible(model, allowed_protocols, scope)
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if configured_models.is_empty() {
+                continue;
+            }
+            let Some(source_binding) = source.binding_for(binding.binding_key) else {
+                continue;
+            };
+            let (authorization_name, authorization) =
+                source.authorization_for_binding(source_binding);
+            routes.push(SourceMetadataRoute {
+                candidate_id: candidate_id.clone(),
+                models_url: source.models_url.clone(),
+                authorization_name,
+                authorization,
+                protocol_headers: source.protocol_headers_for_binding(source_binding),
+                configured_models,
+                adapter: binding.adapter,
+                reasoning_mode: binding.reasoning_mode,
+            });
+        }
+        routes
     }
 
     pub(crate) fn set_codex_model_uses_responses_lite(&self, model: &str, enabled: bool) {
