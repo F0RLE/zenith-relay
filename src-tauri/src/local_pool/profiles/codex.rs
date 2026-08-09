@@ -26,6 +26,7 @@ mod catalog;
 mod catalog_state;
 mod config;
 mod local;
+mod transaction;
 
 use catalog_state::{
     apply_model_catalog_change, backup_path, invalidate_models_cache, local_backup,
@@ -34,6 +35,11 @@ use catalog_state::{
     valid_managed_model_catalog,
 };
 use config::*;
+use transaction::{
+    io_error, io_error_at, merge_rollbacks, profile_changed_at, profile_restore_blocked,
+    read_optional_bytes, remove_if_unchanged, replace_if_unchanged, replace_with_snapshot,
+    restore_snapshot_if_unchanged, rollback_file, snapshot_text, with_rollback,
+};
 
 const PROVIDER_ID: &str = "zenith_relay_local";
 const CONFIG_FILE: &str = "config.toml";
@@ -1377,73 +1383,6 @@ fn restore_secret_snapshot(
     }
 }
 
-fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(content) => Ok(Some(content)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error_at(path, error)),
-    }
-}
-
-fn snapshot_text<'a>(snapshot: &'a Option<Vec<u8>>, path: &Path) -> Result<Option<&'a str>> {
-    snapshot
-        .as_deref()
-        .map(|content| {
-            std::str::from_utf8(content).map_err(|error| {
-                LocalPoolError::new(
-                    ErrorCode::Io,
-                    format!("{} is not valid UTF-8: {error}", path.display()),
-                )
-            })
-        })
-        .transpose()
-}
-
-fn replace_if_unchanged(path: &Path, expected: &Option<Vec<u8>>, content: &str) -> Result<()> {
-    if &read_optional_bytes(path)? != expected {
-        return Err(profile_changed_at(path));
-    }
-    atomic_write(path, content).map_err(io_error_message)
-}
-
-fn remove_if_unchanged(path: &Path, expected: &Option<Vec<u8>>) -> Result<()> {
-    if &read_optional_bytes(path)? != expected {
-        return Err(profile_changed_at(path));
-    }
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && expected.is_none() => Ok(()),
-        Err(error) => Err(io_error_at(path, error)),
-    }
-}
-
-fn rollback_file(path: &Path, expected_content: &str, previous: &Option<Vec<u8>>) -> Result<()> {
-    let expected = Some(expected_content.as_bytes().to_vec());
-    restore_snapshot_if_unchanged(path, &expected, previous)
-}
-
-fn restore_snapshot_if_unchanged(
-    path: &Path,
-    expected_current: &Option<Vec<u8>>,
-    previous: &Option<Vec<u8>>,
-) -> Result<()> {
-    match snapshot_text(previous, path)? {
-        Some(content) => replace_if_unchanged(path, expected_current, content),
-        None => remove_if_unchanged(path, expected_current),
-    }
-}
-
-fn replace_with_snapshot(
-    path: &Path,
-    expected_current: &Option<Vec<u8>>,
-    content: Option<&str>,
-) -> Result<()> {
-    match content {
-        Some(content) => replace_if_unchanged(path, expected_current, content),
-        None => remove_if_unchanged(path, expected_current),
-    }
-}
-
 fn previous_auth_snapshot(
     secret_ref: Option<&str>,
     secrets: &impl SecretBackend,
@@ -1512,47 +1451,6 @@ fn discard_backup(
     Ok(())
 }
 
-fn merge_rollbacks(first: Result<()>, second: Result<()>) -> Result<()> {
-    match (first, second) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(first), Err(second)) => Err(LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!("{}; {}", first.message, second.message),
-        )),
-    }
-}
-
-fn with_rollback(error: LocalPoolError, rollback: Result<()>) -> LocalPoolError {
-    match rollback {
-        Ok(()) => error,
-        Err(rollback_error) => LocalPoolError::new(
-            ErrorCode::RecoveryRequired,
-            format!(
-                "{}; profile rollback failed: {}",
-                error.message, rollback_error.message
-            ),
-        ),
-    }
-}
-
-fn profile_restore_blocked() -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::ProfileRestoreBlocked,
-        "ChatGPT profile changed after attach; restore was not applied",
-    )
-}
-
-fn profile_changed_at(path: &Path) -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::ProfileRestoreBlocked,
-        format!(
-            "ChatGPT changed {} while Zenith Relay was updating the profile; no replacement was applied",
-            path.display()
-        ),
-    )
-}
-
 trait SecretBackend {
     fn save(&self, secret_ref: &str, value: &str) -> Result<()>;
     fn load(&self, secret_ref: &str) -> Result<Option<String>>;
@@ -1573,21 +1471,6 @@ impl SecretBackend for OsSecretBackend {
     fn delete(&self, secret_ref: &str) -> Result<()> {
         secret_store::delete(secret_ref)
     }
-}
-
-fn io_error(error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error.to_string())
-}
-
-fn io_error_at(path: &Path, error: std::io::Error) -> LocalPoolError {
-    LocalPoolError::new(
-        ErrorCode::Io,
-        format!("failed to access {}: {error}", path.display()),
-    )
-}
-
-fn io_error_message(error: String) -> LocalPoolError {
-    LocalPoolError::new(ErrorCode::Io, error)
 }
 
 #[cfg(test)]
