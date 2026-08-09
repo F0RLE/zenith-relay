@@ -200,6 +200,16 @@ fn selected_ids_are_validated_and_deduplicated_in_order() {
     );
     assert!(normalize_selected_item_ids(vec!["../secret".into()]).is_err());
 }
+
+#[test]
+fn imported_model_lists_are_trimmed_deduplicated_and_validated() {
+    assert_eq!(
+        normalize_models(vec![" gpt-test ".into(), "gpt-test".into(), "   ".into(),]).unwrap(),
+        vec!["gpt-test"]
+    );
+    assert!(normalize_models(vec!["model\nid".into()]).is_err());
+}
+
 #[test]
 fn quota_refresh_preserves_a_failure_observed_while_it_was_in_flight() {
     let before_refresh = account_record("account-race");
