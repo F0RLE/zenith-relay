@@ -4,7 +4,7 @@ use crate::state::{
 };
 use crate::token_refresh::ServerTokenPersistence;
 use reqwest::{header::HeaderValue, redirect::Policy};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use zenith_relay_core::{
     accounts::TokenPersistenceAdapter,
     protocol::{
@@ -174,29 +174,6 @@ pub(super) fn account_proxy_status(
         return (ProxyMode::Common, common_available);
     }
     (ProxyMode::Direct, !account_proxy_required)
-}
-
-pub(super) fn source_runtime_available(
-    source_runtime: &HashMap<&str, bool>,
-    source_id: &str,
-) -> bool {
-    source_runtime.iter().any(|(candidate_id, available)| {
-        *available
-            && (*candidate_id == source_id
-                || candidate_id
-                    .strip_prefix(source_id)
-                    .is_some_and(|suffix| suffix.starts_with("::")))
-    })
-}
-
-pub(crate) fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
-    accounts.iter().any(|account| {
-        account.in_pool
-            && account
-                .models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
 }
 
 pub(super) fn runtime_source(record: SourceRecord, api_key: String) -> RuntimeSource {

@@ -6,7 +6,7 @@ use crate::{
     automations::{WakeHistory, WakeTask},
     codex_model_display_name, codex_model_is_picker_eligible,
     quota::{QuotaSnapshot, Subscription, SubscriptionStatus},
-    ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateQuota,
+    ApiEquivalentSummary, ApiModelPriceOverride, CandidateHealth, CandidateKind, CandidateQuota,
     CandidateRuntimeSnapshot, DefaultServiceTier, ModelRules, RoutingDiagnostics, RoutingStrategy,
     SourceProtocolBinding, WireApi,
 };
@@ -140,6 +140,21 @@ pub fn apply_model_reasoning_summary(
             .cloned()
             .collect();
     }
+}
+
+pub fn source_runtime_available(
+    routing_order: &[CandidateRuntimeSnapshot],
+    source_id: &str,
+) -> bool {
+    routing_order.iter().any(|candidate| {
+        candidate.kind == CandidateKind::ApiSource
+            && candidate.available
+            && (candidate.candidate_id == source_id
+                || candidate
+                    .candidate_id
+                    .strip_prefix(source_id)
+                    .is_some_and(|suffix| suffix.starts_with("::")))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -458,6 +473,16 @@ pub struct AccountSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_block_reason: Option<AccountRoutingBlockReason>,
     pub last_error_code: Option<String>,
+}
+
+pub fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
+    accounts.iter().any(|account| {
+        account.in_pool
+            && account
+                .models
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(model))
+    })
 }
 
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
@@ -1003,8 +1028,80 @@ pub struct ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::{QuotaWindow, QuotaWindowKind};
-    use crate::{MessagesReasoningMode, SourceAdapter};
+    use crate::quota::{QuotaEconomicsSummary, QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+    use crate::{
+        ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
+        MessagesReasoningMode, SourceAdapter,
+    };
+
+    fn runtime_candidate(
+        candidate_id: &str,
+        kind: CandidateKind,
+        available: bool,
+    ) -> CandidateRuntimeSnapshot {
+        CandidateRuntimeSnapshot {
+            candidate_id: candidate_id.into(),
+            kind,
+            available,
+            in_flight: 0,
+            active_request_count: 0,
+            active_models: Vec::<ActiveModelRuntime>::new(),
+            last_used_at_ms: None,
+            next_retry_at_ms: None,
+            half_open: false,
+            dispatches: 0,
+        }
+    }
+
+    fn account_summary(in_pool: bool, models: &[&str]) -> AccountSummary {
+        AccountSummary {
+            id: "account".into(),
+            label: "Account".into(),
+            identity_hint: "account".into(),
+            enabled: true,
+            in_pool,
+            draining: false,
+            operational_status: OperationalStatus::Rotation,
+            auth_state: AccountAuthState::Active,
+            health: "healthy".into(),
+            models: models.iter().map(ToString::to_string).collect(),
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            api_equivalent: ApiEquivalentSummary::default(),
+            economics: QuotaEconomicsSummary::default(),
+            subscription: Subscription::default(),
+            quota: QuotaSnapshot::default(),
+            quota_refresh_status: QuotaRefreshStatus::default(),
+            secret_available: true,
+            remote_location: None,
+            proxy_mode: ProxyMode::Direct,
+            proxy_available: true,
+            proxy_id: None,
+            routing_block_reason: None,
+            last_error_code: None,
+        }
+    }
+
+    #[test]
+    fn runtime_and_native_account_helpers_keep_summary_rules_shared() {
+        let runtime = [
+            runtime_candidate("source::messages", CandidateKind::ApiSource, true),
+            runtime_candidate("source::responses", CandidateKind::ApiSource, false),
+            runtime_candidate("source", CandidateKind::OAuthAccount, true),
+        ];
+        assert!(source_runtime_available(&runtime, "source"));
+        assert!(!source_runtime_available(&runtime, "missing"));
+        assert!(!source_runtime_available(&runtime, "sour"));
+
+        let accounts = [
+            account_summary(true, &["GPT-5"]),
+            account_summary(false, &["other"]),
+        ];
+        assert!(model_has_native_account_route(&accounts, "gpt-5"));
+        assert!(!model_has_native_account_route(&accounts, "other"));
+    }
 
     #[test]
     fn model_summaries_apply_member_rules_hidden_state_and_catalog_order() {

@@ -16,22 +16,20 @@ use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
     accounts::TokenSet,
     protocol::{
-        apply_model_reasoning_summary, GatewaySummary, OperationalStatus, ProxyMode,
-        RuntimeStateSnapshot, RuntimeTargetSummary,
+        apply_model_reasoning_summary, model_has_native_account_route, source_runtime_available,
+        GatewaySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
     },
     quota::{attach_quota_plan_benchmarks, quota_plan_benchmarks, quota_valuation_revision},
-    CandidateKind, CandidateScope, GatewayRuntime, GatewayRuntimeOptions, RuntimeChatGptAuth,
-    UsageCallback, WireApi, QUOTA_STALE_AFTER_MS,
+    CandidateScope, GatewayRuntime, GatewayRuntimeOptions, RuntimeChatGptAuth, UsageCallback,
+    WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 mod account_runtime;
 
-pub(crate) use account_runtime::{
-    account_proxy_config, model_has_native_account_route, prepare_server_account_authorization,
-};
+pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
 use account_runtime::{
     account_proxy_status, account_summary, common_proxy_available, runtime_account, runtime_key,
-    runtime_source, source_runtime_available, source_summary,
+    runtime_source, source_summary,
 };
 
 impl AppState {
@@ -371,11 +369,6 @@ impl AppState {
             .as_ref()
             .map(|runtime| runtime.candidate_runtime_order())
             .unwrap_or_default();
-        let source_runtime = routing_order
-            .iter()
-            .filter(|candidate| candidate.kind == CandidateKind::ApiSource)
-            .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
-            .collect::<HashMap<_, _>>();
         let mut warnings = Vec::new();
         if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
             warnings.push("usage_persistence_failed".to_string());
@@ -391,7 +384,7 @@ impl AppState {
                     record,
                     secret_available,
                     (running && record.enabled)
-                        .then(|| source_runtime_available(&source_runtime, &record.id)),
+                        .then(|| source_runtime_available(&routing_order, &record.id)),
                     equivalents
                         .get(&identity_hint(&record.id))
                         .copied()
@@ -739,18 +732,5 @@ mod tests {
         assert_eq!(summary.operational_status, OperationalStatus::Rotation);
         assert!(summary.enabled);
         assert!(summary.in_pool);
-    }
-
-    #[test]
-    fn source_runtime_status_matches_protocol_candidates() {
-        let runtime = HashMap::from([
-            ("source::messages", true),
-            ("source::responses", false),
-            ("other", true),
-        ]);
-
-        assert!(source_runtime_available(&runtime, "source"));
-        assert!(!source_runtime_available(&runtime, "missing"));
-        assert!(!source_runtime_available(&runtime, "sour"));
     }
 }

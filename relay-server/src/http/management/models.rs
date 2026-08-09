@@ -1,5 +1,5 @@
 use super::{runtime_error, store_error, ManagementError};
-use crate::{app::model_has_native_account_route, state::AppState};
+use crate::state::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -7,7 +7,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
-    normalize_model_reasoning_allowed_levels, protocol::RuntimeStateSnapshot, ApiModelPriceOverride,
+    normalize_model_reasoning_allowed_levels,
+    protocol::{model_has_native_account_route, RuntimeStateSnapshot},
+    ApiModelPriceOverride,
 };
 
 pub(super) fn routes() -> Router<Arc<AppState>> {

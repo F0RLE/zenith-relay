@@ -9,19 +9,20 @@ use crate::local_pool::{
     state::DesktopState,
     store::secret_store,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::time::Instant;
 use tauri::State;
 use zenith_relay_core::protocol::{
-    account_operational_state, apply_model_reasoning_summary, operational_status,
-    pool_model_summaries, AccountOperationalInput, AccountSummary, Capabilities, GatewaySummary,
-    OperationalStatus, RuntimeStateSnapshot, RuntimeTargetSummary, SourceSummary,
+    account_operational_state, apply_model_reasoning_summary, model_has_native_account_route,
+    operational_status, pool_model_summaries, source_runtime_available, AccountOperationalInput,
+    AccountSummary, Capabilities, GatewaySummary, OperationalStatus, RuntimeStateSnapshot,
+    RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
     },
-    ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
+    ApiEquivalentSummary, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 #[tauri::command]
@@ -46,11 +47,6 @@ pub async fn get_local_runtime_state(
         .as_ref()
         .map(|runtime| runtime.candidate_runtime_order())
         .unwrap_or_default();
-    let source_runtime = routing_order
-        .iter()
-        .filter(|candidate| candidate.kind == CandidateKind::ApiSource)
-        .map(|candidate| (candidate.candidate_id.as_str(), candidate.available))
-        .collect::<HashMap<_, _>>();
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
     let snapshot_at_ms = current_time_ms();
     let equivalents = state.telemetry.api_equivalents_with_price_overrides(
@@ -68,7 +64,7 @@ pub async fn get_local_runtime_state(
             local_source_summary(
                 record,
                 (running && record.enabled)
-                    .then(|| source_runtime_available(&source_runtime, &record.id)),
+                    .then(|| source_runtime_available(&routing_order, &record.id)),
                 equivalents
                     .sources
                     .get(&record.id)
@@ -253,26 +249,6 @@ pub async fn get_local_runtime_order(
         .unwrap_or_default())
 }
 
-fn source_runtime_available(source_runtime: &HashMap<&str, bool>, source_id: &str) -> bool {
-    source_runtime.iter().any(|(candidate_id, available)| {
-        *available
-            && (*candidate_id == source_id
-                || candidate_id
-                    .strip_prefix(source_id)
-                    .is_some_and(|suffix| suffix.starts_with("::")))
-    })
-}
-
-fn model_has_native_account_route(accounts: &[AccountSummary], model: &str) -> bool {
-    accounts.iter().any(|account| {
-        account.in_pool
-            && account
-                .models
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(model))
-    })
-}
-
 fn local_source_summary(
     record: &ProviderSourceRecord,
     runtime_available: Option<bool>,
@@ -449,18 +425,5 @@ mod parity_tests {
             local.as_object().unwrap().keys().collect::<Vec<_>>(),
             remote.as_object().unwrap().keys().collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn source_runtime_status_matches_protocol_candidates() {
-        let runtime = HashMap::from([
-            ("source::messages", true),
-            ("source::responses", false),
-            ("other", true),
-        ]);
-
-        assert!(source_runtime_available(&runtime, "source"));
-        assert!(!source_runtime_available(&runtime, "missing"));
-        assert!(!source_runtime_available(&runtime, "sour"));
     }
 }
