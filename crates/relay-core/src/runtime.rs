@@ -2516,6 +2516,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn management_prefetch_includes_sources_for_an_account_only_key_scope() {
+        let runtime = Arc::new(
+            GatewayRuntime::build(
+                vec![RuntimeSource::unrestricted(source(
+                    "source-shared",
+                    "shared-secret",
+                    &["provider/fable"],
+                ))],
+                Vec::new(),
+                vec![RuntimeMixedLocalKey {
+                    key: key("key-account-only", "local-secret"),
+                    enabled: true,
+                    source_ids: None,
+                    account_ids: Some(vec!["account-only".into()]),
+                    allowed_models: Vec::new(),
+                    excluded_models: Vec::new(),
+                    model_prefix: None,
+                    wire_apis: None,
+                }],
+                None,
+                ReachabilityRequirement::AllowUnroutable,
+                GatewayRuntimeOptions::default(),
+                Arc::new(|_| {}),
+            )
+            .unwrap(),
+        );
+        let now_ms = current_time_ms();
+        runtime.remember_source_model_manifest(
+            "source-shared",
+            serde_json::json!({
+                "data": [{
+                    "id": "provider/fable",
+                    "reasoningEffortModes": ["low"]
+                }]
+            }),
+            now_ms,
+        );
+
+        runtime.prefetch_source_model_metadata();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime
+                .confirmed_source_reasoning_levels("provider/fable")
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("an account-only key leaves source access unrestricted");
+
+        assert_eq!(
+            runtime.confirmed_source_reasoning_levels("provider/fable"),
+            vec!["low".to_string()]
+        );
+    }
+
+    #[tokio::test]
     async fn scoped_catalog_refresh_keeps_reasoning_confirmed_by_another_route() {
         let runtime = GatewayRuntime::from_pool(
             vec![

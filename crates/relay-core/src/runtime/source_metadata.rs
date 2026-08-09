@@ -89,12 +89,11 @@ impl GatewayRuntime {
                 .scope
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if scope.source_ids.is_none() && scope.account_ids.is_none() {
+            let Some(ids) = scope.source_ids.as_ref() else {
+                // Account restrictions do not restrict API sources.
                 return CandidateScope::default();
-            }
-            if let Some(ids) = scope.source_ids.as_ref() {
-                source_ids.extend(ids.iter().cloned());
-            }
+            };
+            source_ids.extend(ids.iter().cloned());
         }
         CandidateScope {
             source_ids: Some(source_ids),
