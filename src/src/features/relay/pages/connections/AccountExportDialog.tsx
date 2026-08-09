@@ -50,9 +50,9 @@ export function AccountExportDialog({ accountIds, onClose }: { accountIds: strin
     const ok = await perform(`account-export-${destination}`, async () => {
       const input = {
         accountIds,
-        format,
+        format: selectedFormat.value,
         destination,
-        ...(format === "zenith" && description.trim() ? { description } : {}),
+        ...(selectedFormat.value === "zenith" && description.trim() ? { description } : {}),
       } as const;
       const result = mode === "local"
         ? await relayCommands.exportLocalAccounts(input)

@@ -70,7 +70,7 @@ export function ConnectionsPage({ onImport }: { onImport: () => void }) {
       setView((current) => reconcileRemoteConnectionView(mode, false, current));
       return;
     }
-    if ((view === "accounts" && !supports("accounts")) || (view === "sources" && !supports("sources")) || (view === "automations" && !supports("wake_tasks"))) setView("remote");
+    if (!availableViews.includes(view)) setView("remote");
   }, [mode, runtime, view]);
 
   const tabLabels: Record<ConnectionView, string> = {

@@ -1,6 +1,59 @@
 use super::*;
+use crate::accounts::{
+    AccountAuthState, TokenPersistenceAdapter, TokenPersistenceFailure, TokenRefresh,
+    TokenRefreshAdapter, TokenRefreshFailure, TokenRefreshFailureKind, TokenSet,
+};
 use crate::catalog::source_reasoning_capabilities;
-use crate::ToolUseDiagnostics;
+use crate::{CandidateHealth, CandidateQuota, ToolUseDiagnostics, QUOTA_STALE_AFTER_MS};
+use futures_util::future::BoxFuture;
+use std::collections::HashMap;
+
+struct NeverRefresh;
+
+impl TokenRefreshAdapter for NeverRefresh {
+    fn refresh<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _refresh_token: &'a str,
+        _now_ms: u64,
+    ) -> BoxFuture<'a, std::result::Result<TokenRefresh, TokenRefreshFailure>> {
+        Box::pin(async {
+            Err(TokenRefreshFailure::new(
+                TokenRefreshFailureKind::Transient,
+                "not_called",
+            ))
+        })
+    }
+}
+
+struct NoopPersistence;
+
+impl TokenPersistenceAdapter for NoopPersistence {
+    fn persist<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _tokens: &'a TokenSet,
+    ) -> BoxFuture<'a, std::result::Result<(), TokenPersistenceFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn persist_auth_state<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _auth_state: AccountAuthState,
+    ) -> BoxFuture<'a, std::result::Result<(), TokenPersistenceFailure>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn persist_agent_task_id<'a>(
+        &'a self,
+        _account_id: &'a str,
+        _expected_task_id: Option<&'a str>,
+        task_id: &'a str,
+    ) -> BoxFuture<'a, std::result::Result<String, TokenPersistenceFailure>> {
+        Box::pin(async move { Ok(task_id.to_string()) })
+    }
+}
 
 fn source(id: &str, key: &str, models: &[&str]) -> ProviderSource {
     ProviderSource {
@@ -18,6 +71,117 @@ fn key(id: &str, secret: &str) -> LocalGatewayKey {
         id: id.to_string(),
         secret: secret.to_string(),
     }
+}
+
+fn quota_account(snapshot: QuotaSnapshot) -> RuntimeChatGptAccount {
+    RuntimeChatGptAccount {
+        id: "account-1".to_string(),
+        source_id: "openai-codex".to_string(),
+        chatgpt_account_id: "account-1".to_string(),
+        responses_url: "https://example.test/v1/responses".to_string(),
+        models: vec!["gpt-test".to_string()],
+        enabled: true,
+        draining: false,
+        priority: 0,
+        weight: 1,
+        allowed_models: Vec::new(),
+        excluded_models: Vec::new(),
+        health: CandidateHealth::Healthy,
+        quota: CandidateQuota::from_snapshot(&snapshot, 1_000, QUOTA_STALE_AFTER_MS),
+        quota_updated_at_ms: snapshot.updated_at_ms,
+        quota_snapshot: snapshot,
+        subscription_plan_type: None,
+        subscription_expires_at_ms: None,
+        last_used_at_ms: None,
+        cooldowns: BTreeMap::new(),
+        consecutive_failures: 0,
+        proxy: None,
+    }
+}
+
+fn quota_runtime(snapshot: QuotaSnapshot) -> GatewayRuntime {
+    GatewayRuntime::from_mixed_pool(
+        Vec::new(),
+        vec![quota_account(snapshot)],
+        vec![RuntimeMixedLocalKey {
+            key: key("key-1", "local-secret"),
+            enabled: true,
+            source_ids: None,
+            account_ids: None,
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            model_prefix: None,
+            wire_apis: None,
+        }],
+        RuntimeChatGptAuth {
+            token_authority: Arc::new(TokenAuthority::new(1).unwrap()),
+            refresh_adapter: Arc::new(NeverRefresh),
+            persistence_adapter: Arc::new(NoopPersistence),
+            refresh_skew_ms: 60_000,
+            agent_identities: HashMap::new(),
+        },
+        GatewayRuntimeOptions::default(),
+        Arc::new(|_| {}),
+    )
+    .unwrap()
+}
+
+#[test]
+fn passive_quota_exhaustion_and_recovery_are_persisted_without_waiting_for_the_debounce() {
+    let runtime = quota_runtime(QuotaSnapshot::default());
+    let mut exhausted_headers = reqwest::header::HeaderMap::new();
+    exhausted_headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("100"),
+    );
+    exhausted_headers.insert(
+        "x-codex-primary-reset-after-seconds",
+        reqwest::header::HeaderValue::from_static("1"),
+    );
+
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        reqwest::StatusCode::OK,
+        &exhausted_headers,
+        1_000,
+    ));
+    let exhausted = runtime
+        .take_passive_quota_snapshot("account-1", 1_000)
+        .unwrap();
+    assert!(exhausted.limit_reached);
+    assert_eq!(
+        CandidateQuota::from_snapshot(&exhausted, 1_000, QUOTA_STALE_AFTER_MS),
+        CandidateQuota::Exhausted
+    );
+
+    let mut recovered_headers = reqwest::header::HeaderMap::new();
+    recovered_headers.insert(
+        "x-codex-primary-used-percent",
+        reqwest::header::HeaderValue::from_static("5"),
+    );
+    recovered_headers.insert(
+        "x-codex-primary-reset-after-seconds",
+        reqwest::header::HeaderValue::from_static("600"),
+    );
+
+    assert!(runtime.observe_codex_quota_headers(
+        "account-1",
+        reqwest::StatusCode::OK,
+        &recovered_headers,
+        3_000,
+    ));
+    let persisted = runtime
+        .take_passive_quota_snapshot("account-1", 3_000)
+        .unwrap();
+
+    assert!(!persisted.limit_reached);
+    assert_ne!(
+        CandidateQuota::from_snapshot(&persisted, 3_000, QUOTA_STALE_AFTER_MS),
+        CandidateQuota::Exhausted
+    );
+    assert!(runtime
+        .take_passive_quota_snapshot("account-1", 3_001)
+        .is_none());
 }
 
 #[derive(Default)]
@@ -545,11 +709,10 @@ fn source_connector_preserves_normalized_binding_and_model_order() {
             .as_deref(),
         Some("gpt-5.4-mini")
     );
-    assert!(connector
+    assert!(!connector
         .protocol_bindings()
         .iter()
-        .find(|binding| binding.wire_api == WireApi::ChatCompletions)
-        .is_none());
+        .any(|binding| binding.wire_api == WireApi::ChatCompletions));
 }
 
 #[tokio::test]
