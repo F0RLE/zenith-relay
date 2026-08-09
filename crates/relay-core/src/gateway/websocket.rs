@@ -1492,7 +1492,7 @@ mod tests {
     use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
         event_terminal, incomplete_requires_cooldown, terminal_failure_status, ClientRequest,
-        EventTerminalOutcome, WEBSOCKET_PROTOCOLS,
+        EventTerminalOutcome, GatewayFailure, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
         GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
@@ -1608,6 +1608,15 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("99")
         );
+    }
+
+    #[test]
+    fn websocket_cooldown_failure_keeps_retry_metadata() {
+        let failure = GatewayFailure::cooldown(1_700_000_120_000);
+
+        assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(failure.category, "all_candidates_cooling_down");
+        assert_eq!(failure.retry_at_ms, Some(1_700_000_120_000));
     }
 
     #[test]
