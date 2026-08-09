@@ -4,8 +4,7 @@ use super::mutations::{
 };
 use super::quota_refresh::{
     account_bearer_authorization, AccountQuotaOutcome, ConfirmAccountImportResponse,
-    ImportItemResult, QUOTA_COMMAND_TIMEOUT_OVERHEAD, QUOTA_REFRESH_BATCH_SIZE,
-    TOKEN_REFRESH_SKEW_MS,
+    ImportItemResult, QUOTA_COMMAND_TIMEOUT_OVERHEAD, TOKEN_REFRESH_SKEW_MS,
 };
 use crate::local_pool::accounts::credentials::{
     CredentialError, CredentialErrorCode, CredentialStore, StoredCodexCredentials,
@@ -43,19 +42,19 @@ use zenith_relay_core::accounts::{
     ImportPreview, ImportPreviewStatus, ImportQuotaStatus, ParsedImport, ParsedImportItem,
     MAX_IMPORT_BYTES, MAX_IMPORT_ITEMS,
 };
-use zenith_relay_core::accounts::{AccountAuthMode, AccountAuthState, AccountHealthState};
+use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
 use zenith_relay_core::providers::chatgpt::{
     AgentIdentityCredential, CodexModelsClient, CodexQuotaClient, ModelDiscoveryFailure,
     ModelDiscoveryFailureCode, QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::{
-    discover_source_models, is_valid_model_id, normalize_error_code, ProviderSource, ProxyConfig,
-    WireApi,
+    discover_source_models, normalize_error_code, ProviderSource, ProxyConfig, WireApi,
 };
 
 mod claims;
 mod identity;
+mod policy;
 mod sources;
 
 pub(super) use claims::{imported_identity, parse_subscription_timestamp_ms};
@@ -64,6 +63,11 @@ pub(super) use identity::normalized_profile_account_id;
 pub(super) use identity::{
     account_id_from_check_response, masked_account_identity, provider_identity_key,
     timestamp_from_ms,
+};
+pub(super) use policy::{
+    account_auth_mode, account_model_state_is_valid, ensure_account_import_item,
+    merge_existing_account, normalize_models, normalize_selected_item_ids,
+    preserve_newer_account_state, should_probe_import_quota, validate_label,
 };
 
 pub(super) use sources::*;
@@ -1961,74 +1965,6 @@ pub(super) async fn restore_authority(
         .map_err(|_| ImportItemError::recovery("failed to restore previous token authority state"))
 }
 
-pub(super) fn ensure_account_import_item(item: &ParsedImportItem) -> ItemResult<()> {
-    if item.secrets().api_key().is_some() {
-        Err(ImportItemError::new(
-            "use_source_import",
-            "API keys must be imported as compatible API sources",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-pub(super) fn account_auth_mode(mode: ImportAuthMode) -> ItemResult<AccountAuthMode> {
-    match mode {
-        ImportAuthMode::OAuth => Ok(AccountAuthMode::OAuth),
-        ImportAuthMode::AgentIdentity => Ok(AccountAuthMode::ImportedToken),
-        ImportAuthMode::ImportedToken => Ok(AccountAuthMode::ImportedToken),
-        ImportAuthMode::ApiKey => Err(ImportItemError::new(
-            "use_source_import",
-            "API keys must be imported as compatible API sources",
-        )),
-        ImportAuthMode::Unknown => Err(ImportItemError::new(
-            "unknown_auth_mode",
-            "imported account authentication mode is unknown",
-        )),
-    }
-}
-
-pub(super) fn merge_existing_account(
-    account: &mut LocalAccountRecord,
-    existing: Option<&LocalAccountRecord>,
-) {
-    let Some(existing) = existing else {
-        return;
-    };
-    account.account.label = existing.account.label.clone();
-    account.account.tags = existing.account.tags.clone();
-    account.account.enabled = existing.account.enabled;
-    account.account.in_pool = existing.account.in_pool;
-    account.account.draining = existing.account.draining;
-    account.account.created_at_ms = existing.account.created_at_ms;
-    account.account.last_used_at_ms = existing.account.last_used_at_ms;
-    account.account.health = existing.account.health;
-    account.account.quota = existing.account.quota.clone();
-    account.account.subscription = existing.account.subscription.clone();
-    account.account.last_error_code = existing.account.last_error_code.clone();
-    account.remote_location = existing.remote_location.clone();
-    account.allowed_models = existing.allowed_models.clone();
-    account.excluded_models = existing.excluded_models.clone();
-    account.priority = existing.priority;
-    account.weight = existing.weight;
-}
-
-pub(super) fn preserve_newer_account_state(
-    account: &mut LocalAccountRecord,
-    before_refresh: &LocalAccountRecord,
-    current: &LocalAccountRecord,
-) {
-    if current.account.auth_state != before_refresh.account.auth_state {
-        account.account.auth_state = current.account.auth_state;
-    }
-    if current.account.health != before_refresh.account.health {
-        account.account.health = current.account.health;
-    }
-    if current.account.last_error_code != before_refresh.account.last_error_code {
-        account.account.last_error_code = current.account.last_error_code.clone();
-    }
-}
-
 pub(super) fn apply_account_patch(
     account: &mut LocalAccountRecord,
     input: UpdateAccountInput,
@@ -2114,91 +2050,6 @@ pub(super) fn validate_account_record(account: &LocalAccountRecord) -> LocalResu
         credentials.to_token_set().map_err(credential_local_error)?;
     }
     Ok(())
-}
-
-pub(super) fn account_model_state_is_valid(account: &LocalAccountRecord) -> bool {
-    !account.models.is_empty()
-        || (account.account.last_error_code.is_some()
-            && account.account.health != zenith_relay_core::accounts::AccountHealthState::Healthy)
-}
-
-pub(super) fn validate_label(label: &str) -> LocalResult<()> {
-    let label = label.trim();
-    if label.is_empty()
-        || label.len() > MAX_ACCOUNT_LABEL_BYTES
-        || label.chars().any(char::is_control)
-    {
-        Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "account label is invalid",
-        ))
-    } else {
-        Ok(())
-    }
-}
-
-pub(super) fn normalize_models(models: Vec<String>) -> LocalResult<Vec<String>> {
-    if models.len() > MAX_MODELS {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "model list exceeds the supported limit",
-        ));
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() {
-            continue;
-        }
-        if !is_valid_model_id(model) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "model name is invalid",
-            ));
-        }
-        if seen.insert(model.to_string()) {
-            normalized.push(model.to_string());
-        }
-    }
-    Ok(normalized)
-}
-
-pub(super) fn normalize_selected_item_ids(item_ids: Vec<String>) -> CommandResult<Vec<String>> {
-    if item_ids.len() > MAX_IMPORT_ITEMS {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "selected import item count exceeds the supported limit",
-        )
-        .into());
-    }
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for item_id in item_ids {
-        let item_id = item_id.trim();
-        let Some(suffix) = item_id.strip_prefix("import_") else {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import item id is invalid",
-            )
-            .into());
-        };
-        if suffix.len() != 16 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "selected import item id is invalid",
-            )
-            .into());
-        }
-        if seen.insert(item_id.to_string()) {
-            normalized.push(item_id.to_string());
-        }
-    }
-    Ok(normalized)
-}
-
-pub(super) fn should_probe_import_quota(requested: bool, row_count: usize) -> bool {
-    requested && row_count <= QUOTA_REFRESH_BATCH_SIZE
 }
 
 pub(super) fn existing_identity_index(
