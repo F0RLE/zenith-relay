@@ -430,7 +430,7 @@ test("disabled model state stays readable in the compact dark window", async ({ 
   await expect(table.getByRole("columnheader")).toHaveCount(5);
   expect(await table.getByRole("columnheader").evaluateAll((cells) => cells.map((cell) => getComputedStyle(cell).textAlign))).toEqual(["left", "center", "center", "center", "center"]);
   await expect(table.locator(".model-group-row").first()).toContainText("ChatGPT");
-  await expect(table.locator(".model-group-row").nth(1)).toContainText("Claude");
+  await expect(table.locator(".model-group-row").nth(1)).toContainText("Anthropic");
   const model = page.locator('.model-rules tbody tr[data-model-id="gpt-5.4-mini"]');
   await model.getByRole("button", { name: "Отключить gpt-5.4-mini" }).click();
   await expect(model).toHaveAttribute("data-enabled", "false");
@@ -463,7 +463,7 @@ test("sparse reference tables stay compact and centered in a wide window", async
   await page.screenshot({ path: "output/playwright/api-sources-centered-ru-dark-1648x1168.png" });
 });
 
-test("source prices are grouped by provider and Claude exposes cache TTLs", async ({ page }) => {
+test("source prices are grouped by provider and Anthropic exposes cache TTLs", async ({ page }) => {
   await installTauriMock(page, { locale: "ru", mode: "local", theme: "dark", populated: true, mixedModels: true });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
@@ -473,7 +473,7 @@ test("source prices are grouped by provider and Claude exposes cache TTLs", asyn
   const dialog = page.getByRole("dialog", { name: "Изменить источник" });
   await dialog.locator(".source-price-section > summary").click();
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
-  await dialog.locator(".source-price-group > summary").filter({ hasText: "Claude" }).click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "Anthropic" }).click();
   await expect(dialog.getByText("Кэш запись 5 мин", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Кэш запись 1 ч", { exact: true })).toBeVisible();
   expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
