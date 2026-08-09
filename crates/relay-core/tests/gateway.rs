@@ -1955,7 +1955,7 @@ async fn upstream_responses(
             .unwrap();
     }
 
-    let release_stream = state.release_stream.clone();
+    let release_stream = state.release_stream;
     let chunks = stream::unfold(0_u8, move |step| {
         let release_stream = release_stream.clone();
         async move {

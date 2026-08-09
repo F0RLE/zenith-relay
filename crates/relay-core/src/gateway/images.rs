@@ -247,15 +247,12 @@ async fn prepare_request(
 
 #[allow(clippy::result_large_err)]
 fn parse_json(body: &[u8], endpoint: ImageEndpoint) -> Result<ParsedImageFields, Response<Body>> {
-    let fields = match serde_json::from_slice(body) {
-        Ok(Value::Object(fields)) => fields,
-        _ => {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                "request body must be a JSON object",
-                "invalid_request",
-            ))
-        }
+    let Ok(Value::Object(fields)) = serde_json::from_slice(body) else {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "request body must be a JSON object",
+            "invalid_request",
+        ));
     };
     if endpoint == ImageEndpoint::Generations {
         return Ok((fields, Vec::new(), None));
@@ -551,40 +548,37 @@ async fn execute_prepared(
 
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes = match crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES)
-            .await
-        {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                let failure = AttemptFailure::body();
-                let state = apply_cooldown_for_model(
-                    &runtime,
-                    &route.candidate_id,
-                    "*",
-                    IMAGE_API_MODEL,
-                    TRANSIENT_COOLDOWN_MS,
-                    &cooldown_context,
-                    route.half_open_probe,
-                );
-                if failure_requires_independent_source_endpoint(failure.status, failure.category) {
-                    runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
-                }
-                let mut event = image_usage_event(
-                    &request_id,
-                    attempt,
-                    &key,
-                    &route,
-                    &prepared,
-                    false,
-                    failure.status,
-                    Some(failure.category.to_string()),
-                    started,
-                );
-                apply_failure_state(&mut event, state);
-                emit_usage(&runtime, event);
-                last_failure = Some(failure);
-                continue;
+        let Ok(bytes) =
+            crate::transport::collect_limited(upstream, MAX_IMAGE_RESPONSE_BODY_BYTES).await
+        else {
+            let failure = AttemptFailure::body();
+            let state = apply_cooldown_for_model(
+                &runtime,
+                &route.candidate_id,
+                "*",
+                IMAGE_API_MODEL,
+                TRANSIENT_COOLDOWN_MS,
+                &cooldown_context,
+                route.half_open_probe,
+            );
+            if failure_requires_independent_source_endpoint(failure.status, failure.category) {
+                runtime.exclude_same_source_endpoint(&route.candidate_id, &mut tried);
             }
+            let mut event = image_usage_event(
+                &request_id,
+                attempt,
+                &key,
+                &route,
+                &prepared,
+                false,
+                failure.status,
+                Some(failure.category.to_string()),
+                started,
+            );
+            apply_failure_state(&mut event, state);
+            emit_usage(&runtime, event);
+            last_failure = Some(failure);
+            continue;
         };
         if !status.is_success() {
             let failure = AttemptFailure::status_with_body(status, Some(&bytes));

@@ -128,15 +128,12 @@ pub(super) async fn execute_account_endpoint(
                 Value::String(route.source_model.clone()),
             );
         }
-        let request_body = match serde_json::to_vec(&upstream_body) {
-            Ok(body) => body,
-            Err(_) => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "request body could not be serialized",
-                    "invalid_request",
-                )
-            }
+        let Ok(request_body) = serde_json::to_vec(&upstream_body) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "request body could not be serialized",
+                "invalid_request",
+            );
         };
         let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
@@ -194,38 +191,36 @@ pub(super) async fn execute_account_endpoint(
         };
         let status = upstream.status();
         let response_headers = upstream.headers().clone();
-        let bytes =
-            match crate::transport::collect_limited(upstream, endpoint.response_limit()).await {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    let failure = AttemptFailure::body();
-                    let state = apply_cooldown_for_model(
-                        &runtime,
-                        &route.candidate_id,
-                        "*",
-                        &route.source_model,
-                        TRANSIENT_COOLDOWN_MS,
-                        &cooldown_context,
-                        route.half_open_probe,
-                    );
-                    let mut event = usage_event(
-                        &request_id,
-                        attempt,
-                        &key.id,
-                        &route,
-                        &requested_model,
-                        false,
-                        failure.status.as_u16(),
-                        Some(failure.category.to_string()),
-                        started.elapsed().as_millis() as u64,
-                        tool_use.clone(),
-                    );
-                    apply_failure_state(&mut event, state);
-                    emit_usage(&runtime, event);
-                    last_failure = Some(failure);
-                    continue;
-                }
-            };
+        let Ok(bytes) =
+            crate::transport::collect_limited(upstream, endpoint.response_limit()).await
+        else {
+            let failure = AttemptFailure::body();
+            let state = apply_cooldown_for_model(
+                &runtime,
+                &route.candidate_id,
+                "*",
+                &route.source_model,
+                TRANSIENT_COOLDOWN_MS,
+                &cooldown_context,
+                route.half_open_probe,
+            );
+            let mut event = usage_event(
+                &request_id,
+                attempt,
+                &key.id,
+                &route,
+                &requested_model,
+                false,
+                failure.status.as_u16(),
+                Some(failure.category.to_string()),
+                started.elapsed().as_millis() as u64,
+                tool_use.clone(),
+            );
+            apply_failure_state(&mut event, state);
+            emit_usage(&runtime, event);
+            last_failure = Some(failure);
+            continue;
+        };
         if !status.is_success() {
             if !function_item_id_repair_attempted
                 && responses_function_item_id_requires_fc_prefix(&bytes)
@@ -388,15 +383,12 @@ pub(super) async fn execute_client_request(
     if !runtime.allows_client_wire_api(&key, client_wire_api) {
         return client_api_forbidden();
     }
-    let body = match axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(_) => {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                MAX_CLIENT_REQUEST_BODY_ERROR,
-                "request_too_large",
-            )
-        }
+    let Ok(body) = axum::body::to_bytes(body, MAX_CLIENT_REQUEST_BODY_BYTES).await else {
+        return api_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            MAX_CLIENT_REQUEST_BODY_ERROR,
+            "request_too_large",
+        );
     };
 
     let request: Value = match serde_json::from_slice(&body) {
@@ -677,15 +669,12 @@ async fn execute_request(
             normalize_account_request(object, responses_lite.is_some());
         }
         let adapter_is_passthrough = adapter_request.is_passthrough();
-        let request_body = match serde_json::to_vec(adapter_request.upstream_body()) {
-            Ok(body) => body,
-            Err(_) => {
-                return api_error(
-                    StatusCode::BAD_REQUEST,
-                    "request body could not be serialized",
-                    "invalid_request",
-                )
-            }
+        let Ok(request_body) = serde_json::to_vec(adapter_request.upstream_body()) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "request body could not be serialized",
+                "invalid_request",
+            );
         };
         let tool_use = with_forwarded_tool_diagnostics(&client_tool_use, &request_body);
 
@@ -1269,7 +1258,6 @@ async fn execute_request(
                 let combined: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> =
                     if let Some(bridge) = adapter_request.into_stream_bridge() {
                         let completed = completion_bridge_state
-                            .clone()
                             .expect("bridge state is configured for bridge routes");
                         Box::pin(bridge_messages_stream(first, remaining, bridge, completed))
                     } else {

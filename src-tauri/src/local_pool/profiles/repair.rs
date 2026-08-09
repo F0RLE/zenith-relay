@@ -189,7 +189,7 @@ pub fn preview(
     let session_id = format!("repair_{}", uuid::Uuid::new_v4().simple());
     let snapshot = RepairSnapshot {
         version: SNAPSHOT_VERSION,
-        session_id: session_id.clone(),
+        session_id,
         target_provider: target.to_string(),
         profile_roots: roots.iter().map(|path| path_string(path)).collect(),
         rollout_files,

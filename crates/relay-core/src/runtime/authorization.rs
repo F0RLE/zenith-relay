@@ -101,14 +101,12 @@ impl GatewayRuntime {
                 return Err(classify_token_authority_error(error));
             }
         };
-        let mut authorization =
-            match HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token())) {
-                Ok(authorization) => authorization,
-                Err(_) => {
-                    self.set_candidate_health(candidate_id, CandidateHealth::Unhealthy);
-                    return Err(ExecutorPrepareError::InvalidCredential);
-                }
-            };
+        let Ok(mut authorization) =
+            HeaderValue::from_str(&format!("Bearer {}", prepared.tokens.access_token()))
+        else {
+            self.set_candidate_health(candidate_id, CandidateHealth::Unhealthy);
+            return Err(ExecutorPrepareError::InvalidCredential);
+        };
         authorization.set_sensitive(true);
         Ok(PreparedAuthorization {
             header_name: AUTHORIZATION,

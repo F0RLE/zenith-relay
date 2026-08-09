@@ -4742,7 +4742,7 @@ async fn upstream_models(
     } else {
         StatusCode::BAD_REQUEST
     };
-    (status, Json(state.model_catalog.clone()))
+    (status, Json(state.model_catalog))
 }
 
 fn default_upstream_model_catalog() -> Value {

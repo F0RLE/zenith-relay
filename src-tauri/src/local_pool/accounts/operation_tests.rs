@@ -795,7 +795,7 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
     let runtime = ProviderSource {
         id: "source_test".into(),
         name: item.label.clone(),
-        base_url: base_url.clone(),
+        base_url,
         api_key: item.secrets().api_key().unwrap().to_string(),
         wire_api,
         models: vec!["gpt-test".into()],

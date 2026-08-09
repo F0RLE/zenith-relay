@@ -234,11 +234,10 @@ pub fn run() {
             let state = app.state::<AppState>();
             build_tray(&handle, &state)?;
             crate::portable_update::acknowledge_startup();
-            let startup_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
-                let state = startup_handle.state::<local_pool::DesktopState>();
+                let state = handle.state::<local_pool::DesktopState>();
                 let _ = local_pool::commands::gateway::start_if_enabled(&state).await;
-                crate::tray::refresh_tray(&startup_handle).await;
+                crate::tray::refresh_tray(&handle).await;
             });
             Ok(())
         })

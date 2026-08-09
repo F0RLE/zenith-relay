@@ -14,9 +14,8 @@ pub async fn proxy(State(state): State<Arc<AppState>>, request: Request) -> Resp
     if !state.store.gateway_enabled().unwrap_or(false) {
         return unavailable("gateway_stopped");
     }
-    let runtime = match state.runtime() {
-        Ok(Some(runtime)) => runtime,
-        _ => return unavailable("runtime_unavailable"),
+    let Ok(Some(runtime)) = state.runtime() else {
+        return unavailable("runtime_unavailable");
     };
     // relay-core is also used by the desktop loopback gateway. The server
     // invokes it in-process, so replace the untrusted public Host header with

@@ -125,9 +125,8 @@ impl AppState {
             };
             let credential: AccountCredential = serde_json::from_str(&secret)
                 .map_err(|_| "stored account credential is invalid".to_string())?;
-            let proxy = match account_proxy_config(self, &record, &credential) {
-                Ok(proxy) => proxy,
-                Err(_) => continue,
+            let Ok(proxy) = account_proxy_config(self, &record, &credential) else {
+                continue;
             };
             if let Some(agent) = credential.agent_identity()? {
                 agent_identities.insert(record.id.clone(), agent);

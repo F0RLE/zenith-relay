@@ -479,15 +479,12 @@ async fn rollback_completion(
         .await;
     }
     if let Some(port) = restart_port {
-        let runtime = match super::runtime_from_store(state).await {
-            Ok(runtime) => runtime,
-            Err(_) => {
-                return super::fail_closed(
-                    state,
-                    "OAuth completion rollback could not rebuild the previous runtime".to_string(),
-                )
-                .await
-            }
+        let Ok(runtime) = super::runtime_from_store(state).await else {
+            return super::fail_closed(
+                state,
+                "OAuth completion rollback could not rebuild the previous runtime".to_string(),
+            )
+            .await;
         };
         if state.gateway.start(runtime, port).await.is_err() {
             return super::fail_closed(

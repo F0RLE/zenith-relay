@@ -852,7 +852,7 @@ mod tests {
             database.api_equivalents().unwrap().accounts,
             cached.accounts
         );
-        let mut second = event.clone();
+        let mut second = event;
         second.request_id = "req_2".into();
         second.input_tokens = Some(20);
         second.total_tokens = Some(23);

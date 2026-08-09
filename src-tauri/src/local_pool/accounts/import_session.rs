@@ -1037,10 +1037,10 @@ mod tests {
             .start(&fixture(), Some("session.user@example.test.json"), &[])
             .unwrap();
         let identity_key = started.items[0].identity_key.clone();
-        let session_id = started.session_id.clone();
+        let session_id = started.session_id;
         drop(first_store);
 
-        let reopened = ImportSessionStore::new(root.clone(), secrets.clone());
+        let reopened = ImportSessionStore::new(root.clone(), secrets);
         let resumed = reopened.resume(&session_id, &[identity_key]).unwrap();
         assert_eq!(resumed.session_id, session_id);
         assert_eq!(resumed.items[0].secrets().api_key(), Some(API_KEY));
@@ -1092,7 +1092,7 @@ mod tests {
     fn prepared_preview_keeps_rejected_rows_without_recovery_error() {
         let root = temp_root("prepared-invalid-row");
         let secrets = MemorySecrets::default();
-        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let store = ImportSessionStore::new(root.clone(), secrets);
         let input = r#"[{"email":"same@example.test","access_token":"first"},{"email":"same@example.test","access_token":"second"}]"#;
         let started = store.start(input, None, &[]).unwrap();
         assert_eq!(started.items.len(), 1);
@@ -1115,7 +1115,7 @@ mod tests {
     fn prepared_preview_accepts_a_row_rejected_during_preparation() {
         let root = temp_root("prepared-newly-invalid-row");
         let secrets = MemorySecrets::default();
-        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let store = ImportSessionStore::new(root.clone(), secrets);
         let started = store
             .start(r#"{"refresh_token":"refresh"}"#, None, &[])
             .unwrap();
@@ -1216,7 +1216,7 @@ mod tests {
     fn corrupt_unsafe_and_traversal_snapshots_are_rejected() {
         let root = temp_root("unsafe");
         let secrets = MemorySecrets::default();
-        let store = ImportSessionStore::new(root.clone(), secrets.clone());
+        let store = ImportSessionStore::new(root.clone(), secrets);
         let started = store.start(&fixture(), None, &[]).unwrap();
         let path = snapshot_path(&root, &started.session_id).unwrap();
         fs::write(&path, b"{not-json").unwrap();

@@ -602,12 +602,9 @@ where
         }
         Err(RequestReadError::Io) => return RequestOutcome::Rejected,
     };
-    let callback_url = match callback_url(&snapshot.pending, &target) {
-        Ok(callback_url) => callback_url,
-        Err(_) => {
-            let _ = write_response(&mut stream, 400, "Invalid OAuth callback request.").await;
-            return RequestOutcome::Rejected;
-        }
+    let Ok(callback_url) = callback_url(&snapshot.pending, &target) else {
+        let _ = write_response(&mut stream, 400, "Invalid OAuth callback request.").await;
+        return RequestOutcome::Rejected;
     };
     match inner.accept_callback(&snapshot.login_id, &callback_url) {
         Ok(()) => {

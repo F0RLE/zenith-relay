@@ -207,12 +207,11 @@ async fn refresh_data(
         Err(failure) if failure.http_status() == Some(401) => failure,
         Err(failure) => return Err(failure),
     };
-    let tokens = match state
+    let Ok(tokens) = state
         .recover_account_tokens_after_unauthorized(&account.id)
         .await
-    {
-        Ok(tokens) => tokens,
-        Err(_) => return Err(failure),
+    else {
+        return Err(failure);
     };
     authorization = bearer_authorization(tokens.access_token())
         .map_err(|_| QuotaRefreshFailure::new("quota_token_prepare", true))?;

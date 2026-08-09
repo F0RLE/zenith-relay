@@ -1599,7 +1599,7 @@ mod tests {
         }];
         assert!(validate_direct_source(&messages_only).is_err());
 
-        let mut bridged_only = source.clone();
+        let mut bridged_only = source;
         bridged_only.protocol_bindings = vec![SourceProtocolBinding {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,

@@ -604,7 +604,7 @@ impl MessagesStreamBridge {
                     json!({
                         "type": "response.output_text.done",
                         "response_id": response_id,
-                        "item_id": item_id.clone(),
+                        "item_id": item_id,
                         "output_index": output_index,
                         "content_index": content_index,
                         "text": block_text,
@@ -644,12 +644,12 @@ impl MessagesStreamBridge {
                         let response_id = self.response_id.clone();
                         let mut arguments_done = json!({
                             "type": "response.function_call_arguments.done",
-                            "response_id": response_id.clone(),
-                            "item_id": id.clone(),
-                            "call_id": id.clone(),
-                            "name": name.clone(),
+                            "response_id": response_id,
+                            "item_id": id,
+                            "call_id": id,
+                            "name": name,
                             "output_index": output_index,
-                            "arguments": arguments.clone(),
+                            "arguments": arguments,
                         });
                         if let Some(namespace) = namespace.as_ref() {
                             arguments_done
@@ -691,8 +691,8 @@ impl MessagesStreamBridge {
                             "response.custom_tool_call_input.done",
                             json!({
                                 "type": "response.custom_tool_call_input.done",
-                                "response_id": response_id.clone(),
-                                "item_id": id.clone(),
+                                "response_id": response_id,
+                                "item_id": id,
                                 "output_index": output_index,
                                 "input": raw_input,
                             }),
@@ -744,7 +744,7 @@ impl MessagesStreamBridge {
                     "type": "response.output_item.added",
                     "output_index": output_index,
                     "item": {
-                        "id": item_id.clone(),
+                        "id": item_id,
                         "type": "message",
                         "status": "in_progress",
                         "role": "assistant",
@@ -776,7 +776,7 @@ impl MessagesStreamBridge {
             "response.content_part.added",
             json!({
                 "type": "response.content_part.added",
-                "item_id": item_id.clone(),
+                "item_id": item_id,
                 "output_index": output_index,
                 "content_index": content_index,
                 "part": {"type": "output_text", "text": ""},
@@ -958,7 +958,7 @@ impl MessagesStreamBridge {
         continuation.append_assistant_content(content);
         self.completed = Some(MessagesBridgeResponse {
             response_body: response_body.clone(),
-            response_id: response_id.clone(),
+            response_id,
             continuation,
         });
         self.frame(

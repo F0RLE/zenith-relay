@@ -117,15 +117,12 @@ async fn wake_loop(app: AppHandle) {
             tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
             continue;
         }
-        let permits = match app
+        let Ok(permits) = app
             .state::<DesktopState>()
             .claim_due_automatic_wakes(current_time_ms(), WAKE_BATCH_SIZE)
-        {
-            Ok(permits) => permits,
-            Err(_) => {
-                tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
-                continue;
-            }
+        else {
+            tokio::time::sleep(Duration::from_millis(WORKER_ERROR_RETRY_MS)).await;
+            continue;
         };
         let state = app.state::<DesktopState>();
         let result = run_wake_permits(&state, permits).await;

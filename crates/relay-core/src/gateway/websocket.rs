@@ -352,17 +352,14 @@ async fn connect_upstream(
                 .get(route.upstream_url.clone())
                 .headers(headers)
                 .upgrade();
-            let upgrade = match timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await {
-                Ok(Ok(upgrade)) => upgrade,
-                _ => {
-                    let failure = GatewayFailure::transport();
-                    record_connect_failure(
-                        runtime, key, &route, &request, attempt, started, &failure, None,
-                    );
-                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
-                    last_failure = Some(failure);
-                    continue 'candidates;
-                }
+            let Ok(Ok(upgrade)) = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await else {
+                let failure = GatewayFailure::transport();
+                record_connect_failure(
+                    runtime, key, &route, &request, attempt, started, &failure, None,
+                );
+                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
+                last_failure = Some(failure);
+                continue 'candidates;
             };
             if upgrade.status() != StatusCode::UNAUTHORIZED
                 || prepared.token_generation.is_none()
@@ -469,17 +466,16 @@ async fn connect_upstream(
             record_connect_rejection(runtime, key, &route, &request, attempt, started, &failure);
             return Err(failure);
         }
-        let mut upstream = match timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.into_websocket()).await {
-            Ok(Ok(upstream)) => upstream,
-            _ => {
-                let failure = GatewayFailure::transport();
-                record_connect_failure(
-                    runtime, key, &route, &request, attempt, started, &failure, None,
-                );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
-                last_failure = Some(failure);
-                continue;
-            }
+        let Ok(Ok(mut upstream)) =
+            timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.into_websocket()).await
+        else {
+            let failure = GatewayFailure::transport();
+            record_connect_failure(
+                runtime, key, &route, &request, attempt, started, &failure, None,
+            );
+            exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
+            last_failure = Some(failure);
+            continue;
         };
         if send_request(&mut upstream, payload).await.is_err() {
             let failure = GatewayFailure::transport();

@@ -44,9 +44,8 @@ impl ManagementAuth {
     }
 
     fn authorize(&self, ip: IpAddr, token: Option<&str>, now_ms: u64) -> AuthResult {
-        let mut failures = match self.inner.failures.lock() {
-            Ok(failures) => failures,
-            Err(_) => return AuthResult::Blocked,
+        let Ok(mut failures) = self.inner.failures.lock() else {
+            return AuthResult::Blocked;
         };
         let supplied: [u8; 32] = Sha256::digest(token.unwrap_or_default().as_bytes()).into();
         if self.inner.expected_hash.ct_eq(&supplied).into() {
