@@ -319,30 +319,19 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       "gpt-5.4": { catalogRank: 5, inputMicroUsdPerMillion: 2_500_000, cachedInputMicroUsdPerMillion: 250_000, outputMicroUsdPerMillion: 15_000_000 },
       "gpt-5.4-mini": { catalogRank: 6, inputMicroUsdPerMillion: 750_000, cachedInputMicroUsdPerMillion: 75_000, outputMicroUsdPerMillion: 4_500_000 },
     };
-    const modelGroupOrder = new Map(["chatgpt", "openai", "anthropic", "google", "zhipu", "xai", "other"].map((group, index) => [group, index]));
-    const knownModelOrder = [
-      "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-image-2",
-      "claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-sonnet-4-6", "claude-haiku-4-5",
-      "gemini-3.1-pro-preview", "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
-      "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-4.7",
-    ];
+    const modelGroupOrder = new Map(["openai", "anthropic", "other"].map((group, index) => [group, index]));
     function modelLeaf(model: string) { return model.trim().toLowerCase().split("/").at(-1) ?? model.trim().toLowerCase(); }
     function isOpenAiModel(model: string) { return /^(gpt-|codex-|o\d|text-|dall-e)/.test(model); }
     function modelProviderGroup(model: string) {
       const leaf = modelLeaf(model);
       if (leaf.startsWith("claude-")) return "anthropic";
-      if (leaf.startsWith("gemini-")) return "google";
-      if (leaf.startsWith("glm-")) return "zhipu";
-      if (leaf.startsWith("grok-")) return "xai";
       if (isOpenAiModel(leaf)) return "openai";
       return "other";
     }
     function compareModelOrder(left: MockModelSummary, right: MockModelSummary) {
       const leftGroup = modelGroupOrder.get(modelProviderGroup(left.id)) ?? 99;
       const rightGroup = modelGroupOrder.get(modelProviderGroup(right.id)) ?? 99;
-      const leftRank = knownModelOrder.indexOf(modelLeaf(left.id));
-      const rightRank = knownModelOrder.indexOf(modelLeaf(right.id));
-      return leftGroup - rightGroup || (leftRank < 0 ? Number.MAX_SAFE_INTEGER : leftRank) - (rightRank < 0 ? Number.MAX_SAFE_INTEGER : rightRank);
+      return leftGroup - rightGroup;
     }
     const automation = {
       id: "wake_synthetic",
