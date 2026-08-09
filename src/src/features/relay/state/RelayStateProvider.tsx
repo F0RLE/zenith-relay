@@ -6,6 +6,13 @@ import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivat
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import { sanitizeFeedbackError, type FeedbackError } from "./feedback";
+import {
+  RELAY_STORAGE_KEYS,
+  readCodexPoolOauthSelection,
+  readRelayPreference,
+  removeRelayPreference,
+  writeRelayPreference,
+} from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
 
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
@@ -69,7 +76,7 @@ const RelayContext = createContext<RelayContextValue | null>(null);
 export function RelayStateProvider({ children }: { children: ReactNode }) {
   const { i18n, t } = useTranslation();
   const confirm = useConfirm();
-  const [mode, setModeState] = useState<RelayMode>(() => stored("relay.mode", "local") as RelayMode);
+  const [mode, setModeState] = useState<RelayMode>(() => readRelayPreference(RELAY_STORAGE_KEYS.mode, "local") as RelayMode);
   const [page, setPageState] = useState<PageId>("overview");
   const [runtime, setRuntime] = useState<RuntimeSnapshot | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
@@ -82,13 +89,13 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
-  const [onboardingComplete, setOnboardingComplete] = useState(() => stored("relay.onboarding", "0") === "1");
-  const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => stored("relay.theme", "system") as "system" | "light" | "dark");
-  const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => stored("relay.profileSwitchBackupPrompt", "1") !== "0");
-  const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => stored("relay.profileSnapshotBackupBeforeRestore", "1") !== "0");
-  const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
-  const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => stored("relay.accountIdentitiesVisible", "0") === "1");
-  const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => stored("relay.poolEconomicsVisible", "true") !== "false");
+  const [onboardingComplete, setOnboardingComplete] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.onboarding, "0") === "1");
+  const [theme, setThemeState] = useState<"system" | "light" | "dark">(() => readRelayPreference(RELAY_STORAGE_KEYS.theme, "system") as "system" | "light" | "dark");
+  const [profileSwitchBackupPrompt, setProfileSwitchBackupPromptState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, "1") !== "0");
+  const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, "1") !== "0");
+  const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
+  const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
+  const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, "true") !== "false");
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
@@ -345,7 +352,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     operationRevision.current += 1;
     ++localUsageRequest.current;
     ++remoteUsageRequest.current;
-    localStorage.setItem("relay.mode", next);
+    writeRelayPreference(RELAY_STORAGE_KEYS.mode, next);
     setRuntime(null);
     setLocalUsage([]);
     setLocalUsagePage(null);
@@ -438,46 +445,46 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, [launchAttachedCodex, perform]);
 
   const finishOnboarding = useCallback((nextMode: RelayMode) => {
-    localStorage.setItem("relay.onboarding", "1");
+    writeRelayPreference(RELAY_STORAGE_KEYS.onboarding, "1");
     setOnboardingComplete(true);
     setMode(nextMode);
   }, [setMode]);
 
   const resetOnboarding = useCallback(() => {
-    localStorage.removeItem("relay.onboarding");
+    removeRelayPreference(RELAY_STORAGE_KEYS.onboarding);
     setOnboardingComplete(false);
     setPage("overview");
   }, []);
 
   const setTheme = useCallback((next: "system" | "light" | "dark") => {
-    localStorage.setItem("relay.theme", next);
+    writeRelayPreference(RELAY_STORAGE_KEYS.theme, next);
     setThemeState(next);
   }, []);
 
   const setProfileSwitchBackupPrompt = useCallback((enabled: boolean) => {
-    localStorage.setItem("relay.profileSwitchBackupPrompt", enabled ? "1" : "0");
+    writeRelayPreference(RELAY_STORAGE_KEYS.profileSwitchBackupPrompt, enabled ? "1" : "0");
     setProfileSwitchBackupPromptState(enabled);
   }, []);
 
   const setProfileSnapshotBackupBeforeRestore = useCallback((enabled: boolean) => {
-    localStorage.setItem("relay.profileSnapshotBackupBeforeRestore", enabled ? "1" : "0");
+    writeRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, enabled ? "1" : "0");
     setProfileSnapshotBackupBeforeRestoreState(enabled);
   }, []);
 
   const setCodexPoolOauthSelection = useCallback((selection: string) => {
-    localStorage.setItem("relay.codexPoolOauthSelection", selection);
-    localStorage.removeItem("relay.codexPoolOauthAccountId");
+    writeRelayPreference(RELAY_STORAGE_KEYS.codexPoolOauthSelection, selection);
+    removeRelayPreference(RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection);
     setCodexPoolOauthSelectionState(selection);
   }, []);
 
   const setAccountIdentitiesVisible = useCallback((visible: boolean) => {
-    localStorage.setItem("relay.accountIdentitiesVisible", visible ? "1" : "0");
+    writeRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, visible ? "1" : "0");
     setAccountIdentitiesVisibleState(visible);
     if (!visible) setRevealedAccountIdentities({});
   }, []);
 
   const setAccountEconomicsVisible = useCallback((visible: boolean) => {
-    localStorage.setItem("relay.poolEconomicsVisible", String(visible));
+    writeRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, String(visible));
     setAccountEconomicsVisibleState(visible);
   }, []);
 
@@ -555,23 +562,4 @@ export function useRelayState() {
   const value = useContext(RelayContext);
   if (!value) throw new Error("RelayStateProvider is missing");
   return value;
-}
-
-function stored(key: string, fallback: string) {
-  try {
-    return localStorage.getItem(key) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function storedCodexPoolOauthSelection() {
-  const selection = stored("relay.codexPoolOauthSelection", "") || stored("relay.codexPoolOauthAccountId", "") || "auto";
-  try {
-    localStorage.setItem("relay.codexPoolOauthSelection", selection);
-    localStorage.removeItem("relay.codexPoolOauthAccountId");
-  } catch {
-    return selection;
-  }
-  return selection;
 }
