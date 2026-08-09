@@ -1,36 +1,26 @@
 use crate::state::{
-    identity_hint, is_internal_gateway_key, now_ms, AccountCredential, AppState,
-    ServerAccountRecord, SourceRecord, SERVER_SCHEMA_VERSION,
+    is_internal_gateway_key, now_ms, AccountCredential, AppState, ServerAccountRecord, SourceRecord,
 };
-use crate::store::configuration_revision;
 use crate::token_refresh::{
     find_account, CodexRefreshClient, ServerRefreshClients, ServerTokenPersistence,
 };
 use crate::usage_writer::UsageWriter;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
 };
 #[cfg(test)]
 use zenith_relay_core::accounts::AccountHealthState;
 use zenith_relay_core::{
-    accounts::TokenSet,
-    protocol::{
-        apply_model_reasoning_summary, model_has_native_account_route, source_runtime_available,
-        GatewaySummary, OperationalStatus, ProxyMode, RuntimeStateSnapshot, RuntimeTargetSummary,
-    },
-    quota::{attach_quota_plan_benchmarks, quota_plan_benchmarks, quota_valuation_revision},
-    CandidateScope, GatewayRuntime, GatewayRuntimeOptions, RuntimeChatGptAuth, UsageCallback,
-    WireApi, QUOTA_STALE_AFTER_MS,
+    accounts::TokenSet, protocol::RuntimeStateSnapshot, CandidateScope, GatewayRuntime,
+    GatewayRuntimeOptions, RuntimeChatGptAuth, UsageCallback, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 mod account_runtime;
+mod snapshot;
 
 pub(crate) use account_runtime::{account_proxy_config, prepare_server_account_authorization};
-use account_runtime::{
-    account_proxy_status, account_summary, common_proxy_available, runtime_account, runtime_key,
-    runtime_source, source_summary,
-};
+use account_runtime::{runtime_account, runtime_key, runtime_source};
 
 impl AppState {
     pub async fn prepare_account_tokens(
@@ -349,202 +339,13 @@ impl AppState {
     }
 
     pub fn snapshot(&self) -> Result<RuntimeStateSnapshot, String> {
-        let sources = self.store.sources()?;
-        let accounts = self.store.accounts()?;
-        let common_proxy_configured = self.store.common_proxy_configured()?;
-        let common_proxy_id = self.store.common_proxy_id()?;
-        let common_proxy_available = common_proxy_available(self, common_proxy_configured);
-        let account_proxy_required = self.store.account_proxy_required()?;
-        let quota_request_timeout_seconds = self.store.quota_request_timeout_seconds()?;
-        let routing_policy = self.store.routing_policy()?;
-        let hidden_models = self.store.hidden_models()?;
-        let model_price_overrides = self.store.model_price_overrides()?;
-        let model_reasoning_allowed_levels = self.store.model_reasoning_allowed_levels()?;
-        let configuration_revision = configuration_revision(&self.store.configuration_settings()?)?;
-        let equivalents = self.store.api_equivalents()?;
-        let runtime = self.runtime()?;
-        let running = self.store.gateway_enabled()? && runtime.is_some();
-        let routing_order = runtime
-            .as_ref()
-            .map(|runtime| runtime.candidate_runtime_order())
-            .unwrap_or_default();
-        let mut warnings = Vec::new();
-        if self.failed_usage_writes.load(Ordering::Relaxed) > 0 {
-            warnings.push("usage_persistence_failed".to_string());
-        }
-        let source_summaries = sources
-            .iter()
-            .map(|record| {
-                let secret_available = self.vault.load(&record.secret_ref)?.is_some();
-                if !secret_available {
-                    warnings.push(format!("source_secret_missing:{}", record.id));
-                }
-                Ok(source_summary(
-                    record,
-                    secret_available,
-                    (running && record.enabled)
-                        .then(|| source_runtime_available(&routing_order, &record.id)),
-                    equivalents
-                        .get(&identity_hint(&record.id))
-                        .copied()
-                        .unwrap_or_default(),
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let mut account_summaries = accounts
-            .iter()
-            .map(|record| {
-                let secret = self.vault.load(&record.secret_ref)?;
-                let secret_available = secret.is_some();
-                if !secret_available {
-                    warnings.push(format!("account_secret_missing:{}", record.id));
-                }
-                let (proxy_mode, proxy_available) = secret
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str::<AccountCredential>(value).ok())
-                    .map(|credential| {
-                        account_proxy_status(
-                            self,
-                            record,
-                            &credential,
-                            common_proxy_configured,
-                            common_proxy_available,
-                            account_proxy_required,
-                        )
-                    })
-                    .unwrap_or((ProxyMode::Direct, false));
-                Ok(account_summary(
-                    record,
-                    secret_available,
-                    proxy_mode,
-                    proxy_available,
-                    equivalents
-                        .get(&identity_hint(&record.id))
-                        .copied()
-                        .unwrap_or_default(),
-                    routing_policy.default_service_tier,
-                    QUOTA_STALE_AFTER_MS,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        let economics_revision = quota_valuation_revision();
-        let plan_benchmarks = quota_plan_benchmarks(
-            accounts
-                .iter()
-                .map(|account| (account.id.as_str(), &account.economics)),
-            now_ms(),
-            economics_revision,
-        );
-        for (record, summary) in accounts.iter().zip(&mut account_summaries) {
-            attach_quota_plan_benchmarks(
-                &mut summary.economics,
-                "chatgpt",
-                record.subscription.plan_type.as_deref(),
-                &record.quota,
-                routing_policy.default_service_tier,
-                economics_revision,
-                &plan_benchmarks,
-            );
-        }
-        let mut models = zenith_relay_core::protocol::pool_model_summaries(
-            &source_summaries,
-            &account_summaries,
-            &hidden_models,
-        );
-        for model in &mut models {
-            let model_id = model.id.clone();
-            if let Some(price) = model_price_overrides.get(&model_id.to_ascii_lowercase()) {
-                model.input_micro_usd_per_million = Some(price.input_micro_usd_per_million);
-                model.cached_input_micro_usd_per_million = Some(
-                    price
-                        .cached_input_micro_usd_per_million
-                        .unwrap_or(price.input_micro_usd_per_million),
-                );
-                model.cache_write_5m_micro_usd_per_million =
-                    price.cache_write_5m_micro_usd_per_million;
-                model.cache_write_1h_micro_usd_per_million =
-                    price.cache_write_1h_micro_usd_per_million;
-                model.output_micro_usd_per_million = Some(price.output_micro_usd_per_million);
-                model.custom_price = true;
-            }
-            apply_model_reasoning_summary(
-                model,
-                runtime
-                    .as_ref()
-                    .map(|runtime| runtime.confirmed_source_reasoning_levels(&model_id))
-                    .unwrap_or_default(),
-                model_reasoning_allowed_levels
-                    .get(&model_id.to_ascii_lowercase())
-                    .map(Vec::as_slice),
-                model_has_native_account_route(&account_summaries, &model_id),
-            );
-        }
-        let visible_model_ids = models
-            .iter()
-            .filter(|model| model.enabled)
-            .map(|model| model.id.clone())
-            .collect::<Vec<_>>();
-        Ok(RuntimeStateSnapshot {
-            schema_version: SERVER_SCHEMA_VERSION,
-            configuration_revision: Some(configuration_revision),
-            runtime_target: RuntimeTargetSummary {
-                kind: "remote".to_string(),
-                connected: true,
-                origin: Some(self.config.public_base_url.origin().ascii_serialization()),
-                server_id: Some(self.capabilities.server_id.clone()),
-                version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            },
-            gateway: GatewaySummary {
-                running,
-                base_url: format!(
-                    "{}/v1",
-                    self.config.public_base_url.as_str().trim_end_matches('/')
-                ),
-                candidate_count: source_summaries
-                    .iter()
-                    .filter(|record| {
-                        record.in_pool
-                            && record.supports_wire_api(WireApi::Responses)
-                            && record.operational_status == OperationalStatus::Rotation
-                    })
-                    .count()
-                    + account_summaries
-                        .iter()
-                        .filter(|record| {
-                            record.in_pool
-                                && record.operational_status == OperationalStatus::Rotation
-                        })
-                        .count(),
-                visible_model_ids,
-                max_retry_candidates: routing_policy.max_retry_candidates,
-                cooldown_after_failures: routing_policy.cooldown_after_failures,
-                keep_last_candidate_available: routing_policy.keep_last_candidate_available,
-                routing_strategy: routing_policy.routing_strategy,
-                subscription_plan_order: routing_policy.subscription_plan_order,
-                default_service_tier: routing_policy.default_service_tier,
-                image_base_model: routing_policy.image_base_model,
-                models,
-                common_proxy_configured,
-                common_proxy_available,
-                common_proxy_id,
-                account_proxy_required,
-                quota_request_timeout_seconds,
-                chatgpt_interface_quota_reserve_basis_points: None,
-                routing_order,
-            },
-            platform: std::env::consts::OS.to_string(),
-            capabilities: self.capabilities.clone(),
-            sources: source_summaries,
-            accounts: account_summaries,
-            automations: self.store.wake_tasks()?,
-            wake_history: self.store.wake_state()?.history().iter().cloned().collect(),
-            warnings,
-        })
+        snapshot::build(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::account_runtime::account_summary;
     use super::*;
     use crate::{
         config::Config,
@@ -555,9 +356,158 @@ mod tests {
     use zenith_relay_core::accounts::AccountAuthState;
     use zenith_relay_core::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind, Subscription};
     use zenith_relay_core::{
-        protocol::UsageQuery, ApiEquivalentSummary, CandidateQuota, DefaultServiceTier, UsageEvent,
-        WireApi,
+        protocol::{OperationalStatus, ProxyMode, UsageQuery},
+        ApiEquivalentSummary, ApiModelPriceOverride, CandidateQuota, DefaultServiceTier,
+        UsageEvent, WireApi,
     };
+
+    fn snapshot_test_state(root: &TempDir) -> Arc<AppState> {
+        let config = Config::for_test(root.path().to_path_buf(), "127.0.0.1:0".parse().unwrap());
+        let store = Arc::new(Store::open(root.path().join("relay.sqlite")).unwrap());
+        let vault = Arc::new(Vault::open(&root.path().join("vault"), config.vault_key).unwrap());
+        AppState::new(config, store, vault).unwrap()
+    }
+
+    fn snapshot_test_source(id: &str, model: &str) -> SourceRecord {
+        SourceRecord {
+            id: id.into(),
+            name: "Snapshot source".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: format!("source:{id}"),
+            wire_api: WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec![model.into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::new(),
+            last_error_code: None,
+        }
+    }
+
+    fn snapshot_test_account(id: &str, model: &str) -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: id.into(),
+            label: "Snapshot account".into(),
+            identity_hint: "snapshot-account".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "openai_codex".into(),
+            secret_ref: format!("account:{id}"),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec![model.into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Subscription::default(),
+            quota: QuotaSnapshot::default(),
+            economics: Default::default(),
+            cooldowns: BTreeMap::new(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        }
+    }
+
+    #[test]
+    fn snapshot_preserves_persisted_model_policy_and_missing_secret_warning() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let source = snapshot_test_source("source-snapshot", "gpt-5.4");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state
+            .store
+            .save_account(&snapshot_test_account(
+                "account-missing",
+                "gpt-account-test",
+            ))
+            .unwrap();
+        state
+            .store
+            .set_hidden_models(vec!["gpt-5.4".into()])
+            .unwrap();
+        state
+            .store
+            .set_model_price_overrides(BTreeMap::from([(
+                "gpt-5.4".into(),
+                ApiModelPriceOverride {
+                    input_micro_usd_per_million: 1_000,
+                    cached_input_micro_usd_per_million: Some(100),
+                    cache_write_5m_micro_usd_per_million: Some(1_500),
+                    cache_write_1h_micro_usd_per_million: Some(2_000),
+                    output_micro_usd_per_million: 3_000,
+                },
+            )]))
+            .unwrap();
+
+        let snapshot = state.snapshot().unwrap();
+
+        assert_eq!(snapshot.runtime_target.kind, "remote");
+        assert!(!snapshot.gateway.running);
+        assert_eq!(snapshot.gateway.candidate_count, 1);
+        assert!(snapshot.gateway.visible_model_ids.is_empty());
+        assert_eq!(snapshot.sources.len(), 1);
+        assert!(snapshot.sources[0].secret_available);
+        assert_eq!(snapshot.accounts.len(), 1);
+        assert!(!snapshot.accounts[0].secret_available);
+        assert_eq!(
+            snapshot.warnings,
+            vec!["account_secret_missing:account-missing"]
+        );
+
+        let model = snapshot.gateway.models.first().unwrap();
+        assert_eq!(model.id, "gpt-5.4");
+        assert!(!model.enabled);
+        assert!(model.custom_price);
+        assert_eq!(model.input_micro_usd_per_million, Some(1_000));
+        assert_eq!(model.cached_input_micro_usd_per_million, Some(100));
+        assert_eq!(model.cache_write_5m_micro_usd_per_million, Some(1_500));
+        assert_eq!(model.cache_write_1h_micro_usd_per_million, Some(2_000));
+        assert_eq!(model.output_micro_usd_per_million, Some(3_000));
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_the_active_runtime_candidate_order() {
+        let root = TempDir::new().unwrap();
+        let state = snapshot_test_state(&root);
+        let source = snapshot_test_source("source-runtime", "gpt-runtime-test");
+        state.store.save_source(&source).unwrap();
+        state
+            .vault
+            .save(&source.secret_ref, "synthetic-source-key")
+            .unwrap();
+        state.rebuild_runtime().await.unwrap();
+
+        let snapshot = state.snapshot().unwrap();
+
+        assert!(snapshot.gateway.running);
+        assert_eq!(snapshot.gateway.candidate_count, 1);
+        assert_eq!(snapshot.gateway.visible_model_ids, ["gpt-runtime-test"]);
+        assert_eq!(snapshot.gateway.routing_order.len(), 1);
+        assert_eq!(snapshot.gateway.routing_order[0].candidate_id, source.id);
+        assert!(snapshot.gateway.routing_order[0].available);
+        assert_eq!(
+            snapshot.sources[0].operational_status,
+            OperationalStatus::Rotation
+        );
+
+        state.shutdown_runtime().await.unwrap();
+    }
 
     #[tokio::test]
     async fn usage_writer_is_reused_and_flushes_before_shutdown() {
