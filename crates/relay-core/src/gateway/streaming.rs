@@ -1258,4 +1258,15 @@ data: {"type":"response.cancelled","response":{"error":{"type":"invalid_request_
             assert!(parse_sse_event(event.as_bytes()).has_output_delta);
         }
     }
+
+    #[test]
+    fn streamed_custom_tool_input_commits_the_response() {
+        let event = parse_sse_event(
+            br#"data: {"type":"response.custom_tool_call_input.delta","delta":"{"}
+
+"#,
+        );
+
+        assert!(event.has_output_delta);
+    }
 }
