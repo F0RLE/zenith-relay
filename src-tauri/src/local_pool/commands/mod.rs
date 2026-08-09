@@ -26,8 +26,6 @@ use super::{
 };
 use std::{collections::HashMap, sync::Arc};
 use tauri::{AppHandle, Manager};
-#[cfg(test)]
-use zenith_relay_core::protocol::AccountRoutingBlockReason;
 use zenith_relay_core::{
     accounts::AccountRecord,
     protocol::{
@@ -36,8 +34,10 @@ use zenith_relay_core::{
     },
     GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeCandidatePolicy,
     RuntimeChatGptAccount, RuntimeChatGptAuth, RuntimeMixedLocalKey, RuntimeSource,
-    RuntimeSourcePolicyUpdate, WireApi, QUOTA_STALE_AFTER_MS,
+    RuntimeSourcePolicyUpdate, QUOTA_STALE_AFTER_MS,
 };
+#[cfg(test)]
+use zenith_relay_core::{protocol::AccountRoutingBlockReason, WireApi};
 
 async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>> {
     let system_key = pool::ensure_system_gateway_key(state)?;
@@ -59,21 +59,8 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
     };
     let quota_stale_after_ms = QUOTA_STALE_AFTER_MS;
     // The managed ChatGPT/Codex profile has one strict Responses-only pool.
-    let mut pool_source_ids = Vec::new();
-    for source in &source_records {
-        if source.in_pool
-            && source
-                .supports_wire_api(WireApi::Responses)
-                .map_err(|message| LocalPoolError::new(ErrorCode::InvalidState, message))?
-        {
-            pool_source_ids.push(source.id.clone());
-        }
-    }
-    let pool_account_ids = account_records
-        .iter()
-        .filter(|account| account.account.in_pool)
-        .map(|account| account.account.id.clone())
-        .collect::<Vec<_>>();
+    let (pool_source_ids, pool_account_ids) =
+        pool::local_pool_member_ids(&source_records, &account_records)?;
     let mut sources = Vec::new();
     for source in source_records {
         let Some(api_key) = secret_store::load(&source.secret_ref)? else {
@@ -173,8 +160,8 @@ async fn runtime_from_store(state: &DesktopState) -> Result<Arc<GatewayRuntime>>
             secret,
         },
         enabled: system_key.enabled,
-        source_ids: Some(pool_source_ids),
-        account_ids: Some(pool_account_ids),
+        source_ids: Some(pool_source_ids.into_iter().collect()),
+        account_ids: Some(pool_account_ids.into_iter().collect()),
         allowed_models: Vec::new(),
         excluded_models: Vec::new(),
         model_prefix: None,
@@ -325,6 +312,23 @@ fn source_runtime_policy_changed(
         || previous.recovery_delay_seconds != next.recovery_delay_seconds
 }
 
+/// Applies the configured Responses pool to an existing runtime. The live
+/// scheduler is the source of truth for candidate availability, so this never
+/// reopens credentials merely to rebuild a key scope.
+pub(super) fn apply_local_gateway_key_scope(
+    state: &DesktopState,
+    runtime: &GatewayRuntime,
+) -> Result<bool> {
+    let system_key = pool::ensure_system_gateway_key(state)?;
+    let (sources, accounts) = {
+        let store = state.store()?;
+        (store.sources().to_vec(), store.accounts().to_vec())
+    };
+    let (source_ids, account_ids) = pool::local_pool_member_ids(&sources, &accounts)?;
+    let scope = runtime.active_responses_scope(&source_ids, &account_ids);
+    Ok(runtime.update_key_scope(&system_key.id, scope))
+}
+
 /// Refreshes the managed local key's candidate scope without replacing the
 /// listener or any source/account executor. Source membership is represented
 /// by this scope, so a policy-only source edit that also changes `in_pool`
@@ -335,13 +339,7 @@ pub(super) async fn refresh_local_gateway_key_scope_if_running(
     let Some(runtime) = state.gateway.runtime().await else {
         return Ok(true);
     };
-    let system_key = pool::ensure_system_gateway_key(state)?;
-    let (sources, accounts) = {
-        let store = state.store()?;
-        (store.sources().to_vec(), store.accounts().to_vec())
-    };
-    let scope = pool::local_pool_scope(&sources, &accounts)?;
-    Ok(runtime.update_key_scope(&system_key.id, scope))
+    apply_local_gateway_key_scope(state, &runtime)
 }
 
 pub(super) async fn apply_account_policy_if_running(

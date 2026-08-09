@@ -25,7 +25,7 @@ use zenith_relay_core::{
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
         CONFIGURATION_PRESET_SCHEMA_VERSION,
     },
-    ApiModelPriceOverride, CandidateScope, DefaultServiceTier, RoutingStrategy, WireApi,
+    ApiModelPriceOverride, DefaultServiceTier, RoutingStrategy, WireApi,
 };
 
 type CommandResult<T> = std::result::Result<T, CommandError>;
@@ -577,10 +577,12 @@ fn pool_model_has_native_account(state: &DesktopState, model: &str) -> LocalResu
     }))
 }
 
-pub(super) fn local_pool_scope(
+/// Returns the configured members of the managed Responses pool. Runtime
+/// availability is intentionally applied later from the live scheduler.
+pub(super) fn local_pool_member_ids(
     sources: &[ProviderSourceRecord],
     accounts: &[LocalAccountRecord],
-) -> LocalResult<CandidateScope> {
+) -> LocalResult<(BTreeSet<String>, BTreeSet<String>)> {
     let mut source_ids = BTreeSet::new();
     for source in sources.iter().filter(|source| source.in_pool) {
         if source
@@ -590,17 +592,12 @@ pub(super) fn local_pool_scope(
             source_ids.insert(source.id.clone());
         }
     }
-    Ok(CandidateScope {
-        source_ids: Some(source_ids),
-        account_ids: Some(
-            accounts
-                .iter()
-                .filter(|account| account.account.in_pool)
-                .map(|account| account.account.id.clone())
-                .collect(),
-        ),
-        model_rules: Default::default(),
-    })
+    let account_ids = accounts
+        .iter()
+        .filter(|account| account.account.in_pool)
+        .map(|account| account.account.id.clone())
+        .collect();
+    Ok((source_ids, account_ids))
 }
 
 #[tauri::command]
@@ -628,12 +625,6 @@ pub async fn set_local_pool_membership(
             store.keys().to_vec(),
         )
     };
-    let system_key_id = old_keys
-        .iter()
-        .find(|key| key.id == SYSTEM_GATEWAY_KEY_ID)
-        .or_else(|| old_keys.iter().find(|key| key.system))
-        .map(|key| key.id.clone())
-        .unwrap_or_else(|| SYSTEM_GATEWAY_KEY_ID.to_string());
     if source_ids
         .iter()
         .any(|id| !old_sources.iter().any(|record| &record.id == id))
@@ -688,7 +679,6 @@ pub async fn set_local_pool_membership(
         return state.snapshot().await.map_err(Into::into);
     }
 
-    let next_scope = local_pool_scope(&sources, &accounts)?;
     let changed_accounts = accounts
         .iter()
         .filter(|account| account_ids.contains(&account.account.id))
@@ -704,7 +694,7 @@ pub async fn set_local_pool_membership(
                 &account.account.id,
                 runtime_account_policy(account, policy_now_ms),
             )
-        }) && runtime.update_key_scope(&system_key_id, next_scope)
+        }) && super::apply_local_gateway_key_scope(&state, &runtime).unwrap_or(false)
     } else {
         false
     };
@@ -769,4 +759,50 @@ pub async fn update_local_routing(
         sync_gateway_or_rollback(&state, old_gateway).await?;
     }
     state.snapshot().await.map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(id: &str, in_pool: bool, wire_api: WireApi) -> ProviderSourceRecord {
+        ProviderSourceRecord {
+            id: id.into(),
+            name: id.into(),
+            enabled: true,
+            in_pool,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: format!("source:{id}"),
+            wire_api,
+            protocol_bindings: Vec::new(),
+            models: vec!["test-model".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: Default::default(),
+            last_used_at: None,
+            last_test_at: None,
+            last_test_status: None,
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn local_pool_member_ids_keep_only_configured_responses_sources() {
+        let (source_ids, account_ids) = local_pool_member_ids(
+            &[
+                source("responses", true, WireApi::Responses),
+                source("messages", true, WireApi::Messages),
+                source("outside", false, WireApi::Responses),
+            ],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(source_ids, BTreeSet::from(["responses".to_string()]));
+        assert!(account_ids.is_empty());
+    }
 }

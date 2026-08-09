@@ -103,6 +103,18 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
   const revealableAccountIds = canRevealAccountIdentities ? (runtime?.accounts ?? []).filter((account) => account.secretAvailable).map((account) => account.id) : [];
   const revealableAccountSignature = revealableAccountIds.join("\0");
+  const accountIndex = useMemo(() => {
+    const uniqueById = new Map<string, AccountSummary | null>();
+    const uniqueByLabel = new Map<string, AccountSummary | null>();
+    for (const account of runtime?.accounts ?? []) {
+      uniqueById.set(account.id, uniqueById.has(account.id) ? null : account);
+      uniqueByLabel.set(
+        account.label,
+        uniqueByLabel.has(account.label) ? null : account,
+      );
+    }
+    return { uniqueById, uniqueByLabel };
+  }, [runtime?.accounts]);
 
   const refresh = useCallback(async () => {
     const requestedMode = mode;
@@ -507,14 +519,12 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
-    const accounts = runtime?.accounts ?? [];
-    const matches = accountId
-      ? accounts.filter((account) => account.id === accountId)
-      : fallbackLabel ? accounts.filter((account) => account.label === fallbackLabel) : [];
-    const account = matches.length === 1 ? matches[0] : null;
+    const account = accountId
+      ? accountIndex.uniqueById.get(accountId) ?? null
+      : fallbackLabel ? accountIndex.uniqueByLabel.get(fallbackLabel) ?? null : null;
     if (!account) return fallbackLabel ?? null;
     return accountIdentitiesVisible && canRevealAccountIdentities && account.secretAvailable ? revealedAccountIdentities[`${mode}:${account.id}`] ?? account.label : account.label;
-  }, [accountIdentitiesVisible, canRevealAccountIdentities, mode, revealedAccountIdentities, runtime?.accounts]);
+  }, [accountIdentitiesVisible, accountIndex, canRevealAccountIdentities, mode, revealedAccountIdentities]);
 
   const displayRuntime = useMemo<RuntimeSnapshot | null>(() => runtime ? {
     ...runtime,
