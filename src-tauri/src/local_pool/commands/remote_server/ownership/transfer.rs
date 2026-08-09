@@ -2,14 +2,20 @@ use super::super::object_path;
 use crate::local_pool::{
     accounts::export_ops::build_local_account_export_document,
     error::{CommandError, ErrorCode, LocalPoolError},
-    remote::client::RemoteClient,
+    remote::client::{RemoteClient, RemoteClientError},
     state::DesktopState,
 };
 use reqwest::Method;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat};
 use zenith_relay_core::protocol::{valid_generated_id, AccountSummary, OperationalStatus};
+
+const REMOTE_DELETE_MAX_ATTEMPTS: u32 = 3;
+const REMOTE_DELETE_RETRY_DELAY_MS: u64 = 100;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +61,12 @@ struct RemoteTransferConfirmationError {
     message: &'static str,
     created_account_ids: Vec<String>,
     uncertain: bool,
+}
+
+#[derive(Debug)]
+struct RemoteTransferConfirmation {
+    account_ids: Vec<String>,
+    created_account_ids: Vec<String>,
 }
 
 pub(super) struct RemoteTransferBatch {
@@ -134,23 +146,20 @@ pub(super) async fn transfer_local_account_batch(
             message: "remote import confirmation is invalid".into(),
             created_account_ids: Vec::new(),
         })?;
-    let remote_account_ids = validate_remote_transfer_confirmation(&preview, confirmation)
-        .map_err(|error| RemoteTransferBatchError {
-            code: if error.uncertain {
-                ErrorCode::RecoveryRequired
-            } else {
-                ErrorCode::GatewayUnavailable
-            },
-            message: error.message.into(),
-            created_account_ids: error.created_account_ids,
+    let confirmed =
+        validate_remote_transfer_confirmation(&preview, confirmation).map_err(|error| {
+            RemoteTransferBatchError {
+                code: if error.uncertain {
+                    ErrorCode::RecoveryRequired
+                } else {
+                    ErrorCode::GatewayUnavailable
+                },
+                message: error.message.into(),
+                created_account_ids: error.created_account_ids,
+            }
         })?;
-    let created_account_ids = preview
-        .preview
-        .rows
-        .iter()
-        .zip(&remote_account_ids)
-        .filter_map(|(row, account_id)| (!row.existing).then_some(account_id.clone()))
-        .collect::<Vec<_>>();
+    let remote_account_ids = confirmed.account_ids;
+    let created_account_ids = confirmed.created_account_ids;
     let snapshot = client
         .state()
         .await
@@ -201,7 +210,7 @@ fn validate_remote_transfer_preview(
 fn validate_remote_transfer_confirmation(
     preview: &RemoteBatchImportSession,
     confirmation: RemoteBatchImportConfirmation,
-) -> Result<Vec<String>, RemoteTransferConfirmationError> {
+) -> Result<RemoteTransferConfirmation, RemoteTransferConfirmationError> {
     let mut complete = confirmation.session_id == preview.session_id
         && confirmation.results.len() == preview.preview.rows.len();
     let mut uncertain = !complete;
@@ -250,7 +259,10 @@ fn validate_remote_transfer_confirmation(
             uncertain,
         });
     }
-    Ok(account_ids)
+    Ok(RemoteTransferConfirmation {
+        account_ids,
+        created_account_ids,
+    })
 }
 
 fn remote_accounts_are_validated(accounts: &[AccountSummary], expected_ids: &[String]) -> bool {
@@ -287,11 +299,34 @@ pub(super) async fn delete_remote_accounts(client: &RemoteClient, account_ids: &
             complete = false;
             continue;
         };
-        if client.mutate(Method::DELETE, &path, None).await.is_err() {
+        if !delete_remote_account(client, &path).await {
             complete = false;
         }
     }
     complete
+}
+
+async fn delete_remote_account(client: &RemoteClient, path: &str) -> bool {
+    for attempt in 1..=REMOTE_DELETE_MAX_ATTEMPTS {
+        match client.mutate(Method::DELETE, path, None).await {
+            Ok(_) | Err(RemoteClientError::HttpStatus(404)) => return true,
+            Err(error)
+                if should_retry_remote_delete(&error) && attempt < REMOTE_DELETE_MAX_ATTEMPTS =>
+            {
+                tokio::time::sleep(remote_delete_retry_delay(attempt)).await;
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+fn should_retry_remote_delete(error: &RemoteClientError) -> bool {
+    matches!(error, RemoteClientError::Transport)
+}
+
+fn remote_delete_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(REMOTE_DELETE_RETRY_DELAY_MS * (1_u64 << (attempt - 1)))
 }
 
 fn invalid_remote_transfer(message: &str) -> CommandError {
@@ -301,6 +336,14 @@ fn invalid_remote_transfer(message: &str) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     #[test]
     fn transfer_confirmation_preserves_preview_order() {
@@ -314,9 +357,74 @@ mod tests {
         };
 
         assert_eq!(
-            validate_remote_transfer_confirmation(&preview, confirmation).unwrap(),
+            validate_remote_transfer_confirmation(&preview, confirmation)
+                .unwrap()
+                .account_ids,
             vec!["remote-one", "remote-two"]
         );
+    }
+
+    #[test]
+    fn successful_transfer_tracks_only_new_accounts_for_rollback() {
+        let preview = preview(true, false);
+        let confirmation = RemoteBatchImportConfirmation {
+            session_id: preview.session_id.clone(),
+            results: vec![
+                result("import_11111111111111111111111111111111", "remote-existing"),
+                result("import_22222222222222222222222222222222", "remote-new"),
+            ],
+        };
+
+        let confirmed = validate_remote_transfer_confirmation(&preview, confirmation).unwrap();
+
+        assert_eq!(confirmed.account_ids, vec!["remote-existing", "remote-new"]);
+        assert_eq!(confirmed.created_account_ids, vec!["remote-new"]);
+    }
+
+    #[test]
+    fn rollback_delete_retries_only_transport_errors() {
+        assert!(should_retry_remote_delete(&RemoteClientError::Transport));
+        assert!(!should_retry_remote_delete(&RemoteClientError::HttpStatus(
+            503
+        )));
+        assert!(!should_retry_remote_delete(
+            &RemoteClientError::InvalidResponse
+        ));
+        assert_eq!(remote_delete_retry_delay(1), Duration::from_millis(100));
+        assert_eq!(remote_delete_retry_delay(2), Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn rollback_delete_retries_after_a_transport_failure() {
+        let (server, requests, task) = spawn_delete_server(vec![
+            None,
+            Some(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"),
+        ])
+        .await;
+        let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+
+        assert!(delete_remote_accounts(&client, &["remote-new".into()]).await);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn rollback_delete_accepts_an_already_missing_account() {
+        let (server, requests, task) = spawn_delete_server(vec![Some(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )])
+        .await;
+        let client = RemoteClient::new(&server, "synthetic-management-token-value", false).unwrap();
+
+        assert!(delete_remote_accounts(&client, &["remote-new".into()]).await);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -432,5 +540,26 @@ mod tests {
             "lastErrorCode": null
         }))
         .unwrap()
+    }
+
+    async fn spawn_delete_server(
+        responses: Vec<Option<&'static [u8]>>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let task = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await.unwrap();
+                observed.fetch_add(1, Ordering::SeqCst);
+                if let Some(response) = response {
+                    stream.write_all(response).await.unwrap();
+                }
+            }
+        });
+        (format!("http://{address}"), requests, task)
     }
 }
