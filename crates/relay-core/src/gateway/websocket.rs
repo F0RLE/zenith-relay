@@ -1,23 +1,20 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
     apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
-    failure_requires_independent_source_endpoint, rate_limit_body_hint, rate_limit_body_hint_value,
-    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    failure_requires_independent_source_endpoint, rate_limit_body_hint, CooldownContext,
+    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
-use super::request::{
-    forwarded_codex_headers, tool_use_diagnostics, with_forwarded_tool_diagnostics,
-    CODEX_RESPONSES_LITE_HEADER,
-};
+use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
 use super::response::{apply_usage, emit_usage, usage_event};
 use super::streaming::has_output_delta;
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
-use crate::{GatewayRuntime, ToolUseDiagnostics, UsageEvent, WireApi};
+use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{
@@ -29,6 +26,16 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};
+
+mod events;
+mod request;
+
+use events::{
+    event_terminal, incomplete_requires_cooldown, incomplete_status, terminal_failure_status,
+    EventTerminal, EventTerminalOutcome,
+};
+use request::ClientRequest;
+
 const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(180);
 
 const MAX_WEBSOCKET_MESSAGE_BYTES: usize = super::request::MAX_CLIENT_REQUEST_BODY_BYTES;
@@ -120,135 +127,6 @@ async fn read_initial_request(
             Message::Pong(_) => {}
             Message::Close(_) => return Err(GatewayFailure::client_closed()),
         }
-    }
-}
-
-#[derive(Clone)]
-struct ClientRequest {
-    request_id: String,
-    value: Value,
-    requested_model: String,
-    resolved_model: String,
-    responses_lite: bool,
-    response_affinity_key: Option<String>,
-    prompt_affinity_key: Option<String>,
-}
-
-impl ClientRequest {
-    fn parse(
-        runtime: &GatewayRuntime,
-        key: &AuthenticatedKey,
-        headers: &HeaderMap,
-        payload: &[u8],
-    ) -> Result<Self, GatewayFailure> {
-        if payload.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
-            return Err(GatewayFailure::invalid_request(
-                "WebSocket request is too large",
-            ));
-        }
-        let mut value: Value = serde_json::from_slice(payload)
-            .map_err(|_| GatewayFailure::invalid_request("request must be valid JSON"))?;
-        let object = value
-            .as_object_mut()
-            .ok_or_else(|| GatewayFailure::invalid_request("request must be a JSON object"))?;
-        if object
-            .get("type")
-            .and_then(Value::as_str)
-            .is_some_and(|kind| kind != "response.create")
-        {
-            return Err(GatewayFailure::invalid_request(
-                "only response.create messages are supported",
-            ));
-        }
-        let requested_model = object
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .ok_or_else(|| GatewayFailure::invalid_request("model must be a non-empty string"))?
-            .to_string();
-        let resolved_model = runtime
-            .resolve_visible_model(key, &requested_model, WEBSOCKET_PROTOCOLS, now_ms())
-            .ok_or_else(GatewayFailure::model_not_found)?;
-        let responses_lite = headers.contains_key(CODEX_RESPONSES_LITE_HEADER)
-            || metadata_flag(&value, RESPONSES_LITE_METADATA_KEY)
-            || runtime.codex_model_uses_responses_lite(&resolved_model);
-        let response_affinity_key = runtime
-            .response_affinity_key(value.get("previous_response_id").and_then(Value::as_str));
-        let prompt_affinity_key = runtime.prompt_affinity_key(
-            &key.id,
-            &resolved_model,
-            value.get("prompt_cache_key").and_then(Value::as_str),
-        );
-        Ok(Self {
-            request_id: super::request::request_id(),
-            value,
-            requested_model,
-            resolved_model,
-            responses_lite,
-            response_affinity_key,
-            prompt_affinity_key,
-        })
-    }
-
-    fn payload_for(&self, route: &ExecutorRoute) -> Result<String, GatewayFailure> {
-        let mut value = self.value.clone();
-        let object = value
-            .as_object_mut()
-            .expect("request object was validated before routing");
-        object.insert(
-            "type".to_string(),
-            Value::String("response.create".to_string()),
-        );
-        object.insert(
-            "model".to_string(),
-            Value::String(route.source_model.clone()),
-        );
-        if route.account_id.is_some() {
-            super::request::normalize_account_request(object, self.responses_lite);
-        }
-        serde_json::to_string(&value)
-            .map_err(|_| GatewayFailure::invalid_request("request could not be serialized"))
-    }
-
-    fn tool_use_for(&self, route: &ExecutorRoute) -> ToolUseDiagnostics {
-        let client = tool_use_diagnostics(&self.value);
-        self.payload_for(route)
-            .map(|payload| with_forwarded_tool_diagnostics(&client, payload.as_bytes()))
-            .unwrap_or(client)
-    }
-
-    fn has_previous_response_id(&self) -> bool {
-        self.previous_response_id().is_some()
-    }
-
-    fn previous_response_id(&self) -> Option<&str> {
-        self.value
-            .get("previous_response_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    }
-
-    fn has_tool_call_output(&self) -> bool {
-        super::request::contains_tool_call_output(&self.value)
-    }
-
-    fn drop_previous_response_id(&mut self) -> bool {
-        let Some(object) = self.value.as_object_mut() else {
-            return false;
-        };
-        if object.remove("previous_response_id").is_some() {
-            self.response_affinity_key = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn recover_invalid_encrypted_content(&mut self) -> bool {
-        let mut attempted = false;
-        super::request::try_recover_encrypted_content(&mut self.value, &mut attempted)
     }
 }
 
@@ -1285,23 +1163,6 @@ async fn handle_upstream_message(
     }
 }
 
-#[derive(Default)]
-struct EventTerminal {
-    outcome: Option<EventTerminalOutcome>,
-    status: Option<StatusCode>,
-    error_category: Option<&'static str>,
-    headers: HeaderMap,
-    body_hint: RateLimitBodyHint,
-    previous_response_not_found: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EventTerminalOutcome {
-    Success,
-    Incomplete,
-    Failure,
-}
-
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
     let Ok(value) = serde_json::from_slice::<Value>(payload) else {
         return EventTerminal::default();
@@ -1320,29 +1181,6 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
         }
     }
     event_terminal(&value)
-}
-
-fn event_terminal(value: &Value) -> EventTerminal {
-    let outcome = match value.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => Some(EventTerminalOutcome::Success),
-        Some("response.incomplete") => Some(EventTerminalOutcome::Incomplete),
-        Some("response.failed" | "response.cancelled" | "response.canceled" | "error") => {
-            Some(EventTerminalOutcome::Failure)
-        }
-        _ => None,
-    };
-    let status = super::errors::upstream_status_from_value(value);
-    EventTerminal {
-        outcome,
-        status,
-        error_category: super::errors::upstream_event_failure_category(
-            value.get("type").and_then(Value::as_str),
-            value,
-        ),
-        headers: websocket_retry_headers(value),
-        body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
-        previous_response_not_found: super::errors::previous_response_not_found_value(value),
-    }
 }
 
 fn finish_terminal(
@@ -1476,121 +1314,6 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
-}
-
-fn incomplete_status(category: &str) -> Option<StatusCode> {
-    match category {
-        "websocket_idle_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_semantic_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_event_too_large"
-        | "upstream_transport"
-        | "upstream_websocket"
-        | "upstream_websocket_closed" => Some(StatusCode::BAD_GATEWAY),
-        _ => None,
-    }
-}
-
-fn incomplete_requires_cooldown(category: &str) -> bool {
-    matches!(
-        category,
-        "stream_event_too_large"
-            | "upstream_transport"
-            | "upstream_websocket"
-            | "upstream_websocket_closed"
-            | "websocket_idle_timeout"
-            | "stream_semantic_timeout"
-    )
-}
-
-fn terminal_failure_status(status: Option<StatusCode>) -> StatusCode {
-    status
-        .filter(|status| !status.is_success())
-        .unwrap_or(StatusCode::BAD_GATEWAY)
-}
-
-fn websocket_retry_headers(value: &Value) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    let retry_after = websocket_reset_delay_seconds(value, now_ms() / 1_000)
-        .map(|seconds| seconds.to_string())
-        .or_else(|| {
-            value
-                .pointer("/headers/retry-after")
-                .or_else(|| value.pointer("/headers/retry_after"))
-                .or_else(|| value.pointer("/body/headers/retry-after"))
-                .or_else(|| value.pointer("/body/error/resets_in_seconds"))
-                .or_else(|| value.pointer("/error/resets_in_seconds"))
-                .and_then(|value| match value {
-                    Value::String(value) => Some(value.clone()),
-                    Value::Number(value) => Some(value.to_string()),
-                    _ => None,
-                })
-        });
-    if let Some(value) = retry_after
-        .filter(|value| value.len() <= 128)
-        .and_then(|value| HeaderValue::from_str(&value).ok())
-    {
-        headers.insert(RETRY_AFTER, value);
-    }
-    for name in [
-        "x-codex-primary-used-percent",
-        "x-codex-primary-reset-after-seconds",
-        "x-codex-primary-window-minutes",
-        "x-codex-secondary-used-percent",
-        "x-codex-secondary-reset-after-seconds",
-        "x-codex-secondary-window-minutes",
-    ] {
-        if let Some(value) = websocket_header_value(value, name)
-            .filter(|value| value.len() <= 128)
-            .and_then(|value| HeaderValue::from_str(&value).ok())
-        {
-            headers.insert(HeaderName::from_static(name), value);
-        }
-    }
-    headers
-}
-
-fn websocket_header_value(value: &Value, name: &str) -> Option<String> {
-    let alternate = name.replace('-', "_");
-    [
-        value.get("headers"),
-        value.pointer("/body/headers"),
-        value.pointer("/response/headers"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|headers| headers.get(name).or_else(|| headers.get(&alternate)))
-    .and_then(|value| match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    })
-}
-
-fn websocket_reset_delay_seconds(value: &Value, now_seconds: u64) -> Option<u64> {
-    let reset_at = value
-        .pointer("/body/error/resets_at")
-        .or_else(|| value.pointer("/response/error/resets_at"))
-        .or_else(|| value.pointer("/error/resets_at"))?;
-    let mut reset_at = reset_at
-        .as_u64()
-        .or_else(|| reset_at.as_str().and_then(|value| value.parse().ok()))?;
-    if reset_at > 10_000_000_000 {
-        reset_at /= 1_000;
-    }
-    reset_at
-        .checked_sub(now_seconds)
-        .filter(|seconds| *seconds > 0)
-}
-
-fn metadata_flag(value: &Value, key: &str) -> bool {
-    value
-        .get("client_metadata")
-        .and_then(|metadata| metadata.get(key))
-        .is_some_and(|value| match value {
-            Value::Bool(value) => *value,
-            Value::String(value) => value.eq_ignore_ascii_case("true"),
-            _ => false,
-        })
 }
 
 async fn send_gateway_error(downstream: &mut WebSocket, failure: &GatewayFailure) {
@@ -1766,12 +1489,45 @@ impl GatewayFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
-        event_terminal, incomplete_requires_cooldown, terminal_failure_status,
-        websocket_reset_delay_seconds, EventTerminalOutcome,
+        event_terminal, incomplete_requires_cooldown, terminal_failure_status, ClientRequest,
+        EventTerminalOutcome, WEBSOCKET_PROTOCOLS,
     };
-    use reqwest::StatusCode;
+    use crate::{
+        GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
+        RuntimeSource, WireApi,
+    };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn runtime() -> GatewayRuntime {
+        GatewayRuntime::from_pool(
+            vec![RuntimeSource::unrestricted(ProviderSource {
+                id: "source".into(),
+                name: "source".into(),
+                base_url: "https://example.test/v1".into(),
+                api_key: "upstream-secret".into(),
+                wire_api: WireApi::Responses,
+                models: vec!["upstream-model".into()],
+            })],
+            vec![RuntimeLocalKey {
+                key: LocalGatewayKey {
+                    id: "key".into(),
+                    secret: "local-secret".into(),
+                },
+                enabled: true,
+                source_ids: None,
+                allowed_models: Vec::new(),
+                excluded_models: Vec::new(),
+                model_prefix: Some("relay".into()),
+            }],
+            GatewayRuntimeOptions::default(),
+            Arc::new(|_| {}),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn only_upstream_incomplete_failures_cool_the_candidate() {
@@ -1828,5 +1584,98 @@ mod tests {
             crate::gateway::errors::upstream_status_from_value(&value),
             Some(StatusCode::TOO_MANY_REQUESTS)
         );
+    }
+
+    #[test]
+    fn websocket_retry_headers_preserve_nested_reset_and_quota_hints() {
+        let value = json!({
+            "body": {
+                "error": {"resets_in_seconds": 45},
+                "headers": {"x-codex-primary-used-percent": "99"}
+            }
+        });
+        let headers = websocket_retry_headers(&value);
+
+        assert_eq!(
+            headers
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("45")
+        );
+        assert_eq!(
+            headers
+                .get("x-codex-primary-used-percent")
+                .and_then(|value| value.to_str().ok()),
+            Some("99")
+        );
+    }
+
+    #[test]
+    fn client_request_resolves_the_visible_model_before_upstream_serialization() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::gateway::request::CODEX_RESPONSES_LITE_HEADER,
+            HeaderValue::from_static("true"),
+        );
+        let request = ClientRequest::parse(
+            &runtime,
+            &key,
+            &headers,
+            br#"{
+                "model": "relay/upstream-model",
+                "input": "hello",
+                "previous_response_id": "resp_previous",
+                "prompt_cache_key": "cache-key"
+            }"#,
+        )
+        .unwrap_or_else(|_| panic!("request should be accepted"));
+        let route = runtime
+            .executor_route(
+                "source",
+                &request.resolved_model,
+                &key.scope_snapshot(),
+                WEBSOCKET_PROTOCOLS,
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(
+            &request
+                .payload_for(&route)
+                .unwrap_or_else(|_| panic!("request should be serializable")),
+        )
+        .unwrap();
+
+        assert_eq!(request.requested_model, "relay/upstream-model");
+        assert_eq!(request.resolved_model, "upstream-model");
+        assert!(request.responses_lite);
+        assert!(request.response_affinity_key.is_some());
+        assert!(request.prompt_affinity_key.is_some());
+        assert_eq!(payload["type"], "response.create");
+        assert_eq!(payload["model"], "upstream-model");
+        assert_eq!(payload["input"], "hello");
+    }
+
+    #[test]
+    fn client_request_rejects_non_create_messages_before_candidate_selection() {
+        let runtime = runtime();
+        let key = runtime
+            .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
+            .unwrap();
+        let error = match ClientRequest::parse(
+            &runtime,
+            &key,
+            &HeaderMap::new(),
+            br#"{"type":"response.cancel","model":"relay/upstream-model"}"#,
+        ) {
+            Ok(_) => panic!("non-create message should be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.category, "invalid_request");
+        assert_eq!(error.message, "only response.create messages are supported");
     }
 }
