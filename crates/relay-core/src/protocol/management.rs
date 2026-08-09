@@ -157,6 +157,14 @@ pub fn source_runtime_available(
     })
 }
 
+/// Validates a server-generated identifier formatted as a fixed prefix plus
+/// the 32 hexadecimal characters emitted by `Uuid::simple()`.
+pub fn valid_generated_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
@@ -1101,6 +1109,23 @@ mod tests {
         ];
         assert!(model_has_native_account_route(&accounts, "gpt-5"));
         assert!(!model_has_native_account_route(&accounts, "other"));
+    }
+
+    #[test]
+    fn generated_ids_require_the_expected_prefix_and_hex_suffix() {
+        assert!(valid_generated_id(
+            "batch_0123456789abcdef0123456789ABCDEF",
+            "batch_"
+        ));
+        assert!(!valid_generated_id("batch_0123456789abcdef", "batch_"));
+        assert!(!valid_generated_id(
+            "batch_0123456789abcdef0123456789abcdeg",
+            "batch_"
+        ));
+        assert!(!valid_generated_id(
+            "import_0123456789abcdef0123456789abcdef",
+            "batch_"
+        ));
     }
 
     #[test]

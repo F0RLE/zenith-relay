@@ -104,4 +104,13 @@ mod tests {
             .starts_with(&format!("{CODEX_ORIGINATOR}/{CODEX_CLIENT_VERSION} ")));
         assert_eq!(headers["chatgpt-account-id"], "account-1");
     }
+
+    #[test]
+    fn client_version_validation_is_shared_by_gateway_and_identity_headers() {
+        assert!(valid_codex_client_version("0.144.1"));
+        assert!(valid_codex_client_version("release_test+1"));
+        assert!(!valid_codex_client_version(""));
+        assert!(!valid_codex_client_version("0.144.1\ninvalid"));
+        assert!(!valid_codex_client_version(&"a".repeat(65)));
+    }
 }

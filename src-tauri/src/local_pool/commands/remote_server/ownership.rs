@@ -25,7 +25,8 @@ use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, State};
 use zenith_relay_core::accounts::{AccountAuthState, AccountExportFormat, AccountExportRequest};
 use zenith_relay_core::protocol::{
-    AccountSummary, Feature, OperationalStatus, RemoteAccountLocation, RuntimeStateSnapshot,
+    valid_generated_id, AccountSummary, Feature, OperationalStatus, RemoteAccountLocation,
+    RuntimeStateSnapshot,
 };
 
 const REMOTE_TRANSFER_VALIDATION_BATCH_SIZE: usize = 5;
@@ -1232,12 +1233,6 @@ async fn delete_remote_accounts(client: &RemoteClient, account_ids: &[String]) -
         }
     }
     complete
-}
-
-fn valid_generated_id(value: &str, prefix: &str) -> bool {
-    value.strip_prefix(prefix).is_some_and(|suffix| {
-        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
 }
 
 fn invalid_remote_transfer(message: &str) -> CommandError {

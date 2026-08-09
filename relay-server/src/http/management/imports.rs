@@ -20,7 +20,7 @@ use zenith_relay_core::accounts::{
     ImportPreviewStatus, ImportQuotaStatus, ImportWarning, ImportWarningCode, ParsedImport,
     ParsedImportItem, MAX_IMPORT_ITEMS,
 };
-use zenith_relay_core::protocol::AccountSummary;
+use zenith_relay_core::protocol::{valid_generated_id, AccountSummary};
 use zenith_relay_core::providers::chatgpt::parse_subscription_timestamp_ms;
 use zenith_relay_core::quota::{Subscription, SubscriptionInput};
 
@@ -862,12 +862,6 @@ fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {
         let _ = state.vault.delete(&secret_ref);
     }
     Ok(())
-}
-
-fn valid_generated_id(value: &str, prefix: &str) -> bool {
-    value.strip_prefix(prefix).is_some_and(|suffix| {
-        suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
 }
 
 fn safe_plan_type(value: String) -> Option<String> {

@@ -6,7 +6,7 @@ use crate::catalog::{
     normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
 };
 use crate::protocol::ClientWireApi;
-use crate::providers::chatgpt::CODEX_MODELS_CLIENT_VERSION;
+use crate::providers::chatgpt::{valid_codex_client_version, CODEX_MODELS_CLIENT_VERSION};
 use crate::runtime::AuthenticatedKey;
 use crate::{
     codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, routed_codex_catalog_entry,
@@ -456,14 +456,6 @@ fn upstream_codex_models(payload: &Value) -> Option<&Vec<Value>> {
         .get("models")
         .and_then(Value::as_array)
         .filter(|models| models.len() <= 4_096)
-}
-
-fn valid_codex_client_version(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
 
 fn allowed_openai_model_protocols(
