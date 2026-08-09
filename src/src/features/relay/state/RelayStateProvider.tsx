@@ -4,7 +4,9 @@ import { recordPerformance, setWindowBackgroundColor } from "../../../platform/d
 import { relayCommands, type UiState } from "../api/commands";
 import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
+import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
 import { sanitizeFeedbackError, type FeedbackError } from "./feedback";
+import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
 
 export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
 
@@ -87,7 +89,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(storedCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => stored("relay.accountIdentitiesVisible", "0") === "1");
   const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => stored("relay.poolEconomicsVisible", "true") !== "false");
-  const [accountIdentitiesBusy, setAccountIdentitiesBusy] = useState(false);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
   const remoteUsageRequest = useRef(0);
@@ -101,20 +102,14 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const modeSwitchStartedAt = useRef<{ mode: RelayMode; startedAt: number } | null>(null);
   const pageOpenStartedAt = useRef<{ page: PageId; startedAt: number } | null>(null);
   const canRevealAccountIdentities = mode === "local" || (mode === "remote" && Boolean(runtime?.capabilities.features.includes("account_identity_reveal")));
-  const revealableAccountIds = canRevealAccountIdentities ? (runtime?.accounts ?? []).filter((account) => account.secretAvailable).map((account) => account.id) : [];
-  const revealableAccountSignature = revealableAccountIds.join("\0");
-  const accountIndex = useMemo(() => {
-    const uniqueById = new Map<string, AccountSummary | null>();
-    const uniqueByLabel = new Map<string, AccountSummary | null>();
-    for (const account of runtime?.accounts ?? []) {
-      uniqueById.set(account.id, uniqueById.has(account.id) ? null : account);
-      uniqueByLabel.set(
-        account.label,
-        uniqueByLabel.has(account.label) ? null : account,
-      );
-    }
-    return { uniqueById, uniqueByLabel };
-  }, [runtime?.accounts]);
+  const accountIdentitiesBusy = useAccountIdentityReveal({
+    accounts: runtime?.accounts ?? [],
+    canReveal: canRevealAccountIdentities,
+    identitiesVisible: accountIdentitiesVisible,
+    mode,
+    setRevealedIdentities: setRevealedAccountIdentities,
+  });
+  const accountIndex = useMemo(() => buildAccountIdentityIndex(runtime?.accounts ?? []), [runtime?.accounts]);
 
   const refresh = useCallback(async () => {
     const requestedMode = mode;
@@ -219,38 +214,6 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
       active = false;
     };
   }, [refresh, t]);
-
-  useEffect(() => {
-    if (!accountIdentitiesVisible) {
-      setAccountIdentitiesBusy(false);
-      return;
-    }
-    if (!canRevealAccountIdentities || !revealableAccountSignature) {
-      const prefix = `${mode}:`;
-      setRevealedAccountIdentities((current) => Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix))));
-      setAccountIdentitiesBusy(false);
-      return;
-    }
-    let active = true;
-    const accountIds = revealableAccountSignature.split("\0");
-    const prefix = `${mode}:`;
-    setAccountIdentitiesBusy(true);
-    void Promise.allSettled(accountIds.map((accountId) => mode === "local"
-      ? relayCommands.revealLocalAccountIdentity(accountId)
-      : relayCommands.revealRemoteAccountIdentity(accountId)))
-      .then((results) => {
-        if (!active) return;
-        setRevealedAccountIdentities((current) => {
-          const next = Object.fromEntries(Object.entries(current).filter(([key]) => !key.startsWith(prefix)));
-          for (const result of results) {
-            if (result.status === "fulfilled") next[`${prefix}${result.value.accountId}`] = result.value.identity;
-          }
-          return next;
-        });
-      })
-      .finally(() => { if (active) setAccountIdentitiesBusy(false); });
-    return () => { active = false; };
-  }, [accountIdentitiesVisible, canRevealAccountIdentities, mode, revealableAccountSignature]);
 
   useEffect(() => {
     if ((page !== "pool" && page !== "connections") || !runtime?.gateway.running || mode === "zenith") return;
@@ -519,11 +482,15 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const accountDisplayName = useCallback((accountId?: string | null, fallbackLabel?: string | null) => {
-    const account = accountId
-      ? accountIndex.uniqueById.get(accountId) ?? null
-      : fallbackLabel ? accountIndex.uniqueByLabel.get(fallbackLabel) ?? null : null;
-    if (!account) return fallbackLabel ?? null;
-    return accountIdentitiesVisible && canRevealAccountIdentities && account.secretAvailable ? revealedAccountIdentities[`${mode}:${account.id}`] ?? account.label : account.label;
+    return displayAccountIdentity({
+      index: accountIndex,
+      accountId,
+      fallbackLabel,
+      identitiesVisible: accountIdentitiesVisible,
+      canReveal: canRevealAccountIdentities,
+      mode,
+      revealedIdentities: revealedAccountIdentities,
+    });
   }, [accountIdentitiesVisible, accountIndex, canRevealAccountIdentities, mode, revealedAccountIdentities]);
 
   const displayRuntime = useMemo<RuntimeSnapshot | null>(() => runtime ? {
