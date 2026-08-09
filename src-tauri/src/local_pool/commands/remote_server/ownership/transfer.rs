@@ -37,7 +37,6 @@ struct RemoteBatchImportRow {
     item_id: String,
     status: String,
     selectable: bool,
-    existing: bool,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +53,7 @@ struct RemoteBatchImportResult {
     status: String,
     #[serde(default)]
     account_id: Option<String>,
+    created: bool,
 }
 
 #[derive(Debug)]
@@ -223,6 +223,7 @@ fn validate_remote_transfer_confirmation(
     }
     let mut account_ids = Vec::with_capacity(preview.preview.rows.len());
     let mut created_account_ids = Vec::new();
+    let mut seen_account_ids = HashSet::with_capacity(preview.preview.rows.len());
     for row in &preview.preview.rows {
         let Some(result) = results.remove(&row.item_id) else {
             complete = false;
@@ -243,7 +244,12 @@ fn validate_remote_transfer_confirmation(
             uncertain = true;
             continue;
         }
-        if !row.existing {
+        if !seen_account_ids.insert(account_id.clone()) {
+            complete = false;
+            uncertain = true;
+            continue;
+        }
+        if result.created {
             created_account_ids.push(account_id.clone());
         }
         account_ids.push(account_id);
@@ -351,8 +357,16 @@ mod tests {
         let confirmation = RemoteBatchImportConfirmation {
             session_id: preview.session_id.clone(),
             results: vec![
-                result("import_22222222222222222222222222222222", "remote-two"),
-                result("import_11111111111111111111111111111111", "remote-one"),
+                result(
+                    "import_22222222222222222222222222222222",
+                    "remote-two",
+                    true,
+                ),
+                result(
+                    "import_11111111111111111111111111111111",
+                    "remote-one",
+                    false,
+                ),
             ],
         };
 
@@ -370,8 +384,16 @@ mod tests {
         let confirmation = RemoteBatchImportConfirmation {
             session_id: preview.session_id.clone(),
             results: vec![
-                result("import_11111111111111111111111111111111", "remote-existing"),
-                result("import_22222222222222222222222222222222", "remote-new"),
+                result(
+                    "import_11111111111111111111111111111111",
+                    "remote-existing",
+                    false,
+                ),
+                result(
+                    "import_22222222222222222222222222222222",
+                    "remote-new",
+                    true,
+                ),
             ],
         };
 
@@ -379,6 +401,30 @@ mod tests {
 
         assert_eq!(confirmed.account_ids, vec!["remote-existing", "remote-new"]);
         assert_eq!(confirmed.created_account_ids, vec!["remote-new"]);
+    }
+
+    #[test]
+    fn rollback_uses_server_creation_status_instead_of_preview_state() {
+        let preview = preview(true, false);
+        let confirmation = RemoteBatchImportConfirmation {
+            session_id: preview.session_id.clone(),
+            results: vec![
+                result(
+                    "import_11111111111111111111111111111111",
+                    "remote-existing",
+                    true,
+                ),
+                result(
+                    "import_22222222222222222222222222222222",
+                    "remote-new",
+                    false,
+                ),
+            ],
+        };
+
+        let confirmed = validate_remote_transfer_confirmation(&preview, confirmation).unwrap();
+
+        assert_eq!(confirmed.created_account_ids, vec!["remote-existing"]);
     }
 
     #[test]
@@ -441,11 +487,16 @@ mod tests {
         let confirmation = RemoteBatchImportConfirmation {
             session_id: preview.session_id.clone(),
             results: vec![
-                result("import_11111111111111111111111111111111", "remote-new"),
+                result(
+                    "import_11111111111111111111111111111111",
+                    "remote-new",
+                    true,
+                ),
                 RemoteBatchImportResult {
                     item_id: "import_22222222222222222222222222222222".into(),
                     status: "failed".into(),
                     account_id: None,
+                    created: false,
                 },
             ],
         };
@@ -453,6 +504,28 @@ mod tests {
         let error = validate_remote_transfer_confirmation(&preview, confirmation).unwrap_err();
         assert_eq!(error.created_account_ids, vec!["remote-new"]);
         assert!(!error.uncertain);
+    }
+
+    #[test]
+    fn transfer_confirmation_rejects_duplicate_account_ids() {
+        let preview = preview(false, false);
+        let confirmation = RemoteBatchImportConfirmation {
+            session_id: preview.session_id.clone(),
+            results: vec![
+                result(
+                    "import_11111111111111111111111111111111",
+                    "remote-same",
+                    true,
+                ),
+                result(
+                    "import_22222222222222222222222222222222",
+                    "remote-same",
+                    true,
+                ),
+            ],
+        };
+
+        assert!(validate_remote_transfer_confirmation(&preview, confirmation).is_err());
     }
 
     #[test]
@@ -489,15 +562,15 @@ mod tests {
             item_id: item_id.into(),
             status: if existing { "existing" } else { "ready" }.into(),
             selectable: true,
-            existing,
         }
     }
 
-    fn result(item_id: &str, account_id: &str) -> RemoteBatchImportResult {
+    fn result(item_id: &str, account_id: &str, created: bool) -> RemoteBatchImportResult {
         RemoteBatchImportResult {
             item_id: item_id.into(),
             status: "succeeded".into(),
             account_id: Some(account_id.into()),
+            created,
         }
     }
 

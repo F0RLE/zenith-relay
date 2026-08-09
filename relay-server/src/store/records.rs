@@ -71,6 +71,34 @@ impl Store {
         self.save_record("accounts", &record.id, &record.secret_ref, record)
     }
 
+    pub fn save_account_and_report_created(
+        &self,
+        record: &ServerAccountRecord,
+    ) -> Result<bool, String> {
+        let data_json = to_json(record)?;
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let existed = transaction
+            .query_row(
+                "SELECT 1 FROM accounts WHERE id = ?1",
+                [record.id.as_str()],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(db_error)?
+            .is_some();
+        transaction
+            .execute(
+                "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET data_json=excluded.data_json, secret_ref=excluded.secret_ref",
+                params![record.id, data_json, record.secret_ref],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(!existed)
+    }
+
     /// Updates the latest stored account in one transaction so background
     /// observations cannot overwrite an operator's concurrent configuration.
     pub fn update_account<T>(

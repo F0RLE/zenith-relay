@@ -606,6 +606,11 @@ pub struct BatchImportConfirmResponse {
     results: Vec<BatchImportResult>,
 }
 
+struct ConfirmedAccountImport {
+    account: AccountSummary,
+    created: bool,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BatchImportResult {
@@ -613,6 +618,7 @@ struct BatchImportResult {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     account_id: Option<String>,
+    created: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<BatchImportIssue>,
 }
@@ -650,16 +656,18 @@ pub async fn confirm_account_batch_import(
         )
         .await
         {
-            Ok(account) => BatchImportResult {
+            Ok(confirmed) => BatchImportResult {
                 item_id,
                 status: "succeeded".to_string(),
-                account_id: Some(account.id),
+                account_id: Some(confirmed.account.id),
+                created: confirmed.created,
                 error: None,
             },
             Err(error) => BatchImportResult {
                 item_id,
                 status: "failed".to_string(),
                 account_id: None,
+                created: false,
                 error: Some(BatchImportIssue {
                     code: error.code,
                     message: error.message,
@@ -696,7 +704,7 @@ pub async fn confirm_account_import(
         input.probe_metadata,
     )
     .await
-    .map(Json)
+    .map(|confirmed| Json(confirmed.account))
 }
 
 async fn confirm_one_account_import(
@@ -705,7 +713,7 @@ async fn confirm_one_account_import(
     batch_session_id: Option<&str>,
     add_to_pool: bool,
     probe_metadata: bool,
-) -> Result<AccountSummary, ManagementError> {
+) -> Result<ConfirmedAccountImport, ManagementError> {
     if !valid_generated_id(session_id, "import_") {
         return Err(ManagementError::validation(
             "import_session_invalid",
@@ -815,7 +823,10 @@ async fn confirm_one_account_import(
             .as_ref()
             .is_some_and(|value| value.bypass_common_proxy),
     };
-    state.store.save_account(&record).map_err(store_error)?;
+    let created = state
+        .store
+        .save_account_and_report_created(&record)
+        .map_err(store_error)?;
     if probe_metadata {
         match jobs::refresh_account_now(state, record.clone()).await {
             Ok(updated) => record = updated,
@@ -839,7 +850,7 @@ async fn confirm_one_account_import(
             let _ = state.vault.delete(&previous.secret_ref);
         }
     }
-    account_summary(state, &record)
+    account_summary(state, &record).map(|account| ConfirmedAccountImport { account, created })
 }
 
 fn cleanup_expired_imports(state: &AppState) -> Result<(), ManagementError> {

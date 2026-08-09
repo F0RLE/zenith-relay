@@ -96,10 +96,12 @@ pub(super) async fn move_local_accounts_to_remote(
         );
     };
     let capabilities = client.capabilities().await.map_err(remote_error)?;
-    if !capabilities.supports(Feature::AccountBatchImport) {
+    if !capabilities.supports(Feature::AccountBatchImport)
+        || !capabilities.supports(Feature::AccountBatchImportCreationStatus)
+    {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
-            "remote server does not support account batch import",
+            "remote server does not support safe account batch import rollback",
         )
         .into());
     }
@@ -706,10 +708,12 @@ pub(crate) async fn recover_pending_remote_ownership(
             }
             ensure_move_accounts_still_present(state, &operation)?;
             let capabilities = client.capabilities().await.map_err(remote_error)?;
-            if !capabilities.supports(Feature::AccountBatchImport) {
+            if !capabilities.supports(Feature::AccountBatchImport)
+                || !capabilities.supports(Feature::AccountBatchImportCreationStatus)
+            {
                 return Err(LocalPoolError::new(
                     ErrorCode::RecoveryRequired,
-                    "the connected server cannot recover the pending account move",
+                    "the connected server cannot safely recover the pending account move",
                 )
                 .into());
             }

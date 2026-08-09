@@ -403,7 +403,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     remoteRuntime.gateway.baseUrl = "https://relay.example.invalid/v1";
     remoteRuntime.platform = "linux";
     remoteRuntime.configurationRevision = "cfg_synthetic_current";
-    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages"] };
+    remoteRuntime.capabilities = { features: input.remoteFeatures ?? ["sources", "accounts", "account_batch_import", "account_batch_import_creation_status", "account_import_to_pool", "account_export", "account_identity_reveal", "quota", "models", "model_pricing", "usage", "local_gateway", "profile_attach", "profile_key_rotation", "diagnostics", "wake_tasks", "account_proxies", "runtime_routing", "configuration_presets", "images"], supportedWireApis: ["responses", "chat_completions", "messages"] };
     const configurationPreset = {
       format: "zenith-relay-configuration",
       schemaVersion: 2,

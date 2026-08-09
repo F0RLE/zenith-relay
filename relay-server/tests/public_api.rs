@@ -494,6 +494,11 @@ async fn remote_gateway_persists_and_serves_after_management_client_disconnects(
         .unwrap()
         .iter()
         .any(|feature| feature == "profile_key_rotation"));
+    assert!(capabilities["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|feature| feature == "account_batch_import_creation_status"));
     let profile_response = client
         .get(format!("{}/profile/credential", first.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -2695,6 +2700,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         .unwrap();
     assert_eq!(first_confirm["sessionId"], batch_id);
     assert_eq!(first_confirm["results"][0]["status"], "succeeded");
+    assert_eq!(first_confirm["results"][0]["created"], true);
     assert_eq!(server.state.store.accounts().unwrap().len(), 1);
     let first_account = server.state.store.accounts().unwrap().remove(0);
     assert_eq!(first_confirm["results"][0]["accountId"], first_account.id);
@@ -2717,6 +2723,35 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         .as_u64()
         .is_some_and(|value| value > 1_000_000_000_000));
 
+    let existing_preview: Value = client
+        .post(format!("{}/accounts/import/batch/preview", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({"content": content}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(existing_preview["preview"]["rows"][0]["existing"], true);
+    let existing_confirm: Value = client
+        .post(format!("{}/accounts/import/batch/confirm", server.origin))
+        .bearer_auth("synthetic-management-token-value")
+        .json(&json!({
+            "sessionId": existing_preview["sessionId"],
+            "selectedItemIds": [existing_preview["preview"]["rows"][0]["itemId"]],
+            "addToPool": true
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(existing_confirm["results"][0]["status"], "succeeded");
+    assert_eq!(existing_confirm["results"][0]["created"], false);
+    assert_eq!(server.state.store.accounts().unwrap().len(), 1);
+
     let second_confirm: Value = client
         .post(format!("{}/accounts/import/batch/confirm", server.origin))
         .bearer_auth("synthetic-management-token-value")
@@ -2731,6 +2766,7 @@ async fn batch_import_accepts_portable_bundles_and_confirms_selected_accounts() 
         second_confirm["results"][0]["status"], "succeeded",
         "{second_confirm}"
     );
+    assert_eq!(second_confirm["results"][0]["created"], true);
     assert_eq!(server.state.store.accounts().unwrap().len(), 2);
     let second_account = server
         .state
