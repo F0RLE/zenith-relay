@@ -1,8 +1,8 @@
 use super::auth::{client_api_forbidden, invalid_host, unauthorized};
 use super::errors::{
     apply_cooldown, apply_failure_cooldown_with_hint, apply_failure_state,
-    failure_requires_independent_source_endpoint, rate_limit_body_hint, rate_limit_body_hint_value,
-    CooldownContext, RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
+    failure_requires_independent_source_endpoint, rate_limit_body_hint, CooldownContext,
+    RateLimitBodyHint, TRANSIENT_COOLDOWN_MS,
 };
 use super::now_ms;
 use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
@@ -14,7 +14,7 @@ use crate::{GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::http::header::{AUTHORIZATION, RETRY_AFTER};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use futures_util::{SinkExt, StreamExt};
 use reqwest_websocket::{
@@ -27,8 +27,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::{interval_at, sleep_until, timeout, Instant as TokioInstant, MissedTickBehavior};
 
+mod events;
 mod request;
 
+use events::{
+    event_terminal, incomplete_requires_cooldown, incomplete_status, terminal_failure_status,
+    EventTerminal, EventTerminalOutcome,
+};
 use request::ClientRequest;
 
 const WEBSOCKET_SEMANTIC_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1158,23 +1163,6 @@ async fn handle_upstream_message(
     }
 }
 
-#[derive(Default)]
-struct EventTerminal {
-    outcome: Option<EventTerminalOutcome>,
-    status: Option<StatusCode>,
-    error_category: Option<&'static str>,
-    headers: HeaderMap,
-    body_hint: RateLimitBodyHint,
-    previous_response_not_found: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EventTerminalOutcome {
-    Success,
-    Incomplete,
-    Failure,
-}
-
 fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTerminal {
     let Ok(value) = serde_json::from_slice::<Value>(payload) else {
         return EventTerminal::default();
@@ -1193,29 +1181,6 @@ fn inspect_upstream_event(payload: &[u8], state: &mut BridgeState) -> EventTermi
         }
     }
     event_terminal(&value)
-}
-
-fn event_terminal(value: &Value) -> EventTerminal {
-    let outcome = match value.get("type").and_then(Value::as_str) {
-        Some("response.completed" | "response.done") => Some(EventTerminalOutcome::Success),
-        Some("response.incomplete") => Some(EventTerminalOutcome::Incomplete),
-        Some("response.failed" | "response.cancelled" | "response.canceled" | "error") => {
-            Some(EventTerminalOutcome::Failure)
-        }
-        _ => None,
-    };
-    let status = super::errors::upstream_status_from_value(value);
-    EventTerminal {
-        outcome,
-        status,
-        error_category: super::errors::upstream_event_failure_category(
-            value.get("type").and_then(Value::as_str),
-            value,
-        ),
-        headers: websocket_retry_headers(value),
-        body_hint: rate_limit_body_hint_value(value, std::time::SystemTime::now()),
-        previous_response_not_found: super::errors::previous_response_not_found_value(value),
-    }
 }
 
 fn finish_terminal(
@@ -1349,110 +1314,6 @@ fn finish_incomplete(runtime: &GatewayRuntime, state: &mut BridgeState, category
     }
     emit_usage(runtime, in_flight.event);
     state.lease.take();
-}
-
-fn incomplete_status(category: &str) -> Option<StatusCode> {
-    match category {
-        "websocket_idle_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_semantic_timeout" => Some(StatusCode::GATEWAY_TIMEOUT),
-        "stream_event_too_large"
-        | "upstream_transport"
-        | "upstream_websocket"
-        | "upstream_websocket_closed" => Some(StatusCode::BAD_GATEWAY),
-        _ => None,
-    }
-}
-
-fn incomplete_requires_cooldown(category: &str) -> bool {
-    matches!(
-        category,
-        "stream_event_too_large"
-            | "upstream_transport"
-            | "upstream_websocket"
-            | "upstream_websocket_closed"
-            | "websocket_idle_timeout"
-            | "stream_semantic_timeout"
-    )
-}
-
-fn terminal_failure_status(status: Option<StatusCode>) -> StatusCode {
-    status
-        .filter(|status| !status.is_success())
-        .unwrap_or(StatusCode::BAD_GATEWAY)
-}
-
-fn websocket_retry_headers(value: &Value) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    let retry_after = websocket_reset_delay_seconds(value, now_ms() / 1_000)
-        .map(|seconds| seconds.to_string())
-        .or_else(|| {
-            value
-                .pointer("/headers/retry-after")
-                .or_else(|| value.pointer("/headers/retry_after"))
-                .or_else(|| value.pointer("/body/headers/retry-after"))
-                .or_else(|| value.pointer("/body/error/resets_in_seconds"))
-                .or_else(|| value.pointer("/error/resets_in_seconds"))
-                .and_then(|value| match value {
-                    Value::String(value) => Some(value.clone()),
-                    Value::Number(value) => Some(value.to_string()),
-                    _ => None,
-                })
-        });
-    if let Some(value) = retry_after
-        .filter(|value| value.len() <= 128)
-        .and_then(|value| HeaderValue::from_str(&value).ok())
-    {
-        headers.insert(RETRY_AFTER, value);
-    }
-    for name in [
-        "x-codex-primary-used-percent",
-        "x-codex-primary-reset-after-seconds",
-        "x-codex-primary-window-minutes",
-        "x-codex-secondary-used-percent",
-        "x-codex-secondary-reset-after-seconds",
-        "x-codex-secondary-window-minutes",
-    ] {
-        if let Some(value) = websocket_header_value(value, name)
-            .filter(|value| value.len() <= 128)
-            .and_then(|value| HeaderValue::from_str(&value).ok())
-        {
-            headers.insert(HeaderName::from_static(name), value);
-        }
-    }
-    headers
-}
-
-fn websocket_header_value(value: &Value, name: &str) -> Option<String> {
-    let alternate = name.replace('-', "_");
-    [
-        value.get("headers"),
-        value.pointer("/body/headers"),
-        value.pointer("/response/headers"),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|headers| headers.get(name).or_else(|| headers.get(&alternate)))
-    .and_then(|value| match value {
-        Value::String(value) => Some(value.clone()),
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
-    })
-}
-
-fn websocket_reset_delay_seconds(value: &Value, now_seconds: u64) -> Option<u64> {
-    let reset_at = value
-        .pointer("/body/error/resets_at")
-        .or_else(|| value.pointer("/response/error/resets_at"))
-        .or_else(|| value.pointer("/error/resets_at"))?;
-    let mut reset_at = reset_at
-        .as_u64()
-        .or_else(|| reset_at.as_str().and_then(|value| value.parse().ok()))?;
-    if reset_at > 10_000_000_000 {
-        reset_at /= 1_000;
-    }
-    reset_at
-        .checked_sub(now_seconds)
-        .filter(|seconds| *seconds > 0)
 }
 
 async fn send_gateway_error(downstream: &mut WebSocket, failure: &GatewayFailure) {
@@ -1628,9 +1489,10 @@ impl GatewayFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::events::{websocket_reset_delay_seconds, websocket_retry_headers};
     use super::{
-        event_terminal, incomplete_requires_cooldown, terminal_failure_status,
-        websocket_reset_delay_seconds, ClientRequest, EventTerminalOutcome, WEBSOCKET_PROTOCOLS,
+        event_terminal, incomplete_requires_cooldown, terminal_failure_status, ClientRequest,
+        EventTerminalOutcome, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
         GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
@@ -1721,6 +1583,30 @@ mod tests {
         assert_eq!(
             crate::gateway::errors::upstream_status_from_value(&value),
             Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+    }
+
+    #[test]
+    fn websocket_retry_headers_preserve_nested_reset_and_quota_hints() {
+        let value = json!({
+            "body": {
+                "error": {"resets_in_seconds": 45},
+                "headers": {"x-codex-primary-used-percent": "99"}
+            }
+        });
+        let headers = websocket_retry_headers(&value);
+
+        assert_eq!(
+            headers
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok()),
+            Some("45")
+        );
+        assert_eq!(
+            headers
+                .get("x-codex-primary-used-percent")
+                .and_then(|value| value.to_str().ok()),
+            Some("99")
         );
     }
 
