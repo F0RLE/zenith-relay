@@ -47,6 +47,11 @@ pub fn is_valid_model_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_MODEL_ID_BYTES && !value.chars().any(char::is_control)
 }
 
+/// Checks a model ID that must be safe to use as one unescaped protocol token.
+pub fn is_valid_model_token(value: &str) -> bool {
+    is_valid_model_id(value) && !value.chars().any(char::is_whitespace)
+}
+
 /// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
 ///
 /// This function is intentionally not used by Relay's public runtime catalog:
@@ -224,5 +229,7 @@ mod tests {
         assert!(!is_valid_model_id(""));
         assert!(!is_valid_model_id("gpt\ntest"));
         assert!(!is_valid_model_id(&"x".repeat(MAX_MODEL_ID_BYTES + 1)));
+        assert!(is_valid_model_token("gpt-test"));
+        assert!(!is_valid_model_token("gpt test"));
     }
 }

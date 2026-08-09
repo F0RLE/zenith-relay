@@ -13,8 +13,7 @@ use super::response::{
     apply_usage, emit_usage, populate_tokens, proxy_json_response, proxy_response,
     proxy_sse_response, usage_event,
 };
-use super::streaming::sse_event_end;
-use crate::protocol::ClientWireApi;
+use crate::protocol::{sse_event_end, ClientWireApi};
 use crate::runtime::IMAGE_API_MODEL;
 use crate::runtime::{AuthenticatedKey, ExecutorRoute};
 use crate::{GatewayRuntime, UsageEvent, WireApi};

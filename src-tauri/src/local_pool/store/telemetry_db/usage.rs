@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use zenith_relay_core::{
     estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, WireApi,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier,
+    WireApi,
 };
 
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -38,13 +39,13 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     }
     if let Some(value) = query.model_query.as_deref() {
         clauses.push("(requested_model LIKE ? ESCAPE '\\' OR resolved_model LIKE ? ESCAPE '\\')");
-        let value = SqlValue::Text(like_pattern(value));
+        let value = SqlValue::Text(sql_like_contains_pattern(value));
         values.push(value.clone());
         values.push(value);
     }
     if let Some(value) = query.source_or_account_query.as_deref() {
         clauses.push("(source_id LIKE ? ESCAPE '\\' OR account_id LIKE ? ESCAPE '\\')");
-        let value = SqlValue::Text(like_pattern(value));
+        let value = SqlValue::Text(sql_like_contains_pattern(value));
         values.push(value.clone());
         values.push(value);
     }
@@ -71,7 +72,7 @@ pub(super) fn usage_filter(query: &UsageQuery) -> (String, Vec<SqlValue>) {
     }
     if let Some(value) = query.request_id_query.as_deref() {
         clauses.push("request_id LIKE ? ESCAPE '\\'");
-        values.push(SqlValue::Text(like_pattern(value)));
+        values.push(SqlValue::Text(sql_like_contains_pattern(value)));
     }
     let sql = if clauses.is_empty() {
         String::new()
@@ -379,19 +380,6 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         total_tokens: total_tokens.map(rust_u64),
         api_equivalent: ApiEquivalentSummary::default(),
     })
-}
-
-fn like_pattern(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('%');
-    for character in value.chars() {
-        if matches!(character, '%' | '_' | '\\') {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped.push('%');
-    escaped
 }
 
 fn normalize_wire_api(value: String) -> String {

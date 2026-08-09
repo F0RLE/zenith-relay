@@ -12,6 +12,7 @@ use std::{
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
+pub(super) use zenith_relay_core::unix_time_ms;
 
 pub struct Store {
     connection: Mutex<Connection>,
@@ -150,13 +151,6 @@ impl Store {
             .lock()
             .map_err(|_| "SQLite lock poisoned".to_string())
     }
-}
-
-pub(super) fn unix_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 pub(super) fn to_json(value: &impl Serialize) -> Result<String, String> {

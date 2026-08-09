@@ -278,7 +278,7 @@ pub(super) fn parse_item(
                 "{}:{}:{}",
                 source_file.unwrap_or("pasted"),
                 ordinal,
-                auth_mode_name(auth_mode)
+                auth_mode.as_str()
             )
         });
     let item_id = format!("import_{}", &sha256_hex(&item_seed, None, None)[..16]);
@@ -511,16 +511,6 @@ fn is_token_mode(value: &str) -> bool {
             value.trim().to_ascii_lowercase().as_str(),
             "token" | "imported_token" | "apikey" | "api_key"
         )
-}
-
-fn auth_mode_name(value: ImportAuthMode) -> &'static str {
-    match value {
-        ImportAuthMode::OAuth => "oauth",
-        ImportAuthMode::AgentIdentity => "agent_identity",
-        ImportAuthMode::ApiKey => "api_key",
-        ImportAuthMode::ImportedToken => "imported_token",
-        ImportAuthMode::Unknown => "unknown",
-    }
 }
 
 const ACCESS_TOKEN_FIELDS: &[&str] = &["access_token", "accessToken"];

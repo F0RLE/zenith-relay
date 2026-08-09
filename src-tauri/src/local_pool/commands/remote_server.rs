@@ -29,6 +29,8 @@ use zenith_relay_core::protocol::{
 };
 use zenith_relay_core::{CandidateRuntimeSnapshot, SourceProviderStats};
 
+pub(super) use zenith_relay_core::unix_time_ms as now_ms;
+
 use super::pool::write_configuration_preset;
 
 mod ownership;
@@ -700,13 +702,6 @@ fn object_path(collection: &str, id: &str) -> Result<String, CommandError> {
 
 pub(super) fn remote_error(error: impl std::fmt::Display) -> CommandError {
     LocalPoolError::new(ErrorCode::GatewayUnavailable, error.to_string()).into()
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

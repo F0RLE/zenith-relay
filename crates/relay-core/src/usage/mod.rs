@@ -6,6 +6,20 @@ pub use api_equivalent::{
     ApiModelPriceOverride, MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };
 
+/// Escapes a user value for a `LIKE ? ESCAPE '\\'` contains query.
+pub fn sql_like_contains_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('%');
+    for character in value.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped.push('%');
+    escaped
+}
+
 use crate::{quota::QuotaSnapshot, DefaultServiceTier, RoutingDiagnostics, WireApi};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -312,6 +326,14 @@ impl UsageEvent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sql_like_pattern_escapes_wildcards_and_escape_characters() {
+        assert_eq!(
+            sql_like_contains_pattern(r"model%_\name"),
+            r"%model\%\_\\name%"
+        );
+    }
 
     #[test]
     fn tool_diagnostics_record_counts_without_retaining_tool_content() {

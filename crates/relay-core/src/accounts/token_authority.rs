@@ -16,6 +16,15 @@ pub struct TokenSet {
     generation: u64,
 }
 
+/// Returns whether an access token remains usable after the refresh skew.
+pub fn access_token_is_usable(
+    expires_at_ms: Option<u64>,
+    now_ms: u64,
+    refresh_skew_ms: u64,
+) -> bool {
+    expires_at_ms.is_none_or(|expires_at| expires_at > now_ms.saturating_add(refresh_skew_ms))
+}
+
 impl TokenSet {
     pub fn new(
         access_token: impl Into<String>,
@@ -72,8 +81,7 @@ impl TokenSet {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
-        self.expires_at_ms
-            .is_none_or(|expires_at| expires_at > now_ms.saturating_add(refresh_skew_ms))
+        access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 
     pub fn refresh_eligible(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {

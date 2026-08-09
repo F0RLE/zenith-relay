@@ -10,7 +10,10 @@ use serde_json::Value;
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
-use zenith_relay_core::protocol::{GatewayDiagnostic, RuntimeStateSnapshot};
+use zenith_relay_core::{
+    is_valid_model_token,
+    protocol::{GatewayDiagnostic, RuntimeStateSnapshot},
+};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -74,7 +77,7 @@ pub async fn diagnose_gateway(
         .into_iter()
         .flatten()
         .filter_map(|item| item.get("id").and_then(Value::as_str).map(str::to_string))
-        .find(|id| valid_diagnostic_model(id))
+        .find(|id| is_valid_model_token(id))
         .ok_or_else(|| {
             ManagementError::validation(
                 "diagnostic_model_unavailable",
@@ -158,13 +161,6 @@ async fn internal_gateway_request(
                 "diagnostic response exceeded the limit",
             )
         })
-}
-
-fn valid_diagnostic_model(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value.chars().any(char::is_control)
-        && !value.chars().any(char::is_whitespace)
 }
 
 pub async fn start_gateway(

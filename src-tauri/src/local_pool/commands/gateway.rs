@@ -10,6 +10,7 @@ use reqwest::{redirect::Policy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, State};
+use zenith_relay_core::is_valid_model_token;
 
 const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 
@@ -226,7 +227,7 @@ pub async fn diagnose_local_gateway(
         .data
         .into_iter()
         .map(|model| model.id)
-        .find(|model| valid_model_id(model))
+        .find(|model| is_valid_model_token(model))
         .ok_or_else(|| {
             LocalPoolError::new(ErrorCode::Conflict, "local gateway exposes no usable model")
         })?;
@@ -325,13 +326,6 @@ async fn read_limited(mut response: Response) -> Result<Vec<u8>, CommandError> {
     Ok(body)
 }
 
-fn valid_model_id(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && !value.chars().any(char::is_control)
-        && !value.chars().any(char::is_whitespace)
-}
-
 fn valid_diagnostic_response(body: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(body).is_ok_and(|value| {
         value.is_object() && value.get("error").is_none_or(serde_json::Value::is_null)
@@ -362,11 +356,11 @@ mod tests {
 
     #[test]
     fn diagnostic_model_ids_are_bounded_and_single_line() {
-        assert!(valid_model_id("gpt-test"));
-        assert!(!valid_model_id(""));
-        assert!(!valid_model_id("gpt test"));
-        assert!(!valid_model_id("gpt\nsecret"));
-        assert!(!valid_model_id(&"x".repeat(257)));
+        assert!(is_valid_model_token("gpt-test"));
+        assert!(!is_valid_model_token(""));
+        assert!(!is_valid_model_token("gpt test"));
+        assert!(!is_valid_model_token("gpt\nsecret"));
+        assert!(!is_valid_model_token(&"x".repeat(257)));
     }
 
     #[test]

@@ -1773,11 +1773,7 @@ fn is_model_capability_failure(category: &str) -> bool {
 }
 
 fn runtime_now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        })
+    crate::unix_time_ms()
 }
 
 impl ChatGptAccountExecutor {

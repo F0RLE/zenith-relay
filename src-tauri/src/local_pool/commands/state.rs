@@ -22,7 +22,7 @@ use zenith_relay_core::{
     quota::{
         attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
     },
-    ApiEquivalentSummary, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
+    unix_time_ms, ApiEquivalentSummary, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
 #[tauri::command]
@@ -48,7 +48,7 @@ pub async fn get_local_runtime_state(
         .map(|runtime| runtime.candidate_runtime_order())
         .unwrap_or_default();
     let common_proxy_available = common_proxy_available(&snapshot.gateway);
-    let snapshot_at_ms = current_time_ms();
+    let snapshot_at_ms = unix_time_ms();
     let equivalents = state.telemetry.api_equivalents_with_price_overrides(
         &snapshot.gateway.model_price_overrides,
         &snapshot
@@ -364,13 +364,6 @@ fn local_account_summary(
         routing_block_reason: operational.routing_block_reason,
         last_error_code: record.account.last_error_code.clone(),
     })
-}
-
-fn current_time_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

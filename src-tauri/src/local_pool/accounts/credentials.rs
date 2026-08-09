@@ -2,7 +2,7 @@ use super::{import_session::SecretBackend, oauth::OAuthTokenSet};
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
 use std::{fmt, sync::Arc};
-use zenith_relay_core::accounts::{TokenRefresh, TokenSet};
+use zenith_relay_core::accounts::{access_token_is_usable, TokenRefresh, TokenSet};
 use zenith_relay_core::providers::chatgpt::AgentIdentityCredential;
 
 const CREDENTIAL_VERSION: u32 = 1;
@@ -297,8 +297,7 @@ impl StoredCodexCredentials {
     }
 
     pub fn is_access_usable(&self, now_ms: u64, refresh_skew_ms: u64) -> bool {
-        self.expires_at_ms
-            .is_none_or(|expires_at| expires_at > now_ms.saturating_add(refresh_skew_ms))
+        access_token_is_usable(self.expires_at_ms, now_ms, refresh_skew_ms)
     }
 
     pub fn to_token_set(&self) -> Result<TokenSet, CredentialError> {

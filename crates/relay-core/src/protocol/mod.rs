@@ -1,6 +1,7 @@
 mod adapter;
 mod capabilities;
 mod management;
+mod sse;
 mod version;
 
 pub use adapter::{
@@ -29,4 +30,5 @@ pub use management::{
     UsageTotals, CONFIGURATION_PRESET_FORMAT, CONFIGURATION_PRESET_SCHEMA_VERSION,
     PROFILE_KEY_ROTATION_SCHEMA_VERSION,
 };
+pub(crate) use sse::event_end as sse_event_end;
 pub use version::{negotiate, ClientProtocolRange, NegotiatedProtocol, ProtocolError};

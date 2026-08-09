@@ -37,6 +37,18 @@ pub enum ImportAuthMode {
     Unknown,
 }
 
+impl ImportAuthMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth => "oauth",
+            Self::AgentIdentity => "agent_identity",
+            Self::ApiKey => "api_key",
+            Self::ImportedToken => "imported_token",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportPreviewStatus {
@@ -607,6 +619,15 @@ mod tests {
     const ID: &str = "id-super-secret";
     const API_KEY: &str = "sk-super-secret";
     const EMAIL: &str = "private.user@example.test";
+
+    #[test]
+    fn import_auth_mode_names_are_stable() {
+        assert_eq!(ImportAuthMode::OAuth.as_str(), "oauth");
+        assert_eq!(ImportAuthMode::AgentIdentity.as_str(), "agent_identity");
+        assert_eq!(ImportAuthMode::ApiKey.as_str(), "api_key");
+        assert_eq!(ImportAuthMode::ImportedToken.as_str(), "imported_token");
+        assert_eq!(ImportAuthMode::Unknown.as_str(), "unknown");
+    }
 
     #[test]
     fn combines_multiple_files_and_nested_account_containers() {

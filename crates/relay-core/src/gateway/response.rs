@@ -1,6 +1,7 @@
 use super::errors::{api_error, upstream_failure_status, AttemptFailure, RateLimitBodyHint};
 use super::now_ms;
-use super::streaming::{parse_sse_event, sse_event_end, TerminalOutcome};
+use super::streaming::{parse_sse_event, TerminalOutcome};
+use crate::protocol::sse_event_end;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
 use crate::{Error, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;

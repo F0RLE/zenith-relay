@@ -10,6 +10,7 @@ pub mod quota;
 mod runtime;
 pub mod scheduler;
 pub mod sources;
+mod time;
 mod transport;
 pub mod usage;
 
@@ -19,7 +20,7 @@ pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
 pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, is_valid_model_id,
+    deserialize_model_reasoning_allowed_levels, is_valid_model_id, is_valid_model_token,
     normalize_codex_catalog_priorities, normalize_model_ids,
     normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
     normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
@@ -53,10 +54,11 @@ pub use sources::{
     LocalGatewayKey, ProviderSource, SourceConnector, SourceDiscovery, SourceProtocolBinding,
     SourceProtocolBindingKey, SourceProviderStats, SourceStatsProvider, WireApi,
 };
+pub use time::unix_time_ms;
 pub use usage::{
     api_model_price, api_pricing_revision, estimate_api_equivalent,
     estimate_api_equivalent_with_price_override, normalize_model_price_overrides,
-    ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride, TerminalOutputKind, ToolChoiceMode,
-    ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
+    sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPrice, ApiModelPriceOverride,
+    TerminalOutputKind, ToolChoiceMode, ToolUseDiagnostics, UsageCallback, UsageEvent, UsageValue,
     MAX_MODEL_PRICE_MICRO_USD_PER_MILLION,
 };

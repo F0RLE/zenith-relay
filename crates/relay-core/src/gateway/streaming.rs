@@ -7,6 +7,7 @@ use super::response::{
     apply_usage, emit_callback, emit_usage, find_usage, response_id, response_service_tier,
     CompletionCallback,
 };
+use crate::protocol::sse_event_end;
 use crate::runtime::DefaultServiceTier;
 use crate::{GatewayRuntime, MessagesBridgeResponse, MessagesStreamBridge, UsageEvent, WireApi};
 use axum::body::Bytes;
@@ -595,19 +596,6 @@ pub(super) enum TerminalOutcome {
     Success,
     Incomplete,
     Failure,
-}
-
-pub(super) fn sse_event_end(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|position| position + 2)
-        .or_else(|| {
-            bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|position| position + 4)
-        })
 }
 
 pub(super) fn parse_sse_event(event: &[u8]) -> TerminalEvent {

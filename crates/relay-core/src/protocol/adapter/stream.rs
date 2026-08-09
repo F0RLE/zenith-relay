@@ -5,8 +5,10 @@ use super::messages::{
     bridged_response_id_scoped, custom_tool_input, responses_output_from_messages_content,
     responses_usage, set_message_output_id, validate_messages_tool_calls,
 };
+use crate::protocol::sse_event_end;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
 /// Incremental Messages-to-Responses state machine. It owns no network
 /// client and can therefore be reused by desktop, server, and contract tests.
 #[derive(Debug)]
@@ -27,7 +29,6 @@ pub struct MessagesStreamBridge {
     upstream_error: Option<Value>,
     terminal: bool,
 }
-
 #[derive(Clone, Debug)]
 enum StreamBlock {
     Text {
@@ -1054,17 +1055,4 @@ fn tool_arguments_value(arguments: &str) -> Option<Value> {
     serde_json::from_str::<Value>(arguments)
         .ok()
         .filter(Value::is_object)
-}
-
-fn sse_event_end(bytes: &[u8]) -> Option<usize> {
-    bytes
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|position| position + 2)
-        .or_else(|| {
-            bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|position| position + 4)
-        })
 }

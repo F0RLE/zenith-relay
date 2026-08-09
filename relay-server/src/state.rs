@@ -21,6 +21,8 @@ use zenith_relay_core::{
     SourceProtocolBinding, WireApi,
 };
 
+pub use zenith_relay_core::unix_time_ms as now_ms;
+
 pub const SERVER_SCHEMA_VERSION: u32 = 31;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
@@ -475,13 +477,6 @@ pub fn identity_fingerprint(server_id: &str) -> String {
 
 pub fn proxy_id(value: &str) -> String {
     zenith_relay_core::proxy_reference_id(value).expect("stored proxy URL was normalized")
-}
-
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -360,7 +360,7 @@ pub async fn preview_account_batch_import(
                     item_id: preview.session_id.clone(),
                     label: preview.label,
                     identity: preview.identity_hint,
-                    auth_mode: import_auth_mode_name(preview_row.auth_mode).to_string(),
+                    auth_mode: preview_row.auth_mode.as_str().to_string(),
                     source_name: preview_row.source_name.clone(),
                     quota_status: import_quota_status_name(preview_row.quota_status).to_string(),
                     status: if preview.duplicate_account_id.is_some() {
@@ -475,7 +475,7 @@ fn batch_preview_row(row: ImportPreviewRow) -> BatchImportRow {
         item_id: row.item_id,
         label: row.label,
         identity: row.identity,
-        auth_mode: import_auth_mode_name(row.auth_mode).to_string(),
+        auth_mode: row.auth_mode.as_str().to_string(),
         source_name: row.source_name,
         quota_status: import_quota_status_name(row.quota_status).to_string(),
         status: import_preview_status_name(row.status).to_string(),
@@ -543,16 +543,6 @@ fn import_format_name(value: ImportFormat) -> &'static str {
         ImportFormat::JsonLines => "json_lines",
         ImportFormat::PortableAccountBundleV1 => "portable_account_bundle",
         ImportFormat::ZenithV1 => "zenith_v1",
-    }
-}
-
-fn import_auth_mode_name(value: ImportAuthMode) -> &'static str {
-    match value {
-        ImportAuthMode::OAuth => "oauth",
-        ImportAuthMode::AgentIdentity => "agent_identity",
-        ImportAuthMode::ApiKey => "api_key",
-        ImportAuthMode::ImportedToken => "imported_token",
-        ImportAuthMode::Unknown => "unknown",
     }
 }
 

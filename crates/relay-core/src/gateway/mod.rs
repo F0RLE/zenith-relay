@@ -5,7 +5,8 @@ use crate::GatewayRuntime;
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+pub(crate) use crate::unix_time_ms as now_ms;
 
 mod auth;
 mod errors;
@@ -34,14 +35,6 @@ pub fn router(runtime: Arc<GatewayRuntime>) -> Router {
         .route("/v1/images/generations", post(images::generations))
         .route("/v1/images/edits", post(images::edits))
         .with_state(runtime)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
 }
 
 #[cfg(test)]
