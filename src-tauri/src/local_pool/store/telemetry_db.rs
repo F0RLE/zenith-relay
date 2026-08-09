@@ -1,16 +1,10 @@
 use crate::local_pool::error::{ErrorCode, LocalPoolError, Result};
-use rusqlite::{
-    params, params_from_iter, types::Value as SqlValue, Connection, OptionalExtension,
-    TransactionBehavior,
-};
+use rusqlite::{params, params_from_iter, types::Value as SqlValue, Connection};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+    sync::{atomic::AtomicU64, Mutex},
     time::Instant,
 };
 #[cfg(test)]
@@ -24,6 +18,9 @@ use zenith_relay_core::{
 
 mod affinity;
 mod migrations;
+mod queries;
+mod record;
+mod state;
 mod usage;
 
 use migrations::*;
@@ -228,495 +225,6 @@ impl TelemetryDb {
             .map_err(db_error)?;
         Ok(())
     }
-
-    pub(crate) fn state_json(&self, key: &str) -> Result<Option<String>> {
-        validate_state_key(key)?;
-        self.connection
-            .lock()
-            .map_err(lock_error)?
-            .query_row(
-                "SELECT value_json FROM app_state WHERE key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_error)
-    }
-
-    pub(crate) fn state_count(&self) -> Result<usize> {
-        let count: i64 = self
-            .connection
-            .lock()
-            .map_err(lock_error)?
-            .query_row("SELECT COUNT(*) FROM app_state", [], |row| row.get(0))
-            .map_err(db_error)?;
-        usize::try_from(count).map_err(|_| {
-            LocalPoolError::new(ErrorCode::RecoveryRequired, "local state count is invalid")
-        })
-    }
-
-    pub(crate) fn replace_state_json(&self, values: &[(&str, String)]) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, None)
-    }
-
-    pub(crate) fn replace_state_json_and_delete_account_data(
-        &self,
-        values: &[(&str, String)],
-        account_id: &str,
-    ) -> Result<()> {
-        self.replace_state_json_with_account_purge(values, Some(account_id))
-    }
-
-    fn replace_state_json_with_account_purge(
-        &self,
-        values: &[(&str, String)],
-        account_id: Option<&str>,
-    ) -> Result<()> {
-        for (key, value) in values {
-            validate_state_key(key)?;
-            if value.len() > MAX_STATE_JSON_BYTES {
-                return Err(LocalPoolError::new(
-                    ErrorCode::InvalidState,
-                    "local state value is too large",
-                ));
-            }
-        }
-        let mut connection = self.connection.lock().map_err(lock_error)?;
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(db_error)?;
-        for (key, value) in values {
-            transaction
-                .execute(
-                    "INSERT INTO app_state(key, value_json) VALUES (?1, ?2)
-                     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
-                    params![key, value],
-                )
-                .map_err(db_error)?;
-        }
-        if let Some(account_id) = account_id {
-            transaction
-                .execute(
-                    "DELETE FROM request_logs WHERE account_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM usage_candidate_rollups
-                     WHERE candidate_kind = 'account' AND candidate_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-            transaction
-                .execute(
-                    "DELETE FROM response_affinity WHERE candidate_id = ?1",
-                    [account_id],
-                )
-                .map_err(db_error)?;
-        }
-        transaction.commit().map_err(db_error)?;
-        if account_id.is_some() {
-            self.invalidate_usage_cache();
-        }
-        Ok(())
-    }
-
-    pub fn record(&self, event: &UsageEvent) -> Result<()> {
-        if event.attempt == 0 {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "usage attempt must be at least one",
-            ));
-        }
-        let routing_json = event
-            .routing
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()
-            .map_err(|error| {
-                LocalPoolError::new(
-                    ErrorCode::Io,
-                    format!("usage routing diagnostics serialization failed: {error}"),
-                )
-            })?;
-        let tool_use_json = event
-            .tool_use
-            .has_evidence()
-            .then(|| serde_json::to_string(&event.tool_use))
-            .transpose()
-            .map_err(|error| {
-                LocalPoolError::new(
-                    ErrorCode::Io,
-                    format!("usage tool diagnostics serialization failed: {error}"),
-                )
-            })?;
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
-        let changed = connection
-            .execute(
-                "INSERT INTO request_logs (
-                    request_id, attempt, local_key_id, source_id, candidate_id, account_id,
-                    requested_model, resolved_model, wire_api, success, http_status,
-                    error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
-                ON CONFLICT(request_id) DO UPDATE SET
-                    created_at = CURRENT_TIMESTAMP,
-                    attempt = excluded.attempt,
-                    local_key_id = excluded.local_key_id,
-                    source_id = excluded.source_id,
-                    candidate_id = excluded.candidate_id,
-                    account_id = excluded.account_id,
-                    requested_model = excluded.requested_model,
-                    resolved_model = excluded.resolved_model,
-                    wire_api = excluded.wire_api,
-                    success = excluded.success,
-                    http_status = excluded.http_status,
-                    error_category = excluded.error_category,
-                    latency_ms = excluded.latency_ms,
-                    ttft_ms = excluded.ttft_ms,
-                    generation_ms = excluded.generation_ms,
-                    input_tokens = excluded.input_tokens,
-                    cached_input_tokens = excluded.cached_input_tokens,
-                    cache_write_input_tokens = excluded.cache_write_input_tokens,
-                    reasoning_tokens = excluded.reasoning_tokens,
-                    output_tokens = excluded.output_tokens,
-                    total_tokens = excluded.total_tokens,
-                    service_tier = excluded.service_tier,
-                    applied_service_tier = excluded.applied_service_tier,
-                    routing_json = excluded.routing_json,
-                    tool_use_json = excluded.tool_use_json
-                WHERE excluded.attempt >= request_logs.attempt",
-                params![
-                    event.request_id,
-                    event.attempt,
-                    event.local_key_id,
-                    event.source_id,
-                    event.candidate_id,
-                    event.account_id,
-                    event.requested_model,
-                    event.resolved_model,
-                    event.wire_api.as_str(),
-                    event.success,
-                    event.http_status,
-                    event.error_category,
-                    sql_u64(event.latency_ms),
-                    event.ttft_ms.map(sql_u64),
-                    event.generation_ms.map(sql_u64),
-                    event.input_tokens.map(sql_u64),
-                    event.cached_input_tokens.map(sql_u64),
-                    event.cache_write_input_tokens.map(sql_u64),
-                    event.reasoning_tokens.map(sql_u64),
-                    event.output_tokens.map(sql_u64),
-                    event.total_tokens.map(sql_u64),
-                    event.service_tier.as_str(),
-                    event.applied_service_tier.map(DefaultServiceTier::as_str),
-                    routing_json,
-                    tool_use_json,
-                ],
-            )
-            .map_err(db_error)?
-            > 0;
-        if connection.last_insert_rowid() % 256 == 0 {
-            connection
-                .execute_batch(ARCHIVE_USAGE_SQL)
-                .map_err(db_error)?;
-        }
-        drop(connection);
-        if changed {
-            self.invalidate_usage_cache();
-        }
-        Ok(())
-    }
-
-    pub fn list(&self, limit: u16) -> Result<Vec<UsageLog>> {
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
-                    local_key_id, source_id, candidate_id, account_id, requested_model,
-                    resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                    ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                    cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json
-                 FROM request_logs ORDER BY id DESC LIMIT ?1",
-            )
-            .map_err(db_error)?;
-        let logs = statement
-            .query_map([limit.clamp(1, 500)], usage_log_from_row)
-            .map_err(db_error)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_error)?;
-        Ok(logs)
-    }
-
-    #[cfg(test)]
-    pub fn usage_page(&self, query: &UsageQuery) -> Result<LocalUsagePage> {
-        self.usage_page_with_price_overrides(query, &BTreeMap::new(), &BTreeMap::new())
-    }
-
-    pub fn usage_page_with_price_overrides(
-        &self,
-        query: &UsageQuery,
-        price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
-        source_price_overrides: &SourcePriceOverrides,
-    ) -> Result<LocalUsagePage> {
-        let page = query.page.max(1);
-        let page_size = if query.page_size == 0 {
-            50
-        } else {
-            query.page_size.clamp(1, 200)
-        };
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
-        let (where_sql, values) = usage_filter(query);
-        let mut totals = usage_totals(&connection, &where_sql, &values)?;
-        let mut models = usage_groups(
-            &connection,
-            &where_sql,
-            &values,
-            "COALESCE(resolved_model, requested_model, '')",
-        )?;
-        let mut model_equivalents = usage_model_equivalents(
-            &connection,
-            &where_sql,
-            &values,
-            price_overrides,
-            source_price_overrides,
-        )?;
-        for group in &mut models {
-            group.totals.api_equivalent = model_equivalents.remove(&group.key).unwrap_or_default();
-            totals.api_equivalent.merge(group.totals.api_equivalent);
-        }
-        let pool_members = usage_groups(
-            &connection,
-            &where_sql,
-            &values,
-            "COALESCE(account_id, source_id, '')",
-        )?;
-        let buckets = usage_buckets(
-            &connection,
-            &where_sql,
-            &values,
-            query,
-            price_overrides,
-            source_price_overrides,
-        )?;
-        let total = totals.requests;
-        let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
-        let sql = format!(
-            "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), request_id, attempt,
-                local_key_id, source_id, candidate_id, account_id, requested_model,
-                resolved_model, wire_api, success, http_status, error_category, latency_ms,
-                ttft_ms, generation_ms, input_tokens, cached_input_tokens,
-                cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                service_tier, applied_service_tier, routing_json, tool_use_json
-             FROM request_logs{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
-        );
-        let mut statement = connection.prepare(&sql).map_err(db_error)?;
-        let mut page_values = values;
-        page_values.push(SqlValue::Integer(i64::from(page_size)));
-        page_values.push(SqlValue::Integer(offset.min(i64::MAX as u64) as i64));
-        let mut events = statement
-            .query_map(params_from_iter(page_values.iter()), usage_log_from_row)
-            .map_err(db_error)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_error)?;
-        for event in &mut events {
-            let candidate_kind = if event.account_id.is_some() {
-                "account"
-            } else {
-                "source"
-            };
-            let candidate_id = event.account_id.as_deref().unwrap_or(&event.source_id);
-            let model = event
-                .resolved_model
-                .as_deref()
-                .or(event.requested_model.as_deref());
-            event.api_equivalent = estimate_api_equivalent_with_price_override(
-                model,
-                event.input_tokens,
-                event.cached_input_tokens,
-                event.cache_write_input_tokens,
-                event.output_tokens,
-                event.total_tokens,
-                configured_model_price(
-                    price_overrides,
-                    source_price_overrides,
-                    candidate_kind,
-                    candidate_id,
-                    model,
-                ),
-            );
-        }
-        let total_pages = if total == 0 {
-            0
-        } else {
-            total.div_ceil(u64::from(page_size)) as u32
-        };
-        Ok(LocalUsagePage {
-            events,
-            total,
-            page,
-            page_size,
-            total_pages,
-            totals,
-            models,
-            pool_members,
-            buckets,
-        })
-    }
-
-    #[cfg(test)]
-    pub fn api_equivalents(&self) -> Result<UsageEquivalents> {
-        self.api_equivalents_with_price_overrides(&BTreeMap::new(), &BTreeMap::new())
-    }
-
-    pub fn api_equivalents_with_price_overrides(
-        &self,
-        price_overrides: &BTreeMap<String, ApiModelPriceOverride>,
-        source_price_overrides: &SourcePriceOverrides,
-    ) -> Result<UsageEquivalents> {
-        let usage_revision = self.usage_revision.load(Ordering::Acquire);
-        let pricing_revision = serde_json::to_string(&(
-            api_pricing_revision(),
-            price_overrides,
-            source_price_overrides,
-        ))
-        .map_err(|error| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                format!("usage pricing revision serialization failed: {error}"),
-            )
-        })?;
-        if let Some(cached) = self
-            .api_equivalent_cache
-            .lock()
-            .map_err(lock_error)?
-            .as_ref()
-            .filter(|cached| {
-                cached.usage_revision == usage_revision
-                    && cached.pricing_revision == pricing_revision
-            })
-        {
-            return Ok(cached.value.clone());
-        }
-        let connection = self
-            .connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?;
-        let mut statement = connection
-            .prepare(
-                "SELECT candidate_kind, candidate_id, model,
-                    SUM(input_tokens), SUM(cached_input_tokens), SUM(cache_write_input_tokens),
-                    SUM(output_tokens), SUM(total_tokens), SUM(input_samples),
-                    SUM(cached_input_samples), SUM(cache_write_input_samples)
-                 FROM (
-                    SELECT candidate_kind, candidate_id, model,
-                        input_tokens, cached_input_tokens, cache_write_input_tokens,
-                        output_tokens, total_tokens, input_samples,
-                        cached_input_samples, cache_write_input_samples
-                    FROM usage_candidate_rollups
-                    UNION ALL
-                    SELECT CASE WHEN account_id IS NULL THEN 'source' ELSE 'account' END,
-                        COALESCE(account_id, source_id),
-                        COALESCE(resolved_model, requested_model, ''),
-                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(cached_input_tokens), 0),
-                        COALESCE(SUM(cache_write_input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(total_tokens), 0), COUNT(input_tokens),
-                        COUNT(cached_input_tokens), COUNT(cache_write_input_tokens)
-                    FROM request_logs GROUP BY 1, 2, 3
-                 ) GROUP BY candidate_kind, candidate_id, model",
-            )
-            .map_err(db_error)?;
-        let rows = statement
-            .query_map([], |row| {
-                let input_tokens: Option<i64> = row.get(3)?;
-                let cached_input_tokens: Option<i64> = row.get(4)?;
-                let cache_write_input_tokens: Option<i64> = row.get(5)?;
-                let output_tokens: Option<i64> = row.get(6)?;
-                let total_tokens: Option<i64> = row.get(7)?;
-                let input_samples: i64 = row.get(8)?;
-                let cached_samples: i64 = row.get(9)?;
-                let cache_write_samples: i64 = row.get(10)?;
-                let model = row.get::<_, Option<String>>(2)?;
-                let kind = row.get::<_, String>(0)?;
-                let id = row.get::<_, String>(1)?;
-                Ok((
-                    kind.clone(),
-                    id.clone(),
-                    estimate_api_equivalent_with_price_override(
-                        model.as_deref(),
-                        input_tokens.map(rust_u64),
-                        (input_samples > 0 && cached_samples == input_samples)
-                            .then(|| cached_input_tokens.map(rust_u64))
-                            .flatten(),
-                        (input_samples > 0 && cache_write_samples == input_samples)
-                            .then(|| cache_write_input_tokens.map(rust_u64))
-                            .flatten(),
-                        output_tokens.map(rust_u64),
-                        total_tokens.map(rust_u64),
-                        configured_model_price(
-                            price_overrides,
-                            source_price_overrides,
-                            &kind,
-                            &id,
-                            model.as_deref(),
-                        ),
-                    ),
-                ))
-            })
-            .map_err(db_error)?;
-        let mut equivalents = UsageEquivalents::default();
-        for row in rows {
-            let (kind, id, estimate) = row.map_err(db_error)?;
-            let values = if kind == "account" {
-                &mut equivalents.accounts
-            } else {
-                &mut equivalents.sources
-            };
-            values.entry(id).or_default().merge(estimate);
-        }
-        drop(statement);
-        drop(connection);
-        if self.usage_revision.load(Ordering::Acquire) == usage_revision {
-            self.api_equivalent_cache
-                .lock()
-                .map_err(lock_error)?
-                .replace(CachedUsageEquivalents {
-                    usage_revision,
-                    pricing_revision,
-                    value: equivalents.clone(),
-                });
-        }
-        Ok(equivalents)
-    }
-
-    pub fn clear(&self) -> Result<()> {
-        self.connection
-            .lock()
-            .map_err(|_| LocalPoolError::new(ErrorCode::Io, "usage database lock poisoned"))?
-            .execute_batch("DELETE FROM request_logs; DELETE FROM usage_candidate_rollups;")
-            .map_err(db_error)?;
-        self.invalidate_usage_cache();
-        Ok(())
-    }
-
-    fn invalidate_usage_cache(&self) {
-        self.usage_revision.fetch_add(1, Ordering::AcqRel);
-        if let Ok(mut cached) = self.api_equivalent_cache.lock() {
-            *cached = None;
-        }
-    }
 }
 
 fn valid_performance_name(name: &str) -> bool {
@@ -733,21 +241,6 @@ fn valid_performance_name(name: &str) -> bool {
             | "mode_switch"
             | "page_open"
     )
-}
-
-fn validate_state_key(key: &str) -> Result<()> {
-    if key.is_empty()
-        || key.len() > 64
-        || !key
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(LocalPoolError::new(
-            ErrorCode::InvalidState,
-            "local state key is invalid",
-        ));
-    }
-    Ok(())
 }
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> LocalPoolError {
@@ -847,6 +340,16 @@ mod tests {
         // merged once, so the relation holds regardless of catalog prices.
         assert!(page.events[0].api_equivalent.micro_usd > 0);
         assert_eq!(page.totals.api_equivalent, page.events[0].api_equivalent);
+        let default_page = database
+            .usage_page(&UsageQuery {
+                page: 0,
+                page_size: 0,
+                ..UsageQuery::default()
+            })
+            .unwrap();
+        assert_eq!(default_page.page, 1);
+        assert_eq!(default_page.page_size, 50);
+        assert_eq!(default_page.total_pages, 1);
         let cached = database.api_equivalents().unwrap();
         assert_eq!(
             database.api_equivalents().unwrap().accounts,
@@ -959,6 +462,60 @@ mod tests {
             database.state_json("accounts").unwrap().as_deref(),
             Some("[]")
         );
+        drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_state_batch_does_not_partially_save_or_purge_account_data() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-delete-rollback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let database = TelemetryDb::open(&root.join("usage.sqlite")).unwrap();
+        database
+            .replace_state_json(&[("accounts", "[\"before\"]".to_string())])
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO request_logs(
+                    request_id, local_key_id, source_id, candidate_id, account_id,
+                    wire_api, success, http_status, latency_ms
+                 ) VALUES ('request-rollback', 'key', 'codex', 'account-rollback',
+                    'account-rollback', 'responses', 1, 200, 1)",
+                [],
+            )
+            .unwrap();
+
+        let error = database
+            .replace_state_json_and_delete_account_data(
+                &[
+                    ("accounts", "[]".to_string()),
+                    ("invalid-key", "{}".to_string()),
+                ],
+                "account-rollback",
+            )
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::InvalidState);
+        assert_eq!(
+            database.state_json("accounts").unwrap().as_deref(),
+            Some("[\"before\"]")
+        );
+        let remaining: i64 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM request_logs WHERE account_id = 'account-rollback'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1154,6 +711,14 @@ mod tests {
         event.retry_at_ms = None;
         event.consecutive_failures = Some(0);
         database.record(&event).unwrap();
+
+        event.attempt = 1;
+        event.source_id = "source_stale".into();
+        event.success = false;
+        event.http_status = 503;
+        event.error_category = Some("upstream_unavailable".into());
+        database.record(&event).unwrap();
+
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].attempt, 2);

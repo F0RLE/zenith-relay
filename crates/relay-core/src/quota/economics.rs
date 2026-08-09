@@ -19,8 +19,11 @@ const FULL_CYCLE_THRESHOLD_BASIS_POINTS: u16 = 9_950;
 const EXHAUSTED_CYCLE_THRESHOLD_BASIS_POINTS: u16 = 50;
 pub const MAX_PURCHASE_COST_MICRO_USD: u64 = 1_000_000_000_000;
 
+mod calibration;
+mod state;
 mod summary;
 
+use calibration::*;
 pub use summary::*;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -96,155 +99,6 @@ pub struct QuotaEconomicsState {
     provider: String,
     #[serde(default)]
     plan: Option<String>,
-}
-
-impl QuotaEconomicsState {
-    pub fn purchase_cost_micro_usd(&self) -> Option<u64> {
-        self.purchase_cost_micro_usd
-    }
-
-    pub fn set_purchase_cost_micro_usd(&mut self, value: Option<u64>) {
-        self.purchase_cost_micro_usd = value;
-    }
-
-    pub fn observe_event(&mut self, event: &crate::UsageEvent, usage_value: UsageValue) {
-        let observed_at_ms = event
-            .quota_snapshot
-            .as_ref()
-            .and_then(|quota| quota.updated_at_ms)
-            .unwrap_or_else(|| self.latest_observed_at_ms());
-        self.observe_event_at(event, usage_value, observed_at_ms);
-    }
-
-    pub fn observe_event_at(
-        &mut self,
-        event: &crate::UsageEvent,
-        usage_value: UsageValue,
-        observed_at_ms: u64,
-    ) {
-        if let Some(usage) = QuotaEconomicsUsage::from_event(event, usage_value) {
-            self.observe_usage_with_source(
-                usage,
-                event.quota_snapshot.as_ref(),
-                observed_at_ms,
-                QuotaObservationSource::Passive,
-            );
-        } else if let Some(quota) = event.quota_snapshot.as_ref() {
-            self.observe_quota_with_source(quota, QuotaObservationSource::Passive);
-        }
-    }
-
-    pub fn observe_usage(&mut self, usage: QuotaEconomicsUsage, quota: Option<&QuotaSnapshot>) {
-        let observed_at_ms = quota
-            .and_then(|quota| quota.updated_at_ms)
-            .unwrap_or_else(|| self.latest_observed_at_ms());
-        self.observe_usage_with_source(
-            usage,
-            quota,
-            observed_at_ms,
-            QuotaObservationSource::Active,
-        );
-    }
-
-    fn observe_usage_with_source(
-        &mut self,
-        usage: QuotaEconomicsUsage,
-        quota: Option<&QuotaSnapshot>,
-        observed_at_ms: u64,
-        source: QuotaObservationSource,
-    ) {
-        self.primary.record_usage(usage, observed_at_ms);
-        self.secondary.record_usage(usage, observed_at_ms);
-        if let Some(quota) = quota {
-            self.observe_quota_with_source(quota, source);
-        }
-    }
-
-    pub fn observe_quota(&mut self, quota: &QuotaSnapshot) {
-        self.observe_quota_with_source(quota, QuotaObservationSource::Active);
-    }
-
-    fn observe_quota_with_source(&mut self, quota: &QuotaSnapshot, source: QuotaObservationSource) {
-        let context = EconomicsContext {
-            provider: self.provider.clone(),
-            plan: self.plan.clone(),
-            pricing_revision: self.pricing_revision.clone(),
-        };
-        let limiting_available = quota
-            .primary
-            .iter()
-            .chain(quota.secondary.iter())
-            .filter_map(|window| window.available_basis_points)
-            .min();
-        if let Some(window) = quota.primary.as_ref() {
-            self.primary.observe_quota(
-                window,
-                &context,
-                source,
-                quota.limit_reached && window.available_basis_points == limiting_available,
-            );
-        }
-        if let Some(window) = quota.secondary.as_ref() {
-            self.secondary.observe_quota(
-                window,
-                &context,
-                source,
-                quota.limit_reached && window.available_basis_points == limiting_available,
-            );
-        }
-    }
-
-    fn latest_observed_at_ms(&self) -> u64 {
-        self.primary
-            .observations
-            .last()
-            .into_iter()
-            .chain(self.secondary.observations.last())
-            .map(|observation| observation.observed_at_ms)
-            .max()
-            .unwrap_or_default()
-    }
-
-    pub fn set_account_context(&mut self, provider: &str, plan: Option<&str>) {
-        let provider = provider.trim().to_ascii_lowercase();
-        let plan = plan
-            .map(super::windows::normalize_subscription_plan)
-            .filter(|value| !value.is_empty());
-        if self.provider == provider && self.plan == plan {
-            return;
-        }
-        self.provider = provider;
-        self.plan = plan;
-        self.primary.begin_new_epoch();
-        self.secondary.begin_new_epoch();
-    }
-
-    pub fn reset_learning(&mut self) {
-        self.primary = WindowEconomicsHistory::default();
-        self.secondary = WindowEconomicsHistory::default();
-        self.pricing_revision = None;
-    }
-
-    pub fn reset_learning_for_revision(&mut self, revision: &str) {
-        self.primary.begin_new_epoch();
-        self.secondary.begin_new_epoch();
-        let revision = revision.trim();
-        if !revision.is_empty() {
-            self.pricing_revision = Some(revision.to_string());
-        }
-    }
-
-    /// Selects the valuation formula used by the provider that feeds this
-    /// state. A changed revision invalidates old calibration samples.
-    pub fn set_value_revision(&mut self, revision: &str) {
-        let revision = revision.trim();
-        if revision.is_empty() {
-            return;
-        }
-        if self.pricing_revision.as_deref() != Some(revision) {
-            self.reset_learning_for_revision(revision);
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -874,94 +728,6 @@ pub(super) struct IntervalSample {
     source: QuotaObservationSource,
 }
 
-fn rate_is_outside_epoch(samples: &[IntervalSample], candidate: IntervalSample) -> bool {
-    if samples.len() < DRIFT_BASELINE_SAMPLES {
-        return false;
-    }
-    weighted_calibration_rate(samples)
-        .zip(primary_calibration_rate(candidate))
-        .is_some_and(|(baseline, candidate)| materially_different(baseline, candidate))
-}
-
-fn drift_confirms_new_epoch(
-    baseline_samples: &[IntervalSample],
-    drift_samples: &[IntervalSample],
-) -> bool {
-    weighted_calibration_rate(baseline_samples)
-        .zip(weighted_calibration_rate(drift_samples))
-        .is_some_and(|(baseline, drift)| materially_different(baseline, drift))
-}
-
-/// Cost of a full window, extrapolated from one measured interval.
-///
-/// This is the calibration unit: measured reference dollars per unit of
-/// measured quota movement. Drift detection compares accounts and epochs in
-/// this unit, so it must never be derived through a second conversion.
-fn primary_calibration_rate(sample: IntervalSample) -> Option<u64> {
-    sample
-        .usage
-        .api_equivalent_micro_usd
-        .map(|value| scale(value, 10_000, sample.consumed_basis_points))
-}
-
-fn weighted_calibration_rate(samples: &[IntervalSample]) -> Option<u64> {
-    weighted_quantile(
-        samples
-            .iter()
-            .filter_map(|sample| {
-                Some((
-                    primary_calibration_rate(*sample)?,
-                    u64::from(sample.consumed_basis_points),
-                ))
-            })
-            .collect(),
-        1,
-        2,
-    )
-}
-
-fn materially_different(baseline: u64, candidate: u64) -> bool {
-    if baseline == 0 {
-        return candidate > 0;
-    }
-    u128::from(baseline.abs_diff(candidate)).saturating_mul(10_000)
-        > u128::from(baseline).saturating_mul(u128::from(DRIFT_THRESHOLD_BASIS_POINTS))
-}
-
-fn greatest_common_divisor(mut left: u16, mut right: u16) -> u16 {
-    while right != 0 {
-        (left, right) = (right, left % right);
-    }
-    left
-}
-
-fn scale(measured: u64, available_basis_points: u16, consumed_basis_points: u16) -> u64 {
-    u64::try_from(
-        u128::from(measured) * u128::from(available_basis_points)
-            / u128::from(consumed_basis_points),
-    )
-    .unwrap_or(u64::MAX)
-}
-
-fn weighted_quantile(mut values: Vec<(u64, u64)>, numerator: u64, denominator: u64) -> Option<u64> {
-    if values.is_empty() || denominator == 0 || numerator > denominator {
-        return None;
-    }
-    values.sort_unstable_by_key(|(value, _)| *value);
-    let total_weight = values.iter().map(|(_, weight)| *weight).sum::<u64>();
-    if total_weight == 0 {
-        return None;
-    }
-    let target = u128::from(total_weight)
-        .saturating_mul(u128::from(numerator))
-        .div_ceil(u128::from(denominator));
-    let mut cumulative = 0_u128;
-    values.into_iter().find_map(|(value, weight)| {
-        cumulative = cumulative.saturating_add(u128::from(weight));
-        (cumulative >= target).then_some(value)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,6 +1002,18 @@ mod tests {
             QuotaEconomicsEstimateState::Collecting
         );
         assert_eq!(summary.sample_count, 0);
+    }
+
+    #[test]
+    fn equivalent_account_context_does_not_restart_the_calibration_epoch() {
+        let mut state = QuotaEconomicsState::default();
+        state.set_account_context(" ChatGPT ", Some("Plus"));
+        let epoch = state.primary.epoch;
+
+        state.set_account_context("chatgpt", Some("plus"));
+
+        assert_eq!(state.primary.epoch, epoch);
+        assert_eq!(state.secondary.epoch, epoch);
     }
 
     #[test]
@@ -1576,6 +1354,26 @@ mod tests {
     }
 
     #[test]
+    fn limit_reached_does_not_complete_a_window_when_another_window_is_unknown() {
+        let mut state = QuotaEconomicsState::default();
+        configure_account(&mut state, "plus", "test-revision");
+        state.observe_quota(&two_window_snapshot(10_000, 10_000, 1_000));
+        state.observe_usage(
+            usage(4_000_000, 10, 100_000, DefaultServiceTier::Standard),
+            None,
+        );
+        let mut uncertain = two_window_snapshot(350, 10_000, 2_000);
+        uncertain.primary.as_mut().unwrap().available_basis_points = None;
+        uncertain.limit_reached = true;
+        state.observe_quota(&uncertain);
+
+        assert!(state.primary.cycles.is_empty());
+        assert!(state.secondary.cycles.is_empty());
+        assert!(state.primary.active_cycle.is_some());
+        assert!(state.secondary.active_cycle.is_some());
+    }
+
+    #[test]
     fn reset_before_exhaustion_records_a_censored_cycle() {
         let mut state = QuotaEconomicsState::default();
         configure_account(&mut state, "plus", "test-revision");
@@ -1709,6 +1507,39 @@ mod tests {
             restored.secondary.observations,
             state.secondary.observations
         );
+    }
+
+    #[test]
+    fn restores_legacy_pending_usage_request_fields() {
+        let mut fixture = serde_json::to_value(QuotaEconomicsState::default()).unwrap();
+        let pending = fixture["secondary"]["pending"].as_object_mut().unwrap();
+        pending.remove("standardObservations");
+        pending.remove("fastObservations");
+        pending.insert("standardRequests".to_string(), serde_json::json!(3));
+        pending.insert("fastRequests".to_string(), serde_json::json!(5));
+
+        let restored: QuotaEconomicsState = serde_json::from_value(fixture).unwrap();
+
+        assert_eq!(restored.secondary.pending.standard_observations, 3);
+        assert_eq!(restored.secondary.pending.fast_observations, 5);
+    }
+
+    #[test]
+    fn repeated_quota_polls_do_not_duplicate_observation_history() {
+        let mut state = QuotaEconomicsState::default();
+        state.observe_quota(&snapshot(10_000, 300_000, 1_000));
+        state.observe_quota(&snapshot(10_000, 300_000, 2_000));
+
+        assert_eq!(state.secondary.observations.len(), 1);
+    }
+
+    #[test]
+    fn weighted_quartiles_respect_consumed_quota_weight() {
+        let estimates = vec![(10_u64, 4_u64), (20, 1), (30, 5)];
+
+        assert_eq!(weighted_quantile(estimates.clone(), 1, 4), Some(10));
+        assert_eq!(weighted_quantile(estimates.clone(), 1, 2), Some(20));
+        assert_eq!(weighted_quantile(estimates, 3, 4), Some(30));
     }
 
     #[test]

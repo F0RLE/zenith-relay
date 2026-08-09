@@ -31,11 +31,19 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-audit
+      - name: Prepare RustSec advisory database
+        run: |
+          RUSTSEC_ADVISORY_DB="$RUNNER_TEMP/rustsec-advisory-db"
+          echo "RUSTSEC_ADVISORY_DB=$RUSTSEC_ADVISORY_DB" >> "$GITHUB_ENV"
+          git init --quiet "$RUSTSEC_ADVISORY_DB"
+          git -C "$RUSTSEC_ADVISORY_DB" remote add origin https://github.com/RustSec/advisory-db.git
+          git -C "$RUSTSEC_ADVISORY_DB" fetch --depth=1 origin b4af64d3dab58bfac9d4ab23d474264ed0bb6537
+          git -C "$RUSTSEC_ADVISORY_DB" checkout --detach --quiet FETCH_HEAD
       - run: cargo fmt --manifest-path relay-server/Cargo.toml --all -- --check
       - run: cargo check --manifest-path relay-server/Cargo.toml --locked
       - run: cargo clippy --manifest-path relay-server/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo test --manifest-path relay-server/Cargo.toml --locked
-      - run: cargo audit --file relay-server/Cargo.lock
+      - run: cargo audit --db "$RUSTSEC_ADVISORY_DB" --no-fetch --file relay-server/Cargo.lock
 
   container:
     needs: check

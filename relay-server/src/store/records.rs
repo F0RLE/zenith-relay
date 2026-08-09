@@ -71,6 +71,41 @@ impl Store {
         self.save_record("accounts", &record.id, &record.secret_ref, record)
     }
 
+    /// Updates the latest stored account in one transaction so background
+    /// observations cannot overwrite an operator's concurrent configuration.
+    pub fn update_account<T>(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut ServerAccountRecord) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(db_error)?;
+        let json = transaction
+            .query_row(
+                "SELECT data_json FROM accounts WHERE id = ?1",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some(json) = json else {
+            transaction.commit().map_err(db_error)?;
+            return Ok(None);
+        };
+        let mut record = parse_json(&json)?;
+        let value = update(&mut record)?;
+        transaction
+            .execute(
+                "UPDATE accounts SET data_json = ?1, secret_ref = ?2 WHERE id = ?3",
+                params![to_json(&record)?, record.secret_ref, id],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(Some(value))
+    }
+
     pub fn save_accounts(&self, records: &[ServerAccountRecord]) -> Result<(), String> {
         let encoded = records
             .iter()
@@ -246,6 +281,61 @@ mod tests {
     use super::*;
     use crate::store::test_support::test_root;
     use std::fs;
+    use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
+
+    fn account() -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: "account_1".into(),
+            label: "Account".into(),
+            identity_hint: "account".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "openai_codex".into(),
+            secret_ref: "account:1".into(),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Default::default(),
+            quota: Default::default(),
+            economics: Default::default(),
+            cooldowns: Default::default(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        }
+    }
+
+    #[test]
+    fn account_observation_update_preserves_a_newer_proxy_configuration() {
+        let root = test_root("account-observation-update");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        let mut configured = account();
+        store.save_account(&configured).unwrap();
+        configured.proxy_id = Some("proxy_1".into());
+        store.save_account(&configured).unwrap();
+
+        store
+            .update_account("account_1", |record| {
+                record.last_used_at_ms = Some(2);
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+
+        let stored = store.account("account_1").unwrap().unwrap();
+        assert_eq!(stored.proxy_id.as_deref(), Some("proxy_1"));
+        assert_eq!(stored.last_used_at_ms, Some(2));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn pool_membership_batch_rolls_back_when_one_record_is_missing() {
