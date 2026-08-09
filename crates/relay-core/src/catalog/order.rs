@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+const MAX_MODEL_ID_BYTES: usize = 256;
+
 /// The launcher-facing order is based only on a model ID. It deliberately has
 /// no source/provider identity: sources merely publish model IDs, while the
 /// picker groups familiar model families and keeps every unknown ID in the
@@ -38,6 +40,11 @@ const GLM_MODEL_ORDER: &[&str] = &["glm-5.2", "glm-5.1", "glm-5-turbo", "glm-4.7
 struct OrderedModel {
     id: String,
     upstream_order: usize,
+}
+
+/// Checks the common persisted model-ID boundary after callers trim their input.
+pub fn is_valid_model_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_MODEL_ID_BYTES && !value.chars().any(char::is_control)
 }
 
 /// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
@@ -209,5 +216,13 @@ mod tests {
             ]),
             ["GPT-5", "claude-sonnet"]
         );
+    }
+
+    #[test]
+    fn model_id_validation_rejects_empty_control_and_oversized_values() {
+        assert!(is_valid_model_id("gpt-test"));
+        assert!(!is_valid_model_id(""));
+        assert!(!is_valid_model_id("gpt\ntest"));
+        assert!(!is_valid_model_id(&"x".repeat(MAX_MODEL_ID_BYTES + 1)));
     }
 }

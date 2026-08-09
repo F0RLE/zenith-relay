@@ -71,13 +71,7 @@ pub async fn clear_usage(
 }
 
 fn normalize_usage_query(query: &mut UsageQuery) -> Result<(), ManagementError> {
-    query.page = query.page.max(1);
-    query.page_size = if query.page_size == 0 {
-        50
-    } else {
-        query.page_size.clamp(1, 200)
-    };
-    query.bucket_ms = query.bucket_ms.filter(|value| *value >= 60_000);
+    query.normalize_pagination();
     for value in [
         &mut query.model_query,
         &mut query.source_or_account_query,

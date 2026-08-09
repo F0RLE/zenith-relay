@@ -1,3 +1,4 @@
+use super::is_valid_model_id;
 use serde::{de::Error as _, Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -321,7 +322,7 @@ pub fn normalize_model_reasoning_allowed_levels(
     let mut normalized = BTreeMap::new();
     for (model, levels) in allowed_levels {
         let model = model.trim();
-        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+        if !is_valid_model_id(model) {
             return Err("model reasoning allowed levels are invalid");
         }
         if levels.len() > MAX_MODEL_REASONING_LEVELS {

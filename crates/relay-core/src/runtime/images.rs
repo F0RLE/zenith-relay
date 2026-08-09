@@ -1,5 +1,5 @@
 use super::IMAGE_API_MODEL;
-use crate::{api_model_price, Error, Result};
+use crate::{api_model_price, is_valid_model_id, Error, Result};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeSet;
 
@@ -11,7 +11,7 @@ pub fn normalize_image_base_model(value: Option<String>) -> Result<Option<String
     if value.is_empty() || value.eq_ignore_ascii_case("auto") {
         return Ok(None);
     }
-    if value.len() > 256 || value.chars().any(char::is_control) {
+    if !is_valid_model_id(value) {
         return Err(Error::Validation(
             "image base model id is invalid".to_string(),
         ));

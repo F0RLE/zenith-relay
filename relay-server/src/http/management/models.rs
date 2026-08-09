@@ -7,7 +7,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc};
 use zenith_relay_core::{
-    normalize_model_reasoning_allowed_levels,
+    is_valid_model_id, normalize_model_reasoning_allowed_levels,
     protocol::{model_has_native_account_route, RuntimeStateSnapshot},
     ApiModelPriceOverride,
 };
@@ -221,7 +221,7 @@ fn canonical_model_id(
     requested: &str,
 ) -> Result<String, ManagementError> {
     let requested = requested.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+    if !is_valid_model_id(requested) {
         return Err(ManagementError::validation(
             "model_id_invalid",
             "model id is invalid",

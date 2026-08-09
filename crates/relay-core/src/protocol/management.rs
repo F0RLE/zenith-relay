@@ -1009,6 +1009,18 @@ pub struct UsageQuery {
     pub request_id_query: Option<String>,
 }
 
+impl UsageQuery {
+    pub fn normalize_pagination(&mut self) {
+        self.page = self.page.max(1);
+        self.page_size = if self.page_size == 0 {
+            50
+        } else {
+            self.page_size.clamp(1, 200)
+        };
+        self.bucket_ms = self.bucket_ms.filter(|value| *value >= 60_000);
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayDiagnostic {
@@ -1090,6 +1102,28 @@ mod tests {
             routing_block_reason: None,
             last_error_code: None,
         }
+    }
+
+    #[test]
+    fn usage_query_pagination_uses_bounded_defaults() {
+        let mut query = UsageQuery {
+            page: 0,
+            page_size: 0,
+            bucket_ms: Some(59_999),
+            ..Default::default()
+        };
+        query.normalize_pagination();
+        assert_eq!(query.page, 1);
+        assert_eq!(query.page_size, 50);
+        assert_eq!(query.bucket_ms, None);
+
+        query.page = 9;
+        query.page_size = 999;
+        query.bucket_ms = Some(60_000);
+        query.normalize_pagination();
+        assert_eq!(query.page, 9);
+        assert_eq!(query.page_size, 200);
+        assert_eq!(query.bucket_ms, Some(60_000));
     }
 
     #[test]

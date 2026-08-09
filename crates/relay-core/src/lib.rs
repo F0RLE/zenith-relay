@@ -19,11 +19,12 @@ pub const DEFAULT_KEEP_LAST_CANDIDATE_AVAILABLE: bool = true;
 pub use catalog::{
     canonicalize_model_ids, codex_catalog_entry_is_compatible, codex_model_alias,
     codex_model_display_name, codex_model_is_picker_eligible, decode_codex_model_alias,
-    deserialize_model_reasoning_allowed_levels, normalize_codex_catalog_priorities,
-    normalize_model_ids, normalize_model_reasoning_allowed_levels,
-    normalize_native_codex_catalog_entry, normalize_upstream_codex_catalog_entry,
-    routed_codex_catalog_entry, source_model_declares_image_input, ModelRegistry, ModelRules,
-    CODEX_CATALOG_PRIORITY_BASE, CODEX_RELAY_CATALOG_HASH,
+    deserialize_model_reasoning_allowed_levels, is_valid_model_id,
+    normalize_codex_catalog_priorities, normalize_model_ids,
+    normalize_model_reasoning_allowed_levels, normalize_native_codex_catalog_entry,
+    normalize_upstream_codex_catalog_entry, routed_codex_catalog_entry,
+    source_model_declares_image_input, ModelRegistry, ModelRules, CODEX_CATALOG_PRIORITY_BASE,
+    CODEX_RELAY_CATALOG_HASH,
 };
 pub use error::{normalize_error_code, Error, Result};
 pub use protocol::{

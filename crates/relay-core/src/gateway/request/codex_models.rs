@@ -9,8 +9,8 @@ use crate::protocol::ClientWireApi;
 use crate::providers::chatgpt::{valid_codex_client_version, CODEX_MODELS_CLIENT_VERSION};
 use crate::runtime::AuthenticatedKey;
 use crate::{
-    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, routed_codex_catalog_entry,
-    GatewayRuntime, WireApi,
+    codex_catalog_entry_is_compatible, codex_model_is_picker_eligible, is_valid_model_id,
+    routed_codex_catalog_entry, GatewayRuntime, WireApi,
 };
 use axum::body::Body;
 use axum::extract::State;
@@ -275,7 +275,7 @@ fn build_codex_models_response_from_manifests<'a>(
         .filter_map(|model| {
             let object = model.as_object()?;
             let slug = object.get("slug")?.as_str()?.trim();
-            if slug.is_empty() || slug.len() > 256 || slug.chars().any(char::is_control) {
+            if !is_valid_model_id(slug) {
                 return None;
             }
             let normalized = slug.to_ascii_lowercase();

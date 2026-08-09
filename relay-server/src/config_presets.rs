@@ -5,7 +5,7 @@ use crate::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_price_overrides,
+    is_valid_model_id, normalize_image_base_model, normalize_model_price_overrides,
     normalize_model_reasoning_allowed_levels, normalize_source_protocol_bindings,
     normalize_subscription_plan_order,
     protocol::{
@@ -305,7 +305,7 @@ fn normalize_models(models: Vec<String>) -> Result<Vec<String>, PresetError> {
         if model.is_empty() {
             continue;
         }
-        if model.len() > 256 || model.chars().any(char::is_control) {
+        if !is_valid_model_id(model) {
             return Err(PresetError::Invalid(
                 "configuration preset model id is invalid".to_string(),
             ));

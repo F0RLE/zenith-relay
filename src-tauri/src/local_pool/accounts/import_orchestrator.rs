@@ -52,7 +52,8 @@ use zenith_relay_core::providers::chatgpt::{
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::{
-    discover_source_models, normalize_error_code, ProviderSource, ProxyConfig, WireApi,
+    discover_source_models, is_valid_model_id, normalize_error_code, ProviderSource, ProxyConfig,
+    WireApi,
 };
 
 mod claims;
@@ -66,8 +67,6 @@ type CommandResult<T> = std::result::Result<T, CommandError>;
 type ItemResult<T> = std::result::Result<T, ImportItemError>;
 
 pub(super) const MAX_ACCOUNT_LABEL_BYTES: usize = 128;
-
-pub(super) const MAX_MODEL_BYTES: usize = 256;
 
 pub(super) const MAX_MODELS: usize = 4_096;
 
@@ -2230,7 +2229,7 @@ pub(super) fn normalize_models(models: Vec<String>) -> LocalResult<Vec<String>> 
         if model.is_empty() {
             continue;
         }
-        if model.len() > MAX_MODEL_BYTES || model.chars().any(char::is_control) {
+        if !is_valid_model_id(model) {
             return Err(LocalPoolError::new(
                 ErrorCode::InvalidState,
                 "model name is invalid",

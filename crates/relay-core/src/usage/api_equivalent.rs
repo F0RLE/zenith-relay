@@ -1,4 +1,5 @@
 use super::ApiEquivalentSummary;
+use crate::is_valid_model_id;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -76,11 +77,7 @@ pub fn normalize_model_price_overrides(
     let mut normalized = BTreeMap::new();
     for (model, price) in prices {
         let model = model.trim();
-        if model.is_empty()
-            || model.len() > 256
-            || model.chars().any(char::is_control)
-            || !price.is_valid()
-        {
+        if !is_valid_model_id(model) || !price.is_valid() {
             return Err("model price override is invalid");
         }
         normalized.insert(model.to_ascii_lowercase(), price);

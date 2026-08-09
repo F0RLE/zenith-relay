@@ -5,7 +5,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use zenith_relay_core::{
-    normalize_image_base_model, normalize_model_price_overrides,
+    is_valid_model_id, normalize_image_base_model, normalize_model_price_overrides,
     normalize_model_reasoning_allowed_levels, normalize_subscription_plan_order,
     protocol::{
         AccountPresetRule, ConfigurationPresetSettings, PresetQuotaPolicy, PresetRoutingPolicy,
@@ -732,7 +732,7 @@ fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
         if model.is_empty() {
             continue;
         }
-        if model.len() > 256 || model.chars().any(char::is_control) {
+        if !is_valid_model_id(model) {
             return Err("model id is invalid".to_string());
         }
         if seen.insert(model.to_ascii_lowercase()) {

@@ -22,6 +22,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zenith_relay_core::{
+    is_valid_model_id,
     protocol::{
         AccountPresetRule, ConfigurationPreset, ConfigurationPresetSettings, PresetQuotaPolicy,
         PresetRoutingPolicy, SourcePresetRule, CONFIGURATION_PRESET_FORMAT,
@@ -529,7 +530,7 @@ pub async fn set_local_model_reasoning(
 
 fn canonical_pool_model(state: &DesktopState, model_id: &str) -> LocalResult<String> {
     let requested = model_id.trim();
-    if requested.is_empty() || requested.len() > 256 || requested.chars().any(char::is_control) {
+    if !is_valid_model_id(requested) {
         return Err(LocalPoolError::new(
             ErrorCode::InvalidState,
             "model id is invalid",
