@@ -6,11 +6,11 @@ use super::errors::{
 };
 use super::now_ms;
 use super::request::{forwarded_codex_headers, CODEX_RESPONSES_LITE_HEADER};
-use super::response::{apply_usage, emit_usage, usage_event};
+use super::response::{apply_usage, emit_usage, route_error_origin, usage_event};
 use super::streaming::has_output_delta;
 use crate::protocol::ClientWireApi;
 use crate::runtime::{AuthenticatedKey, CandidateLease, ExecutorPrepareError, ExecutorRoute};
-use crate::{GatewayRuntime, UsageEvent, WireApi};
+use crate::{ErrorOrigin, GatewayRuntime, UsageEvent, WireApi};
 use axum::body::Body;
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -83,15 +83,16 @@ async fn handle_connection(
     let request = match read_initial_request(&mut downstream, &runtime, &key, &headers).await {
         Ok(request) => request,
         Err(failure) => {
-            send_gateway_error(&mut downstream, &failure).await;
+            send_gateway_error(&mut downstream, &failure, None).await;
             return;
         }
     };
 
+    let request_id = request.request_id.clone();
     let connected = match connect_upstream(&runtime, &key, &headers, request, true, 0).await {
         Ok(connected) => connected,
         Err(failure) => {
-            send_gateway_error(&mut downstream, &failure).await;
+            send_gateway_error(&mut downstream, &failure, Some(&request_id)).await;
             return;
         }
     };
@@ -192,6 +193,7 @@ async fn connect_upstream(
         };
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
+        let source_error_origin = route_error_origin(&route);
         if route.wire_api != WireApi::Responses {
             continue;
         }
@@ -209,7 +211,7 @@ async fn connect_upstream(
         {
             Ok(prepared) => prepared,
             Err(error) => {
-                let failure = GatewayFailure::prepare(error);
+                let failure = GatewayFailure::prepare(error, source_error_origin);
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
@@ -233,7 +235,7 @@ async fn connect_upstream(
                 .headers(headers)
                 .upgrade();
             let Ok(Ok(upgrade)) = timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.send()).await else {
-                let failure = GatewayFailure::transport();
+                let failure = GatewayFailure::transport(source_error_origin);
                 record_connect_failure(
                     runtime, key, &route, &request, attempt, started, &failure, None,
                 );
@@ -259,7 +261,7 @@ async fn connect_upstream(
             {
                 Ok(prepared) => prepared,
                 Err(error) => {
-                    let failure = GatewayFailure::prepare(error);
+                    let failure = GatewayFailure::prepare(error, source_error_origin);
                     record_connect_failure(
                         runtime, key, &route, &request, attempt, started, &failure, None,
                     );
@@ -286,7 +288,8 @@ async fn connect_upstream(
             .await
             .ok()
             .and_then(Result::ok);
-            let failure = GatewayFailure::upstream_status(status, body.as_deref());
+            let failure =
+                GatewayFailure::upstream_status(status, body.as_deref(), source_error_origin);
             if failure.category == "upstream_encrypted_content_invalid"
                 && !encrypted_content_recovered
                 && request.recover_invalid_encrypted_content()
@@ -349,7 +352,7 @@ async fn connect_upstream(
         let Ok(Ok(mut upstream)) =
             timeout(UPSTREAM_CONNECT_TIMEOUT, upgrade.into_websocket()).await
         else {
-            let failure = GatewayFailure::transport();
+            let failure = GatewayFailure::transport(source_error_origin);
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
@@ -357,8 +360,11 @@ async fn connect_upstream(
             last_failure = Some(failure);
             continue;
         };
-        if send_request(&mut upstream, payload).await.is_err() {
-            let failure = GatewayFailure::transport();
+        if send_request(&mut upstream, payload, source_error_origin)
+            .await
+            .is_err()
+        {
+            let failure = GatewayFailure::transport(source_error_origin);
             record_connect_failure(
                 runtime, key, &route, &request, attempt, started, &failure, None,
             );
@@ -366,25 +372,26 @@ async fn connect_upstream(
             last_failure = Some(failure);
             continue;
         }
-        let initial_messages = match initial_application_messages(&mut upstream).await {
-            Ok(messages) => messages,
-            Err(failure) => {
-                let response_headers = HeaderMap::new();
-                record_connect_failure(
-                    runtime,
-                    key,
-                    &route,
-                    &request,
-                    attempt,
-                    started,
-                    &failure,
-                    Some(&response_headers),
-                );
-                exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
-                last_failure = Some(failure);
-                continue;
-            }
-        };
+        let initial_messages =
+            match initial_application_messages(&mut upstream, source_error_origin).await {
+                Ok(messages) => messages,
+                Err(failure) => {
+                    let response_headers = HeaderMap::new();
+                    record_connect_failure(
+                        runtime,
+                        key,
+                        &route,
+                        &request,
+                        attempt,
+                        started,
+                        &failure,
+                        Some(&response_headers),
+                    );
+                    exclude_correlated_source_endpoint(runtime, &route, &failure, &mut tried);
+                    last_failure = Some(failure);
+                    continue;
+                }
+            };
         if let Some(terminal) = initial_messages.last().and_then(first_message_terminal) {
             if terminal.outcome == Some(EventTerminalOutcome::Failure) {
                 let category = terminal.error_category.unwrap_or_else(|| {
@@ -404,7 +411,7 @@ async fn connect_upstream(
                 {
                     encrypted_content_recovered = true;
                     tried.remove(&route.candidate_id);
-                    let failure = GatewayFailure::classified(status, category);
+                    let failure = GatewayFailure::classified(status, category, source_error_origin);
                     record_connect_rejection(
                         runtime, key, &route, &request, attempt, started, &failure,
                     );
@@ -424,7 +431,7 @@ async fn connect_upstream(
                         request.has_previous_response_id(),
                     )
                 {
-                    let failure = GatewayFailure::classified(status, category);
+                    let failure = GatewayFailure::classified(status, category, source_error_origin);
                     if affinity_miss {
                         confirmed_response_missing |= terminal.previous_response_not_found;
                         owner_recovery_confirmed |= !response_affinity_hit;
@@ -503,11 +510,12 @@ async fn connect_upstream(
 
 async fn initial_application_messages(
     upstream: &mut UpstreamWebSocket,
+    origin: ErrorOrigin,
 ) -> Result<Vec<UpstreamMessage>, GatewayFailure> {
     let mut messages = Vec::new();
     let mut buffered_bytes = 0_usize;
     loop {
-        let message = first_application_message(upstream).await?;
+        let message = first_application_message(upstream, origin).await?;
         let message_bytes = match &message {
             UpstreamMessage::Text(text) => text.len(),
             UpstreamMessage::Binary(bytes) => bytes.len(),
@@ -515,7 +523,7 @@ async fn initial_application_messages(
         };
         buffered_bytes = buffered_bytes.saturating_add(message_bytes);
         if buffered_bytes > MAX_WEBSOCKET_MESSAGE_BYTES.saturating_mul(2) {
-            return Err(GatewayFailure::bootstrap_too_large());
+            return Err(GatewayFailure::message_too_large(origin));
         }
         let committed = initial_message_state(&message)
             .map(|(has_output, terminal)| has_output || terminal.outcome.is_some())
@@ -529,6 +537,7 @@ async fn initial_application_messages(
 
 async fn first_application_message(
     upstream: &mut UpstreamWebSocket,
+    origin: ErrorOrigin,
 ) -> Result<UpstreamMessage, GatewayFailure> {
     let deadline = TokioInstant::now() + INITIAL_MESSAGE_TIMEOUT;
     let mut heartbeat = interval_at(
@@ -538,12 +547,12 @@ async fn first_application_message(
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout()),
+            _ = sleep_until(deadline) => return Err(GatewayFailure::idle_timeout(origin)),
             _ = heartbeat.tick() => {
                 upstream
                     .send(UpstreamMessage::Ping(Default::default()))
                     .await
-                    .map_err(|_| GatewayFailure::transport())?;
+                    .map_err(|_| GatewayFailure::transport(origin))?;
             }
             message = upstream.next() => {
                 match message {
@@ -554,13 +563,13 @@ async fn first_application_message(
                         upstream
                             .send(UpstreamMessage::Pong(payload))
                             .await
-                            .map_err(|_| GatewayFailure::transport())?;
+                            .map_err(|_| GatewayFailure::transport(origin))?;
                     }
                     Some(Ok(UpstreamMessage::Pong(_))) => {}
                     Some(Ok(UpstreamMessage::Close { .. })) | None => {
-                        return Err(GatewayFailure::closed());
+                        return Err(GatewayFailure::closed(origin));
                     }
-                    Some(Err(_)) => return Err(GatewayFailure::transport()),
+                    Some(Err(_)) => return Err(GatewayFailure::transport(origin)),
                 }
             }
         }
@@ -761,6 +770,7 @@ fn ensure_websocket_beta(headers: &mut HeaderMap) {
 async fn send_request(
     upstream: &mut UpstreamWebSocket,
     payload: String,
+    origin: ErrorOrigin,
 ) -> Result<(), GatewayFailure> {
     let send = async {
         upstream.send(UpstreamMessage::Text(payload)).await?;
@@ -768,7 +778,7 @@ async fn send_request(
     };
     match timeout(UPSTREAM_CONNECT_TIMEOUT, send).await {
         Ok(Ok(())) => Ok(()),
-        _ => Err(GatewayFailure::transport()),
+        _ => Err(GatewayFailure::transport(origin)),
     }
 }
 
@@ -784,7 +794,16 @@ struct BridgeState {
     lease: Option<CandidateLease>,
     in_flight: Option<InFlight>,
     upstream_candidate_id: String,
+    upstream_origin: ErrorOrigin,
     last_response_id: Option<String>,
+}
+
+impl BridgeState {
+    fn request_id(&self) -> Option<&str> {
+        self.in_flight
+            .as_ref()
+            .map(|in_flight| in_flight.event.request_id.as_str())
+    }
 }
 
 async fn bridge(
@@ -808,6 +827,7 @@ async fn bridge(
         connected.request.tool_use_for(&connected.route),
     );
     let upstream_candidate_id = connected.route.candidate_id.clone();
+    let upstream_origin = route_error_origin(&connected.route);
     let prompt_affinity_key = connected.request.prompt_affinity_key.clone();
     let mut state = BridgeState {
         lease: Some(connected.lease),
@@ -819,6 +839,7 @@ async fn bridge(
             prompt_affinity_key,
         }),
         upstream_candidate_id,
+        upstream_origin,
         last_response_id: None,
     };
     for message in connected.initial_messages {
@@ -848,8 +869,13 @@ async fn bridge(
                 });
         tokio::select! {
             _ = sleep_until(semantic_deadline), if semantic_waiting => {
+                let request_id = state.request_id().map(str::to_owned);
                 finish_incomplete(&runtime, &mut state, "stream_semantic_timeout");
-                send_gateway_error(&mut downstream, &GatewayFailure::semantic_timeout()).await;
+                send_gateway_error(
+                    &mut downstream,
+                    &GatewayFailure::semantic_timeout(state.upstream_origin),
+                    request_id.as_deref(),
+                ).await;
                 break;
             }
             _ = sleep_until(idle_deadline) => {
@@ -863,9 +889,14 @@ async fn bridge(
             _ = heartbeat.tick() => {
                 if upstream.send(UpstreamMessage::Ping(Default::default())).await.is_err() {
                     let active_request = state.in_flight.is_some();
+                    let request_id = state.request_id().map(str::to_owned);
                     finish_incomplete(&runtime, &mut state, "upstream_websocket");
                     if active_request {
-                        send_gateway_error(&mut downstream, &GatewayFailure::transport()).await;
+                        send_gateway_error(
+                            &mut downstream,
+                            &GatewayFailure::transport(state.upstream_origin),
+                            request_id.as_deref(),
+                        ).await;
                     }
                     break;
                 }
@@ -892,8 +923,9 @@ async fn bridge(
                     Ok(true) => {}
                     Ok(false) => break,
                     Err(failure) => {
+                        let request_id = state.request_id().map(str::to_owned);
                         finish_incomplete(&runtime, &mut state, failure.category);
-                        send_gateway_error(&mut downstream, &failure).await;
+                        send_gateway_error(&mut downstream, &failure, request_id.as_deref()).await;
                         break;
                     }
                 }
@@ -902,17 +934,27 @@ async fn bridge(
                 last_activity = TokioInstant::now();
                 let Some(message) = message else {
                     let active_request = state.in_flight.is_some();
+                    let request_id = state.request_id().map(str::to_owned);
                     finish_incomplete(&runtime, &mut state, "upstream_websocket_closed");
                     if active_request {
-                        send_gateway_error(&mut downstream, &GatewayFailure::closed()).await;
+                        send_gateway_error(
+                            &mut downstream,
+                            &GatewayFailure::closed(state.upstream_origin),
+                            request_id.as_deref(),
+                        ).await;
                     }
                     break;
                 };
                 let Ok(message) = message else {
                     let active_request = state.in_flight.is_some();
+                    let request_id = state.request_id().map(str::to_owned);
                     finish_incomplete(&runtime, &mut state, "upstream_websocket");
                     if active_request {
-                        send_gateway_error(&mut downstream, &GatewayFailure::transport()).await;
+                        send_gateway_error(
+                            &mut downstream,
+                            &GatewayFailure::transport(state.upstream_origin),
+                            request_id.as_deref(),
+                        ).await;
                     }
                     break;
                 };
@@ -955,13 +997,13 @@ async fn handle_downstream_message(
             upstream
                 .send(UpstreamMessage::Ping(payload))
                 .await
-                .map_err(|_| GatewayFailure::transport())?;
+                .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
         Message::Pong(payload) => {
             upstream
                 .send(UpstreamMessage::Pong(payload))
                 .await
-                .map_err(|_| GatewayFailure::transport())?;
+                .map_err(|_| GatewayFailure::transport(state.upstream_origin))?;
         }
         Message::Close(frame) => {
             let (code, reason) = frame
@@ -1041,7 +1083,10 @@ async fn start_next_request(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         let started = Instant::now();
-        if let Err(failure) = send_request(upstream, request.payload_for(&route)?).await {
+        let upstream_origin = route_error_origin(&route);
+        if let Err(failure) =
+            send_request(upstream, request.payload_for(&route)?, upstream_origin).await
+        {
             record_connect_failure(runtime, key, &route, &request, 1, started, &failure, None);
             return Err(failure);
         }
@@ -1058,6 +1103,7 @@ async fn start_next_request(
             request.tool_use_for(&route),
         );
         state.lease = Some(lease);
+        state.upstream_origin = upstream_origin;
         state.in_flight = Some(InFlight {
             route: route.clone(),
             event,
@@ -1098,6 +1144,7 @@ async fn start_next_request(
     *upstream = next_upstream;
     state.lease = Some(lease);
     state.upstream_candidate_id = route.candidate_id.clone();
+    state.upstream_origin = route_error_origin(&route);
     state.last_response_id = None;
     state.in_flight = Some(InFlight {
         route,
@@ -1123,7 +1170,14 @@ async fn handle_upstream_message(
     match message {
         UpstreamMessage::Text(text) => {
             if text.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+                let request_id = state.request_id().map(str::to_owned);
                 finish_incomplete(runtime, state, "stream_event_too_large");
+                send_gateway_error(
+                    downstream,
+                    &GatewayFailure::message_too_large(state.upstream_origin),
+                    request_id.as_deref(),
+                )
+                .await;
                 return false;
             }
             let terminal = inspect_upstream_event(text.as_bytes(), state);
@@ -1135,7 +1189,14 @@ async fn handle_upstream_message(
         }
         UpstreamMessage::Binary(bytes) => {
             if bytes.len() > MAX_WEBSOCKET_MESSAGE_BYTES {
+                let request_id = state.request_id().map(str::to_owned);
                 finish_incomplete(runtime, state, "stream_event_too_large");
+                send_gateway_error(
+                    downstream,
+                    &GatewayFailure::message_too_large(state.upstream_origin),
+                    request_id.as_deref(),
+                )
+                .await;
                 return false;
             }
             let terminal = inspect_upstream_event(&bytes, state);
@@ -1149,9 +1210,15 @@ async fn handle_upstream_message(
         UpstreamMessage::Pong(payload) => downstream.send(Message::Pong(payload)).await.is_ok(),
         UpstreamMessage::Close { code, reason } => {
             let active_request = state.in_flight.is_some();
+            let request_id = state.request_id().map(str::to_owned);
             finish_incomplete(runtime, state, "upstream_websocket_closed");
             if active_request {
-                send_gateway_error(downstream, &GatewayFailure::closed()).await;
+                send_gateway_error(
+                    downstream,
+                    &GatewayFailure::closed(state.upstream_origin),
+                    request_id.as_deref(),
+                )
+                .await;
             } else {
                 let _ = downstream
                     .send(Message::Close(Some(CloseFrame {
@@ -1326,8 +1393,8 @@ mod tests {
         EventTerminalOutcome, GatewayFailure, WEBSOCKET_PROTOCOLS,
     };
     use crate::{
-        GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource, RuntimeLocalKey,
-        RuntimeSource, WireApi,
+        ErrorOrigin, GatewayRuntime, GatewayRuntimeOptions, LocalGatewayKey, ProviderSource,
+        RuntimeLocalKey, RuntimeSource, WireApi,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use serde_json::json;
@@ -1448,6 +1515,28 @@ mod tests {
         assert_eq!(failure.status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(failure.category, "all_candidates_cooling_down");
         assert_eq!(failure.retry_at_ms, Some(1_700_000_120_000));
+        assert_eq!(failure.origin, ErrorOrigin::Relay);
+    }
+
+    #[test]
+    fn websocket_errors_keep_the_source_origin_and_unmapped_category() {
+        let failure = GatewayFailure::classified(
+            StatusCode::BAD_REQUEST,
+            "upstream_invalid_request",
+            ErrorOrigin::Account,
+        );
+        let event = super::failure::gateway_error_event(&failure, Some("relay-request-3"));
+
+        assert_eq!(event["error"]["code"], "invalid_request");
+        assert_eq!(
+            event["error"]["zenith_relay"]["category"],
+            "upstream_invalid_request"
+        );
+        assert_eq!(event["error"]["zenith_relay"]["origin"], "account");
+        assert_eq!(
+            event["error"]["zenith_relay"]["request_id"],
+            "relay-request-3"
+        );
     }
 
     #[test]

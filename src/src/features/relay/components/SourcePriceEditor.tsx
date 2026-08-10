@@ -37,9 +37,11 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
     ...source.allowedModels,
     ...source.excludedModels,
     ...Object.keys(source.modelPriceOverrides ?? {}),
+    ...Object.keys(source.detectedModelPrices ?? {}),
   ].map((model) => [model.toLowerCase(), model])).values()];
   const groups = groupModels(models, (model) => model);
-  const fallback = new Map((runtime?.gateway.models ?? []).map((model) => [model.id.toLowerCase(), model]));
+  const detectedPrices = new Map(Object.entries(source.detectedModelPrices ?? {}).map(([model, price]) => [model.toLowerCase(), price]));
+  const catalogPrices = new Map((runtime?.gateway.models ?? []).map((model) => [model.id.toLowerCase(), model]));
   const modelSelectionEnabled = Boolean(enabledModels && onToggleModel);
   const enabledModelIds = new Set((enabledModels ?? []).map((model) => model.toLowerCase()));
   const enabledCount = modelSelectionEnabled
@@ -63,13 +65,13 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
           ? group.items.filter((model) => enabledModelIds.has(model.toLowerCase())).length
           : group.items.length;
         return <details key={group.id} className="source-price-group">
-          <summary><strong>{t(`modelGroups.${group.id}`)}</strong><span>{modelSelectionEnabled ? `${t("common.enabled")}: ${groupEnabledCount}/${group.items.length}` : t("sources.groupModelsCount", { count: group.items.length })}</span></summary>
+          <summary><strong>{t(`modelGroups.${group.id}`, { defaultValue: group.label })}</strong><span>{modelSelectionEnabled ? `${t("common.enabled")}: ${groupEnabledCount}/${group.items.length}` : t("sources.groupModelsCount", { count: group.items.length })}</span></summary>
           <div className="source-price-table" data-cache-write={cacheWrite ? "true" : "false"}>
             <div className="source-price-grid-head"><span>{t("common.model")}</span><span>{t("sources.inputPrice")}</span><span>{t("sources.outputPrice")}</span><span>{t("sources.cachedInputPrice")}</span>{cacheWrite ? <><span>{t("sources.cacheWrite5mPrice")}</span><span>{t("sources.cacheWrite1hPrice")}</span></> : null}<span /></div>
             {group.items.map((model) => {
               const key = model.toLowerCase();
               const draft = drafts[key];
-              const inherited = fallback.get(key);
+              const inherited = detectedPrices.get(key) ?? catalogPrices.get(key);
               const showWrites = supportsCacheWritePricing(model);
               const enabled = !modelSelectionEnabled || enabledModelIds.has(key);
               return <div className="source-price-row" key={key} data-custom-price={draft ? "true" : "false"} data-member-model-id={modelSelectionEnabled ? model : undefined} data-enabled={modelSelectionEnabled ? String(enabled) : undefined}>

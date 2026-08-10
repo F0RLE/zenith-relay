@@ -270,6 +270,34 @@ pub(crate) fn responses_function_call_output_has_invalid_call_id(payload: &[u8])
     )
 }
 
+/// Zenith Gateway intentionally hides provider-specific 400 details. A
+/// Responses continuation with tool output can use the local replay state to
+/// recover the preceding tool call when this exact public envelope is returned.
+/// Do not match arbitrary 400 responses: those may be genuine client errors.
+pub(crate) fn zenith_gateway_invalid_request(payload: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(payload) else {
+        return false;
+    };
+    zenith_gateway_invalid_request_value(&value)
+}
+
+pub(crate) fn zenith_gateway_invalid_request_value(value: &Value) -> bool {
+    const MESSAGE: &str =
+        "Zenith AI request is invalid. Check the model, messages, tools, and parameters.";
+
+    [
+        "/error/message",
+        "/response/error/message",
+        "/body/error/message",
+        "/message",
+        "/response/message",
+        "/body/message",
+    ]
+    .into_iter()
+    .filter_map(|path| value.pointer(path).and_then(Value::as_str))
+    .any(|message| message.trim().eq_ignore_ascii_case(MESSAGE))
+}
+
 /// Strict Responses endpoints use a separate `fc_` namespace for
 /// `function_call.id`; the matching `call_id` is unchanged. This is only a
 /// recovery signal — the request repair itself still verifies that it has a

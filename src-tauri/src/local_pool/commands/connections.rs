@@ -129,6 +129,7 @@ pub async fn create_local_source(
         weight: input.weight,
         recovery_delay_seconds: input.recovery_delay_seconds,
         model_price_overrides: input.model_price_overrides,
+        detected_model_prices: discovery.detected_model_prices,
         last_used_at: None,
         last_test_at: Some(Utc::now().to_rfc3339()),
         last_test_status: Some("ok".into()),
@@ -186,6 +187,7 @@ pub async fn update_local_source(
         model_price_overrides: input
             .model_price_overrides
             .unwrap_or(current.model_price_overrides),
+        detected_model_prices: current.detected_model_prices,
         last_used_at: current.last_used_at,
         last_test_at: current.last_test_at,
         last_test_status: current.last_test_status,
@@ -429,6 +431,7 @@ pub(crate) async fn refresh_local_source_models(
     let mut updated = current;
     updated.models = discovery.models;
     updated.protocol_bindings = discovery.protocol_bindings;
+    updated.detected_model_prices = discovery.detected_model_prices;
     updated.last_test_at = Some(Utc::now().to_rfc3339());
     updated.last_test_status = Some("ok".into());
     updated.last_error = None;
@@ -611,6 +614,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             last_used_at: None,
             last_test_at: None,
             last_test_status: None,
@@ -632,6 +636,25 @@ mod tests {
         source.normalize();
         source.normalize_protocol_bindings().unwrap();
         assert!(source.validate_protocol_bindings().is_ok());
+    }
+
+    #[test]
+    fn source_wide_catalog_binding_remains_automatic_after_normalization() {
+        let mut source = source_record();
+        source.protocol_bindings = vec![SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: Vec::new(),
+        }];
+
+        source.normalize_protocol_bindings().unwrap();
+
+        assert!(source.protocol_bindings[0].model_ids.is_empty());
+        assert_eq!(
+            source.effective_protocol_bindings().unwrap()[0].model_ids,
+            ["model-a"]
+        );
     }
 
     #[test]

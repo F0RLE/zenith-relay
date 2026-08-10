@@ -19,7 +19,9 @@ export function PoolMemberEditor({ member, onClose }: { member: PoolMember; onCl
   const [sourceOrder, setSourceOrder] = useState<string[]>(() => member.kind === "source" ? sourceOrderForRole(runtime?.sources ?? [], apiSourceRole(member.priority), member.id) : []);
   const [draggedSource, setDraggedSource] = useState<string | null>(null);
   const [recoveryDelaySeconds, setRecoveryDelaySeconds] = useState(member.kind === "source" ? member.recoveryDelaySeconds ?? 0 : 0);
-  const pricedModels = member.kind === "source" ? Object.keys(member.modelPriceOverrides ?? {}) : [];
+  const pricedModels = member.kind === "source"
+    ? [...Object.keys(member.modelPriceOverrides ?? {}), ...Object.keys(member.detectedModelPrices ?? {})]
+    : [];
   const modelIds = [...new Map([...member.models, ...member.allowedModels, ...member.excludedModels, ...pricedModels].map((model) => [model.toLocaleLowerCase(), model])).values()];
   const [enabledModels, setEnabledModels] = useState(() => {
     const allowed = new Set(member.allowedModels.map((model) => model.toLocaleLowerCase()));

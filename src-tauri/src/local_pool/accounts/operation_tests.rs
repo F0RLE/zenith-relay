@@ -811,7 +811,14 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         models: vec!["gpt-test".into()],
     };
     runtime.validate().unwrap();
-    let source = imported_source_record(&item, runtime, "source:source_test".into(), None, None);
+    let source = imported_source_record(
+        &item,
+        runtime,
+        "source:source_test".into(),
+        None,
+        Default::default(),
+        None,
+    );
     let serialized = serde_json::to_string(&ImportItemResult::source_success(
         item.item_id,
         source.clone(),
@@ -850,6 +857,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         weight: 3,
         recovery_delay_seconds: 60,
         model_price_overrides: Default::default(),
+        detected_model_prices: Default::default(),
         last_used_at: Some("2026-07-10T00:00:00Z".into()),
         last_test_at: None,
         last_test_status: None,
@@ -873,6 +881,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         runtime,
         existing.secret_ref.clone(),
         Some(&existing),
+        existing.detected_model_prices.clone(),
         None,
     );
 

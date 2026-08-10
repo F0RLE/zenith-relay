@@ -80,16 +80,16 @@ impl Store {
                         error_category, latency_ms, ttft_ms, generation_ms, input_tokens,
                         cached_input_tokens, cache_write_input_tokens, reasoning_tokens,
                         output_tokens, total_tokens, created_at_ms, routing_json,
-                        service_tier, applied_service_tier, tool_use_json
+                        service_tier, applied_service_tier, tool_use_json, error_origin
                     ) SELECT
                         ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                         ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                        ?23, ?24, ?25
+                        ?23, ?24, ?25, ?26
                     WHERE NOT EXISTS (
                         SELECT 1 FROM usage_request_tombstones WHERE request_id = ?1
                     )
                     AND (?4 != 'account' OR EXISTS (
-                        SELECT 1 FROM accounts WHERE id = ?26
+                        SELECT 1 FROM accounts WHERE id = ?27
                     ))
                     ON CONFLICT(request_id) DO UPDATE SET
                         attempt=excluded.attempt,
@@ -115,7 +115,8 @@ impl Store {
                         routing_json=excluded.routing_json,
                         service_tier=excluded.service_tier,
                         applied_service_tier=excluded.applied_service_tier,
-                        tool_use_json=excluded.tool_use_json
+                        tool_use_json=excluded.tool_use_json,
+                        error_origin=excluded.error_origin
                     WHERE excluded.attempt >= usage_events.attempt"#,
                 )
                 .map_err(db_error)?;
@@ -165,6 +166,7 @@ impl Store {
                         event.service_tier.as_str(),
                         event.applied_service_tier.map(DefaultServiceTier::as_str),
                         tool_use_json,
+                        event.error_origin().map(|origin| origin.as_str()),
                         candidate_id,
                     ])
                     .map_err(db_error)?;
@@ -219,7 +221,7 @@ impl Store {
         let total = totals.requests;
         let offset = u64::from(page.saturating_sub(1)) * u64::from(page_size);
         let sql = format!(
-            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json \
+            "SELECT id, request_id, local_key_id, candidate_kind, candidate_hint, requested_model, resolved_model, wire_api, success, http_status, error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens, cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens, created_at_ms, routing_json, service_tier, applied_service_tier, tool_use_json, error_origin \
              FROM usage_events{where_sql} ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         let mut statement = connection.prepare(&sql).map_err(db_error)?;
@@ -256,6 +258,7 @@ impl Store {
                     success: row.get::<_, i64>(8)? != 0,
                     http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
                     error_category: row.get(10)?,
+                    error_origin: parse_error_origin(row.get(25)?),
                     latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
                     ttft_ms: optional_u64(row.get(12)?),
                     generation_ms: optional_u64(row.get(13)?),
@@ -525,6 +528,15 @@ impl Store {
     }
 }
 
+fn parse_error_origin(value: Option<String>) -> Option<zenith_relay_core::ErrorOrigin> {
+    match value.as_deref()? {
+        "provider" => Some(zenith_relay_core::ErrorOrigin::Provider),
+        "account" => Some(zenith_relay_core::ErrorOrigin::Account),
+        "relay" => Some(zenith_relay_core::ErrorOrigin::Relay),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,7 +553,7 @@ mod tests {
     use zenith_relay_core::ResponseAffinityStore;
     use zenith_relay_core::RoutingDiagnostics;
     use zenith_relay_core::SelectionReason;
-    use zenith_relay_core::{TerminalOutputKind, ToolChoiceMode};
+    use zenith_relay_core::{ErrorOrigin, TerminalOutputKind, ToolChoiceMode};
 
     #[test]
     fn usage_keeps_one_terminal_row_per_request() {
@@ -639,6 +651,7 @@ mod tests {
             .unwrap();
         assert!(!failed.success);
         assert_eq!(failed.http_status, 429);
+        assert_eq!(failed.error_origin, Some(ErrorOrigin::Provider));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -879,6 +892,7 @@ mod tests {
                     weight: 1,
                     recovery_delay_seconds: 0,
                     model_price_overrides: BTreeMap::from([("private-model".into(), model_price)]),
+                    detected_model_prices: BTreeMap::new(),
                     last_error_code: None,
                 })
                 .unwrap();

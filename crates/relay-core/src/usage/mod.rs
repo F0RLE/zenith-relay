@@ -247,6 +247,24 @@ fn message_has_text(value: &Value) -> bool {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorOrigin {
+    Provider,
+    Account,
+    Relay,
+}
+
+impl ErrorOrigin {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provider => "provider",
+            Self::Account => "account",
+            Self::Relay => "relay",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageEvent {
@@ -292,6 +310,23 @@ pub struct UsageEvent {
 }
 
 impl UsageEvent {
+    /// Attributes a failed attempt to the component that produced its error.
+    /// A Relay-origin error was constructed locally; otherwise the selected
+    /// account or API source is responsible for the upstream result.
+    pub fn error_origin(&self) -> Option<ErrorOrigin> {
+        if self.success || self.error_category.is_none() {
+            return None;
+        }
+        let category = self.error_category.as_deref().unwrap_or_default();
+        if relay_error_category(category) || category.starts_with("adapter_") {
+            return Some(ErrorOrigin::Relay);
+        }
+        if self.account_id.is_some() {
+            return Some(ErrorOrigin::Account);
+        }
+        Some(ErrorOrigin::Provider)
+    }
+
     pub fn affects_account_state(&self) -> bool {
         if self.account_id.is_none() || self.success {
             return false;
@@ -322,10 +357,80 @@ impl UsageEvent {
     }
 }
 
+fn relay_error_category(category: &str) -> bool {
+    matches!(
+        category,
+        "invalid_request"
+            | "reasoning_effort_not_allowed"
+            | "model_not_found"
+            | "no_eligible_source"
+            | "all_sources_temporarily_unavailable"
+            | "all_sources_cooling_down"
+            | "adapter_websocket_not_supported"
+            | "client_cancelled"
+            | "client_websocket"
+            | "response_affinity_miss"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn failed_usage_event(category: &str, account_id: Option<&str>) -> UsageEvent {
+        UsageEvent {
+            request_id: "request".into(),
+            attempt: 1,
+            local_key_id: "key".into(),
+            source_id: "source".into(),
+            candidate_id: Some("candidate".into()),
+            account_id: account_id.map(str::to_owned),
+            routing: None,
+            requested_model: Some("model".into()),
+            resolved_model: Some("model".into()),
+            wire_api: WireApi::Responses,
+            service_tier: DefaultServiceTier::Standard,
+            applied_service_tier: None,
+            success: false,
+            http_status: 502,
+            error_category: Some(category.into()),
+            tool_use: ToolUseDiagnostics::default(),
+            cooldown_scope: None,
+            retry_at_ms: None,
+            consecutive_failures: None,
+            latency_ms: 0,
+            ttft_ms: None,
+            generation_ms: None,
+            input_tokens: None,
+            cached_input_tokens: None,
+            cache_write_input_tokens: None,
+            reasoning_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            quota_snapshot: None,
+        }
+    }
+
+    #[test]
+    fn failed_usage_events_keep_the_component_that_produced_the_error() {
+        assert_eq!(
+            failed_usage_event("upstream_invalid_request", None).error_origin(),
+            Some(ErrorOrigin::Provider)
+        );
+        assert_eq!(
+            failed_usage_event("upstream_transport", Some("account")).error_origin(),
+            Some(ErrorOrigin::Account)
+        );
+        assert_eq!(
+            failed_usage_event("invalid_request", Some("account")).error_origin(),
+            Some(ErrorOrigin::Relay)
+        );
+        assert_eq!(
+            failed_usage_event("adapter_upstream_error", None).error_origin(),
+            Some(ErrorOrigin::Relay)
+        );
+    }
 
     #[test]
     fn sql_like_pattern_escapes_wildcards_and_escape_characters() {

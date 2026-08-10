@@ -403,9 +403,9 @@ impl MessagesBridgeState {
 /// supports `previous_response_id` over WebSocket v2.
 ///
 /// The initial request and completed output are kept in memory so the next
-/// HTTP request can replay the conversation without pretending that the
-/// upstream response id is portable across transports. This is deliberately
-/// separate from `ResponsesToMessages`: no protocol conversion happens here.
+/// request can replay the conversation without pretending that the upstream
+/// response id is portable across transports. This is deliberately separate
+/// from `ResponsesToMessages`: no protocol conversion happens here.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct NativeResponsesReplayState {
     pub(super) model: String,
@@ -446,7 +446,7 @@ impl NativeResponsesReplayState {
 
     /// Builds a new native Responses request with the prior turn materialized
     /// in `input`. The caller invokes this only after the upstream explicitly
-    /// rejected `previous_response_id` on HTTP.
+    /// rejected `previous_response_id` before the stream is committed.
     pub fn replay_request(
         &self,
         continuation: &Value,

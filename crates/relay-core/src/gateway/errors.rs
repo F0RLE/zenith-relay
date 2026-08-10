@@ -26,10 +26,14 @@ pub(super) use failure::{
     previous_response_not_found_value, previous_response_requires_websocket,
     recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    retry_candidate_limit, retryable_failure, retryable_status,
+    retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
+    zenith_gateway_invalid_request_value,
 };
 
-pub(super) use response::{api_error, api_error_code, api_error_type, cooldown_error};
+pub(super) use response::{
+    api_error, api_error_code, api_error_type, api_error_with_origin,
+    api_error_with_origin_and_category, cooldown_error,
+};
 
 pub(super) const TRANSIENT_COOLDOWN_MS: u64 = 60_000;
 

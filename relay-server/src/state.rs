@@ -23,7 +23,7 @@ use zenith_relay_core::{
 
 pub use zenith_relay_core::unix_time_ms as now_ms;
 
-pub const SERVER_SCHEMA_VERSION: u32 = 31;
+pub const SERVER_SCHEMA_VERSION: u32 = 32;
 pub const MAX_SERVER_ACCOUNTS: usize = 1_024;
 pub const COMMON_PROXY_SECRET_REF: &str = "proxy:common";
 pub(crate) const SYSTEM_GATEWAY_KEY_ID: &str = "key_system";
@@ -61,6 +61,8 @@ pub struct SourceRecord {
     pub recovery_delay_seconds: u64,
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
+    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
     pub last_error_code: Option<String>,
 }
 

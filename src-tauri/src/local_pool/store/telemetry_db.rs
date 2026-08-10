@@ -12,8 +12,8 @@ use zenith_relay_core::ResponseAffinityBinding;
 use zenith_relay_core::{
     api_pricing_revision, estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
-    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, RoutingDiagnostics,
-    ToolUseDiagnostics, UsageEvent,
+    ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier, ErrorOrigin,
+    RoutingDiagnostics, ToolUseDiagnostics, UsageEvent,
 };
 
 mod affinity;
@@ -64,6 +64,7 @@ pub struct UsageLog {
     pub success: bool,
     pub http_status: u16,
     pub error_category: Option<String>,
+    pub error_origin: Option<ErrorOrigin>,
     pub tool_use: Option<ToolUseDiagnostics>,
     pub latency_ms: u64,
     pub ttft_ms: Option<u64>,
@@ -178,6 +179,9 @@ impl TelemetryDb {
         if version <= 20 {
             connection.execute_batch(MIGRATION_021).map_err(db_error)?;
         }
+        if version <= 21 {
+            connection.execute_batch(MIGRATION_022).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -258,7 +262,9 @@ fn io_error(error: std::io::Error) -> LocalPoolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zenith_relay_core::{SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi};
+    use zenith_relay_core::{
+        ErrorOrigin, SelectionReason, TerminalOutputKind, ToolChoiceMode, WireApi,
+    };
 
     #[test]
     fn usage_survives_database_reopen() {
@@ -780,6 +786,7 @@ mod tests {
         assert!(!logs[0].success);
         assert_eq!(logs[0].http_status, 429);
         assert_eq!(logs[0].source_id, "source_2");
+        assert_eq!(logs[0].error_origin, Some(ErrorOrigin::Provider));
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }

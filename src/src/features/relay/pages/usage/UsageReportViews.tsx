@@ -2,7 +2,7 @@ import { type KeyboardEvent, type PointerEvent, type ReactNode, useEffect, useSt
 import { Activity, CreditCard, Database, Gauge, SlidersHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, DefaultServiceTier, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
+import type { AccountSummary, DefaultServiceTier, ErrorOrigin, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { Button, CopyButton, Dialog, EmptyState, formatAccountPlan, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
@@ -45,6 +45,7 @@ export type UsageRow = {
   requestId: string | null;
   httpStatus: number | null;
   errorCategory: string | null;
+  errorOrigin: ErrorOrigin | null;
   toolUse: ToolUseDiagnostics | null;
   routing: RoutingDiagnostics | null;
   accountId: string | null;
@@ -207,6 +208,7 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
     time: { label: t("usage.time"), cell: (row) => formatTime(row.time) },
     model: { label: t("common.model"), cell: (row) => <code>{row.model ?? "-"}</code> },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
+    origin: { label: t("usage.errorOrigin"), cell: (row) => formatErrorOrigin(row.errorOrigin, t) },
     error: { label: t("usage.errorCategory"), cell: (row) => <span title={row.errorCategory ?? undefined}>{formatErrorCategory(row.errorCategory, t)}</span> },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
   };
@@ -238,6 +240,7 @@ export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () =>
       <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
       <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
       <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
+      <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
       <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
       <div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div>
       <div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div>
@@ -283,6 +286,10 @@ function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTi
 function formatErrorCategory(category: string | null, t: TFunction): string {
   if (!category) return t("common.unknown");
   return t(`usage.errorCategories.${category}`, { defaultValue: category.replace(/_/g, " ") });
+}
+
+function formatErrorOrigin(origin: ErrorOrigin | null, t: TFunction): string {
+  return origin ? t(`usage.errorOrigins.${origin}`) : t("common.unknown");
 }
 
 function formatToolChoice(choice: ToolUseDiagnostics["toolChoice"], t: TFunction): string {

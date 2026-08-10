@@ -1,7 +1,17 @@
-export type ModelProviderGroup = "chatgpt" | "openai" | "anthropic" | "other";
+type KnownModelProviderGroup = "chatgpt" | "openai" | "anthropic" | "other";
 
-const groupOrder: ModelProviderGroup[] = ["chatgpt", "openai", "anthropic", "other"];
-const groupRank = new Map(groupOrder.map((group, index) => [group, index]));
+export type ModelProviderGroup = KnownModelProviderGroup | `provider-${string}`;
+
+type ModelGroup<T> = {
+  id: ModelProviderGroup;
+  label: string;
+  items: T[];
+};
+
+const knownGroupOrder: KnownModelProviderGroup[] = ["chatgpt", "openai", "anthropic"];
+const otherGroup = "other" as const;
+const dynamicGroupPrefix = "provider-";
+const knownGroupRank = new Map<string, number>(knownGroupOrder.map((group, index) => [group, index]));
 
 function modelLeaf(model: string) {
   const id = model.trim().toLowerCase();
@@ -12,12 +22,31 @@ function isOpenAiModel(model: string) {
   return /^(gpt-|codex-|o\d|text-|dall-e)/.test(model);
 }
 
+function dynamicModelFamily(model: string) {
+  const id = modelLeaf(model);
+  const family = id.match(/^[a-z]+(?:\d+(?=[-._]|$))?/i)?.[0]?.replace(/\d+$/, "").toLowerCase();
+  return family || null;
+}
+
+function dynamicGroupLabel(family: string) {
+  return family.length <= 3
+    ? family.toUpperCase()
+    : `${family[0]!.toUpperCase()}${family.slice(1)}`;
+}
+
+export function modelProviderGroupLabel(group: ModelProviderGroup) {
+  return group.startsWith(dynamicGroupPrefix)
+    ? dynamicGroupLabel(group.slice(dynamicGroupPrefix.length))
+    : group;
+}
+
 export function modelProviderGroup(model: string, nativeChatGpt = false): ModelProviderGroup {
   const id = modelLeaf(model);
   if (nativeChatGpt && isOpenAiModel(id)) return "chatgpt";
   if (id.startsWith("claude-")) return "anthropic";
   if (isOpenAiModel(id)) return "openai";
-  return "other";
+  const family = dynamicModelFamily(id);
+  return family ? `provider-${family}` : otherGroup;
 }
 
 function compareModelIdsForLauncher(
@@ -26,9 +55,11 @@ function compareModelIdsForLauncher(
   leftNativeChatGpt: boolean,
   rightNativeChatGpt: boolean,
 ) {
-  const leftGroup = groupRank.get(modelProviderGroup(left, leftNativeChatGpt)) ?? Number.MAX_SAFE_INTEGER;
-  const rightGroup = groupRank.get(modelProviderGroup(right, rightNativeChatGpt)) ?? Number.MAX_SAFE_INTEGER;
-  return leftGroup - rightGroup;
+  const leftGroup = modelProviderGroup(left, leftNativeChatGpt);
+  const rightGroup = modelProviderGroup(right, rightNativeChatGpt);
+  const leftRank = knownGroupRank.get(leftGroup) ?? (leftGroup === otherGroup ? Number.MAX_SAFE_INTEGER : knownGroupOrder.length);
+  const rightRank = knownGroupRank.get(rightGroup) ?? (rightGroup === otherGroup ? Number.MAX_SAFE_INTEGER : knownGroupOrder.length);
+  return leftRank - rightRank;
 }
 
 /// Launcher-only presentation ordering. Sources stay provider-agnostic and
@@ -68,7 +99,16 @@ export function groupModels<T>(
     if (values) values.push(item);
     else groups.set(group, [item]);
   }
-  return groupOrder.flatMap((id) => groups.has(id) ? [{ id, items: groups.get(id)! }] : []);
+  const orderedGroups: ModelProviderGroup[] = [
+    ...knownGroupOrder.filter((id) => groups.has(id)),
+    ...[...groups.keys()].filter((id) => id.startsWith(dynamicGroupPrefix)),
+    ...(groups.has(otherGroup) ? [otherGroup] : []),
+  ];
+  return orderedGroups.map((id): ModelGroup<T> => ({
+    id,
+    label: modelProviderGroupLabel(id),
+    items: groups.get(id)!,
+  }));
 }
 
 export function supportsCacheWritePricing(model: string) {

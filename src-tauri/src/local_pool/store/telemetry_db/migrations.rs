@@ -236,7 +236,14 @@ PRAGMA user_version = 21;
 COMMIT;
 "#;
 
-pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 21;
+pub(super) const MIGRATION_022: &str = r#"
+BEGIN IMMEDIATE;
+ALTER TABLE request_logs ADD COLUMN error_origin TEXT;
+PRAGMA user_version = 22;
+COMMIT;
+"#;
+
+pub(super) const LOCAL_DATABASE_SCHEMA_VERSION: u32 = 22;
 pub(super) const MAX_RESPONSE_AFFINITY_ROWS: usize = 4_096;
 pub(super) const MAX_STATE_JSON_BYTES: usize = 16 * 1024 * 1024;
 pub(super) const ARCHIVE_USAGE_SQL: &str = r#"

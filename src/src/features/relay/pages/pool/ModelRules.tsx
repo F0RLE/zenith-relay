@@ -37,7 +37,7 @@ export function ModelRulesView() {
       <colgroup><col data-column="model" /><col data-column="codex" /><col data-column="price" /><col data-column="members" /><col data-column="actions" /></colgroup>
       <thead><tr><th>{t("common.model")}</th><th>{t("models.codexColumn")}</th><th>{t("models.priceColumn")}</th><th>{t("pool.members")}</th><th>{t("common.actions")}</th></tr></thead>
       {modelGroups.map((group) => <tbody key={group.id}>
-      <tr className="model-group-row"><th colSpan={5} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`)}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
+      <tr className="model-group-row"><th colSpan={5} scope="rowgroup"><strong>{t(`modelGroups.${group.id}`, { defaultValue: group.label })}</strong><span>{t("models.groupCount", { count: group.items.length })}</span></th></tr>
       {group.items.map((model) => {
       const toggling = busy === `model-toggle-${model.id}`;
       const hasPrice = model.inputMicroUsdPerMillion != null && model.outputMicroUsdPerMillion != null;
