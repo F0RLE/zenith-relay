@@ -923,6 +923,16 @@ mod tests {
                 weight: 1,
                 recovery_delay_seconds: 0,
                 model_price_overrides: Default::default(),
+                detected_model_prices: std::collections::BTreeMap::from([(
+                    "gpt-test".into(),
+                    zenith_relay_core::ApiModelPriceOverride {
+                        input_micro_usd_per_million: 1_000_000,
+                        cached_input_micro_usd_per_million: Some(100_000),
+                        cache_write_5m_micro_usd_per_million: None,
+                        cache_write_1h_micro_usd_per_million: None,
+                        output_micro_usd_per_million: 2_000_000,
+                    },
+                )]),
                 last_used_at: None,
                 last_test_at: None,
                 last_test_status: None,
@@ -944,6 +954,16 @@ mod tests {
 
         let reopened = LocalPoolStore::open(root.clone()).unwrap();
         assert_eq!(reopened.sources()[0].models, ["gpt-test"]);
+        assert_eq!(
+            reopened.sources()[0].detected_model_prices.get("gpt-test"),
+            Some(&zenith_relay_core::ApiModelPriceOverride {
+                input_micro_usd_per_million: 1_000_000,
+                cached_input_micro_usd_per_million: Some(100_000),
+                cache_write_5m_micro_usd_per_million: None,
+                cache_write_1h_micro_usd_per_million: None,
+                output_micro_usd_per_million: 2_000_000,
+            })
+        );
         assert_eq!(reopened.keys()[0].secret_ref, "key:key_1");
         let records = reopened
             .database()
@@ -976,6 +996,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: Default::default(),
+            detected_model_prices: Default::default(),
             last_used_at: None,
             last_test_at: None,
             last_test_status: None,

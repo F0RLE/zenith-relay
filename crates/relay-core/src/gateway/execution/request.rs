@@ -1,13 +1,13 @@
 use super::super::errors::{
-    api_error, apply_attempt_failure_cooldown, apply_cooldown_for_model,
-    apply_failure_cooldown_with_body, apply_failure_state, cooldown_error,
-    failure_category_is_request_terminal, failure_category_requires_cooldown,
-    failure_requires_independent_source_endpoint, preserved_upstream_error,
-    previous_response_not_found, previous_response_requires_websocket,
+    api_error, api_error_with_origin, api_error_with_origin_and_category,
+    apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
+    apply_failure_state, cooldown_error, failure_category_is_request_terminal,
+    failure_category_requires_cooldown, failure_requires_independent_source_endpoint,
+    preserved_upstream_error, previous_response_not_found, previous_response_requires_websocket,
     recoverable_response_affinity_miss, responses_function_call_output_has_invalid_call_id,
     responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    retry_candidate_limit, retryable_failure, retryable_status, AttemptFailure, CooldownContext,
-    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    retry_candidate_limit, retryable_failure, retryable_status, zenith_gateway_invalid_request,
+    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 use super::super::request::{
@@ -16,8 +16,9 @@ use super::super::request::{
     try_recover_encrypted_content, with_forwarded_tool_diagnostics, CODEX_RESPONSES_LITE_HEADER,
 };
 use super::super::response::{
-    completed_account_response, emit_usage, populate_tokens, proxy_json_response, proxy_response,
-    response_id_from_bytes, upstream_body_error_response, usage_event,
+    completed_account_response, emit_usage, populate_tokens, proxy_error_response,
+    proxy_json_response, proxy_response, response_id_from_bytes, route_error_origin,
+    upstream_body_error_response, usage_event,
 };
 use super::super::streaming::{bootstrap_stream, StreamExecution};
 use crate::protocol::{
@@ -85,6 +86,7 @@ pub(in crate::gateway::execution) async fn execute_request(
     let mut last_failure = None;
     let mut last_adapter_error: Option<AdapterError> = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
+    let mut last_failure_origin = crate::ErrorOrigin::Relay;
     let has_previous_response_id = wire_api == WireApi::Responses
         && request
             .get("previous_response_id")
@@ -156,6 +158,7 @@ pub(in crate::gateway::execution) async fn execute_request(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
+        let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
             allowed_protocols: &route.allowed_protocols,
@@ -282,6 +285,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 continue;
             }
         };
@@ -331,6 +335,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     }
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
+                    last_failure_origin = selected_error_origin;
                     continue;
                 }
                 Err(error) => return upstream_body_error_response(&runtime, event, started, error),
@@ -369,30 +374,28 @@ pub(in crate::gateway::execution) async fn execute_request(
                 && (previous_response_requires_websocket(&bytes)
                     || (status == StatusCode::BAD_REQUEST
                         && contains_tool_call_output(&request)
-                        && responses_function_call_output_has_invalid_call_id(&bytes)))
+                        && (responses_function_call_output_has_invalid_call_id(&bytes)
+                            || zenith_gateway_invalid_request(&bytes))))
             {
-                let previous_response_id = request
-                    .get("previous_response_id")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                if let Some(previous_response_id) = previous_response_id {
-                    if let Some(replay) = runtime.load_native_responses_replay(
-                        &key.id,
-                        previous_response_id,
-                        &route.candidate_id,
-                        now_ms(),
-                    ) {
-                        request = match replay.replay_request(&request, &source_model, stream) {
-                            Ok(request) => request,
-                            Err(error) => return adapter_error_response(error),
-                        };
-                        native_replay_attempted = true;
-                        tried.remove(&route.candidate_id);
-                        emit_usage(&runtime, event);
-                        last_failure = Some(failure);
-                        continue;
-                    }
+                let replay = match replay_native_tool_continuation(
+                    &runtime,
+                    &key.id,
+                    &request,
+                    &source_model,
+                    &route.candidate_id,
+                    stream,
+                ) {
+                    Ok(replay) => replay,
+                    Err(error) => return adapter_error_response(error),
+                };
+                if let Some(replay) = replay {
+                    request = replay;
+                    native_replay_attempted = true;
+                    tried.remove(&route.candidate_id);
+                    emit_usage(&runtime, event);
+                    last_failure = Some(failure);
+                    last_failure_origin = selected_error_origin;
+                    continue;
                 }
             }
             if wire_api == WireApi::Responses
@@ -402,6 +405,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 tried.remove(&route.candidate_id);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 continue;
             }
             let response_missing = previous_response_not_found(&bytes);
@@ -441,6 +445,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 }
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 if affinity_miss && response_missing && response_affinity_hit {
                     break;
                 }
@@ -449,15 +454,34 @@ pub(in crate::gateway::execution) async fn execute_request(
             if !adapter_is_passthrough {
                 event.error_category = Some("adapter_upstream_error".to_string());
                 emit_usage(&runtime, event);
-                return api_error(
+                if let Some(preserved) = last_preserved_upstream_error.as_ref() {
+                    return api_error_with_origin_and_category(
+                        preserved.status,
+                        &preserved.message,
+                        &preserved.code,
+                        "adapter_upstream_error",
+                        crate::ErrorOrigin::Relay,
+                        Some(&request_id),
+                    );
+                }
+                return api_error_with_origin(
                     failure.status,
                     "upstream source rejected the translated request",
                     "adapter_upstream_error",
+                    crate::ErrorOrigin::Relay,
+                    Some(&request_id),
                 );
             }
             populate_tokens(&mut event, &bytes);
             emit_usage(&runtime, event);
-            return proxy_response(status, &response_headers, Body::from(bytes));
+            return proxy_error_response(
+                status,
+                &response_headers,
+                Body::from(bytes),
+                selected_error_origin,
+                failure.category,
+                Some(&request_id),
+            );
         }
 
         if !upstream_stream {
@@ -505,6 +529,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     apply_failure_state(&mut event, state);
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
+                    last_failure_origin = selected_error_origin;
                     continue;
                 }
             };
@@ -546,6 +571,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                             tried.remove(&route.candidate_id);
                             emit_usage(&runtime, event);
                             last_failure = Some(failure);
+                            last_failure_origin = selected_error_origin;
                             continue;
                         }
                         if let Some(state) = state {
@@ -559,15 +585,25 @@ pub(in crate::gateway::execution) async fn execute_request(
                                         && preserved.category == failure.category
                                 })
                             {
-                                return api_error(
+                                return api_error_with_origin_and_category(
                                     preserved.status,
                                     &preserved.message,
                                     &preserved.code,
+                                    preserved.category,
+                                    selected_error_origin,
+                                    Some(&request_id),
                                 );
                             }
-                            return api_error(failure.status, failure.message, failure.category);
+                            return api_error_with_origin(
+                                failure.status,
+                                failure.message,
+                                failure.category,
+                                selected_error_origin,
+                                Some(&request_id),
+                            );
                         }
                         last_failure = Some(failure);
+                        last_failure_origin = selected_error_origin;
                         continue;
                     }
                 }
@@ -689,7 +725,12 @@ pub(in crate::gateway::execution) async fn execute_request(
             return proxy_response(status, &response_headers, Body::from(bytes));
         }
 
-        match bootstrap_stream(upstream).await {
+        let wait_for_native_replay_error = wire_api == WireApi::Responses
+            && adapter_is_passthrough
+            && has_previous_response_id
+            && !native_replay_attempted
+            && contains_tool_call_output(&request);
+        match bootstrap_stream(upstream, wait_for_native_replay_error).await {
             Ok((headers, first, remaining)) => {
                 return StreamExecution {
                     runtime: runtime.clone(),
@@ -710,19 +751,10 @@ pub(in crate::gateway::execution) async fn execute_request(
                 .into_response(status, headers, first, remaining);
             }
             Err(bootstrap_failure) => {
+                let zenith_gateway_invalid_request =
+                    bootstrap_failure.zenith_gateway_invalid_request;
                 let failure = bootstrap_failure.failure;
                 last_preserved_upstream_error = bootstrap_failure.preserved;
-                let state = failure_category_requires_cooldown(failure.category).then(|| {
-                    apply_attempt_failure_cooldown(
-                        &runtime,
-                        &route.candidate_id,
-                        &source_model,
-                        &failure,
-                        &response_headers,
-                        &cooldown_context,
-                        route.half_open_probe,
-                    )
-                });
                 let mut event = usage_event(
                     &request_id,
                     attempt,
@@ -736,14 +768,54 @@ pub(in crate::gateway::execution) async fn execute_request(
                     tool_use.clone(),
                 );
                 if wire_api == WireApi::Responses
+                    && adapter_is_passthrough
+                    && has_previous_response_id
+                    && !native_replay_attempted
+                    && contains_tool_call_output(&request)
+                    && zenith_gateway_invalid_request
+                {
+                    let replay = match replay_native_tool_continuation(
+                        &runtime,
+                        &key.id,
+                        &request,
+                        &source_model,
+                        &route.candidate_id,
+                        stream,
+                    ) {
+                        Ok(replay) => replay,
+                        Err(error) => return adapter_error_response(error),
+                    };
+                    if let Some(replay) = replay {
+                        request = replay;
+                        native_replay_attempted = true;
+                        tried.remove(&route.candidate_id);
+                        emit_usage(&runtime, event);
+                        last_failure = Some(failure);
+                        last_failure_origin = selected_error_origin;
+                        continue;
+                    }
+                }
+                if wire_api == WireApi::Responses
                     && failure.category == "upstream_encrypted_content_invalid"
                     && try_recover_encrypted_content(&mut request, &mut encrypted_content_recovered)
                 {
                     tried.remove(&route.candidate_id);
                     emit_usage(&runtime, event);
                     last_failure = Some(failure);
+                    last_failure_origin = selected_error_origin;
                     continue;
                 }
+                let state = failure_category_requires_cooldown(failure.category).then(|| {
+                    apply_attempt_failure_cooldown(
+                        &runtime,
+                        &route.candidate_id,
+                        &source_model,
+                        &failure,
+                        &response_headers,
+                        &cooldown_context,
+                        route.half_open_probe,
+                    )
+                });
                 if let Some(state) = state {
                     apply_failure_state(&mut event, state);
                 }
@@ -755,11 +827,25 @@ pub(in crate::gateway::execution) async fn execute_request(
                                 && preserved.category == failure.category
                         })
                     {
-                        return api_error(preserved.status, &preserved.message, &preserved.code);
+                        return api_error_with_origin_and_category(
+                            preserved.status,
+                            &preserved.message,
+                            &preserved.code,
+                            preserved.category,
+                            selected_error_origin,
+                            Some(&request_id),
+                        );
                     }
-                    return api_error(failure.status, failure.message, failure.category);
+                    return api_error_with_origin(
+                        failure.status,
+                        failure.message,
+                        failure.category,
+                        selected_error_origin,
+                        Some(&request_id),
+                    );
                 }
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
             }
         }
     }
@@ -816,9 +902,51 @@ pub(in crate::gateway::execution) async fn execute_request(
     if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
         preserved.status == failure.status && preserved.category == failure.category
     }) {
-        return api_error(preserved.status, &preserved.message, &preserved.code);
+        return api_error_with_origin_and_category(
+            preserved.status,
+            &preserved.message,
+            &preserved.code,
+            preserved.category,
+            last_failure_origin,
+            Some(&request_id),
+        );
     }
-    api_error(failure.status, failure.message, failure.category)
+    api_error_with_origin(
+        failure.status,
+        failure.message,
+        failure.category,
+        last_failure_origin,
+        Some(&request_id),
+    )
+}
+
+fn replay_native_tool_continuation(
+    runtime: &GatewayRuntime,
+    local_key_id: &str,
+    request: &Value,
+    source_model: &str,
+    candidate_id: &str,
+    stream: bool,
+) -> Result<Option<Value>, AdapterError> {
+    let Some(previous_response_id) = request
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(replay) = runtime.load_native_responses_replay(
+        local_key_id,
+        previous_response_id,
+        candidate_id,
+        now_ms(),
+    ) else {
+        return Ok(None);
+    };
+    replay
+        .replay_request(request, source_model, stream)
+        .map(Some)
 }
 
 fn requested_reasoning_effort(request: &Value, wire_api: WireApi) -> Option<String> {

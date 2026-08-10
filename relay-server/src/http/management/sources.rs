@@ -73,6 +73,7 @@ pub async fn create_source(
     let discovery = discover_models(&record, &api_key).await?;
     record.models = discovery.models;
     record.protocol_bindings = discovery.protocol_bindings;
+    record.detected_model_prices = discovery.detected_model_prices;
     normalize_record_protocol_bindings(&mut record)?;
     state
         .vault
@@ -358,6 +359,7 @@ pub async fn test_source(
     };
     record.models = discovery.models;
     record.protocol_bindings = discovery.protocol_bindings;
+    record.detected_model_prices = discovery.detected_model_prices;
     normalize_record_protocol_bindings(&mut record)?;
     record.last_error_code = None;
     state.store.save_source(&record).map_err(store_error)?;
@@ -419,6 +421,7 @@ fn source_record(
         weight: valid_weight(input.weight)?,
         recovery_delay_seconds: valid_recovery_delay(input.recovery_delay_seconds)?,
         model_price_overrides: normalize_source_prices(input.model_price_overrides)?,
+        detected_model_prices: BTreeMap::new(),
         last_error_code: None,
     };
     normalize_record_protocol_bindings(&mut record)?;
@@ -429,6 +432,7 @@ fn source_record(
 fn validate_source_record(record: &SourceRecord, api_key: &str) -> Result<(), ManagementError> {
     valid_recovery_delay(record.recovery_delay_seconds)?;
     normalize_source_prices(record.model_price_overrides.clone())?;
+    normalize_source_prices(record.detected_model_prices.clone())?;
     validate_record_protocol_bindings(record)?;
     ProviderSource {
         id: record.id.clone(),
@@ -459,12 +463,22 @@ fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), M
     if record.protocol_bindings.is_empty() {
         return Ok(());
     }
-    record.protocol_bindings = normalize_source_protocol_bindings(
+    let source_wide_catalog_route =
+        record.protocol_bindings.len() == 1 && record.protocol_bindings[0].model_ids.is_empty();
+    let mut bindings = normalize_source_protocol_bindings(
         std::mem::take(&mut record.protocol_bindings),
         record.wire_api,
         &record.models,
     )
     .map_err(|error| validation_error(error.to_string()))?;
+    if source_wide_catalog_route {
+        // Preserve automatic source-wide discovery; runtime readers expand
+        // the empty route through the effective bindings helper.
+        if let Some(binding) = bindings.first_mut() {
+            binding.model_ids.clear();
+        }
+    }
+    record.protocol_bindings = bindings;
     Ok(())
 }
 

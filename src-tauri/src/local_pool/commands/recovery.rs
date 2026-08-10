@@ -15,7 +15,7 @@ use std::{fs, path::Path};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use zenith_relay_core::{accounts::AccountExportDocument, DefaultServiceTier};
+use zenith_relay_core::{accounts::AccountExportDocument, DefaultServiceTier, ErrorOrigin};
 
 const MAX_EXPORT_ROWS: usize = 500;
 const MAX_EXPORT_TEXT: usize = 512;
@@ -45,6 +45,8 @@ pub struct UsageExportRow {
     request_id: Option<String>,
     http_status: Option<u16>,
     error_category: Option<String>,
+    #[serde(default)]
+    error_origin: Option<ErrorOrigin>,
     service_tier: Option<DefaultServiceTier>,
     applied_service_tier: Option<DefaultServiceTier>,
 }
@@ -346,6 +348,7 @@ mod tests {
             request_id: Some("request-test".into()),
             http_status: Some(200),
             error_category: None,
+            error_origin: None,
             service_tier: Some(DefaultServiceTier::Fast),
             applied_service_tier: Some(DefaultServiceTier::Standard),
         };

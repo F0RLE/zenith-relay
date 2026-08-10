@@ -1,10 +1,10 @@
 use super::super::errors::{
-    api_error, apply_attempt_failure_cooldown, apply_cooldown_for_model,
-    apply_failure_cooldown_with_body, apply_failure_state, cooldown_error,
-    preserved_upstream_error, previous_response_not_found, recoverable_response_affinity_miss,
-    responses_function_item_id_requires_fc_prefix, responses_message_item_id_requires_msg_prefix,
-    retry_candidate_limit, retryable_failure, AttemptFailure, CooldownContext,
-    PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
+    api_error, api_error_with_origin, api_error_with_origin_and_category,
+    apply_attempt_failure_cooldown, apply_cooldown_for_model, apply_failure_cooldown_with_body,
+    apply_failure_state, cooldown_error, preserved_upstream_error, previous_response_not_found,
+    recoverable_response_affinity_miss, responses_function_item_id_requires_fc_prefix,
+    responses_message_item_id_requires_msg_prefix, retry_candidate_limit, retryable_failure,
+    AttemptFailure, CooldownContext, PreservedUpstreamError, TRANSIENT_COOLDOWN_MS,
 };
 use super::super::now_ms;
 use super::super::request::{
@@ -12,7 +12,10 @@ use super::super::request::{
     tool_use_diagnostics, try_recover_encrypted_content, with_forwarded_tool_diagnostics,
     AccountEndpoint, CODEX_RESPONSES_LITE_HEADER,
 };
-use super::super::response::{emit_usage, populate_tokens, proxy_response, usage_event};
+use super::super::response::{
+    emit_usage, populate_tokens, proxy_error_response, proxy_response, route_error_origin,
+    usage_event,
+};
 use crate::protocol::{remove_item_prefixed_message_ids, repair_call_prefixed_function_item_ids};
 use crate::runtime::AuthenticatedKey;
 use crate::{GatewayRuntime, WireApi};
@@ -57,6 +60,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     let mut message_item_id_repair_attempted = false;
     let mut last_failure = None;
     let mut last_preserved_upstream_error: Option<PreservedUpstreamError> = None;
+    let mut last_failure_origin = crate::ErrorOrigin::Relay;
 
     while usize::from(attempt)
         < retry_candidate_limit(runtime.max_retry_candidates(), owner_recovery_confirmed)
@@ -94,6 +98,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
         route.half_open_probe = selected.half_open_probe;
         route.routing = Some(selected.diagnostics);
         route.service_tier = service_tier;
+        let selected_error_origin = route_error_origin(&route);
         let cooldown_context = CooldownContext {
             scope: &route.scope,
             allowed_protocols: &route.allowed_protocols,
@@ -167,6 +172,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 apply_failure_state(&mut event, state);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 continue;
             }
         };
@@ -200,6 +206,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
             apply_failure_state(&mut event, state);
             emit_usage(&runtime, event);
             last_failure = Some(failure);
+            last_failure_origin = selected_error_origin;
             continue;
         };
         if !status.is_success() {
@@ -241,6 +248,7 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 tried.remove(&route.candidate_id);
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 continue;
             }
             let affinity_miss = recoverable_response_affinity_miss(
@@ -272,10 +280,18 @@ pub(in crate::gateway) async fn execute_account_endpoint(
                 }
                 emit_usage(&runtime, event);
                 last_failure = Some(failure);
+                last_failure_origin = selected_error_origin;
                 continue;
             }
             emit_usage(&runtime, event);
-            return proxy_response(status, &response_headers, Body::from(bytes));
+            return proxy_error_response(
+                status,
+                &response_headers,
+                Body::from(bytes),
+                selected_error_origin,
+                failure.category,
+                Some(&request_id),
+            );
         }
 
         let mut event = usage_event(
@@ -329,7 +345,20 @@ pub(in crate::gateway) async fn execute_account_endpoint(
     if let Some(preserved) = last_preserved_upstream_error.as_ref().filter(|preserved| {
         preserved.status == failure.status && preserved.category == failure.category
     }) {
-        return api_error(preserved.status, &preserved.message, &preserved.code);
+        return api_error_with_origin_and_category(
+            preserved.status,
+            &preserved.message,
+            &preserved.code,
+            preserved.category,
+            last_failure_origin,
+            Some(&request_id),
+        );
     }
-    api_error(failure.status, failure.message, failure.category)
+    api_error_with_origin(
+        failure.status,
+        failure.message,
+        failure.category,
+        last_failure_origin,
+        Some(&request_id),
+    )
 }

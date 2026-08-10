@@ -56,6 +56,7 @@ fn add_rebuild_failing_source(state: &AppState) {
             weight: 0,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             last_error_code: None,
         })
         .unwrap();

@@ -54,7 +54,11 @@ pub async fn get_local_runtime_state(
         &snapshot
             .sources
             .iter()
-            .map(|source| (source.id.clone(), source.model_price_overrides.clone()))
+            .map(|source| {
+                let mut prices = source.detected_model_prices.clone();
+                prices.extend(source.model_price_overrides.clone());
+                (source.id.clone(), prices)
+            })
             .collect::<BTreeMap<_, _>>(),
     )?;
     let source_summaries = snapshot
@@ -277,6 +281,7 @@ fn local_source_summary(
         weight: record.weight,
         recovery_delay_seconds: record.recovery_delay_seconds,
         model_price_overrides: record.model_price_overrides.clone(),
+        detected_model_prices: record.detected_model_prices.clone(),
         api_equivalent,
         secret_available,
         last_error_code: record.last_error.clone(),

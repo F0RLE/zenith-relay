@@ -345,6 +345,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
     let applied_service_tier: Option<String> = row.get(24)?;
     let routing_json: Option<String> = row.get(25)?;
     let tool_use_json: Option<String> = row.get(26)?;
+    let error_origin: Option<String> = row.get(27)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -366,6 +367,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         success: row.get(11)?,
         http_status: row.get(12)?,
         error_category: row.get(13)?,
+        error_origin: error_origin.as_deref().and_then(|value| value.parse().ok()),
         tool_use: tool_use_json
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),

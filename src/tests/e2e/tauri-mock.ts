@@ -65,6 +65,13 @@ export type MockOptions = {
   profileSnapshotBackupBeforeRestore?: boolean;
   mixedModels?: boolean;
   serverModelOrder?: string[];
+  sourceDetectedModelPrices?: Record<string, {
+    inputMicroUsdPerMillion: number;
+    cachedInputMicroUsdPerMillion?: number;
+    cacheWrite5mMicroUsdPerMillion?: number;
+    cacheWrite1hMicroUsdPerMillion?: number;
+    outputMicroUsdPerMillion: number;
+  }>;
   modelReasoning?: Record<string, string[]>;
   sourceProtocolBindings?: Array<{
     wireApi: "responses" | "messages" | "chat_completions";
@@ -140,6 +147,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       weight: 100,
       recoveryDelaySeconds: 0,
       modelPriceOverrides: {},
+      detectedModelPrices: input.sourceDetectedModelPrices ?? {},
       apiEquivalent: { microUsd: 8_500, pricedTokens: 1_400, unpricedTokens: 0 },
       secretAvailable: true,
       lastErrorCode: null,

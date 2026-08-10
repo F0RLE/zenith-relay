@@ -1,5 +1,92 @@
 use super::*;
+use crate::ErrorOrigin;
+use axum::body::{to_bytes, Body};
 use std::time::Duration;
+
+#[tokio::test]
+async fn generated_errors_keep_the_original_diagnostic_category() {
+    let response = api_error_with_origin_and_category(
+        StatusCode::BAD_REQUEST,
+        "upstream rejected the request",
+        "invalid_request",
+        "upstream_invalid_request",
+        ErrorOrigin::Provider,
+        Some("relay-request-1"),
+    );
+
+    assert_eq!(
+        response
+            .headers()
+            .get("x-zenith-relay-error-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("provider")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-zenith-relay-error-category")
+            .and_then(|value| value.to_str().ok()),
+        Some("upstream_invalid_request")
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(
+        body["error"]["zenith_relay"]["category"],
+        "upstream_invalid_request"
+    );
+    assert_eq!(body["error"]["zenith_relay"]["origin"], "provider");
+}
+
+#[tokio::test]
+async fn adapter_failures_are_reported_as_relay_errors() {
+    let response = api_error_with_origin_and_category(
+        StatusCode::BAD_REQUEST,
+        "upstream rejected the translated request",
+        "invalid_request",
+        "adapter_upstream_error",
+        ErrorOrigin::Relay,
+        Some("relay-request-bridge"),
+    );
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["zenith_relay"]["origin"], "relay");
+    assert_eq!(
+        body["error"]["zenith_relay"]["category"],
+        "adapter_upstream_error"
+    );
+}
+
+#[tokio::test]
+async fn native_provider_error_body_is_not_rewritten_for_diagnostics() {
+    let original = br#"{"error":{"code":"bad_request","message":"upstream rejected request"}}"#;
+    let response = super::super::response::proxy_error_response(
+        StatusCode::BAD_REQUEST,
+        &reqwest::header::HeaderMap::new(),
+        Body::from(original.to_vec()),
+        ErrorOrigin::Provider,
+        "upstream_invalid_request",
+        Some("relay-request-2"),
+    );
+
+    assert_eq!(
+        response
+            .headers()
+            .get("x-zenith-relay-error-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("provider")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-zenith-relay-error-category")
+            .and_then(|value| value.to_str().ok()),
+        Some("upstream_invalid_request")
+    );
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body.as_ref(), original);
+}
 
 #[test]
 fn bad_request_affinity_recovery_requires_a_structured_missing_response_error() {
@@ -65,6 +152,19 @@ fn invalid_function_call_output_call_ids_are_detected_without_matching_generic_e
     ));
     assert!(!responses_function_call_output_has_invalid_call_id(
         br#"Invalid call_id for function_call_output"#,
+    ));
+}
+
+#[test]
+fn zenith_gateway_invalid_request_is_detected_without_matching_generic_bad_requests() {
+    assert!(zenith_gateway_invalid_request(
+        br#"{"error":{"code":"invalid_request","message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}"#,
+    ));
+    assert!(zenith_gateway_invalid_request(
+        br#"{"type":"error","response":{"error":{"message":"Zenith AI request is invalid. Check the model, messages, tools, and parameters."}}}"#,
+    ));
+    assert!(!zenith_gateway_invalid_request(
+        br#"{"error":{"code":"invalid_request","message":"request payload is invalid"}}"#,
     ));
 }
 

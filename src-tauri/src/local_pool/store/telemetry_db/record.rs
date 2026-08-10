@@ -46,8 +46,8 @@ impl TelemetryDb {
                     requested_model, resolved_model, wire_api, success, http_status,
                     error_category, latency_ms, ttft_ms, generation_ms, input_tokens, cached_input_tokens,
                     cache_write_input_tokens, reasoning_tokens, output_tokens, total_tokens,
-                    service_tier, applied_service_tier, routing_json, tool_use_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+                    service_tier, applied_service_tier, routing_json, tool_use_json, error_origin
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
                 ON CONFLICT(request_id) DO UPDATE SET
                     created_at = CURRENT_TIMESTAMP,
                     attempt = excluded.attempt,
@@ -73,7 +73,8 @@ impl TelemetryDb {
                     service_tier = excluded.service_tier,
                     applied_service_tier = excluded.applied_service_tier,
                     routing_json = excluded.routing_json,
-                    tool_use_json = excluded.tool_use_json
+                    tool_use_json = excluded.tool_use_json,
+                    error_origin = excluded.error_origin
                 WHERE excluded.attempt >= request_logs.attempt",
                 params![
                     event.request_id,
@@ -101,6 +102,7 @@ impl TelemetryDb {
                     event.applied_service_tier.map(DefaultServiceTier::as_str),
                     routing_json,
                     tool_use_json,
+                    event.error_origin().map(|origin| origin.as_str()),
                 ],
             )
             .map_err(db_error)?

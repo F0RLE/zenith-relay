@@ -2,13 +2,14 @@ use super::errors::{
     api_error_type, apply_failure_cooldown_with_hint, apply_failure_state,
     canonical_upstream_status, failure_category_requires_cooldown, preserved_upstream_error_value,
     rate_limit_body_hint_value, upstream_event_failure_category, upstream_failure_status,
-    upstream_status_from_value, AttemptFailure, CooldownContext, PreservedUpstreamError,
-    RateLimitBodyHint,
+    upstream_status_from_value, zenith_gateway_invalid_request_value, AttemptFailure,
+    CooldownContext, PreservedUpstreamError, RateLimitBodyHint,
 };
 use super::now_ms;
 use super::response::{
-    apply_usage, emit_callback, emit_usage, find_usage, proxy_sse_response, response_id,
-    response_service_tier, usage_event, CompletionCallback,
+    apply_usage, attach_stream_diagnostics, emit_callback, emit_usage, find_usage,
+    proxy_sse_response, response_id, response_service_tier, route_error_origin, usage_event,
+    CompletionCallback,
 };
 use crate::protocol::sse_event_end;
 use crate::runtime::{CandidateLease, DefaultServiceTier, ExecutorRoute};
@@ -30,7 +31,11 @@ use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
 const MAX_SSE_EVENT_BYTES: usize = 16 * 1024 * 1024;
 
+const MAX_REPLAY_BOOTSTRAP_BYTES: usize = 256 * 1024;
+
 const SSE_FIRST_BYTE_TIMEOUT: Duration = SSE_IDLE_TIMEOUT;
+
+const SSE_REPLAY_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -50,6 +55,7 @@ pub(super) use events::{
 pub(super) struct StreamBootstrapFailure {
     pub(super) failure: AttemptFailure,
     pub(super) preserved: Option<PreservedUpstreamError>,
+    pub(super) zenith_gateway_invalid_request: bool,
 }
 
 impl From<AttemptFailure> for StreamBootstrapFailure {
@@ -57,54 +63,89 @@ impl From<AttemptFailure> for StreamBootstrapFailure {
         Self {
             failure,
             preserved: None,
+            zenith_gateway_invalid_request: false,
         }
     }
 }
 
 pub(super) async fn bootstrap_stream(
     upstream: reqwest::Response,
+    wait_for_native_replay_error: bool,
 ) -> Result<(reqwest::header::HeaderMap, Bytes, UpstreamStream), StreamBootstrapFailure> {
     let headers = upstream.headers().clone();
     let mut stream: UpstreamStream = Box::pin(upstream.bytes_stream());
-    match tokio::time::timeout(SSE_FIRST_BYTE_TIMEOUT, stream.next()).await {
-        Err(_) => Err(AttemptFailure::stream("stream_first_byte_timeout").into()),
-        Ok(Some(Ok(chunk))) => {
-            if chunk.len() > MAX_SSE_EVENT_BYTES {
-                return Err(AttemptFailure::stream("stream_event_too_large").into());
+    let mut buffered = Vec::new();
+    let mut inspected = 0;
+    let mut first_chunk = true;
+    let mut replay_probe_deadline = None;
+
+    loop {
+        let timeout = if first_chunk {
+            SSE_FIRST_BYTE_TIMEOUT
+        } else {
+            let replay_probe_deadline = replay_probe_deadline
+                .expect("replay probe deadline is set after the first stream chunk");
+            let now = TokioInstant::now();
+            if now >= replay_probe_deadline {
+                return Ok((headers, Bytes::from(buffered), stream));
             }
-            let mut inspected = 0;
-            while let Some(end) = sse_event_end(&chunk[inspected..]) {
-                let absolute_end = inspected + end;
-                let event = parse_sse_event(&chunk[inspected..absolute_end]);
-                if event.has_data && !event.valid {
-                    return Err(AttemptFailure::stream("stream_invalid").into());
-                }
-                if event.outcome == Some(TerminalOutcome::Failure) {
-                    let category = event.error_category.unwrap_or("upstream_terminal");
-                    let failure = AttemptFailure::classified_with_hint(
-                        event
-                            .error_status
-                            .unwrap_or_else(|| upstream_failure_status(category)),
-                        category,
-                        event.cooldown_hint,
-                    );
-                    return Err(StreamBootstrapFailure {
-                        failure,
-                        preserved: event.preserved_error,
-                    });
-                }
-                inspected = absolute_end;
+            replay_probe_deadline - now
+        };
+        match tokio::time::timeout(timeout, stream.next()).await {
+            Err(_) if wait_for_native_replay_error && !buffered.is_empty() => {
+                return Ok((headers, Bytes::from(buffered), stream));
             }
-            // Once a source emits native bytes, forward them immediately.
-            // A Messages stream may begin with `message_start`, thinking,
-            // or `content_block_start` for `tool_use` long before a text
-            // delta exists. Buffering those frames would make a live
-            // stream look retryable and can incorrectly switch sources
-            // during one model turn.
-            Ok((headers, chunk, stream))
+            Err(_) => return Err(AttemptFailure::stream("stream_first_byte_timeout").into()),
+            Ok(Some(Ok(chunk))) => {
+                if chunk.len() > MAX_SSE_EVENT_BYTES {
+                    return Err(AttemptFailure::stream("stream_event_too_large").into());
+                }
+                buffered.extend_from_slice(&chunk);
+                let mut ready_to_forward = false;
+                while let Some(end) = sse_event_end(&buffered[inspected..]) {
+                    let absolute_end = inspected + end;
+                    let event = parse_sse_event(&buffered[inspected..absolute_end]);
+                    if event.has_data && !event.valid {
+                        return Err(AttemptFailure::stream("stream_invalid").into());
+                    }
+                    if event.outcome == Some(TerminalOutcome::Failure) {
+                        let category = event.error_category.unwrap_or("upstream_terminal");
+                        let failure = AttemptFailure::classified_with_hint(
+                            event
+                                .error_status
+                                .unwrap_or_else(|| upstream_failure_status(category)),
+                            category,
+                            event.cooldown_hint,
+                        );
+                        return Err(StreamBootstrapFailure {
+                            failure,
+                            preserved: event.preserved_error,
+                            zenith_gateway_invalid_request: event
+                                .payload
+                                .as_ref()
+                                .is_some_and(zenith_gateway_invalid_request_value),
+                        });
+                    }
+                    ready_to_forward |= event.outcome.is_some()
+                        || event.has_output_delta
+                        || event.output_item.is_some();
+                    inspected = absolute_end;
+                }
+                if !wait_for_native_replay_error
+                    || ready_to_forward
+                    || buffered.len() >= MAX_REPLAY_BOOTSTRAP_BYTES
+                {
+                    return Ok((headers, Bytes::from(buffered), stream));
+                }
+                if first_chunk {
+                    first_chunk = false;
+                    replay_probe_deadline =
+                        Some(TokioInstant::now() + SSE_REPLAY_BOOTSTRAP_TIMEOUT);
+                }
+            }
+            Ok(Some(Err(error))) => return Err(AttemptFailure::transport(&error).into()),
+            Ok(None) => return Err(AttemptFailure::stream("stream_incomplete").into()),
         }
-        Ok(Some(Err(error))) => Err(AttemptFailure::transport(&error).into()),
-        Ok(None) => Err(AttemptFailure::stream("stream_incomplete").into()),
     }
 }
 
@@ -285,7 +326,10 @@ impl StreamExecution {
             completion,
             completion_native_response,
         );
-        proxy_sse_response(status, &headers, Body::from_stream(usage_stream))
+        let origin = route_error_origin(&route);
+        let mut response = proxy_sse_response(status, &headers, Body::from_stream(usage_stream));
+        attach_stream_diagnostics(&mut response, origin, &request_id);
+        response
     }
 }
 
@@ -505,6 +549,11 @@ impl<S> UsageStream<S> {
                     "type": "stream_error",
                     "code": category,
                     "message": message,
+                    "zenith_relay": {
+                        "origin": Self::stream_error_origin(event).as_str(),
+                        "category": category,
+                        "request_id": &event.request_id,
+                    },
                 }
             }
         });
@@ -517,6 +566,14 @@ impl<S> UsageStream<S> {
         frame.extend_from_slice(b"\n\n");
         self.output_pending.push_back(Bytes::from(frame));
         true
+    }
+
+    fn stream_error_origin(event: &UsageEvent) -> crate::ErrorOrigin {
+        if event.account_id.is_some() {
+            crate::ErrorOrigin::Account
+        } else {
+            crate::ErrorOrigin::Provider
+        }
     }
 
     fn fail_stream(&mut self, category: &str) -> bool {
@@ -800,7 +857,27 @@ data: {"type":"error","error":{"type":"invalid_request_error","code":"invalid_re
         let failure =
             String::from_utf8(stream.output_pending.pop_front().unwrap().to_vec()).unwrap();
         assert!(failure.starts_with("event: response.failed\ndata: "));
-        assert!(failure.contains("\"code\":\"stream_event_too_large\""));
+        let payload = failure
+            .strip_prefix("event: response.failed\ndata: ")
+            .and_then(|value| value.strip_suffix("\n\n"))
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .unwrap();
+        assert_eq!(
+            payload["response"]["error"]["code"],
+            "stream_event_too_large"
+        );
+        assert_eq!(
+            payload["response"]["error"]["zenith_relay"]["origin"],
+            "provider"
+        );
+        assert_eq!(
+            payload["response"]["error"]["zenith_relay"]["category"],
+            "stream_event_too_large"
+        );
+        assert_eq!(
+            payload["response"]["error"]["zenith_relay"]["request_id"],
+            "request"
+        );
         assert!(stream.output_pending.is_empty());
         drop(stream);
 

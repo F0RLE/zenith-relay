@@ -292,6 +292,7 @@ pub(super) fn source_summary(
         weight: record.weight,
         recovery_delay_seconds: record.recovery_delay_seconds,
         model_price_overrides: record.model_price_overrides.clone(),
+        detected_model_prices: record.detected_model_prices.clone(),
         api_equivalent,
         secret_available,
         last_error_code: record.last_error_code.clone(),

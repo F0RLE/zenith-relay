@@ -234,6 +234,8 @@ pub struct ProviderSourceRecord {
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
     #[serde(default)]
+    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
+    #[serde(default)]
     pub last_used_at: Option<String>,
     pub last_test_at: Option<String>,
     pub last_test_status: Option<String>,
@@ -402,11 +404,17 @@ impl ProviderSourceRecord {
             .iter()
             .map(|(model, price)| (model.trim().to_ascii_lowercase(), *price))
             .collect();
+        self.detected_model_prices = self
+            .detected_model_prices
+            .iter()
+            .map(|(model, price)| (model.trim().to_ascii_lowercase(), *price))
+            .collect();
         self.weight = self.weight.max(1);
     }
 
     pub fn validate_price_overrides(&self) -> Result<(), &'static str> {
-        validate_model_price_overrides(&self.model_price_overrides)
+        validate_model_price_overrides(&self.model_price_overrides)?;
+        validate_model_price_overrides(&self.detected_model_prices)
     }
 
     /// Resolves the legacy single-protocol fields into the same shape used by
@@ -424,7 +432,14 @@ impl ProviderSourceRecord {
         if self.protocol_bindings.is_empty() {
             return Ok(());
         }
+        let source_wide_catalog_route =
+            self.protocol_bindings.len() == 1 && self.protocol_bindings[0].model_ids.is_empty();
         let bindings = self.effective_protocol_bindings()?;
+        if source_wide_catalog_route {
+            // An empty single route means discover the source-wide catalog;
+            // effective bindings expand it only for validation and routing.
+            return Ok(());
+        }
         // `wire_api` is a compatibility default for legacy readers. Do not
         // derive it from route order: an explicit mixed source is defined by
         // `protocol_bindings`, and discovery is free to return routes in any

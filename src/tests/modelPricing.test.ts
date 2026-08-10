@@ -1,15 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { groupModels, modelProviderGroup, supportsCacheWritePricing } from "../src/features/relay/modelGroups";
+import { groupModels, modelProviderGroup, modelProviderGroupLabel, supportsCacheWritePricing } from "../src/features/relay/modelGroups";
 import { formatEditableModelPrice, parseEditableModelPrice, parseOptionalEditableModelPrice } from "../src/features/relay/modelPricing";
 
 describe("model pricing", () => {
-  test("recognizes only OpenAI and Claude aliases", () => {
+  test("groups known and future provider families without a fixed model catalog", () => {
     expect(modelProviderGroup("gpt-5.7-future")).toBe("openai");
     expect(modelProviderGroup("claude-opus-4-8")).toBe("anthropic");
+    expect(modelProviderGroup("grok-4.5")).toBe("provider-grok");
+    expect(modelProviderGroup("gemini-3.6-flash")).toBe("provider-gemini");
+    expect(modelProviderGroup("glm-5.2")).toBe("provider-glm");
+    expect(modelProviderGroupLabel("provider-glm")).toBe("GLM");
     expect(supportsCacheWritePricing("claude-sonnet-next")).toBe(true);
-    expect(groupModels(["glm-5", "gpt-5", "gemini-3", "new-provider"], (model) => model).map((group) => [group.id, group.items])).toEqual([
+    expect(groupModels(["glm-5", "gpt-5", "gemini-3", "grok-4", "new-provider"], (model) => model).map((group) => [group.id, group.items])).toEqual([
       ["openai", ["gpt-5"]],
-      ["other", ["glm-5", "gemini-3", "new-provider"]],
+      ["provider-glm", ["glm-5"]],
+      ["provider-gemini", ["gemini-3"]],
+      ["provider-grok", ["grok-4"]],
+      ["provider-new", ["new-provider"]],
     ]);
   });
 

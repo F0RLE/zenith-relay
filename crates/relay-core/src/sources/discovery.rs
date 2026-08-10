@@ -2,10 +2,14 @@ use super::{
     normalize_source_protocol_bindings, ProviderSource, SourceConnector, SourceProtocolBinding,
 };
 use crate::transport::{collect_limited, MAX_MODEL_CATALOG_BODY_BYTES};
-use crate::{Error, Result};
+use crate::{ApiModelPriceOverride, Error, Result};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
+
+mod pricing;
+
+use pricing::detected_model_price;
 
 pub async fn discover_source_models(source: &ProviderSource) -> Result<Vec<String>> {
     discover_source_models_for_protocol_bindings(source, &[]).await
@@ -26,15 +30,20 @@ pub async fn discover_source_models_for_protocol_bindings(
 /// The result of binding-aware model discovery.
 ///
 /// `models` is the de-duplicated union in upstream response order. Each
-/// `protocol_bindings` entry contains the models advertised for that binding
-/// after its explicit allow-list is applied. A failed or empty binding is
-/// omitted. A successful `/models` response is catalog evidence, not a
-/// completion capability probe; operators must assign a model only to routes
-/// the upstream documents or has safely verified.
+/// `protocol_bindings` entry normally contains the models advertised for that
+/// binding after its explicit allow-list is applied. A successful automatic
+/// source-wide binding is preserved with an empty `model_ids`; `models` still
+/// holds its current discovered catalog. A failed or empty non-automatic
+/// binding is omitted. A successful `/models` response is catalog evidence,
+/// not a completion capability probe; operators must assign a model only to
+/// routes the upstream documents or has safely verified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SourceDiscovery {
     pub models: Vec<String>,
     pub protocol_bindings: Vec<SourceProtocolBinding>,
+    /// Complete token prices declared by the source model catalog. These are
+    /// refreshed with discovery and never replace a user-configured override.
+    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
 }
 
 /// Discovers models independently for every configured binding.
@@ -43,14 +52,20 @@ pub struct SourceDiscovery {
 /// credentials) on their Responses, Chat Completions, and Messages endpoints.
 /// Discovery must therefore never reuse the first successful response for the
 /// remaining bindings. A configured non-empty `model_ids` list is a strict
-/// allow-list for that binding; an empty list means use the catalog returned
-/// under that binding's authentication. The function succeeds when at least
-/// one binding has a non-empty catalog.
+/// allow-list for that binding, except that a single legacy list equal to the
+/// prior source catalog is recognized as an automatic source-wide route. An
+/// empty single binding also uses the catalog returned under that binding's
+/// authentication. The function succeeds when at least one binding has a
+/// non-empty catalog.
 pub async fn discover_source_models_and_protocol_bindings(
     source: &ProviderSource,
     protocol_bindings: &[SourceProtocolBinding],
 ) -> Result<SourceDiscovery> {
     source.validate()?;
+    // A source-wide single route is an automatic catalog binding, not a
+    // snapshot allow-list. Older records persisted its discovered IDs, so
+    // recognize that equivalent form before asking the upstream for updates.
+    let source_wide_catalog_route = is_source_wide_catalog_route(protocol_bindings, &source.models);
     let bindings = normalize_source_protocol_bindings(
         protocol_bindings.to_vec(),
         source.wire_api,
@@ -61,13 +76,39 @@ pub async fn discover_source_models_and_protocol_bindings(
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    discover_protocol_bindings_with_client(
+    let configured_bindings = (!source_wide_catalog_route).then_some(protocol_bindings);
+    let mut discovery = discover_protocol_bindings_with_client(
         &client,
         &SourceConnector::new(source, &bindings)?,
         &bindings,
-        protocol_bindings,
+        configured_bindings.unwrap_or_default(),
     )
-    .await
+    .await?;
+    if source_wide_catalog_route {
+        if let Some(binding) = discovery.protocol_bindings.first_mut() {
+            binding.model_ids.clear();
+        }
+    }
+    Ok(discovery)
+}
+
+fn is_source_wide_catalog_route(
+    protocol_bindings: &[SourceProtocolBinding],
+    source_models: &[String],
+) -> bool {
+    let [binding] = protocol_bindings else {
+        return protocol_bindings.is_empty();
+    };
+    binding.model_ids.is_empty()
+        || (!source_models.is_empty()
+            && normalized_model_ids(&binding.model_ids) == normalized_model_ids(source_models))
+}
+
+fn normalized_model_ids(models: &[String]) -> HashSet<String> {
+    crate::catalog::normalize_model_ids(models.to_vec())
+        .into_iter()
+        .map(|model| model.to_ascii_lowercase())
+        .collect()
 }
 
 pub(crate) async fn discover_models_with_client(
@@ -94,6 +135,8 @@ async fn discover_protocol_bindings_with_client(
     let mut discovered_models = Vec::new();
     let mut discovered_model_keys = HashSet::new();
     let mut discovered_bindings = Vec::new();
+    let mut detected_model_prices = BTreeMap::new();
+    let mut conflicting_model_prices = HashSet::new();
 
     for binding in bindings {
         let (authorization_name, authorization) = source.authorization_for_binding(binding);
@@ -139,9 +182,11 @@ async fn discover_protocol_bindings_with_client(
         let mut seen = HashSet::new();
         let upstream_models = data
             .iter()
-            .filter_map(|model| model.get("id").and_then(Value::as_str))
-            .filter(|model| seen.insert(model.to_ascii_lowercase()))
-            .map(str::to_string)
+            .filter_map(|model| {
+                let id = model.get("id").and_then(Value::as_str)?;
+                seen.insert(id.to_ascii_lowercase())
+                    .then(|| (id.to_string(), detected_model_price(model)))
+            })
             .collect::<Vec<_>>();
 
         // An explicitly supplied model list is scoped to this protocol. The
@@ -162,7 +207,7 @@ async fn discover_protocol_bindings_with_client(
             });
         let models = upstream_models
             .into_iter()
-            .filter(|model| {
+            .filter(|(model, _)| {
                 explicit_models
                     .as_ref()
                     .is_none_or(|allowed| allowed.contains(&model.to_ascii_lowercase()))
@@ -172,16 +217,31 @@ async fn discover_protocol_bindings_with_client(
             continue;
         }
 
-        for model in &models {
-            if discovered_model_keys.insert(model.to_ascii_lowercase()) {
+        for (model, price) in &models {
+            let model_key = model.to_ascii_lowercase();
+            if discovered_model_keys.insert(model_key.clone()) {
                 discovered_models.push(model.clone());
+            }
+            let Some(price) = price else {
+                continue;
+            };
+            if conflicting_model_prices.contains(&model_key) {
+                continue;
+            }
+            if let Some(existing) = detected_model_prices.get(&model_key) {
+                if existing != price {
+                    detected_model_prices.remove(&model_key);
+                    conflicting_model_prices.insert(model_key);
+                }
+            } else {
+                detected_model_prices.insert(model_key, *price);
             }
         }
         discovered_bindings.push(SourceProtocolBinding {
             wire_api: binding.wire_api,
             adapter: binding.adapter,
             reasoning_mode: binding.reasoning_mode,
-            model_ids: models,
+            model_ids: models.into_iter().map(|(model, _)| model).collect(),
         });
     }
 
@@ -193,5 +253,6 @@ async fn discover_protocol_bindings_with_client(
     Ok(SourceDiscovery {
         models: discovered_models,
         protocol_bindings: discovered_bindings,
+        detected_model_prices,
     })
 }

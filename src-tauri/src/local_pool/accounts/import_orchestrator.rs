@@ -30,7 +30,7 @@ use crate::platform::default_codex_home;
 use reqwest::header::HeaderValue;
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
@@ -49,7 +49,8 @@ use zenith_relay_core::providers::chatgpt::{
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::{
-    discover_source_models, normalize_error_code, ProviderSource, ProxyConfig, WireApi,
+    discover_source_models_and_protocol_bindings, normalize_error_code, ApiModelPriceOverride,
+    ProviderSource, ProxyConfig, SourceProtocolBinding, WireApi,
 };
 
 mod claims;

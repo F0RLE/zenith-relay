@@ -136,6 +136,7 @@ export type SourceSummary = {
   weight: number;
   recoveryDelaySeconds: number;
   modelPriceOverrides?: Record<string, ApiModelPriceOverride>;
+  detectedModelPrices?: Record<string, ApiModelPriceOverride>;
   apiEquivalent: ApiEquivalentSummary;
   secretAvailable: boolean;
   lastErrorCode: string | null;
@@ -462,6 +463,8 @@ export type ToolUseDiagnostics = {
   terminalOutput: "unknown" | "empty" | "text" | "tool_call" | "mixed";
 };
 
+export type ErrorOrigin = "provider" | "account" | "relay";
+
 export type LocalUsage = {
   id: number;
   createdAt: string;
@@ -478,6 +481,7 @@ export type LocalUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  errorOrigin?: ErrorOrigin | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs: number | null;
@@ -552,6 +556,7 @@ export type UsageExportRow = {
   requestId: string | null;
   httpStatus: number | null;
   errorCategory: string | null;
+  errorOrigin?: ErrorOrigin | null;
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
 };
@@ -582,6 +587,7 @@ export type RemoteUsage = {
   success: boolean;
   httpStatus: number;
   errorCategory: string | null;
+  errorOrigin?: ErrorOrigin | null;
   toolUse?: ToolUseDiagnostics;
   latencyMs: number;
   ttftMs?: number | null;

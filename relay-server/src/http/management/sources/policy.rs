@@ -79,6 +79,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             last_error_code: None,
         }
     }

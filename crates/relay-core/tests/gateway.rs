@@ -54,6 +54,8 @@ enum NativeReplayRejection {
     PreviousResponseRequiresWebsocket,
     InvalidFunctionCallOutputCallId,
     GenericInvalidRequest,
+    ZenithGatewayInvalidRequest,
+    ZenithGatewayInvalidRequestStream,
 }
 
 struct TestServer {
@@ -134,7 +136,7 @@ async fn native_messages_model_discovery_uses_anthropic_headers() {
             base_url: format!("{}/v1", upstream.base_url),
             api_key: SOURCE_KEY.into(),
             wire_api: WireApi::Messages,
-            models: vec!["claude-test".into()],
+            models: vec!["claude-test".into(), "claude-hidden".into()],
         },
         &[SourceProtocolBinding {
             wire_api: WireApi::Messages,
@@ -183,7 +185,7 @@ async fn responses_to_messages_discovery_keeps_responses_client_binding() {
             wire_api: WireApi::Responses,
             adapter: SourceAdapter::ResponsesToMessages,
             reasoning_mode: MessagesReasoningMode::Adaptive,
-            model_ids: vec!["claude-test".into(), "claude-hidden".into()],
+            model_ids: Vec::new(),
         }]
     );
 
@@ -193,6 +195,40 @@ async fn responses_to_messages_discovery_keeps_responses_client_binding() {
     assert_eq!(requests[0].authorization, None);
     assert_eq!(requests[0].x_api_key.as_deref(), Some(SOURCE_KEY));
     assert_eq!(requests[0].anthropic_version.as_deref(), Some("2023-06-01"));
+}
+
+#[tokio::test]
+async fn source_wide_catalog_binding_refreshes_new_models() {
+    let (upstream, _) = spawn_upstream().await;
+    let discovery = discover_source_models_and_protocol_bindings(
+        &ProviderSource {
+            id: "source-1".into(),
+            name: "Synthetic source-wide upstream".into(),
+            base_url: format!("{}/v1", upstream.base_url),
+            api_key: SOURCE_KEY.into(),
+            wire_api: WireApi::Responses,
+            models: vec!["gpt-test".into()],
+        },
+        &[SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: vec!["gpt-test".into()],
+        }],
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(discovery.models, ["gpt-test", "hidden-model"]);
+    assert_eq!(
+        discovery.protocol_bindings,
+        [SourceProtocolBinding {
+            wire_api: WireApi::Responses,
+            adapter: SourceAdapter::Native,
+            reasoning_mode: MessagesReasoningMode::Disabled,
+            model_ids: Vec::new(),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -937,6 +973,136 @@ async fn native_responses_does_not_replay_tool_continuation_after_generic_bad_re
         .unwrap();
     assert_eq!(second.status(), StatusCode::BAD_REQUEST);
     assert_eq!(state.bodies.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn native_responses_replays_tool_continuation_after_zenith_gateway_invalid_request() {
+    let (upstream, state) = spawn_native_replay_upstream_with_rejection(
+        NativeReplayRejection::ZenithGatewayInvalidRequest,
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "use a tool",
+            "tools": [{
+                "type": "function",
+                "name": "run_command",
+                "parameters": {"type": "object"}
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "previous_response_id": first["id"],
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_native_tool",
+                "output": "C:\\workspace"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[1]["previous_response_id"], "resp_native_tool");
+    assert!(bodies[2].get("previous_response_id").is_none());
+    assert_eq!(bodies[2]["input"][1]["type"], "function_call");
+    assert_eq!(bodies[2]["input"][2]["type"], "function_call_output");
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(!events[1].success);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
+    assert!(events[2].success);
+}
+
+#[tokio::test]
+async fn native_responses_stream_replays_tool_continuation_after_zenith_gateway_invalid_request() {
+    let (upstream, state) = spawn_native_replay_upstream_with_rejection(
+        NativeReplayRejection::ZenithGatewayInvalidRequestStream,
+    )
+    .await;
+    let (gateway, events) = spawn_gateway(&upstream.base_url, vec!["gpt-test"]).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "input": "use a tool",
+            "tools": [{
+                "type": "function",
+                "name": "run_command",
+                "parameters": {"type": "object"}
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "gpt-test",
+            "stream": true,
+            "previous_response_id": first["id"],
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_native_tool",
+                "output": "C:\\workspace"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = second.text().await.unwrap();
+    assert!(second.contains("Tool result received"));
+    assert!(second.contains("response.completed"));
+    assert!(!second.contains("resp_rejected"));
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    assert_eq!(bodies[1]["previous_response_id"], "resp_native_tool");
+    assert!(bodies[2].get("previous_response_id").is_none());
+    assert_eq!(bodies[2]["stream"], true);
+    assert_eq!(bodies[2]["input"][1]["type"], "function_call");
+    assert_eq!(bodies[2]["input"][2]["type"], "function_call_output");
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(!events[1].success);
+    assert_eq!(
+        events[1].error_category.as_deref(),
+        Some("upstream_invalid_request")
+    );
+    assert!(events[2].success);
 }
 
 #[tokio::test]
@@ -2006,6 +2172,42 @@ async fn native_replay_upstream_responses(
     state.bodies.lock().unwrap().push(request.clone());
 
     if request.get("previous_response_id").is_some() {
+        if matches!(
+            state.rejection,
+            NativeReplayRejection::ZenithGatewayInvalidRequestStream
+        ) && request.get("stream").and_then(Value::as_bool) == Some(true)
+        {
+            let chunks = stream::unfold(0_u8, |step| async move {
+                match step {
+                    // Let the first byte arrive after the replay window would
+                    // have elapsed if it were measured from request start.
+                    0 => {
+                        tokio::time::sleep(Duration::from_millis(2_100)).await;
+                        Some((
+                            Ok::<_, Infallible>(Bytes::from_static(
+                                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\",\"status\":\"in_progress\"}}\n\n",
+                            )),
+                            1,
+                        ))
+                    }
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        Some((
+                            Ok::<_, Infallible>(Bytes::from_static(
+                                b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\",\"message\":\"Zenith AI request is invalid. Check the model, messages, tools, and parameters.\"}}}\n\n",
+                            )),
+                            2,
+                        ))
+                    }
+                    _ => None,
+                }
+            });
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/event-stream")
+                .body(Body::from_stream(chunks))
+                .unwrap();
+        }
         let (message, code) = match state.rejection {
             NativeReplayRejection::PreviousResponseRequiresWebsocket => (
                 "previous_response_id is only supported on Responses WebSocket v2",
@@ -2018,6 +2220,14 @@ async fn native_replay_upstream_responses(
             NativeReplayRejection::GenericInvalidRequest => {
                 ("request payload is invalid", "invalid_request")
             }
+            NativeReplayRejection::ZenithGatewayInvalidRequest => (
+                "Zenith AI request is invalid. Check the model, messages, tools, and parameters.",
+                "invalid_request",
+            ),
+            NativeReplayRejection::ZenithGatewayInvalidRequestStream => (
+                "Zenith AI request is invalid. Check the model, messages, tools, and parameters.",
+                "invalid_request",
+            ),
         };
         return (
             StatusCode::BAD_REQUEST,

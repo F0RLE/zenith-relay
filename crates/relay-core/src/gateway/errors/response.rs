@@ -1,4 +1,5 @@
 use super::*;
+use crate::ErrorOrigin;
 
 pub(crate) fn cooldown_error(
     retry_at_ms: u64,
@@ -39,6 +40,27 @@ pub(crate) fn cooldown_error(
 }
 
 pub(crate) fn api_error(status: StatusCode, message: &str, code: &str) -> Response<Body> {
+    api_error_with_origin(status, message, code, ErrorOrigin::Relay, None)
+}
+
+pub(crate) fn api_error_with_origin(
+    status: StatusCode,
+    message: &str,
+    code: &str,
+    origin: ErrorOrigin,
+    request_id: Option<&str>,
+) -> Response<Body> {
+    api_error_with_origin_and_category(status, message, code, code, origin, request_id)
+}
+
+pub(crate) fn api_error_with_origin_and_category(
+    status: StatusCode,
+    message: &str,
+    code: &str,
+    category: &str,
+    origin: ErrorOrigin,
+    request_id: Option<&str>,
+) -> Response<Body> {
     let code = api_error_code(code);
     let error_type = api_error_type(status, code);
     let mut response = (
@@ -49,10 +71,16 @@ pub(crate) fn api_error(status: StatusCode, message: &str, code: &str) -> Respon
                 "type": error_type,
                 "code": code,
                 "param": null,
+                "zenith_relay": {
+                    "origin": origin.as_str(),
+                    "category": category,
+                    "request_id": request_id,
+                },
             }
         })),
     )
         .into_response();
+    super::super::response::attach_error_diagnostics(&mut response, origin, category, request_id);
     response.extensions_mut().insert(LocalGatewayError);
     response
 }

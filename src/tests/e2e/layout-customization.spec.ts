@@ -44,7 +44,7 @@ test("usage report columns move with pointer input and persist independently", a
   await page.getByRole("tab", { name: "Errors" }).click();
   table = page.locator(".usage-error-table");
   await dragColumn(page, table, "time", "model");
-  await expect.poll(() => columnOrder(table)).toEqual(["model", "time", "connection", "error", "request"]);
+  await expect.poll(() => columnOrder(table)).toEqual(["model", "time", "connection", "origin", "error", "request"]);
   await expectCentered(table);
 
   await page.reload();
@@ -55,7 +55,7 @@ test("usage report columns move with pointer input and persist independently", a
   await page.getByRole("tab", { name: "Pool members" }).click();
   await expect.poll(() => columnOrder(page.locator(".usage-aggregate-table"))).toEqual(["requests", "success", "name", "breakdown", "total", "equivalent", "speed", "timing"]);
   await page.getByRole("tab", { name: "Errors" }).click();
-  await expect.poll(() => columnOrder(page.locator(".usage-error-table"))).toEqual(["model", "time", "connection", "error", "request"]);
+  await expect.poll(() => columnOrder(page.locator(".usage-error-table"))).toEqual(["model", "time", "connection", "origin", "error", "request"]);
 
   await page.getByRole("button", { name: "Overview", exact: true }).click();
   const activity = page.locator(".activity-section li").first();

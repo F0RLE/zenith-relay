@@ -48,15 +48,28 @@ pub(crate) async fn import_source_item(
         .validate()
         .map_err(|_| ImportItemError::new("source_invalid", "imported source is invalid"))?;
     let discover_models = discover_models || runtime_source.models.is_empty();
-    runtime_source.models = if discover_models {
-        discover_source_models(&runtime_source).await.map_err(|_| {
-            ImportItemError::new(
-                "source_model_discovery_failed",
-                "source model discovery failed",
-            )
-        })?
+    let (detected_model_prices, protocol_bindings) = if discover_models {
+        let discovery = discover_source_models_and_protocol_bindings(&runtime_source, &[])
+            .await
+            .map_err(|_| {
+                ImportItemError::new(
+                    "source_model_discovery_failed",
+                    "source model discovery failed",
+                )
+            })?;
+        runtime_source.models = discovery.models;
+        (discovery.detected_model_prices, discovery.protocol_bindings)
     } else if !runtime_source.models.is_empty() {
-        runtime_source.models.clone()
+        (
+            existing
+                .as_ref()
+                .map(|source| source.detected_model_prices.clone())
+                .unwrap_or_default(),
+            existing
+                .as_ref()
+                .map(|source| source.protocol_bindings.clone())
+                .unwrap_or_default(),
+        )
     } else {
         return Err(ImportItemError::new(
             "models_required",
@@ -75,6 +88,8 @@ pub(crate) async fn import_source_item(
         runtime_source,
         secret_ref,
         existing.as_ref(),
+        protocol_bindings,
+        detected_model_prices,
         discover_models.then(|| Utc::now().to_rfc3339()),
     );
     record.in_pool |= add_to_pool;
@@ -87,6 +102,8 @@ pub(crate) fn imported_source_record(
     runtime_source: ProviderSource,
     secret_ref: String,
     existing: Option<&ProviderSourceRecord>,
+    protocol_bindings: Vec<SourceProtocolBinding>,
+    detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
     tested_at: Option<String>,
 ) -> ProviderSourceRecord {
     let tested = tested_at.is_some();
@@ -99,10 +116,7 @@ pub(crate) fn imported_source_record(
         base_url: runtime_source.base_url,
         secret_ref,
         wire_api: runtime_source.wire_api,
-        protocol_bindings: existing
-            .as_ref()
-            .map(|source| source.protocol_bindings.clone())
-            .unwrap_or_default(),
+        protocol_bindings,
         models: runtime_source.models,
         allowed_models: existing
             .as_ref()
@@ -125,6 +139,7 @@ pub(crate) fn imported_source_record(
             .as_ref()
             .map(|source| source.model_price_overrides.clone())
             .unwrap_or_default(),
+        detected_model_prices,
         last_used_at: existing
             .as_ref()
             .and_then(|source| source.last_used_at.clone()),

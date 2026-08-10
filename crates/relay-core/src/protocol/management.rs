@@ -389,6 +389,10 @@ pub struct SourceSummary {
     pub recovery_delay_seconds: u64,
     #[serde(default)]
     pub model_price_overrides: BTreeMap<String, ApiModelPriceOverride>,
+    /// Complete token prices discovered from this source's model catalog.
+    /// Manual source overrides always take precedence.
+    #[serde(default)]
+    pub detected_model_prices: BTreeMap<String, ApiModelPriceOverride>,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
     pub secret_available: bool,
@@ -902,6 +906,8 @@ pub struct UsageSummary {
     pub http_status: u16,
     pub error_category: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_origin: Option<crate::ErrorOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use: Option<crate::ToolUseDiagnostics>,
     pub latency_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1186,6 +1192,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
@@ -1241,6 +1248,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,
@@ -1276,6 +1284,7 @@ mod tests {
             weight: 1,
             recovery_delay_seconds: 0,
             model_price_overrides: BTreeMap::new(),
+            detected_model_prices: BTreeMap::new(),
             api_equivalent: ApiEquivalentSummary::default(),
             secret_available: true,
             last_error_code: None,

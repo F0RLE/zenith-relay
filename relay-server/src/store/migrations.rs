@@ -164,6 +164,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "031_tool_use_diagnostics",
         sql: include_str!("../../migrations/031_tool_use_diagnostics.sql"),
     },
+    Migration {
+        version: 32,
+        name: "032_error_origin",
+        sql: include_str!("../../migrations/032_error_origin.sql"),
+    },
 ];
 
 struct Migration {
@@ -543,7 +548,8 @@ mod tests {
                 (28, "028_applied_service_tier".to_string()),
                 (29, "029_candidate_usage_rollups".to_string()),
                 (30, "030_source_priced_key_rollups".to_string()),
-                (31, "031_tool_use_diagnostics".to_string())
+                (31, "031_tool_use_diagnostics".to_string()),
+                (32, "032_error_origin".to_string())
             ]
         );
         drop(store);

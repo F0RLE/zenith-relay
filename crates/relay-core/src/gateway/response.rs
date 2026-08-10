@@ -1,9 +1,9 @@
-use super::errors::{api_error, upstream_failure_status, AttemptFailure, RateLimitBodyHint};
+use super::errors::{upstream_failure_status, AttemptFailure, RateLimitBodyHint};
 use super::now_ms;
 use super::streaming::{parse_sse_event, TerminalOutcome};
 use crate::protocol::sse_event_end;
 use crate::runtime::{DefaultServiceTier, ExecutorRoute};
-use crate::{Error, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
+use crate::{Error, ErrorOrigin, GatewayRuntime, ToolUseDiagnostics, UsageEvent};
 use axum::body::Body;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
@@ -23,14 +23,17 @@ pub(super) fn upstream_body_error_response(
     event.success = false;
     event.http_status = StatusCode::BAD_GATEWAY.as_u16();
     let too_large = matches!(error, Error::UpstreamBodyTooLarge);
-    event.error_category = Some(if too_large {
-        "upstream_body_too_large".to_string()
+    let category = if too_large {
+        "upstream_body_too_large"
     } else {
-        "upstream_body".to_string()
-    });
+        "upstream_body"
+    };
+    event.error_category = Some(category.to_string());
     event.latency_ms = started.elapsed().as_millis() as u64;
+    let origin = event.error_origin().unwrap_or(ErrorOrigin::Relay);
+    let request_id = event.request_id.clone();
     emit_usage(runtime, event);
-    api_error(
+    super::errors::api_error_with_origin_and_category(
         StatusCode::BAD_GATEWAY,
         if too_large {
             "upstream response is too large"
@@ -38,6 +41,9 @@ pub(super) fn upstream_body_error_response(
             "upstream response failed"
         },
         "upstream_error",
+        category,
+        origin,
+        Some(&request_id),
     )
 }
 
@@ -49,6 +55,78 @@ pub(super) fn proxy_response(
     let mut response = Response::builder().status(status).body(body).unwrap();
     copy_safe_upstream_headers(response.headers_mut(), upstream_headers, true);
     response
+}
+
+pub(super) fn proxy_error_response(
+    status: reqwest::StatusCode,
+    upstream_headers: &reqwest::header::HeaderMap,
+    body: Body,
+    origin: ErrorOrigin,
+    category: &str,
+    request_id: Option<&str>,
+) -> Response<Body> {
+    let mut response = proxy_response(status, upstream_headers, body);
+    attach_error_diagnostics(&mut response, origin, category, request_id);
+    response
+}
+
+pub(super) fn attach_error_diagnostics(
+    response: &mut Response<Body>,
+    origin: ErrorOrigin,
+    category: &str,
+    request_id: Option<&str>,
+) {
+    response.headers_mut().insert(
+        "x-zenith-relay-error-origin",
+        HeaderValue::from_static(origin.as_str()),
+    );
+    if let Ok(value) = HeaderValue::from_str(category) {
+        response
+            .headers_mut()
+            .insert("x-zenith-relay-error-category", value);
+    }
+    if let Some(request_id) = request_id.and_then(safe_request_id) {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            response
+                .headers_mut()
+                .insert("x-zenith-relay-request-id", value);
+        }
+    }
+}
+
+pub(super) fn attach_stream_diagnostics(
+    response: &mut Response<Body>,
+    origin: ErrorOrigin,
+    request_id: &str,
+) {
+    response.headers_mut().insert(
+        "x-zenith-relay-upstream-origin",
+        HeaderValue::from_static(origin.as_str()),
+    );
+    if let Some(request_id) = safe_request_id(request_id) {
+        if let Ok(value) = HeaderValue::from_str(request_id) {
+            response
+                .headers_mut()
+                .insert("x-zenith-relay-request-id", value);
+        }
+    }
+}
+
+fn safe_request_id(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 128
+        && value.is_ascii()
+        && !value.chars().any(char::is_control))
+    .then_some(value)
+}
+
+pub(super) fn route_error_origin(route: &ExecutorRoute) -> ErrorOrigin {
+    if route.account_id.is_some() {
+        ErrorOrigin::Account
+    } else {
+        ErrorOrigin::Provider
+    }
 }
 
 pub(super) fn proxy_sse_response(

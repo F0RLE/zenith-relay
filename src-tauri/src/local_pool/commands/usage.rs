@@ -32,7 +32,11 @@ pub fn get_local_usage_page(
             store
                 .sources()
                 .iter()
-                .map(|source| (source.id.clone(), source.model_price_overrides.clone()))
+                .map(|source| {
+                    let mut prices = source.detected_model_prices.clone();
+                    prices.extend(source.model_price_overrides.clone());
+                    (source.id.clone(), prices)
+                })
                 .collect::<BTreeMap<_, _>>(),
         )
     };

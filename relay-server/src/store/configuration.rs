@@ -234,10 +234,11 @@ impl Store {
         self.sources()?
             .into_iter()
             .map(|source| {
-                Ok((
-                    identity_hint(&source.id),
-                    normalize_model_price_overrides(source.model_price_overrides)?,
-                ))
+                let mut prices = normalize_model_price_overrides(source.detected_model_prices)?;
+                prices.extend(normalize_model_price_overrides(
+                    source.model_price_overrides,
+                )?);
+                Ok((identity_hint(&source.id), prices))
             })
             .collect()
     }
@@ -775,6 +776,70 @@ mod tests {
             Some(&price)
         );
         drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn detected_source_prices_fall_back_from_manual_overrides_and_refresh_cleanly() {
+        let root = test_root("source-detected-prices");
+        let store = Store::open(root.join("relay.sqlite")).unwrap();
+        let detected = ApiModelPriceOverride {
+            input_micro_usd_per_million: 1_000_000,
+            cached_input_micro_usd_per_million: Some(100_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 2_000_000,
+        };
+        let manual = ApiModelPriceOverride {
+            input_micro_usd_per_million: 3_000_000,
+            cached_input_micro_usd_per_million: Some(300_000),
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: 6_000_000,
+        };
+        let mut source = SourceRecord {
+            id: "source-detected".into(),
+            name: "Detected prices".into(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            base_url: "https://example.test/v1".into(),
+            secret_ref: "source:detected".into(),
+            wire_api: zenith_relay_core::WireApi::Responses,
+            protocol_bindings: Vec::new(),
+            models: vec!["private-model".into()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            recovery_delay_seconds: 0,
+            model_price_overrides: BTreeMap::from([("private-model".into(), manual)]),
+            detected_model_prices: BTreeMap::from([("private-model".into(), detected)]),
+            last_error_code: None,
+        };
+        store.save_source(&source).unwrap();
+
+        let price = |store: &Store| {
+            store
+                .source_price_overrides()
+                .unwrap()
+                .get(&identity_hint("source-detected"))
+                .and_then(|prices| prices.get("private-model"))
+                .copied()
+        };
+        assert_eq!(price(&store), Some(manual));
+
+        source.model_price_overrides.clear();
+        store.save_source(&source).unwrap();
+        assert_eq!(price(&store), Some(detected));
+
+        // A later catalog refresh can legitimately omit a still-available
+        // model's price; it must clear the old detected value.
+        source.detected_model_prices.clear();
+        store.save_source(&source).unwrap();
+        assert_eq!(price(&store), None);
+
+        drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 

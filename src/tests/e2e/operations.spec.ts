@@ -131,7 +131,7 @@ test("local commands are reachable from the operational UI", async ({ page }) =>
   await expect(sourcePolicy.getByRole("list", { name: "API order in this role" }).getByRole("listitem")).toHaveCount(1);
   await chooseOption(page, sourcePolicy, "Recovery check", "60");
   await expect(sourcePolicy.locator(".member-model-rules")).toHaveCount(0);
-  await expect(sourcePolicy.locator(".source-model-configuration > summary")).toContainText("Models and cost");
+  await expect(sourcePolicy.locator(".source-model-configuration > summary")).toContainText("Models and price");
   await sourcePolicy.locator(".source-model-configuration > summary").click();
   await sourcePolicy.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await sourcePolicy.locator('[data-member-model-id="gpt-5.4"]').getByRole("button", { name: "Disable gpt-5.4" }).click();
@@ -316,7 +316,14 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog", { name: "Edit source" });
   await dialog.locator(".source-price-section > summary").click();
-  await expect(dialog.locator(".source-price-group > summary")).toHaveText(["OpenAIModels: 1", "AnthropicModels: 1", "OtherModels: 4"]);
+  await expect(dialog.locator(".source-price-group > summary")).toHaveText([
+    "OpenAIModels: 1",
+    "AnthropicModels: 1",
+    "GeminiModels: 1",
+    "GrokModels: 1",
+    "GLMModels: 1",
+    "PrivateModels: 1",
+  ]);
 
   await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
   await expect(dialog.getByRole("textbox", { name: /cache write price for gpt-5.4/i })).toHaveCount(0);
@@ -334,6 +341,43 @@ test("API pricing groups expose cache-write TTLs only for Claude", async ({ page
   })).toEqual({ inputMicroUsdPerMillion: 1_400_000, outputMicroUsdPerMillion: 7_000_000, cachedInputMicroUsdPerMillion: 1_600_000, cacheWrite5mMicroUsdPerMillion: 2_100_000, cacheWrite1hMicroUsdPerMillion: 4_200_000 });
 });
 
+test("API-reported source prices are hints, not manual overrides", async ({ page }) => {
+  await installTauriMock(page, {
+    mode: "local",
+    locale: "en",
+    populated: true,
+    sourceDetectedModelPrices: {
+      "gpt-5.4": {
+        inputMicroUsdPerMillion: 2_500_000,
+        cachedInputMicroUsdPerMillion: 250_000,
+        outputMicroUsdPerMillion: 15_000_000,
+      },
+    },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await page.getByRole("tab", { name: "Sources" }).click();
+  await page.getByRole("row").filter({ hasText: "Example compatible API" }).getByRole("button", { name: "Edit" }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit source" });
+  await dialog.locator(".source-price-section > summary").click();
+  await dialog.locator(".source-price-group > summary").filter({ hasText: "OpenAI" }).click();
+
+  const input = dialog.getByRole("textbox", { name: "Input token price for gpt-5.4", exact: true });
+  const cached = dialog.getByRole("textbox", { name: "Cached input token price for gpt-5.4", exact: true });
+  const output = dialog.getByRole("textbox", { name: "Output token price for gpt-5.4", exact: true });
+  await expect(input).toHaveValue("");
+  await expect(input).toHaveAttribute("placeholder", "2.5");
+  await expect(cached).toHaveAttribute("placeholder", "0.25");
+  await expect(output).toHaveAttribute("placeholder", "15");
+
+  await dialog.getByRole("button", { name: "Save" }).click();
+  const sourceUpdate = await page.evaluate(() => {
+    const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { modelPriceOverrides?: Record<string, unknown> } } }> }).__TAURI_TEST_INVOKES__;
+    return calls.findLast((item) => item.command === "update_local_source")?.args.input?.modelPriceOverrides;
+  });
+  expect(sourceUpdate).toEqual({});
+});
+
 test("pool API source edits model availability and cost in one list", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
@@ -343,7 +387,7 @@ test("pool API source edits model availability and cost in one list", async ({ p
   const dialog = page.getByRole("dialog", { name: /Pool member policy.*Example compatible API/ });
   const configuration = dialog.locator(".source-model-configuration");
   await expect(configuration).toHaveCount(1);
-  await expect(configuration.locator("> summary")).toContainText("Models and cost");
+  await expect(configuration.locator("> summary")).toContainText("Models and price");
   await expect(configuration.locator("> summary")).toContainText("Enabled: 2/2");
   await expect(dialog.locator(".member-model-rules")).toHaveCount(0);
 
