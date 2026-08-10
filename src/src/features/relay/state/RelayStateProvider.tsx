@@ -1,11 +1,11 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { recordPerformance, setWindowBackgroundColor } from "../../../platform/desktop";
 import { relayCommands, type UiState } from "../api/commands";
-import type { AccountSummary, LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
+import type { LocalUsage, LocalUsagePage, PageId, ProfileActivation, ProfileBinding, RelayMode, RemoteUsage, RemoteUsagePage, RemoteUsageQuery, RuntimeSnapshot } from "../api/types";
 import { useConfirm } from "../components/Ui";
 import { buildAccountIdentityIndex, displayAccountIdentity } from "./accountIdentity";
-import { sanitizeFeedbackError, type FeedbackError } from "./feedback";
+import { sanitizeFeedbackError } from "./feedback";
 import {
   RELAY_STORAGE_KEYS,
   readCodexPoolOauthSelection,
@@ -14,8 +14,11 @@ import {
   writeRelayPreference,
 } from "./relayPreferences";
 import { useAccountIdentityReveal } from "./useAccountIdentityReveal";
+import { RelayContext, type Feedback, type RelayContextValue } from "./relayStateContext";
+import { projectRuntimeAccountLabels } from "./runtimeDisplay";
 
-export type Feedback = { kind: "success" | "error"; key: string; error?: FeedbackError } | null;
+export { useRelayState } from "./relayStateContext";
+export type { Feedback } from "./relayStateContext";
 
 const RUNTIME_REFRESH_INTERVAL_MS = 60_000;
 const ROUTING_REFRESH_INTERVAL_MS = 2_000;
@@ -27,51 +30,6 @@ const ERROR_FEEDBACK_TIMEOUT_MS = 8_000;
 function isRuntimeRefreshPage(page: PageId) {
   return page === "overview" || page === "pool" || page === "connections";
 }
-
-type RelayContextValue = {
-  mode: RelayMode;
-  setMode: (mode: RelayMode) => void;
-  page: PageId;
-  setPage: (page: PageId) => void;
-  runtime: RuntimeSnapshot | null;
-  runtimeRevision: number;
-  usageRevision: number;
-  accountIdentitiesVisible: boolean;
-  accountIdentitiesBusy: boolean;
-  canRevealAccountIdentities: boolean;
-  setAccountIdentitiesVisible: (visible: boolean) => void;
-  accountEconomicsVisible: boolean;
-  setAccountEconomicsVisible: (visible: boolean) => void;
-  accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;
-  localUsage: LocalUsage[];
-  localUsagePage: LocalUsagePage | null;
-  loadLocalUsage: (query: RemoteUsageQuery) => Promise<LocalUsagePage>;
-  remoteUsage: RemoteUsage[];
-  remoteUsagePage: RemoteUsagePage | null;
-  loadRemoteUsage: (query: RemoteUsageQuery) => Promise<RemoteUsagePage | null>;
-  readyState: UiState | null;
-  loading: boolean;
-  busy: string | null;
-  feedback: Feedback;
-  refresh: () => Promise<void>;
-  perform: (id: string, work: () => Promise<unknown>, successKey?: string) => Promise<boolean>;
-  activateCodexProfile: (id: string, work: () => Promise<ProfileActivation>, launchAfter?: boolean) => Promise<boolean>;
-  launchCodexProfile: (binding: ProfileBinding) => Promise<boolean>;
-  clearFeedback: () => void;
-  onboardingComplete: boolean;
-  finishOnboarding: (mode: RelayMode) => void;
-  resetOnboarding: () => void;
-  theme: "system" | "light" | "dark";
-  setTheme: (theme: "system" | "light" | "dark") => void;
-  profileSwitchBackupPrompt: boolean;
-  setProfileSwitchBackupPrompt: (enabled: boolean) => void;
-  profileSnapshotBackupBeforeRestore: boolean;
-  setProfileSnapshotBackupBeforeRestore: (enabled: boolean) => void;
-  codexPoolOauthSelection: string;
-  setCodexPoolOauthSelection: (selection: string) => void;
-};
-
-const RelayContext = createContext<RelayContextValue | null>(null);
 
 export function RelayStateProvider({ children }: { children: ReactNode }) {
   const { i18n, t } = useTranslation();
@@ -500,13 +458,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     });
   }, [accountIdentitiesVisible, accountIndex, canRevealAccountIdentities, mode, revealedAccountIdentities]);
 
-  const displayRuntime = useMemo<RuntimeSnapshot | null>(() => runtime ? {
-    ...runtime,
-    accounts: runtime.accounts.map((account): AccountSummary => {
-      const displayName = accountDisplayName(account.id, account.label) ?? account.label;
-      return { ...account, label: displayName, identityHint: displayName };
-    }),
-  } : null, [accountDisplayName, runtime]);
+  const displayRuntime = useMemo(
+    () => projectRuntimeAccountLabels(runtime, accountDisplayName),
+    [accountDisplayName, runtime],
+  );
+  const clearFeedback = useCallback(() => setFeedback(null), []);
 
   const value = useMemo<RelayContextValue>(() => ({
     mode,
@@ -537,7 +493,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     perform,
     activateCodexProfile,
     launchCodexProfile,
-    clearFeedback: () => setFeedback(null),
+    clearFeedback,
     onboardingComplete,
     finishOnboarding,
     resetOnboarding,
@@ -549,17 +505,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";
   }, [i18n.language]);
 
   return <RelayContext.Provider value={value}>{children}</RelayContext.Provider>;
-}
-
-export function useRelayState() {
-  const value = useContext(RelayContext);
-  if (!value) throw new Error("RelayStateProvider is missing");
-  return value;
 }

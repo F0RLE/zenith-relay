@@ -29,6 +29,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, AccountTransferProgress, ProfileBinding } from "../../api/types";
+import { currentAccountErrorCode, operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import {
   AccountPlanBadge,
   ActionMenu,
@@ -45,10 +46,7 @@ import {
   accountPlanOption,
   compareAccountPlans,
   copyText,
-  currentAccountErrorCode,
   formatDetailedRemainingTime,
-  operationalStatusTone,
-  transientCandidateTone,
   useConfirm,
 } from "../../components/Ui";
 import { compareRoutingOrder, routingOrderPositions } from "../../routingOrder";

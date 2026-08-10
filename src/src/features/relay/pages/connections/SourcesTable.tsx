@@ -3,9 +3,10 @@ import { ListMinus, ListPlus, Loader2, Pencil, Play, Power, RefreshCw, Trash2 } 
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { SourceSummary } from "../../api/types";
+import { operationalStatusTone, transientCandidateTone } from "../../accountStatus";
 import { SourceProtocolBindingsSummary } from "../../components/SourceProtocolRoutingDisclosure";
 import { effectiveSourceProtocolBindings, sourceSupportsNativeResponses, sourceSupportsWireApi } from "../../sourceProtocolBindings";
-import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, operationalStatusTone, transientCandidateTone, useConfirm } from "../../components/Ui";
+import { ActionMenu, ActionMenuItem, EmptyState, IconButton, StatusIcon, useConfirm } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";
 export function SourcesTable({ query, onEdit }: { query: string; onEdit: (source: SourceSummary) => void }) {

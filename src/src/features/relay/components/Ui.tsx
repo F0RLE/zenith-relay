@@ -3,57 +3,23 @@ import { createPortal } from "react-dom";
 import { Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, CircleOff, Copy, Eye, EyeOff, Loader2, MoreHorizontal, X } from "lucide-react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { AccountSummary, CandidateRuntimeSnapshot, OperationalStatus, QuotaSnapshot, QuotaWindow } from "../api/types";
+import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
+import { accountErrorTranslationKey } from "../accountStatus";
 import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
 
 export { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan };
 export type { ApiSourceRole };
-
-export function operationalStatusTone(status: OperationalStatus): "ready" | "warning" | "error" | "disabled" {
-  if (status === "rotation") return "ready";
-  if (status === "quotaWait") return "warning";
-  if (status === "unavailable") return "error";
-  return "disabled";
-}
-
-export function transientCandidateTone(candidate: CandidateRuntimeSnapshot | undefined, nowMs: number, includeCooldown: boolean): "warning" | "info" | null {
-  if (candidate?.halfOpen) return "info";
-  if (includeCooldown && candidate?.nextRetryAtMs != null && candidate.nextRetryAtMs > nowMs) return "warning";
-  return null;
-}
-
-export function isCodexOauthAccountEligible(account: AccountSummary) {
-  return account.inPool && (account.operationalStatus === "rotation" || account.operationalStatus === "quotaWait");
-}
-
-export function currentAccountErrorCode(account: AccountSummary) {
-  const quotaError = account.quota.error?.code.trim();
-  if (account.quotaRefreshStatus === "failed" && quotaError) return quotaError;
-  if (account.routingBlockReason === "reauth_required" || account.authState.state === "requires_reauth") {
-    return account.authState.reason ? `auth_${account.authState.reason}` : "auth_requires_reauth";
-  }
-  if (account.operationalStatus !== "unavailable") return null;
-  return account.lastErrorCode?.trim() || quotaError || account.routingBlockReason || "account_unavailable";
-}
+// Compatibility exports keep existing feature and test imports stable while
+// the status policy itself lives in its domain module.
+export {
+  currentAccountErrorCode,
+  isCodexOauthAccountEligible,
+  operationalStatusTone,
+  transientCandidateTone,
+} from "../accountStatus";
 
 export function accountErrorLabel(code: string, t: TFunction) {
-  const normalized = code.toLocaleLowerCase();
-  if (normalized === "remote_missing") return t("accounts.errors.remoteMissing");
-  if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return t("accounts.errors.reusedRefreshToken");
-  if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return t("accounts.errors.expiredRefreshToken");
-  if (/invalidated_refresh_token|refresh_token_invalidated|token_invalidated/.test(normalized)) return t("accounts.errors.invalidatedRefreshToken");
-  if (/invalid_grant/.test(normalized)) return t("accounts.errors.invalidGrant");
-  if (/invalid_grant|requires_reauth|refresh_token/.test(normalized)) return t("accounts.errors.requiresReauth");
-  if (/verification|verify.*account|phone/.test(normalized)) return t("accounts.errors.verificationRequired");
-  if (/credential|secret/.test(normalized)) return t("accounts.errors.credentialsMissing");
-  if (/deactivated|disabled.*workspace|workspace.*(?:disabled|expired|terminated)/.test(normalized)) return t("accounts.errors.blocked");
-  if (/forbidden|blocked/.test(normalized)) return t("accounts.errors.blocked");
-  if (/rate.?limit|too_many/.test(normalized)) return t("accounts.errors.rateLimited");
-  if (/transport|timeout|network|connect/.test(normalized)) return t("accounts.errors.connection");
-  if (/quota/.test(normalized)) return t("accounts.errors.quota");
-  if (/auth_error|unauthorized|authentication/.test(normalized)) return t("accounts.errors.authorization");
-  if (/response|parse|decode|malformed/.test(normalized)) return t("accounts.errors.invalidResponse");
-  return t("accounts.errors.unknown");
+  return t(accountErrorTranslationKey(code));
 }
 
 export function AccountPlanBadge({ planType, unknown }: { planType: string | null; unknown: string }) {

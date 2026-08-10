@@ -3,7 +3,8 @@ import { ArrowRightLeft, Download, Play, Plus, Power, Upload } from "lucide-reac
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { ConfigurationPresetPreview } from "../../api/types";
-import { Button, Dialog, EmptyState, PageHeader, Tabs, isCodexOauthAccountEligible } from "../../components/Ui";
+import { isCodexOauthAccountEligible } from "../../accountStatus";
+import { Button, Dialog, EmptyState, PageHeader, Tabs } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { SourceDialog } from "../connections/SourceDialog";
 import { AddMembersDialog } from "./AddMembersDialog";
