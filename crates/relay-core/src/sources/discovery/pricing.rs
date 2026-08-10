@@ -242,6 +242,22 @@ mod tests {
     }
 
     #[test]
+    fn detects_ttl_cache_prices_for_both_windows() {
+        let price = detected_model_price(&json!({
+            "id": "ttl-model",
+            "inputCostMicrousdPerMillion": 1_000_000,
+            "outputCostMicrousdPerMillion": 2_000_000,
+            "promptCacheReadCostsByTtl": { "5m": 100_000, "1h": 200_000 },
+            "promptCacheWriteCostsByTtl": { "5m": 1_250_000, "1h": 2_500_000 },
+        }))
+        .unwrap();
+
+        assert_eq!(price.cached_input_micro_usd_per_million, Some(100_000));
+        assert_eq!(price.cache_write_5m_micro_usd_per_million, Some(1_250_000));
+        assert_eq!(price.cache_write_1h_micro_usd_per_million, Some(2_500_000));
+    }
+
+    #[test]
     fn detects_openrouter_style_token_prices_without_floating_point() {
         let price = detected_model_price(&json!({
             "id": "external-model",

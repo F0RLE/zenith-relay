@@ -33,11 +33,11 @@ export function SourcePriceEditor({ source, drafts, onChange, enabledModels, onT
   const { t } = useTranslation();
   const { runtime } = useRelayState();
   const models = [...new Map([
-    ...source.models,
-    ...source.allowedModels,
-    ...source.excludedModels,
     ...Object.keys(source.modelPriceOverrides ?? {}),
     ...Object.keys(source.detectedModelPrices ?? {}),
+    ...source.allowedModels,
+    ...source.excludedModels,
+    ...source.models,
   ].map((model) => [model.toLowerCase(), model])).values()];
   const groups = groupModels(models, (model) => model);
   const detectedPrices = new Map(Object.entries(source.detectedModelPrices ?? {}).map(([model, price]) => [model.toLowerCase(), price]));

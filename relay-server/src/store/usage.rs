@@ -258,7 +258,10 @@ impl Store {
                     success: row.get::<_, i64>(8)? != 0,
                     http_status: row.get::<_, i64>(9)?.clamp(0, i64::from(u16::MAX)) as u16,
                     error_category: row.get(10)?,
-                    error_origin: parse_error_origin(row.get(25)?),
+                    error_origin: row
+                        .get::<_, Option<String>>(25)?
+                        .as_deref()
+                        .and_then(|value| value.parse().ok()),
                     latency_ms: row.get::<_, i64>(11)?.max(0) as u64,
                     ttft_ms: optional_u64(row.get(12)?),
                     generation_ms: optional_u64(row.get(13)?),
@@ -525,15 +528,6 @@ impl Store {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         Ok(deleted)
-    }
-}
-
-fn parse_error_origin(value: Option<String>) -> Option<zenith_relay_core::ErrorOrigin> {
-    match value.as_deref()? {
-        "provider" => Some(zenith_relay_core::ErrorOrigin::Provider),
-        "account" => Some(zenith_relay_core::ErrorOrigin::Account),
-        "relay" => Some(zenith_relay_core::ErrorOrigin::Relay),
-        _ => None,
     }
 }
 

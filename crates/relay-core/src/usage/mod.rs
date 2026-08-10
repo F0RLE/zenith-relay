@@ -265,6 +265,19 @@ impl ErrorOrigin {
     }
 }
 
+impl std::str::FromStr for ErrorOrigin {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "provider" => Ok(Self::Provider),
+            "account" => Ok(Self::Account),
+            "relay" => Ok(Self::Relay),
+            _ => Err(()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageEvent {
@@ -430,6 +443,18 @@ mod tests {
             failed_usage_event("adapter_upstream_error", None).error_origin(),
             Some(ErrorOrigin::Relay)
         );
+    }
+
+    #[test]
+    fn error_origin_round_trips_through_storage_values() {
+        for origin in [
+            ErrorOrigin::Provider,
+            ErrorOrigin::Account,
+            ErrorOrigin::Relay,
+        ] {
+            assert_eq!(origin.as_str().parse(), Ok(origin));
+        }
+        assert!("unknown".parse::<ErrorOrigin>().is_err());
     }
 
     #[test]

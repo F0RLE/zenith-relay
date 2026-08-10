@@ -77,12 +77,14 @@ pub(super) async fn bootstrap_stream(
     let mut buffered = Vec::new();
     let mut inspected = 0;
     let mut first_chunk = true;
-    let replay_probe_deadline = TokioInstant::now() + SSE_REPLAY_BOOTSTRAP_TIMEOUT;
+    let mut replay_probe_deadline = None;
 
     loop {
         let timeout = if first_chunk {
             SSE_FIRST_BYTE_TIMEOUT
         } else {
+            let replay_probe_deadline = replay_probe_deadline
+                .expect("replay probe deadline is set after the first stream chunk");
             let now = TokioInstant::now();
             if now >= replay_probe_deadline {
                 return Ok((headers, Bytes::from(buffered), stream));
@@ -135,7 +137,11 @@ pub(super) async fn bootstrap_stream(
                 {
                     return Ok((headers, Bytes::from(buffered), stream));
                 }
-                first_chunk = false;
+                if first_chunk {
+                    first_chunk = false;
+                    replay_probe_deadline =
+                        Some(TokioInstant::now() + SSE_REPLAY_BOOTSTRAP_TIMEOUT);
+                }
             }
             Ok(Some(Err(error))) => return Err(AttemptFailure::transport(&error).into()),
             Ok(None) => return Err(AttemptFailure::stream("stream_incomplete").into()),

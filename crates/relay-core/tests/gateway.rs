@@ -2177,14 +2177,31 @@ async fn native_replay_upstream_responses(
             NativeReplayRejection::ZenithGatewayInvalidRequestStream
         ) && request.get("stream").and_then(Value::as_bool) == Some(true)
         {
-            let chunks = stream::iter([
-                Ok::<_, Infallible>(Bytes::from_static(
-                    b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\",\"status\":\"in_progress\"}}\n\n",
-                )),
-                Ok::<_, Infallible>(Bytes::from_static(
-                    b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\",\"message\":\"Zenith AI request is invalid. Check the model, messages, tools, and parameters.\"}}}\n\n",
-                )),
-            ]);
+            let chunks = stream::unfold(0_u8, |step| async move {
+                match step {
+                    // Let the first byte arrive after the replay window would
+                    // have elapsed if it were measured from request start.
+                    0 => {
+                        tokio::time::sleep(Duration::from_millis(2_100)).await;
+                        Some((
+                            Ok::<_, Infallible>(Bytes::from_static(
+                                b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_rejected\",\"status\":\"in_progress\"}}\n\n",
+                            )),
+                            1,
+                        ))
+                    }
+                    1 => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        Some((
+                            Ok::<_, Infallible>(Bytes::from_static(
+                                b"data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"invalid_request\",\"message\":\"Zenith AI request is invalid. Check the model, messages, tools, and parameters.\"}}}\n\n",
+                            )),
+                            2,
+                        ))
+                    }
+                    _ => None,
+                }
+            });
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(CONTENT_TYPE, "text/event-stream")

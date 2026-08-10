@@ -6,7 +6,7 @@ use zenith_relay_core::{
     estimate_api_equivalent_with_price_override,
     protocol::{UsageBucket, UsageGroup, UsageQuery, UsageTotals},
     sql_like_contains_pattern, ApiEquivalentSummary, ApiModelPriceOverride, DefaultServiceTier,
-    ErrorOrigin, WireApi,
+    WireApi,
 };
 
 const USAGE_TOTAL_COLUMNS: &str = "COUNT(*), \
@@ -367,7 +367,7 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         success: row.get(11)?,
         http_status: row.get(12)?,
         error_category: row.get(13)?,
-        error_origin: parse_error_origin(error_origin),
+        error_origin: error_origin.as_deref().and_then(|value| value.parse().ok()),
         tool_use: tool_use_json
             .as_deref()
             .and_then(|value| serde_json::from_str(value).ok()),
@@ -382,15 +382,6 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
         total_tokens: total_tokens.map(rust_u64),
         api_equivalent: ApiEquivalentSummary::default(),
     })
-}
-
-fn parse_error_origin(value: Option<String>) -> Option<ErrorOrigin> {
-    match value.as_deref()? {
-        "provider" => Some(ErrorOrigin::Provider),
-        "account" => Some(ErrorOrigin::Account),
-        "relay" => Some(ErrorOrigin::Relay),
-        _ => None,
-    }
 }
 
 fn normalize_wire_api(value: String) -> String {

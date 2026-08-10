@@ -33,7 +33,9 @@ use zenith_relay_core::providers::chatgpt::{
     QuotaRefreshOutcome,
 };
 use zenith_relay_core::quota::{QuotaRefreshFailure, QuotaWindow, QuotaWindowKind, Subscription};
-use zenith_relay_core::{ProviderSource, WireApi};
+use zenith_relay_core::{
+    MessagesReasoningMode, ProviderSource, SourceAdapter, SourceProtocolBinding, WireApi,
+};
 
 fn account_record(account_id: &str) -> LocalAccountRecord {
     let credentials = StoredCodexCredentials::new(
@@ -817,6 +819,7 @@ fn api_key_auth_json_builds_a_safe_default_responses_source() {
         "source:source_test".into(),
         None,
         Default::default(),
+        Default::default(),
         None,
     );
     let serialized = serde_json::to_string(&ImportItemResult::source_success(
@@ -876,11 +879,18 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
         wire_api,
         models: vec!["new-model".into()],
     };
+    let discovered_bindings = vec![SourceProtocolBinding {
+        wire_api: WireApi::ChatCompletions,
+        adapter: SourceAdapter::Native,
+        reasoning_mode: MessagesReasoningMode::Disabled,
+        model_ids: vec!["new-model".into()],
+    }];
     let updated = imported_source_record(
         &item,
         runtime,
         existing.secret_ref.clone(),
         Some(&existing),
+        discovered_bindings.clone(),
         existing.detected_model_prices.clone(),
         None,
     );
@@ -888,6 +898,7 @@ fn source_duplicate_identity_updates_the_existing_local_record() {
     assert_eq!(updated.id, existing.id);
     assert_eq!(updated.name, existing.name);
     assert_eq!(updated.wire_api, WireApi::ChatCompletions);
+    assert_eq!(updated.protocol_bindings, discovered_bindings);
     assert_eq!(updated.models, ["new-model"]);
     assert_eq!(updated.allowed_models, existing.allowed_models);
     assert_eq!(updated.excluded_models, existing.excluded_models);

@@ -474,7 +474,9 @@ fn normalize_record_protocol_bindings(record: &mut SourceRecord) -> Result<(), M
     if source_wide_catalog_route {
         // Preserve automatic source-wide discovery; runtime readers expand
         // the empty route through the effective bindings helper.
-        bindings[0].model_ids.clear();
+        if let Some(binding) = bindings.first_mut() {
+            binding.model_ids.clear();
+        }
     }
     record.protocol_bindings = bindings;
     Ok(())

@@ -50,7 +50,7 @@ use zenith_relay_core::providers::chatgpt::{
 use zenith_relay_core::quota::{QuotaRefreshFailure, MAX_PURCHASE_COST_MICRO_USD};
 use zenith_relay_core::{
     discover_source_models_and_protocol_bindings, normalize_error_code, ApiModelPriceOverride,
-    ProviderSource, ProxyConfig, WireApi,
+    ProviderSource, ProxyConfig, SourceProtocolBinding, WireApi,
 };
 
 mod claims;

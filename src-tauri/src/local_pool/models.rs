@@ -404,18 +404,10 @@ impl ProviderSourceRecord {
             .iter()
             .map(|(model, price)| (model.trim().to_ascii_lowercase(), *price))
             .collect();
-        let known_models = self
-            .models
-            .iter()
-            .map(|model| model.to_ascii_lowercase())
-            .collect::<HashSet<_>>();
         self.detected_model_prices = self
             .detected_model_prices
             .iter()
-            .filter_map(|(model, price)| {
-                let model = model.trim().to_ascii_lowercase();
-                known_models.contains(&model).then_some((model, *price))
-            })
+            .map(|(model, price)| (model.trim().to_ascii_lowercase(), *price))
             .collect();
         self.weight = self.weight.max(1);
     }
