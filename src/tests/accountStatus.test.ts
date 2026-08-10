@@ -54,7 +54,7 @@ describe("account status policy", () => {
 
   test("maps safe error codes to stable translation keys", () => {
     expect(accountErrorTranslationKey("HTTP 429 rate-limit")).toBe("accounts.errors.rateLimited");
-    expect(accountErrorTranslationKey("invalid_grant")).toBe("accounts.errors.invalidGrant");
+    expect(accountErrorTranslationKey("INVALID_GRANT")).toBe("accounts.errors.invalidGrant");
     expect(accountErrorTranslationKey("unknown_provider_problem")).toBe("accounts.errors.unknown");
   });
 });

@@ -22,7 +22,7 @@ pub(super) fn validate_configuration_settings(
         || normalize_image_base_model(settings.routing.image_base_model.clone())
             .map_err(|error| error.to_string())?
             != settings.routing.image_base_model
-        || normalize_model_ids(settings.hidden_models.clone())? != settings.hidden_models
+        || normalize_validated_model_ids(settings.hidden_models.clone())? != settings.hidden_models
         || normalize_model_price_overrides(settings.model_price_overrides.clone())?
             != settings.model_price_overrides
         || normalize_model_reasoning_allowed_levels(
@@ -41,9 +41,9 @@ pub(super) fn validate_configuration_settings(
             || rule.name.is_empty()
             || rule.name.len() > 256
             || rule.name.chars().any(char::is_control)
-            || url::Url::parse(&rule.base_url).is_err()
-            || normalize_model_ids(rule.allowed_models.clone())? != rule.allowed_models
-            || normalize_model_ids(rule.excluded_models.clone())? != rule.excluded_models
+            || !is_valid_source_base_url(&rule.base_url)
+            || normalize_validated_model_ids(rule.allowed_models.clone())? != rule.allowed_models
+            || normalize_validated_model_ids(rule.excluded_models.clone())? != rule.excluded_models
             || normalize_model_price_overrides(rule.model_price_overrides.clone())?
                 != rule.model_price_overrides
         {
@@ -58,8 +58,8 @@ pub(super) fn validate_configuration_settings(
             || rule.identity_hint.is_empty()
             || rule.identity_hint.len() > 128
             || rule.identity_hint.chars().any(char::is_control)
-            || normalize_model_ids(rule.allowed_models.clone())? != rule.allowed_models
-            || normalize_model_ids(rule.excluded_models.clone())? != rule.excluded_models
+            || normalize_validated_model_ids(rule.allowed_models.clone())? != rule.allowed_models
+            || normalize_validated_model_ids(rule.excluded_models.clone())? != rule.excluded_models
         {
             return Err("account preset rule is invalid".to_string());
         }
@@ -89,7 +89,7 @@ pub(super) fn validate_routing_policy(
     Ok(())
 }
 
-pub(super) fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
+pub(super) fn normalize_validated_model_ids(models: Vec<String>) -> Result<Vec<String>, String> {
     if models.len() > 4_096 {
         return Err("model list exceeds the supported limit".to_string());
     }
@@ -110,12 +110,17 @@ pub(super) fn normalize_model_ids(models: Vec<String>) -> Result<Vec<String>, St
     Ok(normalized)
 }
 
+fn is_valid_source_base_url(base_url: &str) -> bool {
+    url::Url::parse(base_url)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host())
+}
+
 pub(super) fn model_reasoning_allowed_levels_from_metadata(
     current: Option<String>,
     legacy: Option<String>,
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
     if let Some(current) = current {
-        let allowed_levels = serde_json::from_str(&current)
+        let allowed_levels = serde_json::from_str::<BTreeMap<String, Vec<String>>>(&current)
             .map_err(|_| "model reasoning allowed levels are invalid".to_string())?;
         return normalize_model_reasoning_allowed_levels(allowed_levels).map_err(str::to_string);
     }
@@ -126,22 +131,36 @@ pub(super) fn model_reasoning_allowed_levels_from_metadata(
     })?;
     let allowed_levels = legacy
         .into_iter()
-        .filter_map(|(model, effort)| {
-            (!effort.eq_ignore_ascii_case("auto")).then_some((model, vec![effort]))
-        })
+        .filter_map(normalize_legacy_reasoning_entry)
         .collect();
     normalize_model_reasoning_allowed_levels(allowed_levels).map_err(str::to_string)
 }
 
+fn normalize_legacy_reasoning_entry(
+    (model, effort): (String, String),
+) -> Option<(String, Vec<String>)> {
+    if effort.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    normalize_model_reasoning_allowed_levels(BTreeMap::from([(model, vec![effort])]))
+        .ok()?
+        .into_iter()
+        .next()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{model_reasoning_allowed_levels_from_metadata, normalize_model_ids};
+    use super::{
+        is_valid_source_base_url, model_reasoning_allowed_levels_from_metadata,
+        normalize_validated_model_ids,
+    };
     use std::collections::BTreeMap;
 
     #[test]
     fn normalizes_model_ids_without_losing_the_first_display_spelling() {
         assert_eq!(
-            normalize_model_ids(vec![" GPT-5 ".to_string(), "gpt-5".to_string()]).unwrap(),
+            normalize_validated_model_ids(vec![" GPT-5 ".to_string(), "gpt-5".to_string()])
+                .unwrap(),
             vec!["GPT-5".to_string()],
         );
     }
@@ -156,5 +175,27 @@ mod tests {
             .unwrap(),
             BTreeMap::from([("gpt-5".to_string(), vec!["high".to_string()])]),
         );
+    }
+
+    #[test]
+    fn skips_malformed_legacy_reasoning_entries() {
+        assert_eq!(
+            model_reasoning_allowed_levels_from_metadata(
+                None,
+                Some(
+                    r#"{"gpt-5":"HIGH","":"medium","gpt-empty":"","automatic":"auto"}"#.to_string()
+                ),
+            )
+            .unwrap(),
+            BTreeMap::from([("gpt-5".to_string(), vec!["high".to_string()])]),
+        );
+    }
+
+    #[test]
+    fn source_base_url_requires_http_or_https_with_a_host() {
+        assert!(is_valid_source_base_url("https://api.example.test/v1"));
+        assert!(!is_valid_source_base_url("file:///tmp/relay"));
+        assert!(!is_valid_source_base_url("ftp://api.example.test"));
+        assert!(!is_valid_source_base_url("https://"));
     }
 }

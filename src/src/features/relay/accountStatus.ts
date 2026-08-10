@@ -34,7 +34,7 @@ export function currentAccountErrorCode(account: AccountSummary) {
 }
 
 export function accountErrorTranslationKey(code: string) {
-  const normalized = code.toLocaleLowerCase();
+  const normalized = code.toLowerCase();
   if (normalized === "remote_missing") return "accounts.errors.remoteMissing";
   if (/reused_refresh_token|refresh_token_reused/.test(normalized)) return "accounts.errors.reusedRefreshToken";
   if (/expired_refresh_token|refresh_token_expired/.test(normalized)) return "accounts.errors.expiredRefreshToken";

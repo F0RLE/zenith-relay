@@ -57,13 +57,13 @@ describe("runtime account display projection", () => {
 
     const projected = projectRuntimeAccountLabels(
       snapshot,
-      (accountId, fallbackLabel) => accountId === "one" ? "visible@example.test" : fallbackLabel ?? null,
+      (accountId, fallbackLabel) => accountId === "one" ? "Visible account" : fallbackLabel ?? null,
     );
 
     expect(projected).not.toBe(snapshot);
     expect(snapshot.accounts[0]).toMatchObject({ label: "Masked account", identityHint: "Masked account" });
     expect(projected?.accounts).toMatchObject([
-      { id: "one", label: "visible@example.test", identityHint: "visible@example.test" },
+      { id: "one", label: "Visible account", identityHint: "Visible account" },
       { id: "two", label: "Fallback", identityHint: "Fallback" },
     ]);
   });

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum InFlightLane {
     Text,
     Image,
@@ -10,7 +10,7 @@ pub(super) enum InFlightLane {
 pub(super) struct SchedulerActivity {
     text_in_flight: BTreeMap<String, u32>,
     image_in_flight: BTreeMap<String, u32>,
-    active_models: BTreeMap<String, BTreeMap<String, u32>>,
+    active_models: BTreeMap<(String, InFlightLane), BTreeMap<String, u32>>,
     text_dispatches: BTreeMap<String, u64>,
     image_dispatches: BTreeMap<String, u64>,
 }
@@ -24,7 +24,8 @@ impl SchedulerActivity {
     pub(super) fn remove_candidate(&mut self, candidate_id: &str) {
         self.text_in_flight.remove(candidate_id);
         self.image_in_flight.remove(candidate_id);
-        self.active_models.remove(candidate_id);
+        self.active_models
+            .retain(|(active_candidate_id, _), _| active_candidate_id != candidate_id);
         self.text_dispatches.remove(candidate_id);
         self.image_dispatches.remove(candidate_id);
     }
@@ -44,7 +45,7 @@ impl SchedulerActivity {
 
         let request_count = self
             .active_models
-            .entry(candidate_id.to_string())
+            .entry((candidate_id.to_string(), lane))
             .or_default()
             .entry(model.to_ascii_lowercase())
             .or_default();
@@ -69,7 +70,7 @@ impl SchedulerActivity {
             }
         }
 
-        self.release_active_model(candidate_id, model);
+        self.release_active_model(candidate_id, model, lane);
         true
     }
 
@@ -82,21 +83,28 @@ impl SchedulerActivity {
 
     pub(super) fn active_request_count(&self, candidate_id: &str) -> u32 {
         self.active_models
-            .get(candidate_id)
-            .into_iter()
-            .flat_map(|models| models.values())
+            .iter()
+            .filter(|((active_candidate_id, _), _)| active_candidate_id == candidate_id)
+            .flat_map(|(_, models)| models.values())
             .fold(0_u32, |count, model_count| {
                 count.saturating_add(*model_count)
             })
     }
 
     pub(super) fn active_models_for(&self, candidate_id: &str) -> Vec<(String, u32)> {
-        self.active_models
-            .get(candidate_id)
+        let mut active_models: BTreeMap<String, u32> = BTreeMap::new();
+        for ((active_candidate_id, _), models) in &self.active_models {
+            if active_candidate_id != candidate_id {
+                continue;
+            }
+            for (model, request_count) in models {
+                let count = active_models.entry(model.clone()).or_default();
+                *count = count.saturating_add(*request_count);
+            }
+        }
+        active_models
             .into_iter()
-            .flat_map(|models| models.iter())
-            .filter(|(model, count)| !model.is_empty() && **count > 0)
-            .map(|(model, request_count)| (model.clone(), *request_count))
+            .filter(|(model, count)| !model.is_empty() && *count > 0)
             .collect()
     }
 
@@ -107,15 +115,21 @@ impl SchedulerActivity {
             .unwrap_or_default()
     }
 
-    fn release_active_model(&mut self, candidate_id: &str, model: Option<&str>) {
+    fn release_active_model(
+        &mut self,
+        candidate_id: &str,
+        model: Option<&str>,
+        lane: InFlightLane,
+    ) {
+        let lane_key = (candidate_id.to_string(), lane);
         let model_key = model
             .map(str::to_ascii_lowercase)
-            .or_else(|| self.active_models.get(candidate_id)?.keys().next().cloned());
+            .or_else(|| self.active_models.get(&lane_key)?.keys().next().cloned());
         let Some(model_key) = model_key else {
             return;
         };
         let empty = {
-            let Some(models) = self.active_models.get_mut(candidate_id) else {
+            let Some(models) = self.active_models.get_mut(&lane_key) else {
                 return;
             };
             let remove_model = models.get(&model_key).is_some_and(|count| *count <= 1);
@@ -129,7 +143,7 @@ impl SchedulerActivity {
             models.is_empty()
         };
         if empty {
-            self.active_models.remove(candidate_id);
+            self.active_models.remove(&lane_key);
         }
     }
 
@@ -203,6 +217,24 @@ mod tests {
         assert_eq!(
             activity.active_models_for("candidate"),
             vec![("claude-opus-5".to_string(), 1), ("gpt-5".to_string(), 1)],
+        );
+    }
+
+    #[test]
+    fn missing_model_release_uses_the_reservation_lane() {
+        let mut activity = SchedulerActivity::default();
+        activity.reserve("candidate", "a-text-model", InFlightLane::Text);
+        activity.reserve("candidate", "z-image-model", InFlightLane::Image);
+
+        assert!(activity.release("candidate", None, InFlightLane::Image));
+        assert_eq!(
+            activity.active_models_for("candidate"),
+            vec![("a-text-model".to_string(), 1)],
+        );
+        assert_eq!(activity.in_flight_count("candidate", InFlightLane::Text), 1);
+        assert_eq!(
+            activity.in_flight_count("candidate", InFlightLane::Image),
+            0
         );
     }
 

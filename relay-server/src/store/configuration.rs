@@ -7,7 +7,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use validation::{
-    model_reasoning_allowed_levels_from_metadata, normalize_model_ids,
+    model_reasoning_allowed_levels_from_metadata, normalize_validated_model_ids,
     validate_configuration_settings, validate_quota_request_timeout, validate_routing_policy,
 };
 use zenith_relay_core::{
@@ -173,13 +173,13 @@ impl Store {
         let value = self
             .metadata("hidden_model_ids")?
             .unwrap_or_else(|| "[]".to_string());
-        normalize_model_ids(
+        normalize_validated_model_ids(
             serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())?,
         )
     }
 
     pub fn set_hidden_models(&self, models: Vec<String>) -> Result<(), String> {
-        let models = normalize_model_ids(models)?;
+        let models = normalize_validated_model_ids(models)?;
         self.set_metadata(
             "hidden_model_ids",
             &serde_json::to_string(&models)
@@ -341,7 +341,7 @@ fn configuration_settings_from_connection(
         })?;
     validate_quota_request_timeout(request_timeout_seconds)?;
     let routing = routing_policy_from_connection(connection)?;
-    let hidden_models = normalize_model_ids(
+    let hidden_models = normalize_validated_model_ids(
         metadata_from(connection, "hidden_model_ids")?.map_or(Ok(Vec::new()), |value| {
             serde_json::from_str(&value).map_err(|_| "hidden model list is invalid".to_string())
         })?,
