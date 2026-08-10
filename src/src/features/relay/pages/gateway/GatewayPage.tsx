@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { ArrowRightLeft, CheckCircle2, CircleAlert, Network, Play, RotateCw, Save, Square, UserRound } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
-import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, SettingToggle, formatAccountPlan, isCodexOauthAccountEligible } from "../../components/Ui";
+import { isCodexOauthAccountEligible } from "../../accountStatus";
+import { ActionMenu, ActionMenuItem, Button, EmptyState, OptionMenu, PageHeader, SettingToggle, formatAccountPlan } from "../../components/Ui";
 import { useRelayState } from "../../state/RelayStateProvider";
 
 export function GatewayPage() {

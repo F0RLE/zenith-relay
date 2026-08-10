@@ -1,4 +1,5 @@
-use super::{InFlightLane, PoolScheduler, SelectionReason};
+use super::{PoolScheduler, SelectionReason};
+use crate::scheduler::activity::InFlightLane;
 use crate::scheduler::{CandidateKind, CandidateQuota, RuntimeCandidate};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;

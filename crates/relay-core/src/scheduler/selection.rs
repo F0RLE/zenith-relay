@@ -1,6 +1,7 @@
 mod routing_policy;
 mod snapshot;
 
+use super::activity::{InFlightLane, SchedulerActivity};
 use super::affinity::AffinityCache;
 use super::candidate::{CandidateHealth, CandidateKind, CandidateScope, RuntimeCandidate};
 use super::capacity::{CandidateQuota, QUOTA_STALE_AFTER_MS};
@@ -26,12 +27,6 @@ const MAX_OAUTH_IMAGE_IN_FLIGHT: u32 = 1;
 const PROVIDER_STORM_WINDOW_MS: u64 = 10_000;
 const PROVIDER_STORM_OPEN_MS: u64 = 30_000;
 const PROVIDER_STORM_THRESHOLD: usize = 3;
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(super) enum InFlightLane {
-    Text,
-    Image,
-}
 
 pub struct SelectionRequest<'a> {
     pub model: &'a str,
@@ -68,12 +63,8 @@ pub struct PoolScheduler {
     cooldown_reasons: BTreeMap<(String, String), CooldownReason>,
     response_affinity: AffinityCache,
     prompt_affinity: AffinityCache,
-    in_flight: BTreeMap<String, u32>,
-    image_in_flight: BTreeMap<String, u32>,
-    active_models: BTreeMap<String, BTreeMap<String, u32>>,
+    activity: SchedulerActivity,
     half_open: BTreeSet<(String, String)>,
-    dispatches: BTreeMap<String, u64>,
-    image_dispatches: BTreeMap<String, u64>,
     routing_strategy: RoutingStrategy,
     quota_stale_after_ms: u64,
     subscription_expires_at_ms: BTreeMap<String, u64>,
@@ -113,12 +104,8 @@ impl PoolScheduler {
                 PROMPT_AFFINITY_MAX_ENTRIES,
                 PROMPT_AFFINITY_TTL_MS,
             ),
-            in_flight: BTreeMap::new(),
-            image_in_flight: BTreeMap::new(),
-            active_models: BTreeMap::new(),
+            activity: SchedulerActivity::default(),
             half_open: BTreeSet::new(),
-            dispatches: BTreeMap::new(),
-            image_dispatches: BTreeMap::new(),
             routing_strategy: RoutingStrategy::Adaptive,
             quota_stale_after_ms: QUOTA_STALE_AFTER_MS,
             subscription_expires_at_ms: BTreeMap::new(),
@@ -155,8 +142,7 @@ impl PoolScheduler {
     pub fn set_routing_strategy(&mut self, strategy: RoutingStrategy) {
         if self.routing_strategy != strategy {
             self.routing_strategy = strategy;
-            self.dispatches.clear();
-            self.image_dispatches.clear();
+            self.activity.clear_dispatches();
         }
     }
 
@@ -216,13 +202,9 @@ impl PoolScheduler {
     pub fn remove(&mut self, candidate_id: &str) -> Option<RuntimeCandidate> {
         self.response_affinity.invalidate_candidate(candidate_id);
         self.prompt_affinity.invalidate_candidate(candidate_id);
-        self.in_flight.remove(candidate_id);
-        self.image_in_flight.remove(candidate_id);
-        self.active_models.remove(candidate_id);
+        self.activity.remove_candidate(candidate_id);
         self.half_open
             .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
-        self.dispatches.remove(candidate_id);
-        self.image_dispatches.remove(candidate_id);
         self.subscription_expires_at_ms.remove(candidate_id);
         self.subscription_plans.remove(candidate_id);
         self.execution_fences.remove(candidate_id);
@@ -314,11 +296,7 @@ impl PoolScheduler {
                         .half_open
                         .iter()
                         .any(|(candidate_id, _)| candidate_id == &candidate.id),
-                    dispatches: self
-                        .dispatches
-                        .get(&candidate.id)
-                        .copied()
-                        .unwrap_or_default(),
+                    dispatches: self.dispatch_count(&candidate.id, InFlightLane::Text),
                 }
             })
             .collect()
@@ -363,8 +341,7 @@ impl PoolScheduler {
             candidate.quota_updated_at_ms = quota_updated_at_ms;
         }
         if quota_changed {
-            self.dispatches.clear();
-            self.image_dispatches.clear();
+            self.activity.clear_dispatches();
         }
         true
     }
@@ -386,8 +363,7 @@ impl PoolScheduler {
         candidate.quota_updated_at_ms = quota_updated_at_ms;
         candidate.quota_reset_at_ms = quota_reset_at_ms;
         if changed {
-            self.dispatches.clear();
-            self.image_dispatches.clear();
+            self.activity.clear_dispatches();
         }
         true
     }
@@ -913,17 +889,7 @@ impl PoolScheduler {
                 return false;
             }
         }
-        let in_flight = self
-            .in_flight_map_mut(lane)
-            .entry(candidate_id.to_string())
-            .or_default();
-        *in_flight = in_flight.saturating_add(1);
-        let dispatches = self
-            .dispatch_map_mut(lane)
-            .entry(candidate_id.to_string())
-            .or_default();
-        *dispatches = dispatches.saturating_add(1);
-        self.reserve_active_model(candidate_id, model);
+        self.activity.reserve(candidate_id, model, lane);
         true
     }
 
@@ -955,19 +921,7 @@ impl PoolScheduler {
             self.half_open
                 .retain(|(half_open_candidate, _)| half_open_candidate != candidate_id);
         }
-        {
-            let in_flight_map = self.in_flight_map_mut(lane);
-            let Some(in_flight) = in_flight_map.get_mut(candidate_id) else {
-                return false;
-            };
-            if *in_flight <= 1 {
-                in_flight_map.remove(candidate_id);
-            } else {
-                *in_flight -= 1;
-            }
-        }
-        self.release_active_model(candidate_id, model);
-        true
+        self.activity.release(candidate_id, model, lane)
     }
 
     pub fn record_success(&mut self, candidate_id: &str, model: &str, now_ms: u64) -> bool {
@@ -1222,76 +1176,26 @@ impl PoolScheduler {
     }
 
     fn in_flight_count(&self, candidate_id: &str, lane: InFlightLane) -> u32 {
-        self.in_flight_map(lane)
-            .get(candidate_id)
-            .copied()
-            .unwrap_or_default()
+        self.activity.in_flight_count(candidate_id, lane)
     }
 
     fn active_request_count(&self, candidate_id: &str) -> u32 {
-        self.active_models
-            .get(candidate_id)
-            .into_iter()
-            .flat_map(|models| models.values())
-            .fold(0_u32, |count, model_count| {
-                count.saturating_add(*model_count)
-            })
+        self.activity.active_request_count(candidate_id)
     }
 
     fn active_models_for(&self, candidate_id: &str) -> Vec<ActiveModelRuntime> {
-        self.active_models
-            .get(candidate_id)
+        self.activity
+            .active_models_for(candidate_id)
             .into_iter()
-            .flat_map(|models| models.iter())
-            .filter(|(model, count)| !model.is_empty() && **count > 0)
             .map(|(model, request_count)| ActiveModelRuntime {
-                model: model.clone(),
-                request_count: *request_count,
+                model,
+                request_count,
             })
             .collect()
     }
 
-    fn reserve_active_model(&mut self, candidate_id: &str, model: &str) {
-        let request_count = self
-            .active_models
-            .entry(candidate_id.to_string())
-            .or_default()
-            .entry(model.to_ascii_lowercase())
-            .or_default();
-        *request_count = request_count.saturating_add(1);
-    }
-
-    fn release_active_model(&mut self, candidate_id: &str, model: Option<&str>) {
-        let model_key = model
-            .map(str::to_ascii_lowercase)
-            .or_else(|| self.active_models.get(candidate_id)?.keys().next().cloned());
-        let Some(model_key) = model_key else {
-            return;
-        };
-        let empty = {
-            let Some(models) = self.active_models.get_mut(candidate_id) else {
-                return;
-            };
-            let remove_model = models.get(&model_key).is_some_and(|count| *count <= 1);
-            if remove_model {
-                models.remove(&model_key);
-            } else if let Some(request_count) = models.get_mut(&model_key) {
-                *request_count -= 1;
-            } else {
-                return;
-            }
-            models.is_empty()
-        };
-        if empty {
-            self.active_models.remove(candidate_id);
-        }
-    }
-
     fn dispatch_count(&self, candidate_id: &str, lane: InFlightLane) -> u64 {
-        self.dispatch_map(lane)
-            .get(candidate_id)
-            .copied()
-            .unwrap_or_default()
+        self.activity.dispatch_count(candidate_id, lane)
     }
 
     pub(super) fn rotation_dispatch_count(
@@ -1307,34 +1211,6 @@ impl PoolScheduler {
             dispatches.saturating_sub(u64::from(self.in_flight_count(&candidate.id, lane)))
         } else {
             dispatches
-        }
-    }
-
-    fn in_flight_map(&self, lane: InFlightLane) -> &BTreeMap<String, u32> {
-        match lane {
-            InFlightLane::Text => &self.in_flight,
-            InFlightLane::Image => &self.image_in_flight,
-        }
-    }
-
-    fn in_flight_map_mut(&mut self, lane: InFlightLane) -> &mut BTreeMap<String, u32> {
-        match lane {
-            InFlightLane::Text => &mut self.in_flight,
-            InFlightLane::Image => &mut self.image_in_flight,
-        }
-    }
-
-    fn dispatch_map(&self, lane: InFlightLane) -> &BTreeMap<String, u64> {
-        match lane {
-            InFlightLane::Text => &self.dispatches,
-            InFlightLane::Image => &self.image_dispatches,
-        }
-    }
-
-    fn dispatch_map_mut(&mut self, lane: InFlightLane) -> &mut BTreeMap<String, u64> {
-        match lane {
-            InFlightLane::Text => &mut self.dispatches,
-            InFlightLane::Image => &mut self.image_dispatches,
         }
     }
 

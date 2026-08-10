@@ -1,3 +1,4 @@
+mod activity;
 mod affinity;
 mod candidate;
 mod capacity;

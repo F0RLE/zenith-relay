@@ -11,7 +11,7 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b tsconfig.json && vite build",
     "check": "tsc -b tsconfig.json --pretty false",
-    "test:unit": "bun test tests/i18n.test.ts tests/modelPricing.test.ts tests/poolHelpers.test.ts tests/sourceProtocolBindings.test.ts tests/connectionViewState.test.ts tests/accountIdentity.test.ts tests/relayPreferences.test.ts tests/usageSpeed.test.ts",
+    "test:unit": "bun test tests/accountIdentity.test.ts tests/accountStatus.test.ts tests/connectionViewState.test.ts tests/i18n.test.ts tests/modelPricing.test.ts tests/poolHelpers.test.ts tests/relayPreferences.test.ts tests/runtimeDisplay.test.ts tests/sourceProtocolBindings.test.ts tests/usageSpeed.test.ts",
     "test:e2e": "playwright test",
     "screenshots": "playwright test --config playwright.docs.config.ts",
     "clean": "bun ../.github/tools/clean.mjs",
