@@ -420,6 +420,7 @@ pub(super) fn restore_local_locked(
     let original_auth_bytes = read_optional_bytes(&auth_path)?;
     let original_config = snapshot_text(&original_config_bytes, &config_path)?.unwrap_or_default();
     let mut document = parse_config(original_config)?;
+    validate_config_shape(&document)?;
     let config_matches_managed = managed_config_matches(&document, &backup);
     let config_matches_previous = previous_config_matches(&document, &backup);
     if !config_matches_managed && !config_matches_previous {
@@ -469,7 +470,13 @@ pub(super) fn restore_local_locked(
     }
 
     let model_catalog = backup.previous_model_catalog_json.clone();
-    restore_local_config(&mut document, &backup, model_catalog.as_deref());
+    let current_model_reasoning_effort = root_model_reasoning_effort(&document);
+    restore_local_config(
+        &mut document,
+        &backup,
+        model_catalog.as_deref(),
+        current_model_reasoning_effort.as_deref(),
+    );
     let restored_config = document.to_string();
     if original_config_bytes.as_deref() != Some(restored_config.as_bytes()) {
         replace_if_unchanged(&config_path, &original_config_bytes, &restored_config)?;
