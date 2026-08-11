@@ -30,6 +30,11 @@ the Help Center and GitHub navigation do not depend on one long page.
 - ChatGPT OAuth, existing-profile import, and compatible API sources.
 - Local personal pool with quota/health checks, model rules, proxies, routing,
   response affinity, and redacted usage history.
+- Provider-neutral source discovery with explicit protocol bindings, confirmed
+  reasoning capabilities, API-reported model prices, and optional per-source
+  price overrides.
+- Usage diagnostics that distinguish Relay, account, and provider failures
+  without recording prompts, response bodies, or secrets.
 - Optional user-managed Relay Server with encrypted vault, SQLite state,
   management API, managed ChatGPT/Codex profile attachment, backup/restore, and
   append-only migrations.
@@ -40,6 +45,15 @@ the Help Center and GitHub navigation do not depend on one long page.
 
 Relay is a personal deployment. It is not Zenith customer billing, a public
 account marketplace, or the internal Zenith account pool.
+
+## Current Direction
+
+The next work prioritizes reliable, provider-neutral operation over adding
+vendor-specific shortcuts: prove the existing personal-pool and server paths
+with real permitted accounts, measure user-visible latency, and keep model,
+price, and error behavior covered by regression tests. New account connectors,
+client integrations, and multi-server scale remain demand-gated. The exact
+acceptance gates and their order are in [ROADMAP.md](ROADMAP.md).
 
 ## Screenshots
 

@@ -1,6 +1,6 @@
 # Zenith Relay Planning
 
-Last reviewed: 2026-08-09.
+Last reviewed: 2026-08-11.
 
 This document describes the implementation that exists today, its boundaries,
 and the design rules for compatible integrations. It is not a historical task
@@ -21,6 +21,15 @@ The desktop app is not a public account marketplace, a Zenith billing backend,
 or a way to move a user's accounts into Zenith inventory. Secrets remain on the
 chosen device unless the user explicitly transfers them to their own connected
 server through a management operation.
+
+## Development direction
+
+Relay develops the supported local and user-managed server paths before adding
+new provider-specific behavior. The shared contracts stay provider-neutral:
+model identity, client/upstream protocol binding, reasoning capability, price,
+and error origin are data, not model-name heuristics. Production claims require
+the live acceptance evidence in [ROADMAP.md](ROADMAP.md); a passing fixture,
+mock, or desktop build is not a substitute for a permitted real-account test.
 
 ## Component ownership
 
@@ -48,8 +57,16 @@ placement, so Relay does not force live process pages to disk.
 Current account intake supports ChatGPT OAuth, an existing local profile, and
 compatible imported session material. Compatible API sources are independent
 records with their own address, protocol, credentials, models, priority,
-recovery delay, and optional model-price overrides. A proxy is optional and
-may be shared; there is no one-proxy-per-account rule.
+recovery delay, discovered price metadata, and optional model-price overrides.
+A source catalog also records the route-specific protocol binding and only the
+reasoning options the source explicitly confirms. A proxy is optional and may
+be shared; there is no one-proxy-per-account rule.
+
+Discovery refreshes provider-derived catalog data for that source without
+turning it into a global vendor assumption. A user-entered price remains an
+explicit override; changing an endpoint or protocol causes stale
+provider-derived prices to be rediscovered rather than carried to a different
+source contract.
 
 Every candidate has a stable record, credential availability, health, model
 availability, and a user-facing operational state. A missing secret, revoked
@@ -71,6 +88,10 @@ times. Relay displays the reported window rather than inventing a fixed
 five-hour, weekly, or subscription duration. A successful refresh can restore
 health and clear a model-level transient restriction.
 
+The account view defaults to that provider-reported quota. A separately chosen
+Zenith experimental estimate may show a learned API-value projection, but it
+does not change the reported quota, routing eligibility, or stored usage.
+
 ### Scheduler and execution
 
 The scheduler evaluates factual conditions for the requested model:
@@ -90,7 +111,12 @@ spreading across candidates.
 An execution may refresh one credential and retry a compatible candidate after
 an authentication failure or safe transient upstream failure. It must never
 retry transparently after response bytes have been sent to the client. Stream
-timings and terminal errors are recorded for diagnostics.
+timings and terminal errors are recorded for diagnostics. Each terminal failure
+has a safe origin: `relay` for Relay configuration or translation, `account`
+for account credential or account-route failures, and `provider` for a
+compatible API source or upstream provider. Usage and exports retain the
+origin, category, and HTTP status without retaining raw prompts, secrets, or
+provider response bodies.
 
 ## Models and client visibility
 
@@ -211,6 +237,7 @@ response bodies in ordinary telemetry.
 API-equivalent is an informational estimate, never a routing input:
 
 - a source-specific model price override wins;
+- otherwise the source's valid discovered catalog price is used;
 - otherwise the verified bundled OpenAI price catalog is used;
 - input, cached input, cache writes, and output retain separate price buckets;
 - unknown or incomplete token splits remain explicitly unpriced;

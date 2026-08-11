@@ -41,7 +41,8 @@ balance and counters exposed by the selected provider.
 - A base HTTPS URL for a Responses-compatible API when connecting ChatGPT.
 - A provider API key issued by that service.
 - The required model list, or an endpoint capable of returning it.
-- Current provider prices when they differ from the official catalog.
+- Custom prices only when they differ from the API-reported or built-in model
+  catalog. They are optional.
 
 A Zenith Relay server management token is not valid here. This mode requires a
 **provider API key for inference requests**.
@@ -76,8 +77,11 @@ A Zenith Relay server management token is not valid here. This mode requires a
 - Balance and spend come from the provider account or API when supported.
 - A missing balance with successful requests can mean the provider has no
   statistics endpoint; it does not automatically mean the key is invalid.
-- Set custom prices to your actual purchase cost. They affect local economics,
-  not the provider invoice.
+- When the source catalog reports valid token prices, empty price fields use
+  those prices first, then Relay's verified global model catalog.
+- A custom price is an explicit override for that source. Restore the default
+  price to use a refreshed API-reported or global catalog price again. Custom
+  prices affect local economics, not the provider invoice.
 - OpenAI models use input, output, and cache-read prices. Cache-write fields
   apply only to model families that bill them.
 
@@ -90,6 +94,7 @@ A Zenith Relay server management token is not valid here. This mode requires a
 | `429 Too Many Requests` | Balance, quota, and provider rate limit | Add balance, wait for reset, or select another source |
 | **Connect ChatGPT** is unavailable | Saved source protocol | Change the source to **Responses API**; direct Chat Completions attachment is not supported |
 | Model is listed but rejected | Protocol supported by that model | Verify Responses API support in the provider documentation |
+| A request is rejected after connection succeeds | Model, tools, parameters, and **Error source** in Usage | **Provider** means the upstream rejected the request; **Account** means its credential or route failed; **Relay** means local configuration or translation needs attention |
 | Overview has no balance | Provider statistics support | Use the provider dashboard; re-adding the key is unnecessary |
 | ChatGPT still uses the old endpoint | Active profile | Select **Connect ChatGPT** again on the intended source |
 

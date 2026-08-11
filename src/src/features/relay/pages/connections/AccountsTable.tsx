@@ -5,7 +5,6 @@ import {
   CircleAlert,
   Clock3,
   Copy,
-  DollarSign,
   Download,
   Eye,
   EyeOff,
@@ -56,7 +55,7 @@ import { NoResults, matchesQuery } from "./connectionHelpers";
 type ParticipationFilter = "all" | "included" | "excluded";
 export function AccountsTable({ query, onQuery, canImport, canManageProxies, canExport, onImport, onSignIn, onProxy, onBulkProxies, onExport }: { query: string; onQuery: (value: string) => void; canImport: boolean; canManageProxies: boolean; canExport: boolean; onImport: () => void; onSignIn: () => void; onProxy: (account: AccountSummary) => void; onBulkProxies: (accountIds: string[]) => void; onExport: (accountIds: string[]) => void }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
+  const { mode, runtime, perform, activateCodexProfile, refresh, busy, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountQuotaCalculationMode } = useRelayState();
   const confirm = useConfirm();
   const [selected, setSelected] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ accountIds: string[]; progress: AccountTransferProgress } | null>(null);
@@ -276,7 +275,6 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           <IconButton className="danger" label={t("accounts.deleteSelected")} icon={busy === "delete-selected-accounts" ? <Loader2 className="spin" aria-hidden /> : <Trash2 aria-hidden />} disabled={Boolean(busy)} onClick={deleteSelected} />
           <IconButton label={t("accounts.clearSelection")} icon={<X aria-hidden />} onClick={() => setSelected([])} />
         </> : <>
-          <IconButton className="pool-economics-toggle" label={t(accountEconomicsVisible ? "pool.hideEconomics" : "pool.showEconomics")} icon={<DollarSign aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} />
           {canRevealAccountIdentities && allAccounts.some((account) => account.secretAvailable) ? <IconButton label={t(accountIdentitiesVisible ? "accounts.hideAllIdentities" : "accounts.revealAllIdentities")} icon={accountIdentitiesBusy ? <Loader2 className="spin" aria-hidden /> : accountIdentitiesVisible ? <EyeOff aria-hidden /> : <Eye aria-hidden />} disabled={accountIdentitiesBusy} onClick={() => setAccountIdentitiesVisible(!accountIdentitiesVisible)} /> : null}
           {mode === "local" ? <IconButton label={t("accounts.refreshAll")} icon={busy === "quota-all" ? <Loader2 className="spin" aria-hidden /> : <RefreshCw aria-hidden />} disabled={Boolean(busy)} onClick={() => void refreshAllQuotas()} /> : null}
           <ActionMenu className="account-row-menu account-bulk-menu">
@@ -366,7 +364,7 @@ export function AccountsTable({ query, onQuery, canImport, canManageProxies, can
           </div>
           <div className="account-card-quota compact-quota-layout">{accountHasQuotaWindows(account) ? <QuotaStack snapshot={account.quota} nowMs={nowMs} concise /> : <AccountQuotaRefreshState account={account} />}</div>
           <div className={`account-subscription-line${subscriptionEnded ? " expired" : ""}`} title={[subscriptionEnd.date, subscriptionEnd.relative].filter(Boolean).join(" · ")}><CalendarDays aria-hidden /><span>{subscriptionEnd.date}</span>{subscriptionEnd.relative ? <><span className="account-subscription-separator" aria-hidden>·</span><span className="account-subscription-countdown">{subscriptionEnd.relative}</span></> : null}</div>
-          {accountEconomicsVisible ? <QuotaEconomicsStrip account={account} /> : null}
+          {accountQuotaCalculationMode === "zenith_experimental" ? <QuotaEconomicsStrip account={account} /> : null}
           <footer className="account-card-footer"><div className="account-card-actions">
             {onServer
               ? <IconButton label={t("accounts.onServerHint")} icon={<Server aria-hidden />} disabled />

@@ -1,10 +1,20 @@
 # Zenith Relay Roadmap
 
-Last reviewed: 2026-08-09.
+Last reviewed: 2026-08-11.
 
 This roadmap contains only remaining acceptance gates and future work. It does
 not repeat completed implementation history. A phase is complete only when its
 verification evidence exists, not when its UI is present.
+
+## Current order
+
+1. P0 is blocked only on permitted real accounts and resumes when the user
+   explicitly supplies them.
+2. Until then, work proceeds through P1, P2, and P3: measure visible latency,
+   protect the shared reliability contracts, and collect real client/provider
+   compatibility evidence.
+3. P4 and P5 remain demand-gated. Do not add speculative account connectors or
+   multi-server coordination ahead of the existing acceptance gates.
 
 ## P0 - Prove the personal pool in production (deferred)
 
@@ -49,45 +59,55 @@ The 2026-08-05 representative-data cold baseline measured native startup at
 35.52 ms, window creation at 409.47 ms, first frame at 76.00 ms, interactive
 state at 200.07 ms, Pool opening at 12.22 ms, and a full snapshot at 46.57 ms.
 Pool no longer reads Usage and has a local/remote browser regression test.
+Policy-only source and account edits hot-apply their candidate state; network
+and secret changes remain explicit rebuild operations.
 
-1. Measure warm startup, mode switch, and opening Connections and Usage with a
-   representative account set.
-2. Keep API-equivalent cached until usage or pricing changes.
-3. Skip identical full snapshots when the state revision has not changed.
-4. Turn any measured regression into a small reproducible check before
+1. Measure warm startup, mode switch, Connections, Usage, and policy-save
+   latency with a representative account set.
+2. Prove by regression test that policy edits do not reopen the local listener
+   or discard active state; endpoint, port, and secret changes may rebuild.
+3. Keep API-equivalent cached until usage or pricing changes and skip identical
+   full snapshots when the state revision has not changed.
+4. Turn a measured regression into a small reproducible check before
    optimizing it.
 
 The goal is a responsive application, not speculative caching or background
 work that makes account state stale.
 
-## P2 - Finish reliability and ownership cleanup
+## P2 - Preserve reliability and ownership boundaries
 
-1. Finish current relay-core, Tauri, and server module moves only where they
-   reduce duplicate behavior.
-2. Keep one canonical account mutation path for local and remote modes.
-3. Keep one error classification and one UI state mapping for quota, proxy,
-   credential, and source errors.
-4. Remove dead compatibility branches after their regression tests cover the
-   supported import and profile flows.
-5. Keep server migrations append-only and verify upgrade, interrupted
-   migration recovery, backup, and restore.
+The broad ownership cleanup is complete. Do not reopen it for cosmetic module
+moves. Continue only where a new regression shows two owners for the same
+behavior.
 
-The refactor is complete when a behavior has one owner, not when every file
-has been renamed.
+1. Keep local and remote account mutations on their canonical transactional
+   paths and add a regression test before consolidating a proven duplicate.
+2. Preserve the shared `ErrorOrigin` contract across HTTP, SSE, WebSocket,
+   local SQLite, server SQLite, UI, and exports. A provider failure must not
+   become an account or Relay failure during serialization.
+3. Keep cooldown, retry, response affinity, profile recovery, and tool
+   continuation rules covered at their public protocol boundaries.
+4. Keep server migrations append-only and prove upgrade, interrupted migration
+   recovery, backup, and restore against a real server before a release claim.
 
 ## P3 - Dynamic model catalogs and client integrations
 
 ### Provider-neutral source adapter acceptance
 
 The source catalog must remain provider-neutral. A source contributes model
-capabilities and an explicit client/upstream binding; the scheduler does not
-branch on vendor names.
+capabilities, confirmed reasoning options, optional catalog prices, and an
+explicit client/upstream binding; the scheduler does not branch on vendor
+names. Fixture coverage exists for this contract. The remaining gates require
+real endpoint and client evidence.
 
-1. Keep native passthrough as the default and require an explicit adapter for
+1. Run source discovery against real Responses and Messages endpoints and prove
+   that model availability, protocol bindings, confirmed reasoning, discovered
+   prices, and manual price overrides remain separate across refreshes.
+2. Keep native passthrough as the default and require an explicit adapter for
    every protocol conversion.
-2. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or
+3. Do not claim hosted tools, dynamic discovery, unsupported reasoning, or
    WebSocket bridging until an exact adapter path and regression coverage exist.
-3. Before release, run a real `codex.exe` acceptance matrix for every claimed
+4. Before release, run a real `codex.exe` acceptance matrix for every claimed
    source family: initial tool call, actual local tool execution, follow-up
    `function_call_output`, streaming, and a fresh turn after restart.
 
@@ -140,12 +160,11 @@ place until a real personal deployment demonstrates the need to resume it.
 Do not add distributed coordination to the current single-user server without
 this demand and acceptance evidence.
 
-## P6 - Localization, documentation, and release hygiene
+## P6 - Localization, documentation, and release evidence
 
-1. Keep README, planning, roadmap, and Help aligned with shipped behavior.
-2. For every new UI locale, add the localized overview and three mode-specific
+1. For every new UI locale, add the localized overview and three mode-specific
    Help documents, then register the mode documents in Help Center.
-3. Regenerate screenshots from Playwright after a material layout or
+2. Regenerate screenshots from Playwright after a material layout or
    terminology change.
-4. Run all relevant checks, review generated assets, and perform the P0 live
+3. Run all relevant checks, review generated assets, and perform the P0 live
    acceptance before a release claim.
