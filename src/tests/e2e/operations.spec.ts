@@ -2417,8 +2417,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card .account-token-speed")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toContainText("API equiv.");
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).not.toContainText("Latest output speed");
+  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toHaveCount(0);
+  await expect(page.locator('[data-member-label="Personal Plus"] .quota-meter').first()).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
@@ -3037,31 +3037,29 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
 });
 
-test("account economics visibility is shared by connections and pool and persists", async ({ page }) => {
+test("provider quota display is the default and the Zenith estimate is opt-in in settings", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const connectionEconomics = page.locator(".account-card .account-economics-strip");
 
-  await expect(connectionEconomics.first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Hide account economics" })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "Hide account economics" }).click();
   await expect(connectionEconomics).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+  await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const poolEconomics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
-  await expect(page.getByRole("button", { name: "Show account economics" })).toHaveAttribute("aria-pressed", "false");
-  await expect(poolEconomics).toHaveCount(0);
-  await page.getByRole("button", { name: "Show account economics" }).click();
-  await expect(poolEconomics.first()).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Provider reported", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Zenith estimate (experimental)", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("zenith_experimental");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Hide account economics" })).toHaveAttribute("aria-pressed", "true");
   await expect(connectionEconomics.first()).toBeVisible();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip').first()).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(connectionEconomics.first()).toBeVisible();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip').first()).toBeVisible();
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

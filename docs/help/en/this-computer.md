@@ -91,7 +91,8 @@ the profile unless the backup reminder was disabled in Settings.
 1. Confirm that **API & ChatGPT** shows **API is running**.
 2. Send a short request from ChatGPT.
 3. Open **Usage** and find the new request.
-4. Check its model, pool participant, HTTP status, and response time.
+4. Check its model, pool participant, HTTP status, response time, and **Error
+   source** when it failed.
 5. Return to **Pool** and confirm that the account did not turn red.
 
 > **Ready means:** the request succeeds, Usage names the actual participant,
@@ -112,6 +113,7 @@ the profile unless the backup reminder was disabled in Settings.
 | **Sign-in required** | The session may be revoked or invalid | Sign in to that account again |
 | **Unavailable** | The latest quota, model, or proxy error | Open account status and correct the reported cause |
 | **429** | Account quota, model limit, and other participants | Wait for reset or enable an eligible fallback; one 429 must not block the whole pool |
+| Request fails after a participant was selected | **Error source** in Usage | **Provider** rejected the upstream request, **Account** identifies its credential or route, and **Relay** identifies local configuration or protocol translation |
 | Model cannot be selected | Model availability for every participant | Refresh models; do not force-enable a model the account does not support |
 | Request is absent from Usage | Client endpoint and API state | Reconnect ChatGPT and verify the local endpoint |
 | ChatGPT profile changed incorrectly | The latest automatic backup | Open **Recovery** and restore the previous profile |

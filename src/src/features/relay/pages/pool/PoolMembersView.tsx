@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, Clock3, Cloud, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, SourceStats, SourceSummary } from "../../api/types";
@@ -18,7 +18,7 @@ type SourceStatsState = { value: SourceStats | null; loading: boolean; failed: b
 
 export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSettings }: { onAdd: () => void; onRoutingPolicy: () => void; supportsRoutingSettings: boolean }) {
   const { t, i18n } = useTranslation();
-  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountEconomicsVisible, setAccountEconomicsVisible } = useRelayState();
+  const { mode, runtime, perform, busy, codexPoolOauthSelection, accountQuotaCalculationMode } = useRelayState();
   const confirm = useConfirm();
   const canAdd = mode !== "remote" || Boolean(runtime?.capabilities.features.some((feature) => feature === "accounts" || feature === "sources"));
   const canRefreshQuota = mode !== "remote" || Boolean(runtime?.capabilities.features.includes("quota"));
@@ -173,7 +173,6 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
-            <IconButton className="pool-economics-toggle" label={t(accountEconomicsVisible ? "pool.hideEconomics" : "pool.showEconomics")} icon={<DollarSign aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} />
             <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
           </div>
         </div>
@@ -237,7 +236,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
           </header>
           <div className={`pool-member-card-quota${member.kind === "account" ? " compact-quota-layout" : ""}`}>{member.kind === "account" ? <PoolAccountQuota account={member} nowMs={nowMs} /> : <PoolSourceStats source={member} state={sourceStats[member.id]} />}</div>
           <div className="pool-member-context" data-kind={member.kind}>{member.kind === "account" ? <><span className="pool-member-subscription-date">{subscriptionExpiry?.date}</span>{subscriptionExpiry?.remaining ? <><span className="pool-member-context-separator" aria-hidden>·</span><span className="pool-member-subscription-expiry">{subscriptionExpiry.remaining}</span></> : null}</> : <span>{t(`sources.roles.${apiSourceRole(member.priority)}`)}</span>}</div>
-          {member.kind === "account" && accountEconomicsVisible ? <QuotaEconomicsStrip account={member} /> : null}
+          {member.kind === "account" && accountQuotaCalculationMode === "zenith_experimental" ? <QuotaEconomicsStrip account={member} /> : null}
           <footer className="pool-member-card-footer" data-kind={member.kind}>
             <div className="pool-member-actions">
               <IconButton className="danger" data-relay-context-action label={removeLabel} icon={removing ? <Loader2 className="spin" aria-hidden /> : <ListMinus aria-hidden />} disabled={removing} onClick={() => void confirmRemove(member)} onContextMenu={(event) => {

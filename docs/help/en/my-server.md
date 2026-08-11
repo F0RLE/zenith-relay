@@ -88,7 +88,8 @@ same URL. Do not approve an identity change until its cause is understood.
 ## Verify the setup
 
 1. Send a request from ChatGPT/Codex and find it in **Usage**.
-2. Check its model, participant, speed, tokens, and HTTP status.
+2. Check its model, participant, speed, tokens, HTTP status, and **Error
+   source** when it failed.
 3. Close the desktop application.
 4. Send a second request from ChatGPT/Codex.
 5. Reopen Zenith Relay and confirm that the second request was stored.
@@ -105,6 +106,7 @@ same URL. Do not approve an identity change until its cause is understood.
 | Management API returns `401` | Management token | Replace the management token and reconnect the app |
 | `/v1` returns `401` | Managed profile credential and profile binding | Attach ChatGPT/Codex again from the desktop app |
 | No eligible participant | Pool state, quota, models, and proxies | Repair the specific participant or enable a fallback |
+| A routed request fails | **Error source** in Usage | **Provider** rejected the upstream request, **Account** identifies its credential or route, and **Relay** identifies server configuration or protocol translation |
 | Move was interrupted | The recorded server connection | Reconnect the same server and let Relay recover the operation; do not create a second copy manually |
 | Usage does not refresh | Server `usage` capability and version | Install a compatible server version and fetch a new snapshot |
 
