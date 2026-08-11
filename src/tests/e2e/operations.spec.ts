@@ -2417,8 +2417,8 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card .account-token-speed")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toContainText("API equiv.");
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).not.toContainText("Latest output speed");
+  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toHaveCount(0);
+  await expect(page.locator('[data-member-label="Personal Plus"] .quota-meter').first()).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
 
@@ -3058,6 +3058,8 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await page.reload();
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(connectionEconomics.first()).toBeVisible();
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  await expect(page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip').first()).toBeVisible();
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

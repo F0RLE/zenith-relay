@@ -408,7 +408,7 @@ for (const theme of ["light", "dark"] as const) {
         const bottomGap = availableBottom - (groupsBox!.y + groupsBox!.height);
         expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(2);
       }
-      await expect(groups).toHaveCount(3);
+      await expect(groups).toHaveCount(4);
       const boxes = await groups.evaluateAll((items) => items.map((item) => {
         const rect = item.getBoundingClientRect();
         return { left: rect.left, top: rect.top, width: rect.width, overflow: item.scrollWidth - item.clientWidth };
@@ -595,7 +595,7 @@ for (const viewport of viewports) {
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
     await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Режим запросов" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
-    await expect(poolToolbarGroups.nth(1).locator(":scope > *").evaluateAll((items) => items.map((item) => item.getAttribute("aria-label") ?? item.textContent?.trim()))).resolves.toEqual(["Скрыть экономику аккаунтов", "Обновить квоты"]);
+    await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(1);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
       const cellRect = cell.getBoundingClientRect();
@@ -640,7 +640,6 @@ for (const viewport of viewports) {
     await expect(page.locator(".pool-summary > div")).toHaveCount(4);
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
     await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
-    await expect(members).toContainText("API-экв.");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("42,50");
     await expect(apiCard).toContainText("7,50");
@@ -676,7 +675,6 @@ for (const viewport of viewports) {
 
     await expect(members.getByText("Pro account", { exact: true })).toBeVisible();
     await expect(members.locator('.account-plan-badge[data-plan="pro"]')).toHaveText("Pro");
-    await expect(members).toContainText("API equiv.");
     const apiCard = members.locator('.pool-member-card[data-member-kind="source"]');
     await expect(apiCard).toContainText("$42.50");
     await expect(apiCard).toContainText("$7.50");
