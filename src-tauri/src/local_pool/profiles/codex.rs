@@ -322,7 +322,13 @@ fn snapshot_user_profile_with(
     } else if let Some(backup) = local_backup(codex_home, backup_root)? {
         if managed_config_matches(&document, &backup) {
             let model_catalog = model_catalog_to_restore(&document, &backup);
-            restore_local_config(&mut document, &backup, model_catalog.as_deref());
+            let current_model_reasoning_effort = root_model_reasoning_effort(&document);
+            restore_local_config(
+                &mut document,
+                &backup,
+                model_catalog.as_deref(),
+                current_model_reasoning_effort.as_deref(),
+            );
             let auth = if managed_auth_matches_snapshot(&auth, &auth_path, &backup)? {
                 previous_auth_snapshot(backup.previous_auth_secret_ref.as_deref(), secrets)?
             } else {

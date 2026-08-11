@@ -53,9 +53,9 @@ pub(super) fn attach_config(
     model_catalog_path: Option<&str>,
     previous_model_catalog: Option<&str>,
 ) {
-    // A global Codex effort overrides each model catalog entry. While Relay is
-    // active it must be absent so automatic models use Relay's `medium`
-    // default and a manual per-model rule remains authoritative.
+    // A global Codex effort overrides each model catalog entry. Clear a stale
+    // value on attach so automatic models use Relay's `medium` default; if
+    // Codex or the user adds one while Relay is active, preserve it on restore.
     document.remove("model_reasoning_effort");
     document["model_provider"] = value(PROVIDER_ID);
     restore_root_string(
@@ -94,6 +94,7 @@ pub(super) fn restore_local_config(
     document: &mut DocumentMut,
     backup: &ProfileBackup,
     previous_model_catalog: Option<&str>,
+    current_model_reasoning_effort: Option<&str>,
 ) {
     restore_config(
         document,
@@ -104,7 +105,7 @@ pub(super) fn restore_local_config(
         restore_root_string(
             document,
             "model_reasoning_effort",
-            backup.previous_model_reasoning_effort.as_deref(),
+            current_model_reasoning_effort.or(backup.previous_model_reasoning_effort.as_deref()),
         );
     }
 }
@@ -348,15 +349,11 @@ pub(super) fn managed_config_matches(document: &DocumentMut, backup: &ProfileBac
             || root_model_catalog_json(document).as_deref()
                 == backup.managed_model_catalog_path.as_deref())
         && managed_provider_matches(document, backup)
-        && (!backup.managed_model_reasoning_effort_cleared
-            || document.get("model_reasoning_effort").is_none())
 }
 
 pub(super) fn previous_config_matches(document: &DocumentMut, backup: &ProfileBackup) -> bool {
     root_model_provider(document) == backup.previous_model_provider
         && root_model_catalog_json(document) == backup.previous_model_catalog_json
-        && (!backup.managed_model_reasoning_effort_cleared
-            || root_model_reasoning_effort(document) == backup.previous_model_reasoning_effort)
 }
 
 pub(super) fn external_provider_took_over(document: &DocumentMut, backup: &ProfileBackup) -> bool {
