@@ -1781,6 +1781,70 @@ async fn responses_to_messages_bridge_translates_sse_text_and_tool_arguments() {
 }
 
 #[tokio::test]
+async fn responses_to_messages_bridge_preserves_plain_stream_context_for_http_continuation() {
+    let (upstream, state) = spawn_messages_upstream().await;
+    let (gateway, events) =
+        spawn_messages_bridge_gateway(&upstream.base_url, MessagesReasoningMode::Disabled).await;
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "claude-test",
+            "input": "Remember this turn",
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = first.text().await.unwrap();
+    let response_id = first_body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find_map(|event| {
+            (event["type"] == "response.completed")
+                .then(|| event["response"]["id"].as_str().map(str::to_string))
+                .flatten()
+        })
+        .expect("the completed bridge stream exposes a response id");
+
+    let second = client
+        .post(format!("{}/v1/responses", gateway.base_url))
+        .bearer_auth(LOCAL_KEY)
+        .json(&json!({
+            "model": "claude-test",
+            "previous_response_id": response_id,
+            "input": "What did I ask you to remember?"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let bodies = state.bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let messages = bodies[1]["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"][0]["text"], "Remember this turn");
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[1]["content"][0]["text"], "Streaming context");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(
+        messages[2]["content"][0]["text"],
+        "What did I ask you to remember?"
+    );
+    drop(bodies);
+
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().all(|event| event.success));
+}
+
+#[tokio::test]
 async fn malformed_messages_response_is_redacted_as_adapter_error() {
     let (upstream, state) = spawn_messages_upstream().await;
     let (gateway, events) =
@@ -2417,7 +2481,12 @@ async fn upstream_messages(
     };
     state.bodies.lock().unwrap().push(request.clone());
 
-    if request.get("stream").and_then(Value::as_bool) == Some(true) {
+    if request.get("stream").and_then(Value::as_bool) == Some(true)
+        && request
+            .get("tools")
+            .and_then(Value::as_array)
+            .is_some_and(|tools| !tools.is_empty())
+    {
         let chunks = stream::iter([
             Ok::<_, Infallible>(Bytes::from_static(
                 b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
@@ -2442,6 +2511,33 @@ async fn upstream_messages(
             )),
             Ok::<_, Infallible>(Bytes::from_static(
                 b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":5}}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ]);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .body(Body::from_stream(chunks))
+            .unwrap();
+    }
+    if request.get("stream").and_then(Value::as_bool) == Some(true) {
+        let chunks = stream::iter([
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream_text_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Streaming context\"}}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok::<_, Infallible>(Bytes::from_static(
+                b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}\n\n",
             )),
             Ok::<_, Infallible>(Bytes::from_static(
                 b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
