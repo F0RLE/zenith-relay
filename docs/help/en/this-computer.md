@@ -126,5 +126,11 @@ contains non-secret records, quota state, settings, and request statistics.
 **Recovery** restores the ChatGPT configuration and available profile files.
 Restoring a named snapshot requires confirmation. By default, Relay offers to
 save the current profile first; you can decline it for one restore or turn off
-that default in Settings. Deleting an account from the application also removes
-its owned local secrets and related service data.
+that default in Settings. During Relay-managed automatic detach or restore, a
+reasoning effort added or changed by Codex or you is kept. An explicitly
+selected full snapshot restore may restore the snapshot as a whole and is not
+covered by that preservation guarantee. Changes to the managed provider,
+endpoint, credentials, or model catalog block managed recovery for review
+instead of being overwritten.
+Deleting an account from the application also removes its owned local secrets
+and related service data.

@@ -261,8 +261,12 @@ restore -> verify restored state
 
 Recovery lists snapshots, opens their real location when appropriate, restores
 a selected snapshot, and removes only Relay-managed configuration if no
-snapshot is available. It must not overwrite a user login or configuration
-that changed after Relay attached the profile.
+snapshot is available. During Relay-managed automatic detach/restore, a user
+or Codex change to the global <code>model_reasoning_effort</code> is preserved.
+An explicitly selected full snapshot restore may restore the snapshot as a
+whole and is not covered by that preservation guarantee. Changes to the
+managed provider, base URL, credentials/auth, or model catalog still block
+managed recovery rather than being overwritten.
 
 ## User-managed server
 
