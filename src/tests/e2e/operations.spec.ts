@@ -1376,7 +1376,7 @@ test("accounts without quota show the automatic refresh state", async ({ page })
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const pending = page.locator(".account-card").filter({ hasText: "Quota pending" });
-  await expect(pending.getByText("Waiting for check", { exact: true })).toBeVisible();
+  await expect(pending.locator(".account-quota-refresh-state")).toContainText("Waiting for check");
 });
 
 test("account cards show the subscription end date or an explicit unavailable state", async ({ page }) => {
@@ -3042,9 +3042,23 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   const connectionEconomics = page.locator(".account-card .account-economics-strip");
+  const connectionProviderQuota = page.locator(".account-card .account-provider-quota-strip");
 
   await expect(connectionEconomics).toHaveCount(0);
+  await expect(connectionProviderQuota.first()).toBeVisible();
   await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Hide account calculation" }).click();
+  await expect(connectionProviderQuota).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+  const poolEconomics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
+  const poolProviderQuota = page.locator('.pool-member-card[data-member-kind="account"] .account-provider-quota-strip');
+  await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
+  await expect(poolProviderQuota).toHaveCount(0);
+  await page.getByRole("button", { name: "Show account calculation" }).click();
+  await expect(poolProviderQuota.first()).toBeVisible();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByRole("button", { name: "Provider reported", exact: true })).toHaveAttribute("aria-pressed", "true");
@@ -3053,13 +3067,30 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(connectionEconomics.first()).toBeVisible();
+  await expect(connectionProviderQuota).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Hide account calculation" }).click();
+  await expect(connectionEconomics).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip').first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
+  await expect(poolEconomics).toHaveCount(0);
+  await page.getByRole("button", { name: "Show account calculation" }).click();
+  await expect(poolEconomics.first()).toBeVisible();
+
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Provider reported", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("provider");
+
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+  await expect(connectionEconomics).toHaveCount(0);
+  await expect(connectionProviderQuota.first()).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionEconomics.first()).toBeVisible();
+  await expect(connectionProviderQuota.first()).toBeVisible();
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip').first()).toBeVisible();
+  await expect(poolProviderQuota.first()).toBeVisible();
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

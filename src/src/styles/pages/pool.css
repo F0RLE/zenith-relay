@@ -209,7 +209,7 @@
   gap: 10px;
 }
 
-.pool-economics-toggle[aria-pressed="true"] {
+.account-calculation-toggle[aria-pressed="true"] {
   border-color: color-mix(in srgb, var(--relay-accent) 45%, var(--relay-border));
   background: var(--relay-accent-soft);
   color: var(--relay-accent-hover);

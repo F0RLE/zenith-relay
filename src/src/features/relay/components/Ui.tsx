@@ -71,6 +71,27 @@ export function QuotaEconomicsStrip({ account }: { account: AccountSummary }) {
   </dl>;
 }
 
+export function ProviderQuotaStrip({ account, nowMs }: { account: AccountSummary; nowMs: number }) {
+  const { t, i18n } = useTranslation();
+  const locale = i18n.resolvedLanguage ?? i18n.language;
+  const windows = [account.quota.primary, account.quota.secondary, ...(account.quota.supplemental ?? []).map(({ window }) => window)].filter((window): window is QuotaWindow => window != null);
+  const reportedRemaining = windows.map((window) => window.availableBasisPoints).filter((value): value is number => value != null);
+  const lowestRemaining = account.quota.limitReached ? 0 : reportedRemaining.length ? Math.min(...reportedRemaining) : null;
+  const resetTimes = windows.map((window) => window.resetAtMs).filter((value): value is number => value != null);
+  const nextResetAtMs = resetTimes.length ? Math.min(...resetTimes) : null;
+  const reportStatus = account.quotaRefreshStatus;
+  const reportedAtMs = account.quota.updatedAtMs;
+  const reportedAt = reportedAtMs == null ? t(`accounts.quotaRefreshStatus.${reportStatus}`) : new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(reportedAtMs);
+  const reportTitle = reportedAtMs == null ? reportedAt : t("accounts.providerQuota.reportHint", { value: reportedAt });
+  const resetValue = nextResetAtMs == null ? t("quota.notReported") : formatDetailedRemainingTime(nextResetAtMs, nowMs, t);
+  const resetTitle = nextResetAtMs == null ? resetValue : new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }).format(nextResetAtMs);
+  return <dl className="account-calculation-strip account-provider-quota-strip">
+    <div title={t("accounts.providerQuota.remainingHint")}><dt>{t("accounts.providerQuota.remaining")}</dt><dd>{lowestRemaining == null ? t("quota.notReported") : `${Math.round(lowestRemaining / 100)}%`}</dd></div>
+    <div title={resetTitle}><dt>{t("accounts.providerQuota.reset")}</dt><dd>{resetValue}</dd></div>
+    <div title={reportTitle} data-state={reportStatus}><dt>{t("accounts.providerQuota.report")}</dt><dd>{reportedAt}</dd></div>
+  </dl>;
+}
+
 function formatMicroUsd(value: number, locale: string, approximate = false) {
   const formatted = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value / 1_000_000);
   return `${approximate ? "≈" : ""}${formatted}`;

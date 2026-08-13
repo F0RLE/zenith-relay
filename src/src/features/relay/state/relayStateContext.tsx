@@ -29,6 +29,8 @@ export type RelayContextValue = {
   accountIdentitiesBusy: boolean;
   canRevealAccountIdentities: boolean;
   setAccountIdentitiesVisible: (visible: boolean) => void;
+  accountEconomicsVisible: boolean;
+  setAccountEconomicsVisible: (visible: boolean) => void;
   accountQuotaCalculationMode: AccountQuotaCalculationMode;
   setAccountQuotaCalculationMode: (mode: AccountQuotaCalculationMode) => void;
   accountDisplayName: (accountId?: string | null, fallbackLabel?: string | null) => string | null;

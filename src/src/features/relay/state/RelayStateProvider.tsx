@@ -55,6 +55,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
   const [profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestoreState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.profileSnapshotBackupBeforeRestore, "1") !== "0");
   const [codexPoolOauthSelection, setCodexPoolOauthSelectionState] = useState(readCodexPoolOauthSelection);
   const [accountIdentitiesVisible, setAccountIdentitiesVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.accountIdentitiesVisible, "0") === "1");
+  const [accountEconomicsVisible, setAccountEconomicsVisibleState] = useState(() => readRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, "true") !== "false");
   const [accountQuotaCalculationMode, setAccountQuotaCalculationModeState] = useState(readAccountQuotaCalculationMode);
   const [revealedAccountIdentities, setRevealedAccountIdentities] = useState<Record<string, string>>({});
   const localUsageRequest = useRef(0);
@@ -443,6 +444,11 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     if (!visible) setRevealedAccountIdentities({});
   }, []);
 
+  const setAccountEconomicsVisible = useCallback((visible: boolean) => {
+    writeRelayPreference(RELAY_STORAGE_KEYS.poolEconomicsVisible, String(visible));
+    setAccountEconomicsVisibleState(visible);
+  }, []);
+
   const setAccountQuotaCalculationMode = useCallback((next: AccountQuotaCalculationMode) => {
     writeRelayPreference(RELAY_STORAGE_KEYS.accountQuotaCalculationMode, next);
     setAccountQuotaCalculationModeState(next);
@@ -478,6 +484,8 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     accountIdentitiesBusy,
     canRevealAccountIdentities,
     setAccountIdentitiesVisible,
+    accountEconomicsVisible,
+    setAccountEconomicsVisible,
     accountQuotaCalculationMode,
     setAccountQuotaCalculationMode,
     accountDisplayName,
@@ -507,7 +515,7 @@ export function RelayStateProvider({ children }: { children: ReactNode }) {
     setProfileSnapshotBackupBeforeRestore,
     codexPoolOauthSelection,
     setCodexPoolOauthSelection,
-  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountQuotaCalculationMode, setAccountQuotaCalculationMode, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
+  }), [mode, setMode, page, displayRuntime, runtimeRevision, usageRevision, accountIdentitiesVisible, accountIdentitiesBusy, canRevealAccountIdentities, setAccountIdentitiesVisible, accountEconomicsVisible, setAccountEconomicsVisible, accountQuotaCalculationMode, setAccountQuotaCalculationMode, accountDisplayName, localUsage, localUsagePage, loadLocalUsage, remoteUsage, remoteUsagePage, loadRemoteUsage, readyState, loading, busy, feedback, refresh, perform, activateCodexProfile, launchCodexProfile, clearFeedback, onboardingComplete, finishOnboarding, resetOnboarding, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, codexPoolOauthSelection, setCodexPoolOauthSelection]);
 
   useEffect(() => {
     document.documentElement.lang = i18n.language.startsWith("ru") ? "ru" : "en";

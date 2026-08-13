@@ -10,6 +10,7 @@ export const RELAY_STORAGE_KEYS = {
   codexPoolOauthSelection: "relay.codexPoolOauthSelection",
   legacyCodexPoolOauthSelection: "relay.codexPoolOauthAccountId",
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",
+  poolEconomicsVisible: "relay.poolEconomicsVisible",
   accountQuotaCalculationMode: "relay.accountQuotaCalculationMode",
 } as const;
 
