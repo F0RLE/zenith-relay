@@ -149,37 +149,15 @@ pub async fn set_model_reasoning(
         .remove(&canonical)
         .unwrap_or_default();
     let runtime = state.runtime().map_err(runtime_error)?;
-    if !allowed_levels.is_empty() {
-        if model_has_native_account_route(&snapshot.accounts, &canonical) {
-            return Err(ManagementError::new(
-                StatusCode::CONFLICT,
-                "native_reasoning_managed",
-                "native ChatGPT model reasoning settings cannot be configured here",
-                "configuration",
-                false,
-            ));
-        }
-        let runtime = runtime.as_ref().ok_or_else(|| {
-            ManagementError::new(
-                StatusCode::CONFLICT,
-                "reasoning_capabilities_unavailable",
-                "confirm model reasoning capabilities before allowing modes",
-                "configuration",
-                true,
-            )
-        })?;
-        if allowed_levels
-            .iter()
-            .any(|effort| !runtime.supports_source_reasoning_effort(&canonical, effort))
-        {
-            return Err(ManagementError::new(
-                StatusCode::CONFLICT,
-                "reasoning_levels_unconfirmed",
-                "requested reasoning mode is not confirmed for this model",
-                "configuration",
-                true,
-            ));
-        }
+    if !allowed_levels.is_empty() && model_has_native_account_route(&snapshot.accounts, &canonical)
+    {
+        return Err(ManagementError::new(
+            StatusCode::CONFLICT,
+            "native_reasoning_managed",
+            "native ChatGPT model reasoning settings cannot be configured here",
+            "configuration",
+            false,
+        ));
     }
 
     let previous = state

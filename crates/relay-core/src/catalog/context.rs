@@ -268,9 +268,9 @@ pub(crate) fn apply_claude_reasoning_capability_fallback(
 /// Combines capabilities confirmed by one or more provider routes.
 ///
 /// A route that does not publish metadata is intentionally absent from this
-/// input. The request path excludes that route when a client explicitly asks
-/// for an effort, so it is safe to expose every level confirmed by at least
-/// one route instead of hiding controls for the whole public model.
+/// input. It remains eligible for requests because a provider may support an
+/// effort without advertising it, so the picker exposes every level confirmed
+/// by at least one route instead of hiding controls for the whole public model.
 pub(crate) fn union_source_reasoning_capabilities(
     capabilities: impl IntoIterator<Item = SourceReasoningCapabilities>,
 ) -> Option<SourceReasoningCapabilities> {

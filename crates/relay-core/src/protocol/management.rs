@@ -100,9 +100,10 @@ pub struct ModelSummary {
     pub reasoning_configurable: bool,
 }
 
-/// Adds the confirmed API-source reasoning capabilities to a management
-/// model row. Native ChatGPT routes retain their provider-owned catalog and
-/// are intentionally never configurable here.
+/// Adds API-source reasoning capabilities to a management model row. Saved
+/// operator policy is a valid API capability even when a provider catalog
+/// omits its reasoning metadata. Native ChatGPT routes retain their
+/// provider-owned catalog and are intentionally never configurable here.
 pub fn apply_model_reasoning_summary(
     model: &mut ModelSummary,
     confirmed_levels: Vec<String>,
@@ -123,23 +124,18 @@ pub fn apply_model_reasoning_summary(
             model.reasoning_levels.push(level);
         }
     }
-    if model.reasoning_levels.is_empty() {
-        return;
-    }
-
-    model.reasoning_configurable = true;
     if let Some(saved_allowed_levels) = saved_allowed_levels {
-        let configured = saved_allowed_levels
-            .iter()
-            .map(|level| level.trim().to_ascii_lowercase())
-            .collect::<BTreeSet<_>>();
-        model.reasoning_allowed_levels = model
-            .reasoning_levels
-            .iter()
-            .filter(|level| configured.contains(level.as_str()))
-            .cloned()
-            .collect();
+        for level in saved_allowed_levels {
+            let level = level.trim().to_ascii_lowercase();
+            if !level.is_empty() && seen.insert(level.clone()) {
+                model.reasoning_levels.push(level.clone());
+            }
+            if !level.is_empty() && !model.reasoning_allowed_levels.contains(&level) {
+                model.reasoning_allowed_levels.push(level);
+            }
+        }
     }
+    model.reasoning_configurable = !model.reasoning_levels.is_empty();
 }
 
 pub fn source_runtime_available(
@@ -1149,6 +1145,42 @@ mod tests {
         ];
         assert!(model_has_native_account_route(&accounts, "gpt-5"));
         assert!(!model_has_native_account_route(&accounts, "other"));
+    }
+
+    #[test]
+    fn model_reasoning_summary_keeps_saved_api_levels_without_catalog_metadata() {
+        let mut model = ModelSummary {
+            enabled: true,
+            codex_visible: true,
+            codex_display_name: String::new(),
+            id: "gpt-test".into(),
+            member_count: 1,
+            catalog_rank: None,
+            input_micro_usd_per_million: None,
+            cached_input_micro_usd_per_million: None,
+            cache_write_5m_micro_usd_per_million: None,
+            cache_write_1h_micro_usd_per_million: None,
+            output_micro_usd_per_million: None,
+            custom_price: false,
+            reasoning_levels: Vec::new(),
+            reasoning_allowed_levels: Vec::new(),
+            reasoning_configurable: false,
+        };
+
+        apply_model_reasoning_summary(
+            &mut model,
+            vec!["high".into()],
+            Some(&["ultra".into()]),
+            false,
+        );
+        assert_eq!(model.reasoning_levels, ["high", "ultra"]);
+        assert_eq!(model.reasoning_allowed_levels, ["ultra"]);
+        assert!(model.reasoning_configurable);
+
+        apply_model_reasoning_summary(&mut model, Vec::new(), Some(&["max".into()]), true);
+        assert!(model.reasoning_levels.is_empty());
+        assert!(model.reasoning_allowed_levels.is_empty());
+        assert!(!model.reasoning_configurable);
     }
 
     #[test]
