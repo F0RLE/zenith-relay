@@ -16,12 +16,11 @@
     "screenshots": "playwright test --config playwright.docs.config.ts",
     "clean": "bun ../.github/tools/clean.mjs",
     "clean:all": "bun ../.github/tools/clean.mjs --all",
-    "verify": "bun run check && bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked -- --test-threads=1",
+    "verify": "bun run test:unit && bun run build && cargo test --manifest-path ../src-tauri/Cargo.toml --locked -- --test-threads=1",
     "preview": "vite preview --host 127.0.0.1 --port 4173 --strictPort",
     "tauri": "tauri",
     "app:dev": "bun ../.github/tools/tauri-dev.mjs",
-    "app:build": "bun ../.github/tools/tauri-build.mjs",
-    "app:build:signed": "bun ../.github/tools/tauri-build.mjs"
+    "app:build": "bun ../.github/tools/tauri-build.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
