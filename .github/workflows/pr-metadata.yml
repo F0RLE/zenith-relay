@@ -1,0 +1,76 @@
+name: Validate PR metadata
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+      - ready_for_review
+
+permissions:
+  pull-requests: read
+
+jobs:
+  metadata:
+    name: Release context
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require release context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pullRequest = context.payload.pull_request;
+            if (pullRequest.user.type === "Bot") {
+              core.info("Bot pull request: release metadata is maintained by automation.");
+              return;
+            }
+
+            const body = pullRequest.body || "";
+            const requiredHeadings = [
+              "## Summary",
+              "## User-visible changes",
+              "## Release Notes",
+              "## Validation",
+              "## Risk and rollout",
+            ];
+            const missingHeadings = requiredHeadings.filter(
+              (heading) => !body.toLowerCase().includes(heading.toLowerCase()),
+            );
+
+            const releaseSectionMatch = body.match(
+              /## Release Notes([\s\S]*?)(?=\n##\s|$)/i,
+            );
+            const releaseSection = releaseSectionMatch?.[1] || "";
+            const releaseWorthy = /-\s*\[[xX]\]\s*Release-worthy/i.test(
+              releaseSection,
+            );
+            const noReleaseNote = /-\s*\[[xX]\]\s*No release note/i.test(
+              releaseSection,
+            );
+            const noteSectionMatch = releaseSection.match(
+              /###\s*Ready-to-publish note([\s\S]*)/i,
+            );
+            const noteText = (noteSectionMatch?.[1] || "")
+              .replace(/<!--[\s\S]*?-->/g, "")
+              .replace(/-\s*\[[ xX]\].*/g, "")
+              .replace(/[_* >#-]/g, "")
+              .trim();
+
+            const errors = [...missingHeadings];
+            if (!releaseWorthy && !noReleaseNote) {
+              errors.push("select a Release Notes checkbox");
+            }
+            if (releaseWorthy && noteText.length < 12) {
+              errors.push("write a non-empty ready-to-publish release note");
+            }
+
+            if (errors.length > 0) {
+              core.setFailed(
+                "PR metadata is incomplete: " + errors.join(", ") + ".",
+              );
+            } else {
+              core.info("PR summary, user impact, validation, risk, and release context are present.");
+            }
+
