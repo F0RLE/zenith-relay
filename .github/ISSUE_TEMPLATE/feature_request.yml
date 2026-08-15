@@ -1,5 +1,44 @@
-Get-Content: 
-Line |
-   2 |  Get-Content -Raw -LiteralPath 'work\github-config\ISSUE_TEMPLATE\feat …
-     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Cannot find path 'work\github-config\ISSUE_TEMPLATE\feature_request.yml' because it does not exist.
+name: Feature request
+description: Propose a focused improvement to Zenith Relay
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem first. Small, testable proposals are easiest to evaluate.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who is affected and what is difficult or missing today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the smallest useful behavior or workflow.
+    validations:
+      required: true
+  - type: textarea
+    id: user_impact
+    attributes:
+      label: User-visible impact
+      description: Explain what users would see and what could be written in release notes.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or other approaches, if any.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Request checklist
+      options:
+        - label: I searched existing issues and discussions for related requests.
+          required: true
+
