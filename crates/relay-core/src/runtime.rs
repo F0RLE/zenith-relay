@@ -978,9 +978,9 @@ impl GatewayRuntime {
     ///
     /// Metadata is evaluated per eligible candidate route. A public model may
     /// have several source candidates behind it, so the catalog exposes the
-    /// union of efforts confirmed by at least one source. When a client asks
-    /// for one explicitly, request routing excludes sources that have not
-    /// confirmed that effort.
+    /// union of efforts confirmed by at least one source. Discovery metadata
+    /// only informs the picker: source routing stays model-based because a
+    /// provider may support an effort without advertising it.
     pub(crate) async fn codex_source_model_metadata(
         &self,
         key: &AuthenticatedKey,

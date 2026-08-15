@@ -33,4 +33,3 @@ body:
     attributes:
       label: What you tried
       description: Include relevant steps or safe diagnostics. Do not include secrets, tokens, prompts, or response bodies.
-

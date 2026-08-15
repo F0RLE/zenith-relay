@@ -66,4 +66,3 @@ body:
           required: true
         - label: I removed secrets, tokens, personal data, prompts, and response bodies.
           required: true
-

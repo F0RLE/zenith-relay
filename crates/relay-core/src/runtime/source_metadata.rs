@@ -523,41 +523,6 @@ impl GatewayRuntime {
         self.source_candidate_bindings.keys().cloned().collect()
     }
 
-    /// Excludes API routes that have not explicitly confirmed support for an
-    /// effort. Native ChatGPT routes are deliberately not part of this set:
-    /// their request and catalog semantics remain provider-owned.
-    pub(crate) fn exclude_api_sources_without_reasoning_effort(
-        &self,
-        model: &str,
-        effort: &str,
-        tried: &mut HashSet<String>,
-    ) {
-        let model = model.trim().to_ascii_lowercase();
-        let effort = effort.trim().to_ascii_lowercase();
-        if model.is_empty() || effort.is_empty() || effort == "none" {
-            return;
-        }
-        let confirmed = self
-            .model_metadata
-            .confirmed_reasoning
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A catalog refresh can be absent or temporarily fail. Until at least
-        // one route has confirmed capabilities for this model, preserve the
-        // normal transparent fallback rather than excluding every source.
-        let Some(confirmed) = confirmed.efforts.get(&model) else {
-            return;
-        };
-        for candidate_id in self.source_candidate_bindings.keys() {
-            if !confirmed
-                .get(candidate_id)
-                .is_some_and(|efforts| efforts.contains(&effort))
-            {
-                tried.insert(candidate_id.clone());
-            }
-        }
-    }
-
     pub fn confirmed_source_reasoning_levels(&self, model: &str) -> Vec<String> {
         self.model_metadata
             .confirmed_reasoning
@@ -601,19 +566,5 @@ impl GatewayRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = allowed_levels;
         Ok(())
-    }
-
-    pub fn supports_source_reasoning_effort(&self, model: &str, effort: &str) -> bool {
-        self.model_metadata
-            .confirmed_reasoning
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .efforts
-            .get(&model.trim().to_ascii_lowercase())
-            .is_some_and(|routes| {
-                routes
-                    .values()
-                    .any(|efforts| efforts.contains(&effort.trim().to_ascii_lowercase()))
-            })
     }
 }

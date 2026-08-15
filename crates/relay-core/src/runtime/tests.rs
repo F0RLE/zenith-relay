@@ -1113,7 +1113,7 @@ async fn stale_source_metadata_survives_a_transient_models_failure() {
 }
 
 #[tokio::test]
-async fn source_reasoning_union_keeps_confirmed_route_and_excludes_unknown_route() {
+async fn source_reasoning_union_keeps_unknown_route_eligible() {
     let runtime = GatewayRuntime::from_pool(
         vec![
             RuntimeSource::unrestricted(source(
@@ -1136,13 +1136,6 @@ async fn source_reasoning_union_keeps_confirmed_route_and_excludes_unknown_route
         .authenticate(Some(&HeaderValue::from_static("Bearer local-secret")))
         .unwrap();
     let now_ms = current_time_ms();
-    let mut before_catalog = HashSet::new();
-    runtime.exclude_api_sources_without_reasoning_effort(
-        "provider/fable",
-        "high",
-        &mut before_catalog,
-    );
-    assert!(before_catalog.is_empty());
     runtime.remember_source_model_manifest(
         "source-confirmed",
         serde_json::json!({
@@ -1178,10 +1171,10 @@ async fn source_reasoning_union_keeps_confirmed_route_and_excludes_unknown_route
         .unwrap();
     assert!(runtime.model_reasoning_effort_is_allowed("provider/fable", "high"));
     assert!(!runtime.model_reasoning_effort_is_allowed("provider/fable", "low"));
-    let mut excluded = HashSet::new();
-    runtime.exclude_api_sources_without_reasoning_effort("provider/fable", "high", &mut excluded);
-    assert!(!excluded.contains("source-confirmed"));
-    assert!(excluded.contains("source-unknown"));
+    assert_eq!(
+        runtime.api_source_candidate_ids(),
+        HashSet::from(["source-confirmed".to_string(), "source-unknown".to_string(),])
+    );
 }
 
 #[tokio::test]

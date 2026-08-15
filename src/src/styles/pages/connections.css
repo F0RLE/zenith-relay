@@ -989,7 +989,8 @@
   border-left: 1px solid var(--relay-border);
 }
 
-.account-economics-strip {
+.account-economics-strip,
+.account-calculation-strip {
   min-width: 0;
   min-height: 46px;
   display: grid;
@@ -999,7 +1000,8 @@
   background: color-mix(in srgb, var(--relay-subtle) 55%, transparent);
 }
 
-.account-economics-strip > div {
+.account-economics-strip > div,
+.account-calculation-strip > div {
   min-width: 0;
   display: grid;
   align-content: center;
@@ -1009,25 +1011,30 @@
   text-align: center;
 }
 
-.account-economics-strip > div + div {
+.account-economics-strip > div + div,
+.account-calculation-strip > div + div {
   border-left: 1px solid var(--relay-border);
 }
 
 .account-economics-strip dt,
-.account-economics-strip dd {
+.account-economics-strip dd,
+.account-calculation-strip dt,
+.account-calculation-strip dd {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.account-economics-strip dt {
+.account-economics-strip dt,
+.account-calculation-strip dt {
   color: var(--relay-muted);
   font-size: 9px;
   line-height: 13px;
 }
 
-.account-economics-strip dd {
+.account-economics-strip dd,
+.account-calculation-strip dd {
   margin: 0;
   color: var(--relay-text);
   font-size: 12px;

@@ -1427,7 +1427,7 @@ async fn startup_retires_legacy_user_keys_and_restores_the_system_key() {
 }
 
 #[tokio::test]
-async fn model_reasoning_modes_are_hot_applied_and_only_allow_confirmed_levels() {
+async fn model_reasoning_modes_are_hot_applied_without_source_confirmation() {
     let root = TempDir::new().unwrap();
     let (upstream, upstream_task) = spawn_upstream().await;
     let server = spawn_server(root.path()).await;
@@ -1548,17 +1548,22 @@ async fn model_reasoning_modes_are_hot_applied_and_only_allow_confirmed_levels()
     );
     assert_eq!(filtered_model["default_reasoning_level"], "high");
 
-    let rejected = client
+    let unconfirmed = client
         .post(format!("{}/models/reasoning", server.origin))
         .bearer_auth(management_key)
         .json(&json!({"modelId": "gpt-test", "allowedLevels": ["ultra"]}))
         .send()
         .await
         .unwrap();
-    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+    assert_eq!(unconfirmed.status(), StatusCode::OK);
     assert_eq!(
-        rejected.json::<Value>().await.unwrap()["error"]["code"],
-        "reasoning_levels_unconfirmed"
+        unconfirmed.json::<Value>().await.unwrap()["gateway"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "gpt-test")
+            .unwrap()["reasoningAllowedLevels"],
+        json!(["ultra"])
     );
 
     let reset: Value = client

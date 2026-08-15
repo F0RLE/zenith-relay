@@ -57,7 +57,6 @@ pub(in crate::gateway::execution) async fn execute_request(
         DefaultServiceTier::Standard
     };
     let client_tool_use = tool_use_diagnostics(&request);
-    let mut effort_exclusions = HashSet::new();
     if let Some(effort) = requested_reasoning_effort(&request, wire_api) {
         if !runtime.model_reasoning_effort_is_allowed(&resolved_model, &effort)
             && !runtime.codex_model_has_chatgpt_account(&key, &resolved_model)
@@ -68,13 +67,8 @@ pub(in crate::gateway::execution) async fn execute_request(
                 "reasoning_effort_not_allowed",
             );
         }
-        runtime.exclude_api_sources_without_reasoning_effort(
-            &resolved_model,
-            &effort,
-            &mut effort_exclusions,
-        );
     }
-    let mut tried = effort_exclusions.clone();
+    let mut tried = Default::default();
     let mut attempt = attempt_offset;
     let mut attempts_this_run = 0_usize;
     let mut owner_recovery_confirmed = false;
@@ -888,7 +882,7 @@ pub(in crate::gateway::execution) async fn execute_request(
             &key,
             &resolved_model,
             candidate_protocols(wire_api),
-            &effort_exclusions,
+            &HashSet::new(),
             response_affinity_key.as_deref(),
             now_ms(),
         ) {

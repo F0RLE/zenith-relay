@@ -595,7 +595,8 @@ for (const viewport of viewports) {
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
     await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Режим запросов" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
-    await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(1);
+    await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
+    await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
     await page.screenshot({ path: `output/playwright/pool-priority-ru-dark-${viewport.width}x${viewport.height}.png` });
     expect(await page.locator(".pool-summary > div").evaluateAll((cells) => cells.every((cell) => {
       const cellRect = cell.getBoundingClientRect();

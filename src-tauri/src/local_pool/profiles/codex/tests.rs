@@ -192,6 +192,34 @@ fn local_gateway_uses_catalog_reasoning_default_and_restores_global_override() {
 }
 
 #[test]
+fn restore_preserves_reasoning_override_added_while_relay_is_active() {
+    let (root, home, backups) = profile_dirs("reasoning-effort-user-override");
+    fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
+    let secrets = MemorySecrets::default();
+    let test_key = format!("test-key-{}", std::process::id());
+
+    attach_with(
+        &home,
+        &backups,
+        "http://127.0.0.1:14998/v1",
+        &test_key,
+        &secrets,
+    )
+    .unwrap();
+
+    let mut managed = parse_config(&fs::read_to_string(home.join(CONFIG_FILE)).unwrap()).unwrap();
+    managed["model_reasoning_effort"] = value("ultra");
+    fs::write(home.join(CONFIG_FILE), managed.to_string()).unwrap();
+
+    restore_with(&home, &backups, &secrets).unwrap();
+
+    let restored = fs::read_to_string(home.join(CONFIG_FILE)).unwrap();
+    assert!(restored.contains("model_provider = \"openai\""));
+    assert!(restored.contains("model_reasoning_effort = \"ultra\""));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn managed_catalog_attach_and_restore_preserve_user_config_and_cache() {
     let (root, home, backups) = profile_dirs("model-catalog-restore");
     let previous_catalog_path = root.join("previous-codex-models.json");

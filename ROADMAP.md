@@ -15,6 +15,9 @@ verification evidence exists, not when its UI is present.
    compatibility evidence.
 3. P4 and P5 remain demand-gated. Do not add speculative account connectors or
    multi-server coordination ahead of the existing acceptance gates.
+4. P6 through P8 are long-term design records only. Do not start profile,
+   grouping, or Zenith runtime-convergence work until P0-P3 are complete and
+   the current Zenith production Gateway/Control API path is stable.
 
 ## P0 - Prove the personal pool in production (deferred)
 
@@ -160,11 +163,78 @@ place until a real personal deployment demonstrates the need to resume it.
 Do not add distributed coordination to the current single-user server without
 this demand and acceptance evidence.
 
-## P6 - Localization, documentation, and release evidence
+## P6 - Named pool profiles and explicit server publication
+
+Build this on the existing configuration preset contract. Do not introduce a
+parallel source/account configuration format.
+
+1. Store named profile metadata and immutable profile revisions separately from
+   the active runtime. A revision contains source/account rules, routing and
+   quota policy, model visibility, reasoning policy, price overrides, aliases,
+   and display metadata, but never credentials or vault material.
+2. Track active local revision and published revision independently for every
+   connected server target. Editing, selecting, or publishing one must not
+   mutate another target implicitly.
+3. Add the desktop workflow: create or duplicate profile, edit draft, preview
+   local or remote diff, validate target references and capabilities, publish
+   with expected-revision CAS, verify the rebuilt runtime, and roll back to the
+   previous verified revision.
+4. Missing accounts, sources, proxies, secret references, bindings, or target
+   features make publication fail closed. Secret transfer remains a separate,
+   explicit management operation with its own confirmation and audit result.
+5. Add tests for local/server independence, stale publication, missing target
+   references, runtime rebuild rollback, restart persistence, secret-free
+   exports, and switching profiles while requests are in flight.
+
+## P7 - Model identity, ordering, aliases, and provider groups
+
+1. Separate upstream model id, canonical client id, and localized display name.
+   Alias rules are explicit and scoped to a source/binding; reject cycles and
+   ambiguous collisions. Provider/date heuristics may produce reviewable
+   suggestions only.
+2. Add independent model fields for enabled state, display rank, canonical
+   alias, and price override. Drag-and-drop edits display rank without changing
+   source priority, scheduler order, or price.
+3. Move launcher grouping out of static UI family guesses into optional profile
+   presentation metadata. A group can collect models and provider sources, but
+   route eligibility still comes from current capabilities and health.
+4. Model protocol, prompt-cache, quota, usage, and price dimensions explicitly
+   per binding. Claude-style cache write/read behavior must not leak into other
+   providers, and provider names must not become scheduler branches.
+5. Keep manual prices when discovery has no trusted parser. When an adapter
+   reports prices, retain evidence, currency/unit, freshness, and the manual
+   override separately. Relay personal API-equivalent values remain
+   informational, not customer billing prices.
+
+## P8 - Optional Zenith runtime convergence (future)
+
+Relay Server is currently a personal single-deployment runtime, not a public
+multi-user billing gateway. Convergence proceeds only through explicit gates:
+
+1. Publish a contract matrix against Zenith Gateway for all supported HTTP and
+   streaming protocols, tools, images, reasoning, prompt caching, errors,
+   routing, health, usage evidence, and readiness.
+2. Add a shadow comparison that cannot dispatch duplicate paid requests or
+   write customer usage. Resolve every catalog/route disagreement at the owner
+   of the shared contract.
+3. Run an explicit canary where Zenith Gateway keeps customer auth, pricing,
+   reservations, durable debit/settlement, and public error policy while Relay
+   supplies only provider/account scheduling and execution.
+4. Require production evidence for restart recovery, configuration rollback,
+   partial streams, upstream outages, secret rotation, backup/restore,
+   zero-downtime deployment, and bounded observability labels.
+5. Retire the experimental `zenith-account-pool` only after Relay covers its
+   intended owned-account path. Replace or thin Gateway only after Relay has an
+   approved multi-user isolation and durability design; do not move Control API
+   balances, orders, ledger, or customer pricing into the personal server.
+
+## P9 - Localization, documentation, and release evidence
 
 1. For every new UI locale, add the localized overview and three mode-specific
    Help documents, then register the mode documents in Help Center.
 2. Regenerate screenshots from Playwright after a material layout or
    terminology change.
-3. Run all relevant checks, review generated assets, and perform the P0 live
+3. Keep [CHANGELOG.md](CHANGELOG.md) current: describe review-ready work under
+   `Unreleased`, then move only shipped behavior into a dated tag section.
+4. Run all relevant checks, review generated assets, and perform the P0 live
    acceptance before a release claim.

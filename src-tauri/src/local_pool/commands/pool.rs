@@ -475,30 +475,12 @@ pub async fn set_local_model_reasoning(
     let allowed_levels = normalized_allowed_levels
         .remove(&canonical.to_ascii_lowercase())
         .unwrap_or_default();
-    if !allowed_levels.is_empty() {
-        if pool_model_has_native_account(&state, &canonical)? {
-            return Err(LocalPoolError::new(
-                ErrorCode::Conflict,
-                "native ChatGPT model reasoning settings cannot be configured here",
-            )
-            .into());
-        }
-        let runtime = state.gateway.runtime().await.ok_or_else(|| {
-            LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "confirm model reasoning capabilities before allowing modes",
-            )
-        })?;
-        if allowed_levels
-            .iter()
-            .any(|effort| !runtime.supports_source_reasoning_effort(&canonical, effort))
-        {
-            return Err(LocalPoolError::new(
-                ErrorCode::InvalidState,
-                "requested reasoning mode is not confirmed for this model",
-            )
-            .into());
-        }
+    if !allowed_levels.is_empty() && pool_model_has_native_account(&state, &canonical)? {
+        return Err(LocalPoolError::new(
+            ErrorCode::Conflict,
+            "native ChatGPT model reasoning settings cannot be configured here",
+        )
+        .into());
     }
     let old_gateway = state.store()?.gateway().clone();
     let mut gateway = old_gateway.clone();

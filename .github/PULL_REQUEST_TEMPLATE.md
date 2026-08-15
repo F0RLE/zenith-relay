@@ -1,6 +1,6 @@
 ## Target Branch
 
-- [ ] This PR targets main.
+- [ ] This PR targets `main`.
 
 ## Summary
 
@@ -31,9 +31,8 @@ Describe what changed and why.
 
 ## Validation
 
-- [ ] cd src && bun run check
-- [ ] cd src && bun run build
-- [ ] cd src && cargo test --manifest-path ../src-tauri/Cargo.toml --locked
+- [ ] `cd src && bun run verify`
+- [ ] `cd src && bun run test:e2e`
 - [ ] Not run (explain why below).
 
 ## Compatibility and migration
@@ -48,4 +47,3 @@ Details:
 <!-- Mention packaging, updater behavior, Codex config writes, rollback, or operational risks. -->
 
 Describe the risk and the rollout or rollback plan.
-

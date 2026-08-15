@@ -73,4 +73,3 @@ jobs:
             } else {
               core.info("PR summary, user impact, validation, risk, and release context are present.");
             }
-
