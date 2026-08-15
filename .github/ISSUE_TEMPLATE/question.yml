@@ -1,5 +1,36 @@
-Get-Content: 
-Line |
-   2 |  Get-Content -Raw -LiteralPath 'work\github-config\ISSUE_TEMPLATE\ques …
-     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Cannot find path 'work\github-config\ISSUE_TEMPLATE\question.yml' because it does not exist.
+name: Question
+description: Ask a usage, setup, or configuration question
+title: "[Question]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For general discussion and ideas, you can also use the repository Discussions tab.
+  - type: input
+    id: version
+    attributes:
+      label: Zenith Relay version
+      description: Include the release version or commit SHA when relevant.
+      placeholder: 1.1.0 or v1.1.0-beta.1
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State the question as specifically as possible.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Explain your setup, goal, and the behavior you are seeing.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you tried
+      description: Include relevant steps or safe diagnostics. Do not include secrets, tokens, prompts, or response bodies.
+
