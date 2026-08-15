@@ -1,5 +1,6 @@
-Get-Content: 
-Line |
-   2 |  Get-Content -Raw -LiteralPath 'work\github-config\ISSUE_TEMPLATE\conf …
-     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-     | Cannot find path 'work\github-config\ISSUE_TEMPLATE\config.yml' because it does not exist.
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and usage help
+    url: https://github.com/F0RLE/zenith-relay/discussions
+    about: Ask for setup help, usage guidance, and ideas in Discussions.
+
