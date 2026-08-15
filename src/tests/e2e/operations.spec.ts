@@ -3095,6 +3095,16 @@ test("standard calculation is the default and the Relay estimate is opt-in in se
   await expect(poolProviderQuota.first()).toBeVisible();
 });
 
+test("provider quota reset ignores expired windows", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, mixedQuotaResets: true });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connections", exact: true }).click();
+
+  const reset = page.locator(".account-card .account-provider-quota-strip").first().locator("dd").nth(1);
+  await expect(reset).toContainText(/\d+ d/);
+  await expect(reset).not.toHaveText(/0 seconds/);
+});
+
 test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 1, sourceCount: 1 });
   await page.goto("/");

@@ -234,5 +234,7 @@ multi-user billing gateway. Convergence proceeds only through explicit gates:
    Help documents, then register the mode documents in Help Center.
 2. Regenerate screenshots from Playwright after a material layout or
    terminology change.
-3. Run all relevant checks, review generated assets, and perform the P0 live
+3. Keep [CHANGELOG.md](CHANGELOG.md) current: describe review-ready work under
+   `Unreleased`, then move only shipped behavior into a dated tag section.
+4. Run all relevant checks, review generated assets, and perform the P0 live
    acceptance before a release claim.

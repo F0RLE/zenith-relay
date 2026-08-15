@@ -196,12 +196,13 @@ fn restore_preserves_reasoning_override_added_while_relay_is_active() {
     let (root, home, backups) = profile_dirs("reasoning-effort-user-override");
     fs::write(home.join(CONFIG_FILE), "model_provider = \"openai\"\n").unwrap();
     let secrets = MemorySecrets::default();
+    let test_key = format!("test-key-{}", std::process::id());
 
     attach_with(
         &home,
         &backups,
         "http://127.0.0.1:14998/v1",
-        "zlr_key",
+        &test_key,
         &secrets,
     )
     .unwrap();

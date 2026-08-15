@@ -47,6 +47,7 @@ README.md
 CONTRIBUTING.md
 PLANNING.md
 ROADMAP.md
+CHANGELOG.md
 docs/help/<locale>/README.md
 docs/help/<locale>/this-computer.md
 docs/help/<locale>/choose-api.md
@@ -60,6 +61,16 @@ server contract. Do not add parallel architecture, design, handoff, or
 historical planning documents. Fold current behavior into
 <code>PLANNING.md</code>, future work into <code>ROADMAP.md</code>, and user
 steps into localized Help files.
+
+### Changelog and release notes
+
+Record every user-visible change in [CHANGELOG.md](CHANGELOG.md) under
+`Unreleased`, grouped by behavior rather than by branch. Include the relevant
+PR or commit in the entry when the change is ready for review. When publishing
+a tag, move the shipped entries into a dated version section and leave
+`Unreleased` available for the next cycle. Release-body translations used by
+the updater remain separate and must use the `relay-notes:<locale>` markers
+described below.
 
 To add a locale, add its overview and all three Help files, register its
 translation resources, and update the raw Markdown registry in
@@ -90,8 +101,8 @@ bun run build
 bun run test:e2e
 ~~~
 
-<code>bun run verify</code> runs the type check, unit tests, frontend build,
-and desktop Rust tests. Packaging or updater changes also require:
+<code>bun run verify</code> runs the unit tests, frontend build (including the
+TypeScript build), and desktop Rust tests. Packaging or updater changes also require:
 
 ~~~powershell
 cd src
@@ -131,7 +142,9 @@ behavior.
 4. Run the relevant checks and regenerate screenshots if their UI changed.
 5. Review the diff for secret leakage, stale Help wording, and generated-file
    noise.
-6. Merge reviewed work into <code>main</code>. Tag and publish only after the
+6. Update <code>CHANGELOG.md</code> for user-visible behavior, or state in the
+   PR why no entry is needed.
+7. Merge reviewed work into <code>main</code>. Tag and publish only after the
    release checks and live acceptance pass.
 
 ### Updater changelog for release admins

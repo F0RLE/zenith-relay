@@ -38,6 +38,7 @@ export type MockOptions = {
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
+  mixedQuotaResets?: boolean;
   quotaAvailable?: boolean;
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
@@ -109,9 +110,12 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     type MockOperationalStatus = "rotation" | "quotaWait" | "unavailable" | "disabled";
     type MockAuthState = { state: string; reason?: string };
     const exhaustedQuotaWindow = input.quotaAvailable ? null : input.exhaustedQuotaWindow ?? "primary";
+    const quotaNowMs = Date.now();
+    const primaryResetAtMs = input.mixedQuotaResets ? quotaNowMs - 60_000 : quotaNowMs + 90 * 60_000;
+    const secondaryResetAtMs = quotaNowMs + 3 * 24 * 60 * 60_000;
     const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
-      primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: Date.now() + 90 * 60_000, windowMinutes: 300, observedAtMs: Date.now() },
-      secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: Date.now() + 3 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() },
+      primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowMinutes: 300, observedAtMs: quotaNowMs },
+      secondary: { kind: "secondary", availableBasisPoints: exhaustedQuotaWindow === "secondary" ? 0 : 6400, explicitlyFull: false, resetAtMs: secondaryResetAtMs, windowMinutes: 10_080, observedAtMs: quotaNowMs },
       supplemental: input.supplementalQuota ? [
         { id: "code_review:primary", label: "Code Review", window: { kind: "primary", availableBasisPoints: 7200, explicitlyFull: false, resetAtMs: Date.now() + 2 * 60 * 60_000, windowMinutes: 300, observedAtMs: Date.now() } },
         { id: "code_review:secondary", label: "Code Review", window: { kind: "secondary", availableBasisPoints: 8600, explicitlyFull: false, resetAtMs: Date.now() + 5 * 24 * 60 * 60_000, windowMinutes: 10_080, observedAtMs: Date.now() } },

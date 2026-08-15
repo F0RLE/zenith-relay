@@ -77,7 +77,7 @@ export function ProviderQuotaStrip({ account, nowMs }: { account: AccountSummary
   const windows = [account.quota.primary, account.quota.secondary, ...(account.quota.supplemental ?? []).map(({ window }) => window)].filter((window): window is QuotaWindow => window != null);
   const reportedRemaining = windows.map((window) => window.availableBasisPoints).filter((value): value is number => value != null);
   const lowestRemaining = account.quota.limitReached ? 0 : reportedRemaining.length ? Math.min(...reportedRemaining) : null;
-  const resetTimes = windows.map((window) => window.resetAtMs).filter((value): value is number => value != null);
+  const resetTimes = windows.map((window) => window.resetAtMs).filter((value): value is number => value != null && value > nowMs);
   const nextResetAtMs = resetTimes.length ? Math.min(...resetTimes) : null;
   const reportStatus = account.quotaRefreshStatus;
   const reportedAtMs = account.quota.updatedAtMs;

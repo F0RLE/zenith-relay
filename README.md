@@ -8,6 +8,7 @@
   </p>
   <p>
     <a href="https://github.com/F0RLE/zenith-relay/releases/latest">Download latest release</a> ·
+    <a href="CHANGELOG.md">Changelog</a> ·
     <a href="LICENSE">AGPL-3.0-only</a>
   </p>
 </div>
@@ -79,4 +80,5 @@ For the desktop bundle use `bun run app:build`. Shared runtime and server
 checks are listed in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Current implementation boundaries are in [PLANNING.md](PLANNING.md); unfinished
-acceptance work is in [ROADMAP.md](ROADMAP.md).
+acceptance work is in [ROADMAP.md](ROADMAP.md). Release history is in
+[CHANGELOG.md](CHANGELOG.md).
