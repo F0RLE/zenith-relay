@@ -1365,8 +1365,8 @@ const relayEn = {
     accountUsage: "Account usage",
     accountCalculation: "Quota calculation",
     accountCalculationModes: {
-      provider: "Provider reported",
-      zenith_experimental: "Zenith estimate (experimental)",
+      provider: "Standard calculation",
+      zenith_experimental: "Relay estimate (experimental)",
     },
     application: "Application",
     localData: "Pool data",

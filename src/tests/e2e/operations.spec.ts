@@ -3037,7 +3037,7 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
 });
 
-test("provider quota display is the default and the Zenith estimate is opt-in in settings", async ({ page }) => {
+test("standard calculation is the default and the Relay estimate is opt-in in settings", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -3048,6 +3048,7 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await expect(connectionProviderQuota.first()).toBeVisible();
   await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Hide account calculation" }).locator("svg.lucide-dollar-sign")).toBeVisible();
   await page.getByRole("button", { name: "Hide account calculation" }).click();
   await expect(connectionProviderQuota).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
@@ -3061,14 +3062,15 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await expect(poolProviderQuota.first()).toBeVisible();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Provider reported", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "Zenith estimate (experimental)", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Standard calculation", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Relay estimate (experimental)", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("zenith_experimental");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(connectionEconomics.first()).toBeVisible();
   await expect(connectionProviderQuota).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Hide account calculation" }).locator("svg.lucide-dollar-sign")).toBeVisible();
   await page.getByRole("button", { name: "Hide account calculation" }).click();
   await expect(connectionEconomics).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
@@ -3080,7 +3082,7 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await expect(poolEconomics.first()).toBeVisible();
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Provider reported", exact: true }).click();
+  await page.getByRole("button", { name: "Standard calculation", exact: true }).click();
   await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("provider");
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
@@ -3091,6 +3093,17 @@ test("provider quota display is the default and the Zenith estimate is opt-in in
   await expect(connectionProviderQuota.first()).toBeVisible();
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(poolProviderQuota.first()).toBeVisible();
+});
+
+test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, accountCount: 1, sourceCount: 1 });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Pool", exact: true }).click();
+
+  await page.getByRole("button", { name: "Remove from pool: Personal Plus" }).click({ button: "right" });
+  await expect(page.locator('.pool-member-card[data-member-kind="account"]')).toHaveCount(0);
+
+  await expect(page.getByRole("button", { name: /account calculation/i })).toHaveCount(0);
 });
 
 test("quota cards name provider windows and make remaining percentages explicit", async ({ page }) => {

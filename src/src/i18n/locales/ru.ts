@@ -1365,8 +1365,8 @@ const relayRu = {
     accountUsage: "Использование аккаунтов",
     accountCalculation: "Расчёт квоты",
     accountCalculationModes: {
-      provider: "Данные провайдера",
-      zenith_experimental: "Оценка Zenith (эксперимент)",
+      provider: "Стандартный расчёт",
+      zenith_experimental: "Оценка Relay (эксперимент)",
     },
     application: "Приложение",
     localData: "Данные пула",

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, Calculator, CheckCheck, Clock3, Cloud, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
+import { Activity, CheckCheck, Clock3, Cloud, DollarSign, Gauge, ListMinus, Loader2, Pencil, RefreshCw, UserRound, X, Zap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { AccountSummary, CandidateRuntimeSnapshot, SourceStats, SourceSummary } from "../../api/types";
@@ -115,6 +115,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
     await remove(member);
   };
   const quotaAccountCount = members.filter((member) => member.kind === "account" && member.enabled).length;
+  const hasAccountMembers = members.some((member) => member.kind === "account");
   const refreshQuotas = async () => {
     let report = { succeeded: 0, failed: 0 };
     const ok = await perform("pool-quota-refresh", async () => {
@@ -173,7 +174,7 @@ export function PoolMembersView({ onAdd, onRoutingPolicy, supportsRoutingSetting
             <IconButton label={t("pool.routingSettings")} icon={<Gauge aria-hidden />} disabled={!supportsRoutingSettings} title={!supportsRoutingSettings ? t("remote.capabilityUnavailable") : undefined} onClick={onRoutingPolicy} />
           </div>
           <div className="pool-control-group" data-toolbar-group="refresh">
-            <IconButton className="account-calculation-toggle" label={t(accountEconomicsVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<Calculator aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} />
+            {hasAccountMembers ? <IconButton className="account-calculation-toggle" label={t(accountEconomicsVisible ? "pool.hideCalculation" : "pool.showCalculation")} icon={<DollarSign aria-hidden />} aria-pressed={accountEconomicsVisible} onClick={() => setAccountEconomicsVisible(!accountEconomicsVisible)} /> : null}
             <Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={busy === "pool-quota-refresh"} disabled={!canRefreshQuota || !quotaAccountCount} title={!quotaAccountCount ? t("pool.noQuotaMembers") : !canRefreshQuota ? t("remote.capabilityUnavailable") : undefined} onClick={() => void refreshQuotas()}>{t("pool.refreshQuotas")}</Button>
           </div>
         </div>

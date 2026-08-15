@@ -54,7 +54,7 @@ describe("relay preferences", () => {
     expect(() => removeRelayPreference("relay.mode", unavailable)).not.toThrow();
   });
 
-  test("uses provider-reported quota unless the Zenith estimate is explicitly selected", () => {
+  test("uses standard calculation unless the Relay estimate is explicitly selected", () => {
     expect(readAccountQuotaCalculationMode(fakeStorage())).toBe("provider");
     expect(readAccountQuotaCalculationMode(fakeStorage({
       [RELAY_STORAGE_KEYS.accountQuotaCalculationMode]: "zenith_experimental",
