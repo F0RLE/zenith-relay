@@ -1,13 +1,5 @@
-## Target Branch
-
-- [ ] This PR targets `main`.
-
-## Checks
-
-- [ ] `cd src && bun run check`
-- [ ] `cd src && bun run build`
-- [ ] `cd src && cargo test --manifest-path ../src-tauri/Cargo.toml --locked`
-
-## Notes
-
-Describe what changed and whether this affects packaging, updater behavior, or Codex config writes.
+Get-Content: 
+Line |
+   2 |  Get-Content -Raw -LiteralPath 'work\github-config\PULL_REQUEST_TEMPLA …
+     |  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     | Cannot find path 'work\github-config\PULL_REQUEST_TEMPLATE.md' because it does not exist.
