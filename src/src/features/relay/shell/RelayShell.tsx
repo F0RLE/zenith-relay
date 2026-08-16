@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, ChevronUp, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -6,7 +6,7 @@ import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../.
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState, type Feedback } from "../state/RelayStateProvider";
-import { ActionMenu, ActionMenuItem, Button, copyText, Dialog, IconButton } from "../components/Ui";
+import { Button, copyText, Dialog, IconButton } from "../components/Ui";
 
 const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
@@ -255,9 +255,10 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | null>(null);
-  const details = feedback.error ? JSON.stringify(feedback.error, null, 2) : null;
+  const error = feedback.error;
+  const details = error ? JSON.stringify(error, null, 2) : null;
   const message = t(feedback.key);
-  const accessibleLabel = feedback.error ? `${message} (${feedback.error.code})` : message;
+  const accessibleLabel = error ? `${message} (${error.code})` : message;
 
   useEffect(() => {
     setDetailsOpen(false);
@@ -285,28 +286,36 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   };
 
   return <div className={`global-feedback ${feedback.kind}${detailsOpen ? " details-open" : ""}`} role="status" aria-label={accessibleLabel}>
-    <div className="global-feedback-copy">
-      {feedback.error ? <button
-        className="global-feedback-status-icon global-feedback-status-icon-button"
-        type="button"
-        aria-label={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
-        aria-expanded={detailsOpen}
-        title={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
-        onClick={() => setDetailsOpen((open) => !open)}
-      ><CircleAlert aria-hidden /></button> : <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>}
-      <span className="global-feedback-message"><span>{message}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</span>
-    </div>
+    {error ? <button
+      className="global-feedback-copy global-feedback-error-trigger"
+      type="button"
+      aria-label={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
+      aria-expanded={detailsOpen}
+      aria-controls={detailsOpen ? "global-feedback-error-details" : undefined}
+      title={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
+      onClick={() => setDetailsOpen((open) => !open)}
+    >
+      <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
+      <span className="global-feedback-message"><span>{message}</span><code>{error.code}</code></span>
+    </button> : <div className="global-feedback-copy">
+      <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
+      <span className="global-feedback-message"><span>{message}</span></span>
+    </div>}
     <div className="global-feedback-actions">
-      {feedback.error ? <>
-        <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
-        <ActionMenu className="global-feedback-menu" label={copied ? t("feedback.copied") : t("feedback.errorActions")}>
-          <ActionMenuItem icon={detailsOpen ? <ChevronUp aria-hidden /> : <CircleAlert aria-hidden />} onClick={() => setDetailsOpen((open) => !open)}>{detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}</ActionMenuItem>
-          <ActionMenuItem icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</ActionMenuItem>
-        </ActionMenu>
-      </> : null}
-      <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
+      {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
     </div>
-    {detailsOpen && details ? <div className="global-feedback-details" role="region" aria-label={t("feedback.errorDetails")}><pre><code>{details}</code></pre><p>{t("feedback.detailsHint")}</p></div> : null}
+    {detailsOpen && details ? <div id="global-feedback-error-details" className="global-feedback-details" role="dialog" aria-label={t("feedback.errorDetails")}>
+      <div className="global-feedback-details-header">
+        <div className="global-feedback-details-title"><strong>{message}</strong><code>{error?.code}</code></div>
+        <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
+      </div>
+      <pre><code>{details}</code></pre>
+      <p>{t("feedback.detailsHint")}</p>
+      <div className="global-feedback-details-actions">
+        <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
+        <IconButton label={copied ? t("feedback.copied") : t("feedback.copyError")} icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()} />
+      </div>
+    </div> : null}
   </div>;
 }
 

@@ -1305,7 +1305,7 @@ for (const scenario of [
   { name: "expanded", viewport: { width: 1160, height: 760 }, collapsed: false },
   { name: "compact", viewport: { width: 840, height: 560 }, collapsed: true },
 ] as const) {
-  test(`feedback error menu ${scenario.name}`, async ({ page }) => {
+  test(`feedback error opens without layout shift ${scenario.name}`, async ({ page }) => {
     await installTauriMock(page, { locale: "en", mode: "local", theme: "dark", populated: true, gatewayRunning: true, profileSwitchError: true });
     await page.setViewportSize(scenario.viewport);
     await page.goto("/");
@@ -1318,13 +1318,22 @@ for (const scenario of [
     if (scenario.collapsed) await expect(shell).toHaveClass(/sidebar-collapsed/);
     else await expect(shell).not.toHaveClass(/sidebar-collapsed/);
 
-    const initialGeometry = await feedback.evaluate((element) => {
+    const readGeometry = () => feedback.evaluate((element) => {
       const box = element.getBoundingClientRect();
+      const header = document.querySelector<HTMLElement>(".relay-page-header")!.getBoundingClientRect();
       const message = element.querySelector<HTMLElement>(".global-feedback-message")!;
       const messageBox = message.getBoundingClientRect();
       const style = getComputedStyle(message);
-      return { width: box.width, messageHidden: messageBox.width <= 1 && messageBox.height <= 1 && style.clipPath === "inset(50%)" };
+      return {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        headerY: header.y,
+        messageHidden: messageBox.width <= 1 && messageBox.height <= 1 && style.clipPath === "inset(50%)",
+      };
     });
+    const initialGeometry = await readGeometry();
     if (scenario.collapsed) {
       expect(initialGeometry.width).toBeLessThanOrEqual(38);
       expect(initialGeometry.messageHidden).toBe(true);
@@ -1333,39 +1342,17 @@ for (const scenario of [
       expect(initialGeometry.messageHidden).toBe(false);
     }
 
-    if (scenario.collapsed) {
-      await feedback.hover();
-      await expect.poll(async () => (await feedback.boundingBox())?.width ?? 0, { timeout: 1_000 }).toBeGreaterThan(89);
-      await expect(feedback.locator(".global-feedback-message")).toBeVisible();
-      await page.screenshot({ path: `output/playwright/feedback-error-hover-${scenario.name}.png` });
+    await feedback.hover();
+    await expect.poll(async () => (await feedback.boundingBox())?.width ?? 0, { timeout: 1_000 }).toBe(initialGeometry.width);
+    const hoveredGeometry = await readGeometry();
+    expect(Math.abs(hoveredGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
+    await expect(feedback.locator(".global-feedback-details")).toHaveCount(0);
 
-      await feedback.locator(".global-feedback-status-icon-button").click();
-      await expect(feedback).toHaveClass(/details-open/);
-    }
-
-    const trigger = feedback.locator(".global-feedback-menu summary");
-    await trigger.click();
-    const menu = feedback.locator(".global-feedback-menu > div[role=menu]");
-    await expect(menu).toBeVisible();
-    const menuGeometry = await menu.evaluate((element) => {
-      const menuBox = element.getBoundingClientRect();
-      const triggerBox = element.parentElement!.querySelector("summary")!.getBoundingClientRect();
-      const feedbackBox = element.closest<HTMLElement>(".global-feedback")!.getBoundingClientRect();
-      const helpBox = document.querySelector<HTMLElement>(".sidebar-help")!.getBoundingClientRect();
-      const overlaps = (left: DOMRect, right: DOMRect) => left.left < right.right && left.right > right.left && left.top < right.bottom && left.bottom > right.top;
-      return {
-        withinViewport: menuBox.left >= 0 && menuBox.right <= innerWidth && menuBox.top >= 36 && menuBox.bottom <= innerHeight,
-        opensUp: menuBox.bottom <= triggerBox.top + 1,
-        detachedFromToast: !overlaps(menuBox, feedbackBox),
-        clearOfHelp: !overlaps(menuBox, helpBox),
-        width: menuBox.width,
-      };
-    });
-    expect(menuGeometry).toEqual({ withinViewport: true, opensUp: true, detachedFromToast: true, clearOfHelp: true, width: expect.any(Number) });
-    expect(menuGeometry.width).toBeLessThanOrEqual(242);
-
-    if (!scenario.collapsed) await menu.getByRole("menuitem", { name: "Show details" }).click();
-    const details = feedback.getByRole("region", { name: "Error details" });
+    await feedback.locator(".global-feedback-error-trigger").click();
+    const details = feedback.getByRole("dialog", { name: "Error details" });
     await expect(details).toBeVisible();
     const detailsGeometry = await details.evaluate((element) => {
       const detailsBox = element.getBoundingClientRect();
@@ -1379,9 +1366,15 @@ for (const scenario of [
       };
     });
     expect(detailsGeometry).toEqual({ insideToast: false, withinViewport: true, aboveHelp: true, aboveFeedback: true });
-    if (scenario.collapsed) expect((await feedback.boundingBox())!.width).toBeGreaterThan(89);
+    const openedGeometry = await readGeometry();
+    expect(Math.abs(openedGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(openedGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(openedGeometry.width - initialGeometry.width)).toBeLessThanOrEqual(1);
+    expect(Math.abs(openedGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(openedGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
-    await feedback.locator(".relay-icon-button").click();
+    await details.locator(".global-feedback-details-header .relay-icon-button").click();
+    await expect(feedback).toHaveCount(0);
   });
 }
 

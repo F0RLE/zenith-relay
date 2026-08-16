@@ -27,7 +27,7 @@ const ROUTING_REFRESH_INTERVAL_MS = 2_000;
 const RUNTIME_EVENT_REFRESH_DEBOUNCE_MS = 500;
 const USAGE_EVENT_REFRESH_DEBOUNCE_MS = 250;
 const SUCCESS_FEEDBACK_TIMEOUT_MS = 4_000;
-const ERROR_FEEDBACK_TIMEOUT_MS = 8_000;
+const ERROR_FEEDBACK_TIMEOUT_MS = 60_000;
 
 function isRuntimeRefreshPage(page: PageId) {
   return page === "overview" || page === "pool" || page === "connections";
