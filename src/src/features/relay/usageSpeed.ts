@@ -42,12 +42,12 @@ export function effectiveTokenSpeed(sample: TokenSpeedSample) {
 }
 
 export function tokenSpeed(sample: TokenSpeedSample) {
-  return generationTokenSpeed(sample) ?? effectiveTokenSpeed(sample);
+  return generationTokenSpeed(sample);
 }
 
 export function averageTokenSpeed(samples: TokenSpeedSample[]) {
   const totals = samples.reduce((result, sample) => {
-    const measured = generationMeasurement(sample) ?? measurement(sample);
+    const measured = generationMeasurement(sample);
     if (measured) {
       result.outputTokens += measured.outputTokens;
       result.durationMs += measured.durationMs;
