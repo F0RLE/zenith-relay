@@ -302,8 +302,9 @@ for (const mode of ["local", "remote"] as const) {
     await page.getByRole("button", { name: "Usage", exact: true }).click();
     await page.getByRole("button", { name: new RegExp(`Request details: req_synthetic_${mode}`) }).click();
     const dialog = page.getByRole("dialog", { name: "Request details" });
-    await expect(dialog).toContainText("Weighted rotation");
     await expect(dialog).toContainText("Example compatible API");
+    await dialog.getByRole("tab", { name: "Route", exact: true }).click();
+    await expect(dialog).toContainText("Weighted rotation");
     await expect(dialog.getByText("Quota at selection", { exact: true })).toHaveCount(0);
   });
 }
@@ -1964,7 +1965,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
   await expect(personalPlus.locator(".quota-meter-heading small").first()).toHaveText(/^\d+ h \d+ min$/);
   await expect(personalPlus.locator(".quota-meter-heading small").nth(1)).toHaveText(/^\d+ d \d+ h \d+ min$/);
 
-  const speed = page.getByRole("switch", { name: "Request mode" });
+  const speed = page.getByRole("switch", { name: "Request speed" });
   await expect(speed).not.toBeChecked();
   await speed.check();
   await expect(speed).toBeChecked();
@@ -1975,7 +1976,7 @@ test("local pool saves adaptive distribution without chat pinning", async ({ pag
 
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
-  await expect(dialog).not.toContainText("Request mode");
+  await expect(dialog).not.toContainText("Request speed");
   await expect(dialog).not.toContainText("Keep one chat on one account");
   await expect(dialog).not.toContainText("Accounts tried after an error");
   await expect(dialog).toContainText("Uses the greatest available headroom and distributes requests fairly when values are equal.");
@@ -2064,13 +2065,13 @@ test("remote pool saves distribution settings on the connected runtime", async (
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const speed = page.getByRole("switch", { name: "Request mode" });
+  const speed = page.getByRole("switch", { name: "Request speed" });
   await speed.check();
   await expect(speed).toBeChecked();
   await page.getByRole("button", { name: "Distribution settings", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Distribution" });
   await expect(dialog).not.toContainText("Keep one chat on one account");
-  await expect(dialog).not.toContainText("Request mode");
+  await expect(dialog).not.toContainText("Request speed");
   await chooseOption(page, dialog, "Distribution strategy", "subscription_expiry");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
 
@@ -2342,8 +2343,13 @@ test("usage request columns reorder, resize, and open details only from the requ
   await requestCell.click({ position: { x: cellWidth - 2, y: cellBounds!.height / 2 } });
   await expect(page.getByRole("dialog", { name: "Request details" })).toHaveCount(0);
   await requestLink.click();
-  await expect(page.getByRole("dialog", { name: "Request details" })).toBeVisible();
-  await page.getByRole("dialog", { name: "Request details" }).getByRole("button", { name: "Close" }).first().click();
+  const details = page.getByRole("dialog", { name: "Request details" });
+  await expect(details).toBeVisible();
+  await expect(details.getByRole("tab", { name: "Overview", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(details.getByText("Error origin", { exact: true })).toHaveCount(0);
+  await expect(details.getByText("10 tok/s", { exact: true })).toHaveAttribute("data-tone", "slow");
+  await page.locator(".relay-modal-backdrop").click({ position: { x: 2, y: 2 } });
+  await expect(details).toHaveCount(0);
 
   expect(await table.locator("th, td").evaluateAll((cells) => cells.every((cell) => getComputedStyle(cell).textAlign === "center"))).toBe(true);
   const statusHeading = table.getByLabel(/^Move the Status column/);
@@ -2382,9 +2388,9 @@ test("usage details warn when forwarded tools yield a text-only response", async
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  await expect(dialog.getByText("Tool diagnostics", { exact: true })).toBeVisible();
+  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
   await expect(dialog.getByText("Tools received from client", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Tools forwarded upstream", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("3 → 3", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Automatic", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Text only", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Copy request ID" })).toBeVisible();
@@ -2397,7 +2403,9 @@ test("usage details do not blame the upstream when tools were not forwarded", as
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
 
-  await expect(page.getByRole("dialog", { name: "Request details" }).getByText(/Relay forwarded \d+ tool definitions/)).toHaveCount(0);
+  const dialog = page.getByRole("dialog", { name: "Request details" });
+  await dialog.getByRole("tab", { name: "Tools", exact: true }).click();
+  await expect(dialog.getByText(/Relay forwarded \d+ tool definitions/)).toHaveCount(0);
 });
 
 test("local usage omits the obsolete ChatGPT routing banner", async ({ page }) => {
@@ -2420,7 +2428,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Pool members" }).click();
 
   const account = page.getByRole("row").filter({ hasText: "Personal Plus" });
-  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "≈$0.0001", "10 tok/s", "128 / 428 ms"]);
+  await expect(account.getByRole("cell")).toHaveText(["Personal Plus", "1", "100%", "In20Cache ↓12Reason5Out8", "28", "≈$0.0001", "10 tok/s", "128 ms / 428 ms"]);
   await expect(account.locator(".usage-token-breakdown span")).toHaveText(["In20", "Cache ↓12", "Reason5", "Out8"]);
   await expect(page.locator(".usage-performance")).toContainText("Generation speed10 tok/s");
   await expect(page.locator(".usage-performance")).toContainText("Effective end-to-end speed7 tok/s");
@@ -2428,17 +2436,17 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("tab", { name: "Requests" }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const details = page.getByRole("dialog", { name: "Request details" });
+  await expect(details).toContainText("Generation speed10 tok/s");
+  await expect(details).toContainText("Total time428 ms");
+  await expect(details).toContainText("Visible output3");
+  await details.getByRole("tab", { name: "Tokens", exact: true }).click();
   await expect(details).toContainText("Input tokens20");
   await expect(details).toContainText("Cache reads12");
   await expect(details).toContainText("Reasoning tokens5");
   await expect(details).toContainText("Output tokens8");
   await expect(details).toContainText("Total tokens28");
   await expect(details).toContainText("API equivalent≈$0.0001");
-  await expect(details).toContainText("First output128 ms");
-  await expect(details).toContainText("Generation time300 ms");
-  await expect(details).toContainText("Total time428 ms");
-  await expect(details).toContainText("Generation speed10 tok/s");
-  await expect(details).toContainText("Effective end-to-end speed7 tok/s");
+  await details.getByRole("tab", { name: "Route", exact: true }).click();
   await expect(details).toContainText("Selection reasonGreatest quota remaining");
   await expect(details).toContainText("Eligible participants4");
   await expect(details).toContainText("Quota at selection63.00%");
@@ -3007,7 +3015,7 @@ test("remote usage never exposes an unresolved internal account hash", async ({ 
   await page.getByRole("button", { name: "Usage", exact: true }).click();
 
   await expect(page.locator('.usage-request-table tbody tr td[data-column="connection"]')).toHaveText("Unknown account");
-  await expect(page.locator('.usage-request-table tbody tr td[data-column="tier"]')).toHaveText("Fast for all → Follow ChatGPT");
+  await expect(page.locator('.usage-request-table tbody tr td[data-column="tier"]')).toHaveText("Fast → Standard");
   await expect(page.getByText("4f5c821a909b", { exact: true })).toHaveCount(0);
 });
 
@@ -3345,9 +3353,9 @@ test("open request details follow the terminal fallback result", async ({ page }
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
   const dialog = page.getByRole("dialog", { name: "Request details" });
-  const httpStatus = dialog.locator(".detail-list > div").filter({ hasText: "HTTP status" }).locator("dd");
-  await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Failed");
-  await expect(httpStatus).toHaveText("502");
+  const error = dialog.locator(".request-details-error");
+  await expect(dialog.getByText("Failed", { exact: true })).toBeVisible();
+  await expect(error.locator(".request-details-list > div").filter({ hasText: "HTTP status" }).locator("dd")).toHaveText("502");
 
   await page.evaluate(() => {
     const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
@@ -3363,8 +3371,10 @@ test("open request details follow the terminal fallback result", async ({ page }
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
 
-  await expect(dialog.locator(".detail-list > div").nth(1).locator("dd")).toHaveText("Success");
-  await expect(httpStatus).toHaveText("200");
+  await expect(dialog.getByText("Success", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".request-details-error")).toHaveCount(0);
+  await expect(dialog.getByText("16.2 s", { exact: true })).toBeVisible();
+  await expect(page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]')).toHaveText("128 ms / 16.2 s");
 });
 
 test("switching modes ignores a late failure from the previous mode", async ({ page }) => {

@@ -383,7 +383,7 @@ export function Tabs({ value, items, onChange, label }: { value: string; items: 
   return <div className="relay-tabs" role="tablist" aria-label={label}>{items.map((item, index) => <button key={item.id} role="tab" aria-selected={value === item.id} tabIndex={value === item.id ? 0 : -1} className={value === item.id ? "active" : ""} onClick={() => onChange(item.id)} onKeyDown={(event) => selectAdjacent(event, index)} type="button">{item.label}</button>)}</div>;
 }
 
-export function Dialog({ title, children, onClose, footer, wide = false, className = "" }: { title: string; children: ReactNode; onClose: () => void; footer: ReactNode; wide?: boolean; className?: string }) {
+export function Dialog({ title, children, onClose, footer, wide = false, className = "", closeOnBackdrop = false }: { title: string; children: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean; className?: string; closeOnBackdrop?: boolean }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const onCloseRef = useRef(onClose);
@@ -467,7 +467,7 @@ export function Dialog({ title, children, onClose, footer, wide = false, classNa
       }
     };
   }, []);
-  return <div className="relay-modal-backdrop" role="presentation"><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div><footer>{footer}</footer></section></div>;
+  return <div className="relay-modal-backdrop" role="presentation" onPointerDown={closeOnBackdrop ? (event) => { if (event.target === event.currentTarget) onClose(); } : undefined}><section ref={dialogRef} data-relay-dialog className={`relay-dialog ${wide ? "wide" : ""}${className ? ` ${className}` : ""}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}><header><h2 id={titleId}>{title}</h2><IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={onClose} /></header><div className="relay-dialog-body">{children}</div>{footer != null ? <footer>{footer}</footer> : null}</section></div>;
 }
 
 export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {

@@ -26,6 +26,10 @@
   width: min(920px, 100%);
 }
 
+.relay-dialog.request-details-dialog {
+  width: min(720px, 100%);
+}
+
 .relay-dialog > header,
 .relay-dialog > footer {
   min-height: 56px;

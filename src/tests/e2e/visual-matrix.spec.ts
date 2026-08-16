@@ -594,7 +594,7 @@ for (const viewport of viewports) {
     const poolToolbarGroups = page.locator(".pool-quota-actions > .pool-control-group");
     await expect(poolToolbarGroups).toHaveCount(2);
     await expect(poolToolbarGroups.evaluateAll((groups) => groups.map((group) => group.getAttribute("data-toolbar-group")))).resolves.toEqual(["routing", "refresh"]);
-    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Режим запросов" })).toBeVisible();
+    await expect(poolToolbarGroups.nth(0).getByRole("switch", { name: "Скорость запросов" })).toBeVisible();
     await expect(poolToolbarGroups.nth(0).locator("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label")))).resolves.toEqual(["Настройки распределения"]);
     await expect(poolToolbarGroups.nth(1).locator(":scope > *")).toHaveCount(2);
     await expect(poolToolbarGroups.nth(1).getByRole("button")).toHaveCount(2);
@@ -618,12 +618,12 @@ for (const viewport of viewports) {
     await page.goto("/");
     await page.getByRole("button", { name: "Пул", exact: true }).click();
     await expect(page.locator(".relay-tabs").getByRole("tab")).toHaveText(["Участники", "Правила моделей"]);
-    const speed = page.getByRole("switch", { name: "Режим запросов" });
+    const speed = page.getByRole("switch", { name: "Скорость запросов" });
     await speed.check();
     await expect(speed).toBeChecked();
     await page.getByRole("button", { name: "Настройки распределения", exact: true }).click();
     const distribution = page.getByRole("dialog", { name: "Распределение" });
-    await expect(distribution).not.toContainText("Режим запросов");
+    await expect(distribution).not.toContainText("Скорость запросов");
     await distribution.getByRole("button", { name: /^Стратегия распределения:/ }).click();
     await page.locator('[role="option"][data-value="subscription_plan"]').click();
     await expect(distribution.locator("[data-subscription-plan]")).toHaveCount(4);
@@ -955,7 +955,7 @@ for (const viewport of viewports) {
       await page.keyboard.press("Escape");
       await expect(dialog).not.toContainText("Закреплять один чат за аккаунтом");
       await expect(dialog).not.toContainText("Аккаунтов для повтора при ошибке");
-      await expect(dialog).not.toContainText("Режим запросов");
+      await expect(dialog).not.toContainText("Скорость запросов");
       await expect(dialog).toContainText("Выбирает наибольший доступный остаток, а при равных значениях распределяет запросы равномерно.");
       expect(await dialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
@@ -1043,10 +1043,11 @@ for (const viewport of viewports) {
     await page.getByRole("button", { name: "Request details: req_synthetic_local" }).click();
     dialog = page.getByRole("dialog", { name: "Request details" });
     await expect(dialog).toContainText("req_synthetic_local");
+    await dialog.getByRole("tab", { name: "Route", exact: true }).click();
     await expect(dialog).toContainText("Selection reasonGreatest quota remaining");
     await expect(dialog).toContainText("Eligible participants4");
     await expect(dialog).toContainText("Quota at selection63.00%");
-    expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+    expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
     expect(await dialog.evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
@@ -1591,12 +1592,12 @@ test("ru compact disclosure labels stay readable", async ({ page }) => {
   await page.getByRole("button", { name: "Сведения о запросе: req_synthetic_local" }).click();
   dialog = page.getByRole("dialog", { name: "Сведения о запросе" });
   await expect(dialog).toContainText("req_synthetic_local");
-  await expect(dialog).toContainText("Запрошенное размышлениеМаксимальное");
-  await expect(dialog).toContainText("Передано провайдеруНизкое");
+  await expect(dialog).toContainText("РазмышлениеЗапрошено: Максимальное, передано: Низкое");
+  await dialog.getByRole("tab", { name: "Маршрут", exact: true }).click();
   await expect(dialog).toContainText("Причина выбораНаибольший остаток квоты");
   await expect(dialog).toContainText("Доступных участников4");
   await expect(dialog).toContainText("Квота при выборе63.00%");
-  expect(await dialog.locator(".detail-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
+  expect(await dialog.locator(".request-details-list > div").evaluateAll((items) => items.every((item) => item.scrollWidth <= item.clientWidth))).toBe(true);
   expect(await dialog.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 36 && rect.bottom <= innerHeight;
@@ -1632,7 +1633,7 @@ for (const scenario of [
     expect(await page.locator(".usage-metrics > div, .usage-performance > div").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     expect(await page.locator(".usage-request-table th, .usage-request-table td").evaluateAll((items) => items.every((item) => getComputedStyle(item).textAlign === "center"))).toBe(true);
     const timing = page.getByRole("row").filter({ hasText: "req_synthetic_local" }).locator('td[data-column="timing"]');
-    await expect(timing).toHaveText("128 / 428 ms");
+    await expect(timing).toHaveText(scenario.locale === "ru" ? "128 мс / 428 мс" : "128 ms / 428 ms");
     expect(await timing.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
     const clippedHeaders = await page.locator(".usage-request-table th").evaluateAll((items) => items.filter((item) => item.scrollWidth > item.clientWidth || item.scrollHeight > item.clientHeight).map((item) => item.textContent));
     expect(clippedHeaders).toEqual([]);

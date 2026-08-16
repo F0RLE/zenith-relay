@@ -19,6 +19,13 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Usage request details now open as a compact overview with token, tool, and
+  route sections; durations use seconds when appropriate, and generation speed
+  is color-coded without presenting successful requests as errors.
+- Pool speed controls now use the clearer Standard/Fast terminology while
+  preserving the existing service-tier behavior.
+- Local snapshots mark an enabled pool account unavailable when the active
+  gateway has no matching OAuth candidate, with a sanitized diagnostic warning.
 - Global operation notifications now stay in a bottom-left overlay above the
   Help controls instead of shifting the page from the upper-right corner;
   compact sidebar mode uses a small status toast and opens error details in a

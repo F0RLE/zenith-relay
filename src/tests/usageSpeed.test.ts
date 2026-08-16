@@ -21,6 +21,12 @@ describe("usage token speed", () => {
     expect(tokenSpeed({ success: true, outputTokens: 20, durationMs: 800, ttftMs: 300, generationDurationMs: 400 })).toBe(50);
   });
 
+  test("does not use end-to-end time as streaming speed", () => {
+    const sample = { success: true, outputTokens: 20, durationMs: 800 };
+    expect(tokenSpeed(sample)).toBeNull();
+    expect(averageTokenSpeed([sample])).toBeNull();
+  });
+
   test("does not count hidden reasoning as streamed output", () => {
     expect(tokenSpeed({ success: true, outputTokens: 20, reasoningTokens: 5, durationMs: 600, ttftMs: 100 })).toBe(30);
   });

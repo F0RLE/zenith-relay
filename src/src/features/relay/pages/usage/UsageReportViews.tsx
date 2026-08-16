@@ -4,10 +4,10 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
 import { buildAccountValueProjection } from "../../accountEconomics";
-import { Button, CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
+import { CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusBadge, StatusIcon, Tabs } from "../../components/Ui";
 import { formatAccountValueMicroUsd } from "../../poolFormatting";
 import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
-import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
+import { formatTokenSpeed, generationTokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
   CONNECTION_COLUMN_IDS,
@@ -94,8 +94,8 @@ function RequestTable({ rows, formatTime, onSelect }: { rows: UsageRow[]; format
     model: { label: t("common.model"), cell: (row) => <UsageModel row={row} /> },
     tier: { label: t("usage.serviceTier"), cell: (row) => formatServiceTier(row, t) },
     connection: { label: t("usage.poolMember"), cell: (row) => row.connection },
-    timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration) },
-    speed: { label: t("usage.speed"), cell: (row) => formatTokenSpeed(tokenSpeed(rowSpeedSample(row)), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
+    timing: { label: t("usage.timing"), cell: (row) => formatTiming(row.ttft, row.duration, i18n.resolvedLanguage ?? i18n.language, t) },
+    speed: { label: t("usage.generationSpeed"), cell: (row) => <SpeedValue value={generationTokenSpeed(rowSpeedSample(row))} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
     tokens: { label: t("usage.tokens"), cell: (row) => row.tokens == null ? "-" : <CompactNumber value={row.tokens} locale={i18n.language} /> },
     equivalent: { label: t("usage.value"), cell: (row) => row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—" },
     request: { label: t("usage.requestId"), cell: (row) => <button type="button" className="request-link" aria-haspopup="dialog" aria-label={`${t("usage.requestDetails")}: ${row.requestId ?? "-"}`} onClick={() => onSelect(row)}><code>{row.requestId ?? "-"}</code></button> },
@@ -152,7 +152,9 @@ export function UsageMetric({ icon, label, value, detail, title }: { icon?: Reac
   return <div title={title}>{icon}<div className="usage-metric-copy"><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</div></div>;
 }
 
-function formatTiming(ttft: number | null, duration: number) { return `${ttft ?? "-"} / ${duration} ms`; }
+function formatTiming(ttft: number | null, duration: number, locale: string, t: TFunction) {
+  return `${formatDurationMs(ttft, locale, t)} / ${formatDurationMs(duration, locale, t)}`;
+}
 
 type AggregateRow = {
   name: string;
@@ -186,8 +188,8 @@ export function AggregateView({ rows, groups, field, empty }: { rows: UsageRow[]
     success: { label: t("common.success"), cell: (group) => `${Math.round(group.success / group.requests * 100)}%` },
     breakdown: { label: t("usage.tokens"), cell: (group) => <div className="usage-token-breakdown"><span title={`${t("usage.inputTokens")}: ${formatFullNumber(group.inputTokens, i18n.language)}`}><small>{t("usage.inputShort")}</small>{formatCompactNumber(group.inputTokens, i18n.language)}</span><span title={`${t("usage.cachedInputTokens")}: ${group.cachedInputSamples ? formatFullNumber(group.cachedInputTokens, i18n.language) : t("common.unknown")}`}><small>{t("usage.cachedShort")}</small>{group.cachedInputSamples ? formatCompactNumber(group.cachedInputTokens, i18n.language) : "—"}</span><span title={`${t("usage.reasoningTokens")}: ${formatFullNumber(group.reasoningTokens, i18n.language)}`}><small>{t("usage.reasoningShort")}</small>{formatCompactNumber(group.reasoningTokens, i18n.language)}</span><span title={`${t("usage.outputTokens")}: ${formatFullNumber(group.outputTokens, i18n.language)}`}><small>{t("usage.outputShort")}</small>{formatCompactNumber(group.outputTokens, i18n.language)}</span></div> },
     total: { label: t("usage.totalTokens"), cell: (group) => <CompactNumber value={group.tokens} locale={i18n.language} /> },
-    speed: { label: t("usage.generationSpeed"), cell: (group) => formatTokenSpeed(group.generationSpeed, i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit")) },
-    timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests)) },
+    speed: { label: t("usage.generationSpeed"), cell: (group) => <SpeedValue value={group.generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} /> },
+    timing: { label: t("usage.timing"), cell: (group) => formatTiming(group.ttftCount ? Math.round(group.ttft / group.ttftCount) : null, Math.round(group.duration / group.requests), i18n.resolvedLanguage ?? i18n.language, t) },
     input: { label: t("usage.inputTokens"), cell: (group) => <CompactNumber value={group.inputTokens} locale={i18n.language} /> },
     output: { label: t("usage.outputTokens"), cell: (group) => <CompactNumber value={group.outputTokens} locale={i18n.language} /> },
     cache: { label: t("usage.cachedInputTokens"), cell: (group) => group.cachedInputSamples ? <CompactNumber value={group.cachedInputTokens} locale={i18n.language} /> : "—" },
@@ -225,60 +227,103 @@ export function ErrorsView({ rows, formatTime, onSelect }: { rows: UsageRow[]; f
 
 export function RequestDetails({ row, onClose }: { row: UsageRow; onClose: () => void }) {
   const { t, i18n } = useTranslation();
+  const [section, setSection] = useState<"overview" | "tokens" | "tools" | "route">("overview");
   const routing = row.routing;
   const toolUse = row.toolUse;
   const speed = rowSpeedSample(row);
+  const generationSpeed = generationTokenSpeed(speed);
+  const visibleOutputTokens = row.outputTokens == null ? null : Math.max(0, row.outputTokens - (row.reasoningTokens ?? 0));
   const toolWarning = Boolean(
     toolUse
       && toolUse.forwardedToolCount > 0
       && toolUse.toolCallCount === 0
       && toolUse.terminalOutput === "text",
   );
-  return <Dialog title={t("usage.requestDetails")} onClose={onClose} footer={<Button variant="primary" onClick={onClose}>{t("common.close")}</Button>}>
-    <dl className="detail-list">
-      <div><dt>{t("usage.requestId")}</dt><dd className="detail-copy-value"><code>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</dd></div>
-      <div><dt>{t("common.status")}</dt><dd>{row.success ? t("common.success") : t("common.failed")}</dd></div>
-      <div><dt>{t("common.model")}</dt><dd><code>{row.model ?? "-"}</code></dd></div>
-      <div><dt>{t("usage.requestedReasoningEffort")}</dt><dd>{formatReasoningEffort(row.requestedReasoningEffort, t)}</dd></div>
-      <div><dt>{t("usage.effectiveReasoningEffort")}</dt><dd>{formatReasoningEffort(row.effectiveReasoningEffort, t)}</dd></div>
-      <div><dt>{t("usage.protocol")}</dt><dd><code>{row.wireApi ?? "-"}</code></dd></div>
-      <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
-      <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
-      <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
-      <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
-      <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
-      <div><dt>{t("usage.firstResponse")}</dt><dd>{row.ttft == null ? "-" : `${row.ttft} ms`}</dd></div>
-      <div><dt>{t("usage.generationTime")}</dt><dd>{row.generationDurationMs == null ? "-" : `${row.generationDurationMs} ms`}</dd></div>
-      <div><dt>{t("usage.totalTime")}</dt><dd>{row.duration} ms</dd></div>
-      <div><dt>{t("usage.generationSpeed")}</dt><dd>{formatTokenSpeed(generationTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div>
-      <div><dt>{t("usage.effectiveSpeed")}</dt><dd>{formatTokenSpeed(effectiveTokenSpeed(speed), i18n.resolvedLanguage ?? i18n.language, t("usage.tokensPerSecondUnit"))}</dd></div>
+  const tabs = [
+    { id: "overview", label: t("usage.requestSections.overview") },
+    { id: "tokens", label: t("usage.requestSections.tokens") },
+    ...(toolUse ? [{ id: "tools", label: t("usage.requestSections.tools") }] : []),
+    ...(routing ? [{ id: "route", label: t("usage.requestSections.route") }] : []),
+  ];
+  return <Dialog title={t("usage.requestDetails")} onClose={onClose} wide className="request-details-dialog" closeOnBackdrop>
+    <div className="request-details-header">
+      <div className="request-details-identity">
+        <StatusBadge status={row.success ? "ready" : "error"} label={row.success ? t("common.success") : t("common.failed")} />
+        <code title={row.model ?? undefined}>{row.model ?? "-"}</code>
+      </div>
+      <div className="request-details-id"><span>{t("usage.requestId")}</span><code title={row.requestId ?? undefined}>{row.requestId ?? "-"}</code>{row.requestId ? <CopyButton value={row.requestId} label={t("usage.copyRequestId")} /> : null}</div>
+    </div>
+    <div className="request-details-metrics">
+      <RequestDetailMetric label={t("usage.firstResponse")} value={formatDurationMs(row.ttft, i18n.resolvedLanguage ?? i18n.language, t)} />
+      <RequestDetailMetric label={t("usage.generationSpeed")} value={<SpeedValue value={generationSpeed} locale={i18n.resolvedLanguage ?? i18n.language} unit={t("usage.tokensPerSecondUnit")} />} />
+      <RequestDetailMetric label={t("usage.totalTime")} value={formatDurationMs(row.duration, i18n.resolvedLanguage ?? i18n.language, t)} />
+      <RequestDetailMetric label={t("usage.visibleOutputTokens")} value={visibleOutputTokens == null ? "—" : formatCompactNumber(visibleOutputTokens, i18n.language)} />
+    </div>
+    <Tabs value={section} items={tabs} onChange={(value) => setSection(value as typeof section)} label={t("usage.requestSectionsLabel")} />
+    {section === "overview" ? <>
+      <dl className="request-details-list">
+        <div><dt>{t("usage.poolMember")}</dt><dd>{row.connection}</dd></div>
+        <div><dt>{t("usage.protocol")}</dt><dd><code>{row.wireApi ?? "-"}</code></dd></div>
+        <div><dt>{t("usage.serviceTier")}</dt><dd>{formatServiceTier(row, t, "-")}</dd></div>
+        <div><dt>{t("usage.reasoning")}</dt><dd>{formatReasoningSummary(row, t)}</dd></div>
+      </dl>
+      {!row.success ? <section className="request-details-error" aria-label={t("usage.errorDetails")}>
+        <h3>{t("usage.errorDetails")}</h3>
+        <dl className="request-details-list">
+          <div><dt>{t("usage.httpStatus")}</dt><dd>{row.httpStatus ?? "-"}</dd></div>
+          <div><dt>{t("usage.errorOrigin")}</dt><dd>{formatErrorOrigin(row.errorOrigin, t)}</dd></div>
+          <div><dt>{t("usage.errorCategory")}</dt><dd title={row.errorCategory ?? undefined}>{row.errorCategory ? formatErrorCategory(row.errorCategory, t) : "-"}</dd></div>
+        </dl>
+      </section> : null}
+    </> : null}
+    {section === "tokens" ? <dl className="request-details-list request-details-token-list">
       <div><dt>{t("usage.inputTokens")}</dt><dd>{row.inputTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.cachedInputTokens")}</dt><dd>{row.cachedInputTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.reasoningTokens")}</dt><dd>{row.reasoningTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.outputTokens")}</dt><dd>{row.outputTokens ?? "-"}</dd></div>
       <div><dt>{t("usage.totalTokens")}</dt><dd>{row.tokens ?? "-"}</dd></div>
       <div><dt>{t("usage.apiEquivalent")}</dt><dd title={row.apiEquivalent ? t("usage.requestApiEquivalentHint", { count: row.apiEquivalent.unpricedTokens }) : undefined}>{row.apiEquivalent ? formatApiEquivalent(row.apiEquivalent, i18n.language) : "—"}</dd></div>
-      {toolUse ? <>
-        <div className="detail-section-heading"><dt>{t("usage.toolDiagnostics")}</dt><dd /></div>
-        <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount}</dd></div>
-        <div><dt>{t("usage.forwardedTools")}</dt><dd>{toolUse.forwardedToolCount}</dd></div>
+    </dl> : null}
+    {section === "tools" && toolUse ? <section className="request-details-section">
+      <dl className="request-details-list">
+        <div><dt>{t("usage.clientTools")}</dt><dd>{toolUse.clientToolCount} → {toolUse.forwardedToolCount}</dd></div>
         <div><dt>{t("usage.toolChoice")}</dt><dd>{formatToolChoice(toolUse.toolChoice, t)}</dd></div>
         <div><dt>{t("usage.toolCallsReturned")}</dt><dd>{toolUse.toolCallCount}</dd></div>
         <div><dt>{t("usage.terminalOutput")}</dt><dd>{formatTerminalOutput(toolUse.terminalOutput, t)}</dd></div>
-      </> : null}
-      {routing ? <>
-        <div className="detail-section-heading"><dt>{t("usage.routingDiagnostics")}</dt><dd /></div>
-        <div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
-        <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
-        {row.candidateKind === "account" ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div> : null}
-        <div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div>
-        <div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div>
-      </> : null}
-    </dl>
-    {toolWarning ? <p className="form-note warning-text">{t("usage.toolCallMissing", { count: toolUse?.forwardedToolCount ?? 0 })}</p> : null}
-    {toolUse ? <p className="form-note">{t("usage.toolDiagnosticsHint")}</p> : null}
-    <p className="form-note">{t("usage.redactionHint")}</p>
+      </dl>
+      {toolWarning ? <p className="form-note warning-text">{t("usage.toolCallMissing", { count: toolUse.forwardedToolCount })}</p> : null}
+      <p className="form-note">{t("usage.toolDiagnosticsHint")}</p>
+    </section> : null}
+    {section === "route" && routing ? <dl className="request-details-list">
+      <div><dt>{t("usage.routingReason")}</dt><dd>{t(`usage.routingReasons.${routing.reason}`)}</dd></div>
+      <div><dt>{t("usage.eligibleCandidates")}</dt><dd>{routing.eligibleCandidates}</dd></div>
+      {row.candidateKind === "account" ? <div><dt>{t("usage.quotaAtSelection")}</dt><dd>{routing.quotaRemainingBasisPoints == null ? t("common.unknown") : `${(routing.quotaRemainingBasisPoints / 100).toFixed(2)}%`}</dd></div> : null}
+      <div><dt>{t("usage.inFlightAtSelection")}</dt><dd>{routing.inFlightBefore}</dd></div>
+      <div><dt>{t("usage.dispatchesBefore")}</dt><dd>{routing.dispatchesBefore}</dd></div>
+    </dl> : null}
   </Dialog>;
+}
+
+function RequestDetailMetric({ label, value }: { label: string; value: ReactNode }) {
+  return <div className="request-details-metric"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function SpeedValue({ value, locale, unit }: { value: number | null; locale: string; unit: string }) {
+  const { t } = useTranslation();
+  return <span className="usage-speed-value" data-tone={speedTone(value)} title={t("usage.generationSpeedHint")}>{formatTokenSpeed(value, locale, unit)}</span>;
+}
+
+function formatDurationMs(value: number | null, locale: string, t: TFunction): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 1000) return t("usage.durationSeconds", { value: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(value / 1000) });
+  return t("usage.durationMilliseconds", { value: Math.round(value) });
+}
+
+function speedTone(value: number | null): "good" | "warning" | "slow" | "neutral" {
+  if (value == null || !Number.isFinite(value)) return "neutral";
+  if (value >= 80) return "good";
+  if (value >= 30) return "warning";
+  return "slow";
 }
 
 function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoningEffort" | "effectiveReasoningEffort"> }) {
@@ -295,6 +340,13 @@ function UsageModel({ row }: { row: Pick<UsageRow, "model" | "requestedReasoning
 
 function formatReasoningEffort(effort: ReasoningEffort | null, t: TFunction): string {
   return effort ? t(`usage.reasoningEfforts.${effort}`) : "-";
+}
+
+function formatReasoningSummary(row: Pick<UsageRow, "requestedReasoningEffort" | "effectiveReasoningEffort">, t: TFunction): string {
+  if (row.requestedReasoningEffort && row.effectiveReasoningEffort && row.requestedReasoningEffort !== row.effectiveReasoningEffort) {
+    return t("usage.reasoningEffortChanged", { requested: formatReasoningEffort(row.requestedReasoningEffort, t), effective: formatReasoningEffort(row.effectiveReasoningEffort, t) });
+  }
+  return formatReasoningEffort(row.effectiveReasoningEffort ?? row.requestedReasoningEffort, t);
 }
 
 function formatServiceTier(row: Pick<UsageRow, "serviceTier" | "appliedServiceTier">, t: TFunction, fallback = "—") {
