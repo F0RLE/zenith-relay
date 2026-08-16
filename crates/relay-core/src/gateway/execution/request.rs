@@ -26,6 +26,7 @@ use crate::protocol::{
     AdapterRequestContext,
 };
 use crate::runtime::{AuthenticatedKey, DefaultServiceTier};
+use crate::usage::ReasoningEffortDiagnostics;
 use crate::{Error, GatewayRuntime, WireApi};
 use axum::body::Body;
 use axum::http::header::{ACCEPT, CONTENT_TYPE};
@@ -206,6 +207,11 @@ pub(in crate::gateway::execution) async fn execute_request(
             };
             normalize_account_request(object, responses_lite.is_some());
         }
+        let reasoning_effort = ReasoningEffortDiagnostics::from_bodies(
+            &request,
+            adapter_request.upstream_body(),
+            wire_api,
+        );
         let adapter_is_passthrough = adapter_request.is_passthrough();
         let Ok(request_body) = serde_json::to_vec(adapter_request.upstream_body()) else {
             return api_error(
@@ -269,6 +275,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     attempt,
                     &key.id,
                     &route,
+                    Some(&reasoning_effort),
                     &requested_model,
                     false,
                     failure.status.as_u16(),
@@ -292,6 +299,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 attempt,
                 &key.id,
                 &route,
+                Some(&reasoning_effort),
                 &requested_model,
                 false,
                 status.as_u16(),
@@ -509,6 +517,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                         attempt,
                         &key.id,
                         &route,
+                        Some(&reasoning_effort),
                         &requested_model,
                         false,
                         StatusCode::BAD_GATEWAY.as_u16(),
@@ -548,6 +557,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                             attempt,
                             &key.id,
                             &route,
+                            Some(&reasoning_effort),
                             &requested_model,
                             false,
                             failure.status.as_u16(),
@@ -612,6 +622,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                         attempt,
                         &key.id,
                         &route,
+                        Some(&reasoning_effort),
                         &requested_model,
                         false,
                         StatusCode::BAD_GATEWAY.as_u16(),
@@ -635,6 +646,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                             attempt,
                             &key.id,
                             &route,
+                            Some(&reasoning_effort),
                             &requested_model,
                             false,
                             StatusCode::BAD_GATEWAY.as_u16(),
@@ -656,6 +668,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                 attempt,
                 &key.id,
                 &route,
+                Some(&reasoning_effort),
                 &requested_model,
                 true,
                 status.as_u16(),
@@ -738,6 +751,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     source_model,
                     prompt_affinity_key,
                     wire_api,
+                    reasoning_effort,
                     tool_use,
                     attempt,
                     started,
@@ -754,6 +768,7 @@ pub(in crate::gateway::execution) async fn execute_request(
                     attempt,
                     &key.id,
                     &route,
+                    Some(&reasoning_effort),
                     &requested_model,
                     false,
                     failure.status.as_u16(),

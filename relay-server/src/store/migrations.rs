@@ -169,6 +169,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "032_error_origin",
         sql: include_str!("../../migrations/032_error_origin.sql"),
     },
+    Migration {
+        version: 33,
+        name: "033_reasoning_effort",
+        sql: include_str!("../../migrations/033_reasoning_effort.sql"),
+    },
+    Migration {
+        version: 34,
+        name: "034_account_purchase_cost",
+        sql: include_str!("../../migrations/034_account_purchase_cost.sql"),
+    },
 ];
 
 struct Migration {
@@ -396,8 +406,67 @@ pub(super) fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ServerAccountRecord;
     use crate::store::sqlite::Store;
     use crate::store::test_support::test_root;
+    use zenith_relay_core::accounts::{AccountAuthState, AccountHealthState};
+
+    fn account_record(id: &str) -> ServerAccountRecord {
+        ServerAccountRecord {
+            id: id.to_string(),
+            label: id.to_string(),
+            identity_hint: id.to_string(),
+            enabled: true,
+            in_pool: true,
+            draining: false,
+            source_id: "openai_codex".to_string(),
+            secret_ref: format!("account:{id}"),
+            auth_state: AccountAuthState::Active,
+            health: AccountHealthState::Healthy,
+            models: vec!["gpt-test".to_string()],
+            allowed_models: Vec::new(),
+            excluded_models: Vec::new(),
+            priority: 0,
+            weight: 1,
+            subscription: Default::default(),
+            quota: Default::default(),
+            purchase_cost_micro_usd: None,
+            cooldowns: Default::default(),
+            consecutive_failures: 0,
+            created_at_ms: 1,
+            last_used_at_ms: None,
+            last_error_code: None,
+            proxy_id: None,
+            bypass_common_proxy: false,
+        }
+    }
+
+    fn apply_migrations_through(connection: &mut Connection, target_version: u32) {
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.version <= target_version)
+        {
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            transaction.execute_batch(migration.sql).unwrap();
+            if migration.version >= 2 {
+                transaction
+                    .execute(
+                        "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES (?1, ?2, ?3)",
+                        params![i64::from(migration.version), migration.name, 0_i64],
+                    )
+                    .unwrap();
+            }
+            transaction
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES ('schema_version', ?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [migration.version.to_string()],
+                )
+                .unwrap();
+            transaction.commit().unwrap();
+        }
+    }
 
     #[test]
     fn pool_membership_migration_defaults_existing_records_outside_pool() {
@@ -457,6 +526,92 @@ mod tests {
     }
 
     #[test]
+    fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_economics() {
+        let root = test_root("account-purchase-cost-migration");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("relay.sqlite");
+        let mut connection = Connection::open(&path).unwrap();
+        apply_migrations_through(&mut connection, 33);
+
+        let mut direct = serde_json::to_value(account_record("account_direct")).unwrap();
+        direct["purchaseCostMicroUsd"] = serde_json::json!(42_000_000_u64);
+        direct["economics"] = serde_json::json!({
+            "purchaseCostMicroUsd": 13_000_000_u64,
+            "sampleCount": 8
+        });
+        let mut legacy = serde_json::to_value(account_record("account_legacy")).unwrap();
+        legacy["economics"] = serde_json::json!({
+            "purchaseCostMicroUsd": 21_000_000_u64,
+            "sampleCount": 3
+        });
+        let mut no_cost = serde_json::to_value(account_record("account_without_cost")).unwrap();
+        no_cost["economics"] = serde_json::json!({ "sampleCount": 1 });
+        for (id, value) in [
+            ("account_direct", direct),
+            ("account_legacy", legacy),
+            ("account_without_cost", no_cost),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO accounts(id, data_json, secret_ref) VALUES (?1, ?2, ?3)",
+                    params![id, value.to_string(), format!("account:{id}")],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let store = Store::open(path.clone()).unwrap();
+        assert_eq!(
+            store
+                .account("account_direct")
+                .unwrap()
+                .unwrap()
+                .purchase_cost_micro_usd,
+            Some(42_000_000)
+        );
+        assert_eq!(
+            store
+                .account("account_legacy")
+                .unwrap()
+                .unwrap()
+                .purchase_cost_micro_usd,
+            Some(21_000_000)
+        );
+        assert_eq!(
+            store
+                .account("account_without_cost")
+                .unwrap()
+                .unwrap()
+                .purchase_cost_micro_usd,
+            None
+        );
+        {
+            let connection = store.lock().unwrap();
+            let legacy_objects: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM accounts WHERE json_type(data_json, '$.economics') IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(legacy_objects, 0);
+        }
+        drop(store);
+
+        let reopened = Store::open(path).unwrap();
+        assert_eq!(
+            reopened
+                .account("account_legacy")
+                .unwrap()
+                .unwrap()
+                .purchase_cost_micro_usd,
+            Some(21_000_000)
+        );
+        drop(reopened);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn store_migrates_and_preserves_server_identity() {
         let root =
             std::env::temp_dir().join(format!("zenith-relay-store-{}", uuid::Uuid::new_v4()));
@@ -502,6 +657,23 @@ mod tests {
             store.metadata("schema_version").unwrap(),
             Some(SERVER_SCHEMA_VERSION.to_string())
         );
+        let columns = {
+            let connection = store.lock().unwrap();
+            let mut statement = connection
+                .prepare("SELECT name FROM pragma_table_info('usage_events')")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(columns
+            .iter()
+            .any(|column| column == "requested_reasoning_effort"));
+        assert!(columns
+            .iter()
+            .any(|column| column == "effective_reasoning_effort"));
         let ledger = {
             let connection = store.lock().unwrap();
             let mut statement = connection
@@ -549,7 +721,9 @@ mod tests {
                 (29, "029_candidate_usage_rollups".to_string()),
                 (30, "030_source_priced_key_rollups".to_string()),
                 (31, "031_tool_use_diagnostics".to_string()),
-                (32, "032_error_origin".to_string())
+                (32, "032_error_origin".to_string()),
+                (33, "033_reasoning_effort".to_string()),
+                (34, "034_account_purchase_cost".to_string())
             ]
         );
         drop(store);

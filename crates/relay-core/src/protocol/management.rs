@@ -463,8 +463,8 @@ pub struct AccountSummary {
     pub weight: u32,
     #[serde(default)]
     pub api_equivalent: ApiEquivalentSummary,
-    #[serde(default)]
-    pub economics: crate::quota::QuotaEconomicsSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purchase_cost_micro_usd: Option<u64>,
     pub subscription: Subscription,
     pub quota: QuotaSnapshot,
     #[serde(default)]
@@ -893,6 +893,10 @@ pub struct UsageSummary {
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_reasoning_effort: Option<String>,
     pub wire_api: WireApi,
     #[serde(default)]
     pub service_tier: crate::DefaultServiceTier,
@@ -1050,7 +1054,7 @@ pub struct ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::quota::{QuotaEconomicsSummary, QuotaSnapshot, QuotaWindow, QuotaWindowKind};
+    use crate::quota::{QuotaSnapshot, QuotaWindow, QuotaWindowKind};
     use crate::{
         ActiveModelRuntime, ApiEquivalentSummary, CandidateKind, CandidateRuntimeSnapshot,
         MessagesReasoningMode, SourceAdapter,
@@ -1092,7 +1096,7 @@ mod tests {
             priority: 0,
             weight: 1,
             api_equivalent: ApiEquivalentSummary::default(),
-            economics: QuotaEconomicsSummary::default(),
+            purchase_cost_micro_usd: None,
             subscription: Subscription::default(),
             quota: QuotaSnapshot::default(),
             quota_refresh_status: QuotaRefreshStatus::default(),

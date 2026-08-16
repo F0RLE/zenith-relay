@@ -1,5 +1,4 @@
 export type RelayStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-export type AccountQuotaCalculationMode = "provider" | "zenith_experimental";
 
 export const RELAY_STORAGE_KEYS = {
   mode: "relay.mode",
@@ -10,8 +9,8 @@ export const RELAY_STORAGE_KEYS = {
   codexPoolOauthSelection: "relay.codexPoolOauthSelection",
   legacyCodexPoolOauthSelection: "relay.codexPoolOauthAccountId",
   accountIdentitiesVisible: "relay.accountIdentitiesVisible",
-  poolEconomicsVisible: "relay.poolEconomicsVisible",
-  accountQuotaCalculationMode: "relay.accountQuotaCalculationMode",
+  accountValueVisible: "relay.accountValueVisible",
+  legacyPoolEconomicsVisible: "relay.poolEconomicsVisible",
 } as const;
 
 export function readRelayPreference(
@@ -58,10 +57,21 @@ export function readCodexPoolOauthSelection(storage: RelayStorage | undefined = 
   return selection;
 }
 
-export function readAccountQuotaCalculationMode(storage: RelayStorage | undefined = browserStorage()): AccountQuotaCalculationMode {
-  return readRelayPreference(RELAY_STORAGE_KEYS.accountQuotaCalculationMode, "provider", storage) === "zenith_experimental"
-    ? "zenith_experimental"
-    : "provider";
+export function readAccountValueVisibility(storage: RelayStorage | undefined = browserStorage()) {
+  const value = readRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, "", storage)
+    || readRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, "", storage)
+    || "true";
+  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, value, storage);
+  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
+  return value !== "false";
+}
+
+export function writeAccountValueVisibility(
+  visible: boolean,
+  storage: RelayStorage | undefined = browserStorage(),
+) {
+  writeRelayPreference(RELAY_STORAGE_KEYS.accountValueVisible, String(visible), storage);
+  removeRelayPreference(RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible, storage);
 }
 
 function browserStorage(): RelayStorage | undefined {

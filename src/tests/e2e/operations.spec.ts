@@ -2135,7 +2135,7 @@ test("connections route Free accounts like other pool members", async ({ page })
   const freeAccount = page.locator(".account-card").filter({ hasText: "Backup account" });
   await expect(freeAccount.locator(".relay-status-icon")).toHaveAttribute("aria-label", "In rotation");
   await expect(freeAccount).toContainText("95%");
-  await expect(freeAccount).toContainText("5 weeks");
+  await expect(freeAccount).toContainText("30 days");
 });
 
 test("page navigation resets the shared content scroll position", async ({ page }) => {
@@ -2299,23 +2299,20 @@ test("usage filters are named and stay scoped to the request report", async ({ p
   })).not.toMatchObject({ success: false, wireApi: "responses" });
 });
 
-test("account usage shows measured quota economics and the model cost table", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4, planBenchmark: true });
+test("account usage shows direct API equivalent, payback, and provider quota windows", async ({ page }) => {
+  await installTauriMock(page, { mode: "local", locale: "en", populated: true, quotaAvailable: true, accountCount: 4 });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await chooseOption(page, page, "Account", "account_synthetic");
 
-  const economics = page.locator(".usage-account-economics");
-  await expect(economics).toContainText("Personal Plus");
-  await expect(economics).toContainText("Estimated potential≈$24");
-  await expect(economics).toContainText("Calibration3.4%");
-  await expect(economics).toContainText("Plan benchmark");
-  await expect(economics).toContainText("Plus · Follow ChatGPT · 3 accounts");
-  await expect(economics.locator(".usage-window-table thead th")).toHaveText([
-    "Window", "Remaining", "Estimated potential", "Plan benchmark", "Tokens", "Similar requests", "Mode", "Reset",
-  ]);
-  await expect(economics.locator("tbody tr").nth(1).locator("td").nth(2)).toContainText("≈$28.8");
-  await expect(economics.getByRole("row")).toHaveCount(3);
+  const accountUsage = page.locator(".usage-account-value");
+  await expect(accountUsage).toContainText("Personal Plus");
+  await expect(accountUsage).toContainText("API equiv.");
+  await expect(accountUsage).toContainText("Potential");
+  await expect(accountUsage).toContainText("Purchase cost, USD");
+  await expect(accountUsage).toContainText("Payback");
+  await expect(accountUsage.locator(".usage-window-table thead th")).toHaveText(["Window", "Remaining", "Reset"]);
+  await expect(accountUsage.getByRole("row")).toHaveCount(3);
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_local_usage_page")?.args.input?.sourceOrAccountQuery;
@@ -2326,7 +2323,7 @@ test("account usage shows measured quota economics and the model cost table", as
     "Model", "Requests", "Input tokens", "Output tokens", "Cache reads", "Value",
   ]);
   await page.setViewportSize({ width: 840, height: 560 });
-  await expect(economics).toBeVisible();
+  await expect(accountUsage).toBeVisible();
 });
 
 test("usage request columns reorder, resize, and open details only from the request id", async ({ page }) => {
@@ -2417,7 +2414,7 @@ test("usage attributes API token totals to the selected account", async ({ page 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
   await expect(page.locator(".account-card .account-token-speed")).toHaveCount(0);
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(page.locator('[data-member-label="Personal Plus"] .account-economics-strip')).toHaveCount(0);
+  await expect(page.locator('[data-member-label="Personal Plus"] .account-value-strip')).toHaveCount(0);
   await expect(page.locator('[data-member-label="Personal Plus"] .quota-meter').first()).toBeVisible();
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await page.getByRole("tab", { name: "Pool members" }).click();
@@ -2482,7 +2479,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const rows = page.locator(".model-rules tbody tr[data-model-id]");
     await expect(rows).toHaveCount(3);
-    expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "gpt-5.4-mini", "o3"]);
+    expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "o3", "gpt-5.4-mini"]);
     await expect(rows.first().locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
     await expect(rows.first().locator(".model-price-value strong")).toHaveText(["$2.5", "$15", "$0.25"]);
     await expect(rows.first().locator(".model-codex-state")).toContainText("Shown in model list");
@@ -3037,72 +3034,47 @@ test("an exhausted weekly quota makes the account effectively unavailable in con
   await expect(accountCard.locator(".quota-meter strong")).toHaveText(["0%", "0%"]);
 });
 
-test("standard calculation is the default and the Relay estimate is opt-in in settings", async ({ page }) => {
+test("direct account value remains controlled by the dollar toggle", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  const connectionEconomics = page.locator(".account-card .account-economics-strip");
-  const connectionProviderQuota = page.locator(".account-card .account-provider-quota-strip");
+  const connectionValue = page.locator(".account-card .account-value-strip");
 
-  await expect(connectionEconomics).toHaveCount(0);
-  await expect(connectionProviderQuota.first()).toBeVisible();
+  await expect(connectionValue.first()).toBeVisible();
+  await expect(connectionValue.first().locator("dt")).toHaveText(["API equiv.", "Potential", "Payback"]);
+  await expect(connectionValue.first().locator("dd small")).toHaveCount(0);
+  await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
   await expect(page.locator(".account-card .quota-meter").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("button", { name: "Hide account calculation" }).locator("svg.lucide-dollar-sign")).toBeVisible();
   await page.getByRole("button", { name: "Hide account calculation" }).click();
-  await expect(connectionProviderQuota).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+  await expect(connectionValue).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountValueVisible"))).toBe("false");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
-  const poolEconomics = page.locator('.pool-member-card[data-member-kind="account"] .account-economics-strip');
-  const poolProviderQuota = page.locator('.pool-member-card[data-member-kind="account"] .account-provider-quota-strip');
+  const poolValue = page.locator('.pool-member-card[data-member-kind="account"] .account-value-strip');
   await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
-  await expect(poolProviderQuota).toHaveCount(0);
+  await expect(poolValue).toHaveCount(0);
   await page.getByRole("button", { name: "Show account calculation" }).click();
-  await expect(poolProviderQuota.first()).toBeVisible();
+  await expect(poolValue.first()).toBeVisible();
+  await expect(page.locator(".account-provider-quota-strip")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Standard calculation", exact: true })).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "Relay estimate (experimental)", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("zenith_experimental");
+  await expect(page.getByRole("button", { name: "Standard calculation", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Relay estimate (experimental)", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionEconomics.first()).toBeVisible();
-  await expect(connectionProviderQuota).toHaveCount(0);
+  await expect(connectionValue.first()).toBeVisible();
   await expect(page.getByRole("button", { name: "Hide account calculation" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByRole("button", { name: "Hide account calculation" }).locator("svg.lucide-dollar-sign")).toBeVisible();
   await page.getByRole("button", { name: "Hide account calculation" }).click();
-  await expect(connectionEconomics).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.poolEconomicsVisible"))).toBe("false");
+  await expect(connectionValue).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountValueVisible"))).toBe("false");
 
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await expect(page.getByRole("button", { name: "Show account calculation" })).toHaveAttribute("aria-pressed", "false");
-  await expect(poolEconomics).toHaveCount(0);
+  await expect(poolValue).toHaveCount(0);
   await page.getByRole("button", { name: "Show account calculation" }).click();
-  await expect(poolEconomics.first()).toBeVisible();
-
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Standard calculation", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("relay.accountQuotaCalculationMode"))).toBe("provider");
-
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionEconomics).toHaveCount(0);
-  await expect(connectionProviderQuota.first()).toBeVisible();
-  await page.reload();
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-  await expect(connectionProviderQuota.first()).toBeVisible();
-  await page.getByRole("button", { name: "Pool", exact: true }).click();
-  await expect(poolProviderQuota.first()).toBeVisible();
-});
-
-test("provider quota reset ignores expired windows", async ({ page }) => {
-  await installTauriMock(page, { mode: "local", locale: "en", populated: true, mixedQuotaResets: true });
-  await page.goto("/");
-  await page.getByRole("button", { name: "Connections", exact: true }).click();
-
-  const reset = page.locator(".account-card .account-provider-quota-strip").first().locator("dd").nth(1);
-  await expect(reset).toContainText(/\d+ d/);
-  await expect(reset).not.toHaveText(/0 seconds/);
+  await expect(poolValue.first()).toBeVisible();
 });
 
 test("pool hides the account calculation control when it has only API sources", async ({ page }) => {
@@ -3122,9 +3094,9 @@ test("quota cards name provider windows and make remaining percentages explicit"
   await page.getByRole("button", { name: "Connections", exact: true }).click();
 
   const free = page.locator(".account-card").filter({ hasText: "Backup account" });
-  await expect(free.locator(".quota-meter-heading > span")).toHaveText("5 weeks");
+  await expect(free.locator(".quota-meter-heading > span")).toHaveText("30 days");
   await expect(free.locator(".quota-meter-heading > strong")).toHaveText("95%");
-  await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "5 weeks: 95%");
+  await expect(free.locator(".quota-track")).toHaveAttribute("aria-label", "30 days: 95%");
 });
 
 test("pool toggle changes state without switching ChatGPT", async ({ page }) => {
@@ -3175,17 +3147,18 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
-  const [feedbackBox, headerBox, poolControlsBox] = await Promise.all([
+  const [feedbackBox, shellBox, helpBox] = await Promise.all([
     feedback.boundingBox(),
-    page.locator(".relay-page-header").boundingBox(),
-    page.locator(".pool-controls").boundingBox(),
+    page.locator(".relay-shell").boundingBox(),
+    page.getByRole("button", { name: "Help" }).boundingBox(),
   ]);
   expect(feedbackBox).not.toBeNull();
-  expect(headerBox).not.toBeNull();
-  expect(poolControlsBox).not.toBeNull();
-  expect(feedbackBox!.x).toBeGreaterThan(page.viewportSize()!.width / 2);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(headerBox!.y);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(poolControlsBox!.y);
+  expect(shellBox).not.toBeNull();
+  expect(helpBox).not.toBeNull();
+  expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+  expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
+  expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
@@ -3196,15 +3169,21 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
-test("profile switch errors remain readable and then dismiss automatically", async ({ page }) => {
+test("profile switch errors stay visible until the one-minute timeout", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, profileSwitchError: true });
+  await page.clock.install({ time: 0 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  await expect(feedback).toContainText("The profile changed during the operation.");
-  await expect(feedback).toBeHidden({ timeout: 9_000 });
+  await expect(feedback).toContainText("Something went wrong. Click to view details.");
+  await expect(feedback).not.toContainText("The profile changed during the operation.");
+  await expect(feedback).not.toContainText("profile_restore_blocked");
+  await page.clock.runFor(59_000);
+  await expect(feedback).toBeVisible();
+  await page.clock.runFor(2_000);
+  await expect(feedback).toHaveCount(0);
 });
 
 test("global errors expose sanitized details and a copy confirmation", async ({ page }) => {
@@ -3215,18 +3194,19 @@ test("global errors expose sanitized details and a copy confirmation", async ({ 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  const errorMenu = feedback.locator(".global-feedback-menu summary");
-  await expect(errorMenu).toBeVisible();
-  await errorMenu.click();
-  await feedback.getByRole("menuitem", { name: "Show details" }).click();
-  const details = feedback.getByRole("region", { name: "Error details" });
+  await expect(feedback.locator(".global-feedback-actions .relay-icon-button")).toHaveCount(0);
+  await feedback.locator(".global-feedback-error-trigger").click();
+  const details = page.getByRole("dialog", { name: "Error details" });
   await expect(details).toContainText('"code": "profile_restore_blocked"');
   await expect(details).toContainText('"message": "Synthetic profile conflict"');
+  await expect(page.locator(".global-feedback")).toHaveCount(0);
+  await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
 
-  await errorMenu.click();
-  await feedback.getByRole("menuitem", { name: "Copy error JSON" }).click();
-  await expect(feedback.locator(".global-feedback-copy-state")).toHaveText("Copied");
+  await details.getByRole("button", { name: "Copy error JSON" }).click();
+  await expect(details.locator(".global-feedback-dialog-copy-state")).toHaveText("Copied");
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('"profile_restore_blocked"');
+  await details.locator("header .relay-icon-button").click();
+  await expect(feedback).toHaveCount(0);
 });
 
 test("focus refreshes runtime only after a state revision changes", async ({ page }) => {
@@ -3314,14 +3294,21 @@ test("Overview keeps rendered analytics while a background refresh is pending or
   await expect(activity).toHaveCount(1);
 
   await page.evaluate(() => {
-    const internals = (window as unknown as { __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> } }).__TAURI_INTERNALS__;
+    const testWindow = window as unknown as {
+      __OVERVIEW_USAGE_REFRESH_PENDING__?: boolean;
+      __RESOLVE_OVERVIEW_USAGE_REFRESH__?: () => void;
+      __TAURI_INTERNALS__: { invoke: (command: string, args?: unknown, options?: unknown) => Promise<unknown> };
+    };
+    const internals = testWindow.__TAURI_INTERNALS__;
     const invoke = internals.invoke.bind(internals);
     let delayNextUsageRead = true;
     internals.invoke = (command, args, options) => {
       if (command !== "get_local_usage_page" || !delayNextUsageRead) return invoke(command, args, options);
       delayNextUsageRead = false;
-      (window as unknown as { __OVERVIEW_USAGE_REFRESH_PENDING__?: boolean }).__OVERVIEW_USAGE_REFRESH_PENDING__ = true;
-      return new Promise((resolve, reject) => window.setTimeout(() => invoke(command, args, options).then(resolve, reject), 400));
+      testWindow.__OVERVIEW_USAGE_REFRESH_PENDING__ = true;
+      return new Promise((resolve, reject) => {
+        testWindow.__RESOLVE_OVERVIEW_USAGE_REFRESH__ = () => void invoke(command, args, options).then(resolve, reject);
+      });
     };
   });
   await emitTauriEvent(page, "zenith-state-changed", null);
@@ -3329,6 +3316,11 @@ test("Overview keeps rendered analytics while a background refresh is pending or
   await expect(analytics).toHaveAttribute("aria-busy", "true");
   await expect(tokenSummary).toHaveText("28");
   await expect(activity).toHaveCount(1);
+  await page.evaluate(() => {
+    const release = (window as unknown as { __RESOLVE_OVERVIEW_USAGE_REFRESH__?: () => void }).__RESOLVE_OVERVIEW_USAGE_REFRESH__;
+    if (!release) throw new Error("overview usage refresh was not pending");
+    release();
+  });
   await expect(analytics).toHaveAttribute("aria-busy", "false");
 
   await page.evaluate(() => {
@@ -3612,13 +3604,13 @@ test("remote server-side usage filters and clear logs use managed commands", asy
   expect(calls.findLast((call) => call.command === "execute_remote_server_action")?.args).toMatchObject({ input: { action: { type: "clear_usage" } } });
 });
 
-test("remote account economics uses the server usage identity without exposing its hash", async ({ page }) => {
+test("remote account usage uses the server usage identity without exposing its hash", async ({ page }) => {
   await installTauriMock(page, { mode: "remote", locale: "en", populated: true });
   await page.goto("/");
   await page.getByRole("button", { name: "Usage", exact: true }).click();
   await chooseOption(page, page, "Account", "account_synthetic");
 
-  await expect(page.locator(".usage-account-economics")).toContainText("Personal Plus");
+  await expect(page.locator(".usage-account-value")).toContainText("Personal Plus");
   await expect.poll(() => page.evaluate(() => {
     const calls = (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: { input?: { sourceOrAccountQuery?: string } } }> }).__TAURI_TEST_INVOKES__;
     return calls.findLast((call) => call.command === "get_remote_server_usage")?.args.input?.sourceOrAccountQuery;

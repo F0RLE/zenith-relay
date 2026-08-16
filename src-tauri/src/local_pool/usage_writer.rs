@@ -15,7 +15,7 @@ use zenith_relay_core::{
         AccountUsageState,
     },
     automations::WakeCoordinator,
-    quota::{quota_reference_value, quota_valuation_revision, QuotaRefreshQueue},
+    quota::QuotaRefreshQueue,
     UsageCallback, UsageEvent,
 };
 
@@ -108,19 +108,6 @@ impl DesktopUsageWriter {
                     account.account.auth_state,
                     account.account.health,
                     account.account.last_error_code.clone(),
-                    account.economics.clone(),
-                );
-                account.economics.set_account_context(
-                    "chatgpt",
-                    account.account.subscription.plan_type.as_deref(),
-                );
-                account
-                    .economics
-                    .set_value_revision(quota_valuation_revision());
-                account.economics.observe_event_at(
-                    &event,
-                    quota_reference_value(&event),
-                    observed_at_ms,
                 );
                 let refresh_now = apply_account_usage_state(
                     account,
@@ -136,7 +123,6 @@ impl DesktopUsageWriter {
                         account.account.auth_state,
                         account.account.health,
                         account.account.last_error_code.clone(),
-                        account.economics.clone(),
                     );
                 let mut keys = store.keys().to_vec();
                 if let Some(key) = keys.iter_mut().find(|key| key.id == event.local_key_id) {

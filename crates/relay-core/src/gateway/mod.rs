@@ -53,6 +53,8 @@ mod test_support {
             routing: None,
             requested_model: Some("model".into()),
             resolved_model: Some("model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: crate::WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,

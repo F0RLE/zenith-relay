@@ -117,10 +117,6 @@ pub async fn set_model_price(
             .store
             .set_model_price_overrides(overrides)
             .map_err(store_error)?;
-        state
-            .store
-            .reset_quota_economics_learning()
-            .map_err(store_error)?;
     }
     state.snapshot().map(Json).map_err(store_error)
 }

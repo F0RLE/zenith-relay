@@ -28,13 +28,6 @@ pub fn apply_quota_success(
         AccountQuotaOutcome::Failed { .. } => return Err("quota result kind is invalid"),
     };
     apply_update(account, update);
-    account
-        .economics
-        .set_account_context("chatgpt", account.account.subscription.plan_type.as_deref());
-    account
-        .economics
-        .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
-    account.economics.observe_quota(&account.account.quota);
     Ok(AppliedQuota { transitions })
 }
 

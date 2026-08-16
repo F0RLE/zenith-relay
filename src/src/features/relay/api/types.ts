@@ -34,66 +34,6 @@ export type ApiEquivalentSummary = {
   unpricedTokens: number;
 };
 
-export type QuotaCycleRecord = {
-  status: "complete" | "censored" | "contaminated";
-  provider: string;
-  plan: string | null;
-  windowKind: "primary" | "secondary";
-  windowMinutes: number | null;
-  fingerprint: string;
-  startedAtMs: number;
-  completedAtMs: number;
-  resetAtMs: number | null;
-  pricingRevision: string | null;
-  epoch: number;
-  serviceTier: DefaultServiceTier | null;
-  standardObservations?: number;
-  fastObservations?: number;
-  activeObservations?: number;
-  passiveObservations?: number;
-  consumedBasisPoints: number;
-  unattributedBasisPoints: number;
-  apiEquivalentMicroUsd: number | null;
-  requests: number;
-  inputTokens: number;
-  cachedInputTokens: number;
-  reasoningTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-};
-
-export type QuotaObservationRecord = {
-  windowKind: "primary" | "secondary";
-  usedBasisPoints: number | null;
-  availableBasisPoints: number | null;
-  deltaBasisPoints: number;
-  resolutionBasisPoints: number;
-  resetAtMs: number | null;
-  windowMinutes: number | null;
-  observedAtMs: number;
-  source: "active" | "passive";
-};
-
-export type QuotaPlanBenchmark = {
-  provider: string;
-  plan: string;
-  windowKind: "primary" | "secondary";
-  windowMinutes: number;
-  serviceTier: DefaultServiceTier;
-  pricingRevision: string;
-  accountCount: number;
-  cycleCount: number;
-  latestCompletedAtMs: number;
-  stale: boolean;
-  confidence: "low" | "medium" | "high";
-  fullWindowMicroUsd: number;
-  meanFullWindowMicroUsd: number;
-  lowFullWindowMicroUsd: number;
-  highFullWindowMicroUsd: number;
-  potentialMicroUsd: number | null;
-  weeklyEquivalentMicroUsd: number | null;
-};
-
 export type ApiModelPriceOverride = {
   inputMicroUsdPerMillion: number;
   cachedInputMicroUsdPerMillion?: number | null;
@@ -166,45 +106,7 @@ export type AccountSummary = {
   priority: number;
   weight: number;
   apiEquivalent: ApiEquivalentSummary;
-  economics?: {
-    purchaseCostMicroUsd: number | null;
-    potentialMicroUsd: number | null;
-    potentialLowMicroUsd: number | null;
-    potentialHighMicroUsd: number | null;
-    potentialRequests: number | null;
-    potentialTotalTokens: number | null;
-    availableNowMicroUsd?: number | null;
-    estimateState: "collecting" | "estimated" | "stale";
-    confidence: "low" | "medium" | "high" | null;
-    observedBasisPoints: number;
-    sampleCount: number;
-    windows?: Array<{
-      kind: "primary" | "secondary";
-      potentialMicroUsd: number | null;
-      potentialLowMicroUsd: number | null;
-      potentialHighMicroUsd: number | null;
-      potentialRequests: number | null;
-      potentialTotalTokens: number | null;
-      fullWindowMicroUsd: number | null;
-      fullWindowLowMicroUsd?: number | null;
-      fullWindowHighMicroUsd?: number | null;
-      estimateState: "collecting" | "estimated" | "stale";
-      confidence: "low" | "medium" | "high" | null;
-      observedBasisPoints: number;
-      sampleCount: number;
-      planBenchmark?: QuotaPlanBenchmark | null;
-      serviceTiers?: Array<{
-        serviceTier: DefaultServiceTier;
-        potentialMicroUsd: number | null;
-        potentialRequests: number | null;
-        potentialTotalTokens: number | null;
-        observedBasisPoints: number;
-        sampleCount: number;
-      }>;
-    }>;
-    cycles?: QuotaCycleRecord[];
-    observations?: QuotaObservationRecord[];
-  };
+  purchaseCostMicroUsd?: number | null;
   subscription: { planType: string | null; activeUntilMs: number | null; status: string; updatedAtMs: number | null };
   quota: QuotaSnapshot;
   quotaRefreshStatus: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
@@ -464,6 +366,7 @@ export type ToolUseDiagnostics = {
 };
 
 export type ErrorOrigin = "provider" | "account" | "relay";
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
 export type LocalUsage = {
   id: number;
@@ -475,6 +378,8 @@ export type LocalUsage = {
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;
@@ -544,6 +449,8 @@ export type UsageExportRow = {
   time: string;
   success: boolean;
   model: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   connection: string;
   latencyMs: number;
   ttftMs: number | null;
@@ -581,6 +488,8 @@ export type RemoteUsage = {
   routing?: RoutingDiagnostics | null;
   requestedModel: string | null;
   resolvedModel: string | null;
+  requestedReasoningEffort?: ReasoningEffort | null;
+  effectiveReasoningEffort?: ReasoningEffort | null;
   wireApi: "responses" | "chat_completions" | "messages";
   serviceTier?: DefaultServiceTier;
   appliedServiceTier?: DefaultServiceTier | null;

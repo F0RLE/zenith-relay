@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   RELAY_STORAGE_KEYS,
-  readAccountQuotaCalculationMode,
+  readAccountValueVisibility,
   readCodexPoolOauthSelection,
   readRelayPreference,
   removeRelayPreference,
+  writeAccountValueVisibility,
   writeRelayPreference,
   type RelayStorage,
 } from "../src/features/relay/state/relayPreferences";
@@ -54,16 +55,6 @@ describe("relay preferences", () => {
     expect(() => removeRelayPreference("relay.mode", unavailable)).not.toThrow();
   });
 
-  test("uses standard calculation unless the Relay estimate is explicitly selected", () => {
-    expect(readAccountQuotaCalculationMode(fakeStorage())).toBe("provider");
-    expect(readAccountQuotaCalculationMode(fakeStorage({
-      [RELAY_STORAGE_KEYS.accountQuotaCalculationMode]: "zenith_experimental",
-    }))).toBe("zenith_experimental");
-    expect(readAccountQuotaCalculationMode(fakeStorage({
-      [RELAY_STORAGE_KEYS.accountQuotaCalculationMode]: "unexpected",
-    }))).toBe("provider");
-  });
-
   test("migrates the legacy Codex account selection once", () => {
     const storage = fakeStorage({
       [RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection]: "account_synthetic_2",
@@ -82,5 +73,18 @@ describe("relay preferences", () => {
 
     expect(readCodexPoolOauthSelection(storage)).toBe("none");
     expect(storage.values[RELAY_STORAGE_KEYS.legacyCodexPoolOauthSelection]).toBeUndefined();
+  });
+
+  test("migrates account-value visibility from the percentage-calculation preference", () => {
+    const storage = fakeStorage({
+      [RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible]: "false",
+    });
+
+    expect(readAccountValueVisibility(storage)).toBe(false);
+    expect(storage.values[RELAY_STORAGE_KEYS.accountValueVisible]).toBe("false");
+    expect(storage.values[RELAY_STORAGE_KEYS.legacyPoolEconomicsVisible]).toBeUndefined();
+
+    writeAccountValueVisibility(true, storage);
+    expect(storage.values[RELAY_STORAGE_KEYS.accountValueVisible]).toBe("true");
   });
 });

@@ -805,10 +805,9 @@ async fn confirm_one_account_import(
             .as_ref()
             .map(|value| value.quota.clone())
             .unwrap_or_default(),
-        economics: existing
+        purchase_cost_micro_usd: existing
             .as_ref()
-            .map(|value| value.economics.clone())
-            .unwrap_or_default(),
+            .and_then(|value| value.purchase_cost_micro_usd),
         cooldowns: BTreeMap::new(),
         consecutive_failures: 0,
         created_at_ms: existing

@@ -813,6 +813,7 @@ fn image_usage_event(
         attempt,
         &key.id,
         route,
+        None,
         &request.requested_model,
         success,
         status.as_u16(),

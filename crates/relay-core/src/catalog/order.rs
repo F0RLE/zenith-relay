@@ -1,45 +1,32 @@
-use std::collections::HashSet;
+use std::{cmp::Ordering, collections::HashSet};
 
 const MAX_MODEL_ID_BYTES: usize = 256;
 
-/// The launcher-facing order is based only on a model ID. It deliberately has
-/// no source/provider identity: sources merely publish model IDs, while the
-/// picker groups familiar model families and keeps every unknown ID in the
-/// response order in which it first appeared.
-const OPENAI_MODEL_ORDER: &[&str] = &[
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-image-2",
-];
+#[derive(Clone, Copy)]
+enum KnownModelFamily {
+    OpenAi,
+    Anthropic,
+    Gemini,
+    Grok,
+    Zai,
+}
 
-const CLAUDE_MODEL_ORDER: &[&str] = &[
-    "claude-fable-5",
-    "claude-opus-5",
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-opus-4-6",
-    "claude-sonnet-5",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-];
-
-const GEMINI_MODEL_ORDER: &[&str] = &[
-    "gemini-3.1-pro-preview",
-    "gemini-3.6-flash-high",
-    "gemini-3.6-flash-medium",
-    "gemini-3.6-flash-low",
-];
-
-const GLM_MODEL_ORDER: &[&str] = &["glm-5.2", "glm-5.1", "glm-5-turbo", "glm-4.7"];
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct SemanticModelSortKey {
+    family_rank: u8,
+    image_rank: u8,
+    tier_rank: u8,
+    version_rank: Vec<i64>,
+    modifier_rank: u8,
+    preview_rank: u8,
+    model: String,
+}
 
 #[derive(Clone, Debug)]
 struct OrderedModel {
     id: String,
     upstream_order: usize,
+    semantic_key: Option<SemanticModelSortKey>,
 }
 
 /// Checks the common persisted model-ID boundary after callers trim their input.
@@ -54,10 +41,8 @@ pub fn is_valid_model_token(value: &str) -> bool {
 
 /// Normalize, deduplicate, and order model IDs for a launcher or Codex picker.
 ///
-/// This function is intentionally not used by Relay's public runtime catalog:
-/// that catalog preserves the source response order. Known model families are
-/// grouped here for presentation only. Unknown models never get an
-/// alphabetical tie-breaker.
+/// Familiar model families use a semantic hierarchy: company, model class,
+/// version, and release modifier. Unknown IDs retain their upstream order.
 pub fn canonicalize_model_ids<I, S>(models: I) -> Vec<String>
 where
     I: IntoIterator<Item = S>,
@@ -75,16 +60,20 @@ where
             ordered.push(OrderedModel {
                 id: model.to_string(),
                 upstream_order,
+                semantic_key: semantic_model_sort_key(model),
             });
         }
     }
-    ordered.sort_by_key(|model| {
-        (
-            model_group_rank(&model.id),
-            model_rank(&model.id).unwrap_or(u16::MAX),
-            model.upstream_order,
-        )
-    });
+    ordered.sort_by(
+        |left, right| match (&left.semantic_key, &right.semantic_key) {
+            (Some(left_key), Some(right_key)) => left_key
+                .cmp(right_key)
+                .then_with(|| left.upstream_order.cmp(&right.upstream_order)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => left.upstream_order.cmp(&right.upstream_order),
+        },
+    );
     ordered.into_iter().map(|model| model.id).collect()
 }
 
@@ -106,34 +95,163 @@ where
         .collect()
 }
 
-fn model_group_rank(model: &str) -> u8 {
+fn semantic_model_sort_key(model: &str) -> Option<SemanticModelSortKey> {
     let model = model_leaf(model).to_ascii_lowercase();
-    if is_openai_model(&model) {
-        0
+    let family = known_model_family(&model)?;
+    let is_image = model_has_term(&model, "image") || model.starts_with("dall-e");
+    Some(SemanticModelSortKey {
+        family_rank: model_family_rank(family),
+        image_rank: u8::from(is_image),
+        tier_rank: model_tier_rank(family, &model, is_image),
+        version_rank: model_version_rank(family, &model),
+        modifier_rank: model_modifier_rank(family, &model),
+        preview_rank: u8::from(model_has_term(&model, "preview")),
+        model,
+    })
+}
+
+fn known_model_family(model: &str) -> Option<KnownModelFamily> {
+    if is_openai_model(model) {
+        Some(KnownModelFamily::OpenAi)
     } else if model.starts_with("claude-") {
-        1
+        Some(KnownModelFamily::Anthropic)
     } else if model.starts_with("gemini-") {
-        2
-    } else if model.starts_with("glm-") {
-        3
+        Some(KnownModelFamily::Gemini)
     } else if model.starts_with("grok-") {
-        4
+        Some(KnownModelFamily::Grok)
+    } else if model.starts_with("glm-") {
+        Some(KnownModelFamily::Zai)
     } else {
-        5
+        None
     }
 }
 
-fn model_rank(model: &str) -> Option<u16> {
-    let model = model_leaf(model).to_ascii_lowercase();
-    [
-        OPENAI_MODEL_ORDER,
-        CLAUDE_MODEL_ORDER,
-        GEMINI_MODEL_ORDER,
-        GLM_MODEL_ORDER,
-    ]
-    .into_iter()
-    .flat_map(|models| models.iter().copied().enumerate())
-    .find_map(|(rank, known)| (known == model).then_some(rank as u16))
+fn model_family_rank(family: KnownModelFamily) -> u8 {
+    match family {
+        KnownModelFamily::OpenAi => 0,
+        KnownModelFamily::Anthropic => 1,
+        KnownModelFamily::Gemini => 2,
+        KnownModelFamily::Grok => 3,
+        KnownModelFamily::Zai => 4,
+    }
+}
+
+fn model_tier_rank(family: KnownModelFamily, model: &str, is_image: bool) -> u8 {
+    match family {
+        KnownModelFamily::Anthropic if model_has_term(model, "fable") => 0,
+        KnownModelFamily::Anthropic if model_has_term(model, "opus") => 1,
+        KnownModelFamily::Anthropic if model_has_term(model, "sonnet") => 2,
+        KnownModelFamily::Anthropic if model_has_term(model, "haiku") => 3,
+        KnownModelFamily::Gemini | KnownModelFamily::OpenAi if is_image => 90,
+        KnownModelFamily::Gemini if model_has_term(model, "pro") => 0,
+        KnownModelFamily::Gemini if model_has_term(model, "lite") => 2,
+        KnownModelFamily::Gemini if model_has_term(model, "flash") => 1,
+        KnownModelFamily::OpenAi
+            if model_has_term(model, "mini") || model_has_term(model, "compact") =>
+        {
+            10
+        }
+        KnownModelFamily::OpenAi if model_has_term(model, "spark") => 20,
+        KnownModelFamily::Grok if model_has_term(model, "build") => 10,
+        KnownModelFamily::Zai
+            if model_has_term(model, "air")
+                || model_has_term(model, "flash")
+                || model_has_term(model, "lite") =>
+        {
+            10
+        }
+        KnownModelFamily::Anthropic | KnownModelFamily::Gemini => 80,
+        _ if is_image => 9,
+        _ => 0,
+    }
+}
+
+fn model_modifier_rank(family: KnownModelFamily, model: &str) -> u8 {
+    match family {
+        KnownModelFamily::OpenAi if model.ends_with("-sol") => 1,
+        KnownModelFamily::OpenAi if model.ends_with("-terra") => 2,
+        KnownModelFamily::OpenAi if model.ends_with("-luna") => 3,
+        KnownModelFamily::OpenAi => 8,
+        KnownModelFamily::Gemini if model_has_term(model, "preview") => 9,
+        KnownModelFamily::Gemini if model.ends_with("-high") => 1,
+        KnownModelFamily::Gemini if model.ends_with("-medium") => 2,
+        KnownModelFamily::Gemini if model.ends_with("-low") => 3,
+        KnownModelFamily::Grok if model.ends_with("-non-reasoning") => 1,
+        KnownModelFamily::Grok if model.ends_with("-reasoning") => 0,
+        _ => 0,
+    }
+}
+
+fn model_version_rank(family: KnownModelFamily, model: &str) -> Vec<i64> {
+    let mut version = model_version_components(family, model);
+    if matches!(family, KnownModelFamily::Grok) && is_dated_grok_release(model) {
+        if let Some(minor) = version.get_mut(1) {
+            if *minor >= 10 && *minor % 10 == 0 {
+                *minor /= 10;
+            }
+        }
+    }
+    version.resize(4, 0);
+    version.into_iter().map(|part| -part).collect()
+}
+
+fn model_version_components(family: KnownModelFamily, model: &str) -> Vec<i64> {
+    let tokens = model.split('-').collect::<Vec<_>>();
+    let Some(first_version_token) = tokens
+        .iter()
+        .position(|token| token.bytes().any(|byte| byte.is_ascii_digit()))
+    else {
+        return Vec::new();
+    };
+
+    if !matches!(family, KnownModelFamily::Anthropic) {
+        return version_token_components(tokens[first_version_token]);
+    }
+
+    let mut version = Vec::with_capacity(4);
+    for token in &tokens[first_version_token..] {
+        if token.len() > 5 && token.bytes().all(|byte| byte.is_ascii_digit()) {
+            break;
+        }
+        let components = version_token_components(token);
+        if components.is_empty() {
+            break;
+        }
+        version.extend(components);
+        if version.len() >= 4 {
+            break;
+        }
+    }
+    version.truncate(4);
+    version
+}
+
+fn version_token_components(token: &str) -> Vec<i64> {
+    token
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty() && part.len() <= 5)
+        .filter_map(|part| part.parse::<i64>().ok())
+        .take(4)
+        .collect()
+}
+
+fn is_dated_grok_release(model: &str) -> bool {
+    let mut parts = model.split('-');
+    let (Some("grok"), Some(version), Some(release)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    version
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && release.len() == 4
+        && release.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn model_has_term(model: &str, term: &str) -> bool {
+    model
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|part| part == term)
 }
 
 fn model_leaf(model: &str) -> &str {
@@ -155,40 +273,127 @@ mod tests {
     use super::*;
 
     #[test]
-    fn known_families_follow_the_launcher_contract() {
+    fn semantic_catalog_order_matches_the_public_model_hierarchy() {
         let models = canonicalize_model_ids([
             "private-second",
-            "glm-4.7",
-            "grok-new",
-            "gemini-3.6-flash-low",
-            "claude-haiku-4-5",
-            "gpt-5.4-mini",
-            "gpt-5.6-sol",
-            "glm-5.2",
-            "private-first",
-            "claude-fable-5",
+            "grok-build-0.1",
+            "grok-4.20-0309-non-reasoning",
+            "grok-4.20-0309-reasoning",
+            "grok-4.3",
+            "grok-4.5",
+            "grok-4.6",
+            "gemini-2.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash",
+            "gemini-3-flash-preview",
+            "gemini-3-flash",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3.7-flash",
+            "gemini-2.5-pro",
+            "gemini-3-pro-preview",
+            "gemini-3-pro",
             "gemini-3.1-pro-preview",
-            "gpt-image-2",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-5",
+            "claude-opus-4-6",
+            "claude-opus-4-7",
+            "claude-opus-4-8",
+            "claude-opus-5",
+            "claude-fable-5",
+            "gpt-5.4-mini",
+            "gpt-5.4",
             "gpt-5.5",
-            "GPT-5.6-SOL",
+            "gpt-5.6-terra",
+            "gpt-5.6-sol",
+            "private-first",
         ]);
 
         assert_eq!(
             models,
             [
                 "gpt-5.6-sol",
+                "gpt-5.6-terra",
                 "gpt-5.5",
+                "gpt-5.4",
                 "gpt-5.4-mini",
-                "gpt-image-2",
                 "claude-fable-5",
+                "claude-opus-5",
+                "claude-opus-4-8",
+                "claude-opus-4-7",
+                "claude-opus-4-6",
+                "claude-sonnet-5",
+                "claude-sonnet-4-6",
                 "claude-haiku-4-5",
                 "gemini-3.1-pro-preview",
-                "gemini-3.6-flash-low",
-                "glm-5.2",
-                "glm-4.7",
-                "grok-new",
+                "gemini-3-pro",
+                "gemini-3-pro-preview",
+                "gemini-2.5-pro",
+                "gemini-3.7-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash",
+                "gemini-3-flash",
+                "gemini-3-flash-preview",
+                "gemini-2.5-flash",
+                "gemini-3.1-flash-lite",
+                "gemini-2.5-flash-lite",
+                "grok-4.6",
+                "grok-4.5",
+                "grok-4.3",
+                "grok-4.20-0309-reasoning",
+                "grok-4.20-0309-non-reasoning",
+                "grok-build-0.1",
                 "private-second",
                 "private-first",
+            ]
+        );
+    }
+
+    #[test]
+    fn future_models_use_family_tier_version_and_modifier_not_a_static_catalog() {
+        assert_eq!(
+            canonicalize_model_ids([
+                "private-first",
+                "grok-5.20-0612-non-reasoning",
+                "grok-5.20-0612-reasoning",
+                "grok-5.6",
+                "grok-5.6.1",
+                "gemini-4.1-flash",
+                "gemini-4.1.2-flash",
+                "gemini-3.9-pro",
+                "gemini-4-pro",
+                "claude-sonnet-6",
+                "claude-opus-5",
+                "claude-opus-6",
+                "claude-opus-6-1",
+                "gpt-6.2-terra",
+                "gpt-6.2.1-terra",
+                "gpt-6.2-sol",
+                "gpt-6.2-experimental",
+                "gpt-7.0",
+                "private-second",
+            ]),
+            [
+                "gpt-7.0",
+                "gpt-6.2.1-terra",
+                "gpt-6.2-sol",
+                "gpt-6.2-terra",
+                "gpt-6.2-experimental",
+                "claude-opus-6-1",
+                "claude-opus-6",
+                "claude-opus-5",
+                "claude-sonnet-6",
+                "gemini-4-pro",
+                "gemini-3.9-pro",
+                "gemini-4.1.2-flash",
+                "gemini-4.1-flash",
+                "grok-5.6.1",
+                "grok-5.6",
+                "grok-5.20-0612-reasoning",
+                "grok-5.20-0612-non-reasoning",
+                "private-first",
+                "private-second",
             ]
         );
     }

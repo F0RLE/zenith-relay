@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Database, FolderOpen, Gauge, Palette, RefreshCw, Trash2 } from "lucide-react";
+import { Database, FolderOpen, Palette, RefreshCw, Trash2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { APP_VERSION, restartApplication } from "../../../../platform/desktop";
 import { relayCommands } from "../../api/commands";
@@ -11,7 +11,7 @@ type SettingsUpdateState = "idle" | "checking" | "current" | "available" | "erro
 
 export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }: { updateCheckState: SettingsUpdateState; updateVersion: string | null; onCheckUpdates: () => Promise<SettingsUpdateState> }) {
   const { t, i18n } = useTranslation();
-  const { mode, theme, setTheme, accountQuotaCalculationMode, setAccountQuotaCalculationMode, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, resetOnboarding, perform, busy } = useRelayState();
+  const { mode, theme, setTheme, profileSwitchBackupPrompt, setProfileSwitchBackupPrompt, profileSnapshotBackupBeforeRestore, setProfileSnapshotBackupBeforeRestore, resetOnboarding, perform, busy } = useRelayState();
   const confirm = useConfirm();
   const [storageInfo, setStorageInfo] = useState<RelayStorageInfo | null>(null);
   const [storageUnavailable, setStorageUnavailable] = useState(false);
@@ -36,10 +36,6 @@ export function SettingsPage({ updateCheckState, updateVersion, onCheckUpdates }
       <SettingsGroup icon={<Palette aria-hidden />} title={t("settings.appearance")}>
         <div className="settings-control-row"><div><strong>{t("settings.language")}</strong></div><OptionMenu className="field-option-menu" label={t("settings.language")} value={i18n.language.startsWith("ru") ? "ru" : "en"} onChange={(value) => void i18n.changeLanguage(value)} options={[{ value: "ru", label: "Русский" }, { value: "en", label: "English" }]} /></div>
         <div className="settings-control-row"><div><strong>{t("settings.theme")}</strong></div><div className="segmented settings-theme-control" role="group" aria-label={t("settings.theme")}>{(["system", "light", "dark"] as const).map((value) => <button key={value} type="button" className={theme === value ? "active" : ""} aria-pressed={theme === value} onClick={() => setTheme(value)}>{t(`settings.themes.${value}`)}</button>)}</div></div>
-      </SettingsGroup>
-
-      <SettingsGroup icon={<Gauge aria-hidden />} title={t("settings.accountUsage")}>
-        <div className="settings-control-row"><div><strong>{t("settings.accountCalculation")}</strong></div><div className="segmented settings-theme-control" role="group" aria-label={t("settings.accountCalculation")}>{(["provider", "zenith_experimental"] as const).map((value) => <button key={value} type="button" className={accountQuotaCalculationMode === value ? "active" : ""} aria-pressed={accountQuotaCalculationMode === value} onClick={() => setAccountQuotaCalculationMode(value)}>{t(`settings.accountCalculationModes.${value}`)}</button>)}</div></div>
       </SettingsGroup>
 
       <SettingsGroup icon={<RefreshCw aria-hidden />} title={t("settings.application")}>

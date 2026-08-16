@@ -346,6 +346,8 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
     let routing_json: Option<String> = row.get(25)?;
     let tool_use_json: Option<String> = row.get(26)?;
     let error_origin: Option<String> = row.get(27)?;
+    let requested_reasoning_effort: Option<String> = row.get(28)?;
+    let effective_reasoning_effort: Option<String> = row.get(29)?;
     Ok(UsageLog {
         id: row.get(0)?,
         created_at: row.get(1)?,
@@ -359,6 +361,12 @@ pub(super) fn usage_log_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Us
             .and_then(|value| serde_json::from_str(value).ok()),
         requested_model: row.get(8)?,
         resolved_model: row.get(9)?,
+        requested_reasoning_effort: requested_reasoning_effort
+            .as_deref()
+            .and_then(zenith_relay_core::normalize_reasoning_effort),
+        effective_reasoning_effort: effective_reasoning_effort
+            .as_deref()
+            .and_then(zenith_relay_core::normalize_reasoning_effort),
         wire_api: normalize_wire_api(row.get(10)?),
         service_tier: DefaultServiceTier::from_storage_value(&service_tier),
         applied_service_tier: applied_service_tier

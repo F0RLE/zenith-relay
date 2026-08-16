@@ -5,6 +5,10 @@ mod quota_state;
 mod record;
 mod token_authority;
 
+/// Upper bound for a user-entered account purchase cost in micro-USD.
+/// This is presentation metadata used only for the payback ratio.
+pub const MAX_PURCHASE_COST_MICRO_USD: u64 = 1_000_000_000_000;
+
 pub use export::{
     build_account_export, normalize_account_export_description, AccountExportCredential,
     AccountExportDocument, AccountExportFormat, AccountExportRequest, MAX_ACCOUNT_EXPORT_BYTES,

@@ -724,8 +724,8 @@ mod tests {
                 "GPT 5.4",
                 "Claude Opus 4.8",
                 "Gemini 3.6 Flash",
-                "GLM 5.2",
                 "Grok 4.5",
+                "GLM 5.2",
             ]
         );
         assert!(models.iter().all(codex_catalog_entry_is_compatible));

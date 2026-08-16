@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { relayCommands } from "../../api/commands";
 import type { LocalUsage, RemoteUsage, SourceStats, SourceSummary, UsageBucket, UsageTotals } from "../../api/types";
 import { Button, EmptyState, OptionMenu, PageHeader, StatusIcon } from "../../components/Ui";
+import { formatProviderMicroUsd } from "../../poolFormatting";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { emptyUsageTotals, formatCompactNumber } from "../../usageTotals";
 
@@ -41,6 +42,9 @@ export function OverviewPage() {
   const [analyticsError, setAnalyticsError] = useState(false);
   const [chartsReady, setChartsReady] = useState(false);
   const analyticsScope = useRef<string | null>(null);
+  const pendingAnalyticsRequests = useRef(new Map<string, Set<number>>());
+  const nextAnalyticsRequestId = useRef(0);
+  const mounted = useRef(false);
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const now = new Date();
   const calendarDay = `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
@@ -52,6 +56,11 @@ export function OverviewPage() {
   const analytics = overviewData?.analytics ?? null;
   const activity = overviewData?.activity ?? [];
   const running = Boolean(runtime?.gateway.running);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     let secondFrame = 0;
@@ -70,19 +79,27 @@ export function OverviewPage() {
     analyticsScope.current = usageScope;
     if (scopeChanged) startTransition(() => setOverviewData(null));
     setAnalyticsError(false);
-    if (mode === "zenith") {
+    const stopLoading = () => {
       setAnalyticsLoading(false);
+    };
+    if (mode === "zenith") {
+      stopLoading();
       return () => { active = false; };
     }
     if (!runtime) {
-      setAnalyticsLoading(false);
+      stopLoading();
       return () => { active = false; };
     }
     if (!usageAvailable) {
       startTransition(() => setOverviewData(null));
-      setAnalyticsLoading(false);
+      stopLoading();
       return () => { active = false; };
     }
+    const pending = pendingAnalyticsRequests.current;
+    const requestId = nextAnalyticsRequestId.current++;
+    const scopeRequests = pending.get(usageScope) ?? new Set<number>();
+    scopeRequests.add(requestId);
+    pending.set(usageScope, scopeRequests);
     setAnalyticsLoading(true);
     const input = { page: 1, pageSize: 5, range: "custom" as const, fromMs: windowStartMs, toMs: windowEndMs, bucketMs: range === "today" ? HOUR_MS : DAY_MS };
     const request = mode === "local"
@@ -98,7 +115,14 @@ export function OverviewPage() {
         startTransition(() => setOverviewData(result));
       })
       .catch(() => active && setAnalyticsError(true))
-      .finally(() => active && setAnalyticsLoading(false));
+      .finally(() => {
+        const requests = pending.get(usageScope);
+        requests?.delete(requestId);
+        const remaining = requests?.size ?? 0;
+        if (!remaining) pending.delete(usageScope);
+        // A same-scope refresh may supersede this effect while its request is still in flight.
+        if (mounted.current && analyticsScope.current === usageScope) setAnalyticsLoading(remaining > 0);
+      });
     return () => { active = false; };
   }, [mode, range, runtimeRevision, usageAvailable, usageScope, windowEndMs, windowStartMs, windows]);
 
@@ -156,7 +180,7 @@ function DirectApiOverview({ sources, onOpen }: { sources: SourceSummary[]; onOp
   };
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const display = (value: string | null | undefined) => value || (statsLoading ? "…" : "—");
-  const money = (value: number | null | undefined) => value == null ? null : new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value / 1_000_000);
+  const money = (value: number | null | undefined) => value == null ? null : formatProviderMicroUsd(value, locale);
   const requests = stats?.requests == null ? null : new Intl.NumberFormat(locale).format(stats.requests);
   const totalTokens = stats?.totalTokens == null ? null : new Intl.NumberFormat(locale).format(stats.totalTokens);
   const actions = <><Button variant="secondary" icon={<RefreshCw aria-hidden />} busy={statsLoading} disabled={!source} onClick={() => setStatsRevision((value) => value + 1)}>{t("common.refresh")}</Button><Button variant="primary" icon={<ArrowRight aria-hidden />} onClick={onOpen}>{t("overview.openConnections")}</Button></>;

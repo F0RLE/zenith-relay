@@ -15,12 +15,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use zenith_relay_core::accounts::{
     build_account_export, AccountExportCredential, AccountExportDocument, AccountExportRequest,
+    MAX_PURCHASE_COST_MICRO_USD,
 };
 use zenith_relay_core::protocol::{
     account_candidate_enabled, account_operational_state, AccountOperationalInput, AccountSummary,
     RevealedAccountIdentity, RuntimeStateSnapshot,
 };
-use zenith_relay_core::quota::MAX_PURCHASE_COST_MICRO_USD;
 use zenith_relay_core::{CandidateKind, RuntimeCandidatePolicy, WireApi};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -196,9 +196,7 @@ pub async fn update_account(
                 "account purchase cost is too large",
             ));
         }
-        record
-            .economics
-            .set_purchase_cost_micro_usd((value > 0).then_some(value));
+        record.purchase_cost_micro_usd = (value > 0).then_some(value);
     }
     let policy_changed = account_runtime_policy_changed(&old, &record);
     state.store.save_account(&record).map_err(store_error)?;

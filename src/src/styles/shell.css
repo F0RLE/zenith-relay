@@ -281,6 +281,7 @@
 }
 
 .relay-shell {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -424,10 +425,24 @@
   flex: 0 0 auto;
 }
 
-.sidebar-footer {
+.sidebar-bottom {
+  flex: 0 0 auto;
+  min-width: 0;
   margin-top: auto;
+}
+
+.sidebar-feedback {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 0 10px 8px;
+}
+
+.sidebar-footer {
+  flex: 0 0 auto;
   min-height: 62px;
   display: grid;
+  grid-auto-rows: max-content;
   gap: 4px;
   padding: 8px 10px;
   border-top: 1px solid var(--relay-border);
@@ -511,7 +526,11 @@
 }
 
 .sidebar-collapsed .sidebar-footer {
-  padding-inline: 8px;
+  padding-inline: 0;
+}
+
+.sidebar-collapsed .sidebar-feedback {
+  padding-inline: 0;
 }
 
 .sidebar-collapsed .sidebar-footer-row {
@@ -980,37 +999,79 @@ textarea:focus-visible {
 }
 
 .global-feedback {
-  position: sticky;
+  position: relative;
   z-index: 300;
-  top: 8px;
-  width: min(340px, calc(100% - 48px));
+  width: 100%;
+  max-width: 100%;
   min-height: 36px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
-  margin: 8px 24px 0 auto;
+  margin: 0 0 4px;
   padding: 4px 6px 4px 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
   font-size: 12px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .global-feedback-copy {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.global-feedback-error-trigger {
+  align-self: stretch;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.global-feedback-error-trigger:focus-visible {
+  outline: 2px solid currentcolor;
+  outline-offset: 2px;
+}
+
+.global-feedback-status-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  margin-top: 1px;
+  pointer-events: auto;
+}
+
+.global-feedback-status-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.global-feedback-message {
   min-width: 0;
   display: grid;
   gap: 2px;
   overflow-wrap: anywhere;
 }
 
-.global-feedback-copy > span {
+.global-feedback-message > span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.global-feedback-copy > code {
+.global-feedback-message > code {
   width: fit-content;
   max-width: 100%;
   overflow: hidden;
@@ -1025,6 +1086,7 @@ textarea:focus-visible {
 .global-feedback-actions {
   min-width: 0;
   display: inline-flex;
+  align-self: start;
   align-items: center;
   gap: 2px;
 }
@@ -1048,72 +1110,160 @@ textarea:focus-visible {
   pointer-events: auto;
 }
 
-.global-feedback .relay-action-menu {
+.global-feedback.success .relay-icon-button {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.global-feedback.success:hover .relay-icon-button,
+.global-feedback.success:focus-within .relay-icon-button {
+  opacity: 1;
+}
+
+.sidebar-collapsed .sidebar-feedback > .global-feedback {
+  width: 34px;
+  max-width: 34px;
+  min-width: 0;
+  min-height: 34px;
+  justify-self: center;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.sidebar-collapsed .global-feedback-copy {
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+}
+
+.sidebar-collapsed .global-feedback-status-icon {
+  width: 34px;
+  height: 32px;
+  flex-basis: 34px;
+  margin-top: 0;
+  transition: opacity 120ms ease;
+}
+
+.sidebar-collapsed .global-feedback-status-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-collapsed .global-feedback-message {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.sidebar-collapsed .global-feedback.success:hover .global-feedback-status-icon,
+.sidebar-collapsed .global-feedback.success:focus-within .global-feedback-status-icon {
+  opacity: 0;
+}
+
+.sidebar-collapsed .global-feedback.success .global-feedback-actions {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+.sidebar-collapsed .global-feedback.success .global-feedback-actions .relay-icon-button {
+  position: absolute;
+  inset: 0;
+  width: 34px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.sidebar-collapsed .global-feedback.success:hover .global-feedback-actions .relay-icon-button,
+.sidebar-collapsed .global-feedback.success:focus-within .global-feedback-actions .relay-icon-button {
   pointer-events: auto;
 }
 
-.global-feedback .relay-action-menu summary {
-  width: 28px;
-  height: 28px;
-  border-color: transparent;
-  background: transparent;
-  color: currentColor;
+.sidebar-collapsed .global-feedback.error .global-feedback-actions {
+  display: none;
 }
 
-.global-feedback .relay-action-menu summary:hover,
-.global-feedback .relay-action-menu[open] summary {
-  border-color: color-mix(in srgb, currentColor 28%, transparent);
-  background: color-mix(in srgb, currentColor 10%, transparent);
-}
-
-.global-feedback .relay-action-menu > div {
-  top: 34px;
-  right: 0;
-  bottom: auto;
-}
-
-@media (max-width: 760px) {
-  .global-feedback {
-    width: min(340px, calc(100% - 32px));
-    margin-right: 16px;
-  }
-}
-
-.global-feedback-copy-state {
+.global-feedback-dialog-summary {
   min-width: 0;
-  max-width: 72px;
-  overflow: hidden;
-  color: currentColor;
-  font-size: 10px;
-  font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--relay-error) 34%, var(--relay-border));
+  border-radius: 6px;
+  background: var(--relay-error-soft);
+  color: var(--relay-error);
 }
 
-.global-feedback-details {
-  grid-column: 1 / -1;
+.global-feedback-dialog-summary > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-top: 1px;
+}
+
+.global-feedback-dialog-summary > div {
   min-width: 0;
-  max-height: min(220px, calc(100vh - 96px));
-  overflow: auto;
-  padding: 8px 9px;
-  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  display: grid;
+  gap: 3px;
 }
 
-.global-feedback-details pre {
-  margin: 0;
-  color: currentColor;
-  font-size: 11px;
-  line-height: 15px;
-  white-space: pre-wrap;
+.global-feedback-dialog-summary strong,
+.global-feedback-dialog-summary code {
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
-.global-feedback-details p {
-  margin: 7px 0 0;
-  color: currentColor;
-  font-size: 10px;
-  line-height: 14px;
-  opacity: 0.78;
+.global-feedback-dialog-summary strong {
+  color: var(--relay-text);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.global-feedback-dialog-summary code {
+  color: currentcolor;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.global-feedback-error-json {
+  margin: 16px 0 0;
+}
+
+.global-feedback-error-json pre {
+  max-height: min(300px, 42vh);
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.global-feedback-dialog-actions {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.global-feedback-dialog-copy-state {
+  min-width: 0;
+  margin-right: auto;
+  color: var(--relay-muted);
+  font-size: 11px;
 }
 
 .relay-loading {

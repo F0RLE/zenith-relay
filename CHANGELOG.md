@@ -6,19 +6,30 @@ release entries are kept concise and link to the corresponding tag.
 
 ## [Unreleased]
 
-Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
-
 ### Added
 
-- Provider-reported quota calculation is the default in Connections and Pool;
-  the Relay estimate remains an explicit experimental setting.
-- Persisted account-calculation visibility controls and regression coverage for
-  both calculation modes.
+- Provider-reported quota windows are shown in Connections and Pool, with
+  separate visibility controls for the optional account value summary.
+- Regression coverage keeps provider quota, API-equivalent usage, and purchase
+  cost as separate values.
+- Usage history now shows the requested reasoning effort and the normalized
+  effort actually sent to the selected provider.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
   reuse across a follow-up request.
 
 ### Changed
 
+- Global operation notifications now stay in a bottom-left overlay above the
+  Help controls instead of shifting the page from the upper-right corner;
+  compact sidebar mode uses a small status toast and opens error details in a
+  centered dialog.
+- Model lists and source price editors order familiar model families
+  semantically by company, tier, version, and variant; unknown model IDs keep
+  their upstream order.
+- Connections, Pool, and Usage now show direct token-based API-equivalent and
+  optional purchase-cost payback beside the provider-reported quota window.
+  Relay no longer turns a quota percentage into a monetary potential; legacy
+  calculation state migrates to the direct purchase-cost field.
 - API candidates remain eligible when a provider has not supplied reasoning
   metadata. An explicitly selected reasoning effort is a source/API policy,
   not proof that an account route supports that effort.

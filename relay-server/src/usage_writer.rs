@@ -5,7 +5,6 @@ use zenith_relay_core::accounts::{
     reduce_account_usage, AccountAccessState, AccountAuthState, AccountUsageObservation,
     AccountUsageState,
 };
-use zenith_relay_core::quota::{quota_reference_value, quota_valuation_revision};
 use zenith_relay_core::{UsageCallback, UsageEvent};
 
 const USAGE_QUEUE_CAPACITY: usize = 16_384;
@@ -163,17 +162,6 @@ fn persist_usage_batch(
             let mut natural_use_at_ms = None;
             for queued in &events {
                 let event = &queued.event;
-                account
-                    .economics
-                    .set_account_context("chatgpt", account.subscription.plan_type.as_deref());
-                account
-                    .economics
-                    .set_value_revision(quota_valuation_revision());
-                account.economics.observe_event_at(
-                    event,
-                    quota_reference_value(event),
-                    queued.observed_at_ms,
-                );
                 if let Some(snapshot) = event.quota_snapshot.as_ref().filter(|snapshot| {
                     snapshot.updated_at_ms.unwrap_or_default()
                         >= account.quota.updated_at_ms.unwrap_or_default()
@@ -294,7 +282,7 @@ mod tests {
             weight: 1,
             subscription: Subscription::default(),
             quota: Default::default(),
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             cooldowns: Default::default(),
             consecutive_failures: 0,
             created_at_ms: 1,
@@ -316,6 +304,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".to_string()),
             resolved_model: Some("gpt-test".to_string()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,

@@ -24,7 +24,6 @@ export type MockOptions = {
   activeModelCounts?: Array<{ model: string; requestCount: number }>;
   usageToolDiagnostics?: "forwarded_text_only" | "dropped_text_only";
   usageTotalPages?: number;
-  planBenchmark?: boolean;
   accountAuthReason?: "invalid_grant" | "reused_refresh_token" | "expired_refresh_token" | "invalidated_refresh_token";
   codexBindings?: boolean;
   codexBindingActive?: boolean;
@@ -38,7 +37,6 @@ export type MockOptions = {
   supplementalQuota?: boolean;
   subscriptionExpiresInMs?: number;
   exhaustedQuotaWindow?: "primary" | "secondary";
-  mixedQuotaResets?: boolean;
   quotaAvailable?: boolean;
   quotaRefreshStatus?: "pending" | "refreshing" | "updated" | "failed" | "requires_reauth";
   freeAccountHealthy?: boolean;
@@ -111,7 +109,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
     type MockAuthState = { state: string; reason?: string };
     const exhaustedQuotaWindow = input.quotaAvailable ? null : input.exhaustedQuotaWindow ?? "primary";
     const quotaNowMs = Date.now();
-    const primaryResetAtMs = input.mixedQuotaResets ? quotaNowMs - 60_000 : quotaNowMs + 90 * 60_000;
+    const primaryResetAtMs = quotaNowMs + 90 * 60_000;
     const secondaryResetAtMs = quotaNowMs + 3 * 24 * 60 * 60_000;
     const quota: { primary: MockQuotaWindow | null; secondary: MockQuotaWindow | null; supplemental: Array<{ id: string; label: string; window: MockQuotaWindow }>; limitReached: boolean; resetCreditsAvailable: number; updatedAtMs: number; error: null } = {
       primary: { kind: "primary", availableBasisPoints: exhaustedQuotaWindow === "primary" ? 0 : 7200, explicitlyFull: false, resetAtMs: primaryResetAtMs, windowMinutes: 300, observedAtMs: quotaNowMs },
@@ -183,22 +181,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       priority: 20,
       weight: 100,
       apiEquivalent: { microUsd: 14_100_000, pricedTokens: 2_800_000, unpricedTokens: 0 },
-      economics: {
-        purchaseCostMicroUsd: 18_000_000,
-        potentialMicroUsd: 24_000_000,
-        potentialLowMicroUsd: 20_000_000,
-        potentialHighMicroUsd: 28_000_000,
-        potentialRequests: 220,
-        potentialTotalTokens: 2_400_000,
-        estimateState: "estimated" as const,
-        confidence: "medium" as const,
-        observedBasisPoints: 340,
-        sampleCount: 3,
-        windows: [
-          { kind: "primary" as const, potentialMicroUsd: 4_200_000, potentialLowMicroUsd: 3_800_000, potentialHighMicroUsd: 4_700_000, potentialRequests: 38, potentialTotalTokens: 420_000, fullWindowMicroUsd: 5_830_000, estimateState: "estimated" as const, confidence: "medium" as const, observedBasisPoints: 340, sampleCount: 3, serviceTiers: [{ serviceTier: "standard" as const, potentialMicroUsd: 4_200_000, potentialRequests: 38, potentialTotalTokens: 420_000, observedBasisPoints: 340, sampleCount: 3 }] },
-          { kind: "secondary" as const, potentialMicroUsd: 24_000_000, potentialLowMicroUsd: 20_000_000, potentialHighMicroUsd: 28_000_000, potentialRequests: 220, potentialTotalTokens: 2_400_000, fullWindowMicroUsd: 37_500_000, estimateState: "estimated" as const, confidence: "medium" as const, observedBasisPoints: 340, sampleCount: 3, serviceTiers: [{ serviceTier: "standard" as const, potentialMicroUsd: 24_000_000, potentialRequests: 220, potentialTotalTokens: 2_400_000, observedBasisPoints: 340, sampleCount: 3 }] },
-        ],
-      },
+      purchaseCostMicroUsd: 18_000_000 as number | null,
       subscription: { planType: input.supplementalQuota ? "pro" : "plus", activeUntilMs: Date.now() + (input.subscriptionExpiresInMs ?? 37 * dayMs), status: "active", updatedAtMs: Date.now() },
       quota,
       quotaRefreshStatus: input.quotaRefreshStatus ?? "updated" as "pending" | "refreshing" | "updated" | "failed" | "requires_reauth",
@@ -230,30 +213,18 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.proxyMode = variant.proxyMode;
       item.models = [...variant.models];
       item.priority = variant.priority;
-      const economics = [
+      const accountValue = [
         null,
-        { used: 31_500_000, purchase: 24_000_000, potential: 62_000_000, low: 57_000_000, high: 68_000_000, state: "estimated", confidence: "high", samples: 4, observed: 420 },
-        { used: 3_800_000, purchase: 8_000_000, potential: null, low: null, high: null, state: "stale", confidence: null, samples: 1, observed: 80 },
-        { used: 65_000_000, purchase: 70_000_000, potential: 120_000_000, low: 98_000_000, high: 136_000_000, state: "estimated", confidence: "medium", samples: 3, observed: 250 },
-        { used: 500_000, purchase: 12_000_000, potential: null, low: null, high: null, state: "collecting", confidence: null, samples: 0, observed: 4 },
-        { used: 4_200_000, purchase: null, potential: 9_000_000, low: 5_000_000, high: 14_000_000, state: "estimated", confidence: "low", samples: 2, observed: 40 },
+        { used: 31_500_000, purchase: 24_000_000 },
+        { used: 3_800_000, purchase: 8_000_000 },
+        { used: 65_000_000, purchase: 70_000_000 },
+        { used: 500_000, purchase: 12_000_000 },
+        { used: 4_200_000, purchase: null },
       ][index % 6];
-      if (economics) {
-        item.apiEquivalent.microUsd = economics.used;
+      if (accountValue) {
+        item.apiEquivalent.microUsd = accountValue.used;
         item.apiEquivalent.pricedTokens = 2_800_000 * (index + 1);
-        item.economics = {
-          purchaseCostMicroUsd: economics.purchase,
-          potentialMicroUsd: economics.potential,
-          potentialLowMicroUsd: economics.low,
-          potentialHighMicroUsd: economics.high,
-          potentialRequests: economics.potential == null ? null : 120,
-          potentialTotalTokens: economics.potential == null ? null : 1_200_000,
-          estimateState: economics.state as "collecting" | "estimated" | "stale",
-          confidence: economics.confidence as "low" | "medium" | "high" | null,
-          observedBasisPoints: economics.observed,
-          sampleCount: economics.samples,
-          windows: [],
-        };
+        item.purchaseCostMicroUsd = accountValue.purchase;
       }
       const healthyFree = variant.plan === "free" && input.freeAccountHealthy;
       item.health = healthyFree ? "healthy" : variant.health;
@@ -273,48 +244,6 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       item.quotaRefreshStatus = item.quota.error ? "failed" : item.quota.updatedAtMs == null ? "pending" : "updated";
       return item;
     });
-    if (input.planBenchmark) {
-      for (const [index, label, plan, multiplier] of [
-        [1, "Peer Plus", account.subscription.planType, 1.2],
-        [2, "Outlier Plus", account.subscription.planType, 20],
-        [3, "Peer Business", "team", 100],
-      ] as const) {
-        const peer = accounts[index];
-        if (!peer) continue;
-        peer.label = label;
-        peer.subscription.planType = plan;
-        peer.quota = structuredClone(account.quota);
-        peer.economics = structuredClone(account.economics);
-        for (const window of peer.economics.windows) {
-          window.fullWindowMicroUsd = Math.round(window.fullWindowMicroUsd * multiplier);
-        }
-      }
-      for (const [window, quotaWindow] of [[account.economics.windows[0], account.quota.primary], [account.economics.windows[1], account.quota.secondary]] as const) {
-        const fullWindowMicroUsd = Math.round(window.fullWindowMicroUsd * 1.2);
-        const availableBasisPoints = quotaWindow?.availableBasisPoints ?? 0;
-        Object.assign(window, {
-          planBenchmark: {
-            provider: "chatgpt",
-            plan: "plus",
-            windowKind: window.kind,
-            windowMinutes: quotaWindow?.windowMinutes ?? 0,
-            serviceTier: "standard",
-            pricingRevision: "mock-pricing",
-            accountCount: 3,
-            cycleCount: 9,
-            latestCompletedAtMs: Date.now() - dayMs,
-            stale: false,
-            confidence: "low",
-            fullWindowMicroUsd,
-            meanFullWindowMicroUsd: Math.round(window.fullWindowMicroUsd * 7.4),
-            lowFullWindowMicroUsd: window.fullWindowMicroUsd,
-            highFullWindowMicroUsd: window.fullWindowMicroUsd * 20,
-            potentialMicroUsd: Math.round(fullWindowMicroUsd * availableBasisPoints / 10_000),
-            weeklyEquivalentMicroUsd: null,
-          },
-        });
-      }
-    }
     const systemCredentialId = "key_system";
     const profileDir = input.canonicalProfilePath ? "\\\\?\\C:\\Users\\Test\\.codex" : "C:\\Users\\Test\\.codex";
     let profileSnapshots = input.profileSnapshotsEmpty ? [] : [{
@@ -502,8 +431,8 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
       textOutput: true,
       terminalOutput: "text",
     } : undefined;
-    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
-    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
+    let localUsage = usagePresent ? [{ id: 1, createdAt: new Date().toISOString(), requestId: "req_synthetic_local", attempt: 1, sourceId: source.id, accountId: sourceUsage ? null : input.staleAccountReferences ? "account_deleted_internal" : usageAccount.id, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", serviceTier: "standard", success: !input.usageFailure, httpStatus: input.usageFailure ? 502 : 200, errorCategory: input.usageFailure ? "upstream_failure" : null, latencyMs: 428, ttftMs: 128, generationMs: 300, inputTokens: 20, cachedInputTokens: 12, reasoningTokens: 5, outputTokens: 8, totalTokens: 28, apiEquivalent: { microUsd: 148, pricedTokens: 28 - localUnpricedTokens, unpricedTokens: localUnpricedTokens }, toolUse, routing }] : [];
+    let remoteUsage = usagePresent ? [{ id: 2, requestId: "req_synthetic_remote", candidateKind: sourceUsage ? "source" : "account", candidateHint: sourceUsage ? source.id : input.remoteUsageLabelMissing ? "4f5c821a909b" : "a1b2c3d4e5f6", candidateLabel: sourceUsage ? source.name : input.remoteUsageLabelMissing ? null : usageAccount.label, requestedModel: requestedUsageModel, resolvedModel: resolvedUsageModel, requestedReasoningEffort: "max", effectiveReasoningEffort: "low", wireApi: "responses", serviceTier: "fast", appliedServiceTier: "standard", success: true, httpStatus: 200, errorCategory: null, latencyMs: 512, ttftMs: 184, generationMs: 328, inputTokens: 18, cachedInputTokens: 10, reasoningTokens: 3, outputTokens: 7, totalTokens: 25, apiEquivalent: { microUsd: 148, pricedTokens: 25 - remoteUnpricedTokens, unpricedTokens: remoteUnpricedTokens }, createdAtMs: Date.now(), routing }] : [];
     function usageTotals(events: Array<{ success: boolean; latencyMs: number; ttftMs?: number | null; generationMs?: number | null; inputTokens: number | null; cachedInputTokens: number | null; reasoningTokens: number | null; outputTokens: number | null; totalTokens: number | null; apiEquivalent?: { microUsd: number; pricedTokens: number; unpricedTokens: number } }>) {
       return events.reduce((totals, item) => {
         const visibleOutputTokens = Math.max(0, (item.outputTokens ?? 0) - (item.reasoningTokens ?? 0));
@@ -658,7 +587,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
             if (target && typeof request.priority === "number") target.priority = request.priority;
             if (target && typeof request.weight === "number") target.weight = request.weight;
             if (target && typeof request.draining === "boolean") target.draining = request.draining;
-            if (target && typeof request.purchaseCostMicroUsd === "number" && target.economics) target.economics.purchaseCostMicroUsd = request.purchaseCostMicroUsd || null;
+            if (target && typeof request.purchaseCostMicroUsd === "number") target.purchaseCostMicroUsd = request.purchaseCostMicroUsd || null;
             refreshGatewayModels(localRuntime);
             return structuredClone(localRuntime);
           }
@@ -1142,7 +1071,7 @@ export async function installTauriMock(page: Page, options: MockOptions = {}) {
         if (target && typeof input.payload?.draining === "boolean") target.draining = input.payload.draining;
         if (target && typeof input.payload?.priority === "number") target.priority = input.payload.priority;
         if (target && typeof input.payload?.weight === "number") target.weight = input.payload.weight;
-        if (target && typeof input.payload?.purchaseCostMicroUsd === "number" && target.economics) target.economics.purchaseCostMicroUsd = input.payload.purchaseCostMicroUsd || null;
+        if (target && typeof input.payload?.purchaseCostMicroUsd === "number") target.purchaseCostMicroUsd = input.payload.purchaseCostMicroUsd || null;
         refreshGatewayModels(remoteRuntime);
         return structuredClone(target ?? null);
       }

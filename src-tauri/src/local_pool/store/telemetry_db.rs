@@ -58,6 +58,8 @@ pub struct UsageLog {
     pub routing: Option<RoutingDiagnostics>,
     pub requested_model: Option<String>,
     pub resolved_model: Option<String>,
+    pub requested_reasoning_effort: Option<String>,
+    pub effective_reasoning_effort: Option<String>,
     pub wire_api: String,
     pub service_tier: DefaultServiceTier,
     pub applied_service_tier: Option<DefaultServiceTier>,
@@ -182,6 +184,12 @@ impl TelemetryDb {
         if version <= 21 {
             connection.execute_batch(MIGRATION_022).map_err(db_error)?;
         }
+        if version <= 22 {
+            connection.execute_batch(MIGRATION_023).map_err(db_error)?;
+        }
+        if version <= 23 {
+            connection.execute_batch(MIGRATION_024).map_err(db_error)?;
+        }
         connection
             .execute_batch(ARCHIVE_USAGE_SQL)
             .map_err(db_error)?;
@@ -287,6 +295,8 @@ mod tests {
             }),
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("low".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Fast,
             applied_service_tier: Some(DefaultServiceTier::Standard),
@@ -325,6 +335,8 @@ mod tests {
         assert_eq!(logs[0].cached_input_tokens, Some(1));
         assert_eq!(logs[0].cache_write_input_tokens, Some(1));
         assert_eq!(logs[0].reasoning_tokens, Some(2));
+        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
         assert_eq!(
             logs[0]
                 .tool_use
@@ -579,6 +591,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -685,6 +699,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: Some("max".into()),
+            effective_reasoning_effort: Some("max".into()),
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -713,6 +729,7 @@ mod tests {
         event.success = true;
         event.http_status = 200;
         event.error_category = None;
+        event.effective_reasoning_effort = Some("low".into());
         event.cooldown_scope = None;
         event.retry_at_ms = None;
         event.consecutive_failures = Some(0);
@@ -730,6 +747,8 @@ mod tests {
         assert_eq!(logs[0].attempt, 2);
         assert!(logs[0].success);
         assert_eq!(logs[0].source_id, "source_2");
+        assert_eq!(logs[0].requested_reasoning_effort.as_deref(), Some("max"));
+        assert_eq!(logs[0].effective_reasoning_effort.as_deref(), Some("low"));
         drop(database);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -751,6 +770,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-test".into()),
             resolved_model: Some("gpt-test".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -808,6 +829,8 @@ mod tests {
             routing: None,
             requested_model: Some("gpt-5.4".into()),
             resolved_model: Some("gpt-5.4".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -862,6 +885,8 @@ mod tests {
                 routing: None,
                 requested_model: Some("private-model".into()),
                 resolved_model: Some("private-model".into()),
+                requested_reasoning_effort: None,
+                effective_reasoning_effort: None,
                 wire_api: WireApi::Responses,
                 service_tier: DefaultServiceTier::Standard,
                 applied_service_tier: None,
@@ -941,6 +966,8 @@ mod tests {
             routing: None,
             requested_model: Some("private-model".into()),
             resolved_model: Some("private-model".into()),
+            requested_reasoning_effort: None,
+            effective_reasoning_effort: None,
             wire_api: WireApi::Responses,
             service_tier: DefaultServiceTier::Standard,
             applied_service_tier: None,
@@ -1043,6 +1070,8 @@ mod tests {
         let logs = database.list(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].attempt, 1);
+        assert_eq!(logs[0].requested_reasoning_effort, None);
+        assert_eq!(logs[0].effective_reasoning_effort, None);
         let version: u32 = database
             .connection
             .lock()
@@ -1106,6 +1135,97 @@ mod tests {
         assert!(logs[0].success);
         assert_eq!(logs[0].source_id, "source_2");
         drop(database);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_purchase_cost_migration_preserves_direct_values_and_removes_legacy_economics() {
+        let root = std::env::temp_dir().join(format!(
+            "zenith-relay-account-purchase-cost-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = root.join("usage.sqlite");
+        let database = TelemetryDb::open(&path).unwrap();
+        database
+            .replace_state_json(&[(
+                "accounts",
+                r#"[
+                    {
+                        "account": { "id": "account_direct" },
+                        "purchaseCostMicroUsd": 42000000,
+                        "economics": { "purchaseCostMicroUsd": 13000000, "sampleCount": 8 }
+                    },
+                    {
+                        "account": { "id": "account_legacy" },
+                        "economics": { "purchaseCostMicroUsd": 21000000, "sampleCount": 3 }
+                    },
+                    {
+                        "account": { "id": "account_null_direct" },
+                        "purchaseCostMicroUsd": null,
+                        "economics": { "purchaseCostMicroUsd": 25000000, "sampleCount": 4 }
+                    },
+                    {
+                        "account": { "id": "account_without_cost" },
+                        "economics": { "sampleCount": 1 }
+                    }
+                ]"#
+                .to_string(),
+            )])
+            .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .pragma_update(None, "user_version", 23)
+            .unwrap();
+        drop(database);
+
+        let database = TelemetryDb::open(&path).unwrap();
+        let accounts: serde_json::Value =
+            serde_json::from_str(database.state_json("accounts").unwrap().as_deref().unwrap())
+                .unwrap();
+        let accounts = accounts.as_array().unwrap();
+        assert_eq!(
+            accounts
+                .iter()
+                .map(|account| account["account"]["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "account_direct",
+                "account_legacy",
+                "account_null_direct",
+                "account_without_cost",
+            ]
+        );
+        assert_eq!(accounts[0]["purchaseCostMicroUsd"], 42_000_000);
+        assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
+        assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
+        assert!(accounts[3].get("purchaseCostMicroUsd").is_none());
+        assert!(accounts
+            .iter()
+            .all(|account| account.get("economics").is_none()));
+        let version: u32 = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, LOCAL_DATABASE_SCHEMA_VERSION);
+        drop(database);
+
+        let reopened = TelemetryDb::open(&path).unwrap();
+        let accounts: serde_json::Value =
+            serde_json::from_str(reopened.state_json("accounts").unwrap().as_deref().unwrap())
+                .unwrap();
+        assert_eq!(accounts[0]["purchaseCostMicroUsd"], 42_000_000);
+        assert_eq!(accounts[1]["purchaseCostMicroUsd"], 21_000_000);
+        assert_eq!(accounts[2]["purchaseCostMicroUsd"], 25_000_000);
+        assert!(accounts
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|account| account.get("economics").is_none()));
+        drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1225,6 +1345,8 @@ mod tests {
                 routing: None,
                 requested_model: None,
                 resolved_model: None,
+                requested_reasoning_effort: None,
+                effective_reasoning_effort: None,
                 wire_api: WireApi::Responses,
                 service_tier: DefaultServiceTier::Standard,
                 applied_service_tier: None,

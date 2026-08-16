@@ -81,7 +81,7 @@ A Zenith Relay server management token is not valid here. This mode requires a
   those prices first, then Relay's verified global model catalog.
 - A custom price is an explicit override for that source. Restore the default
   price to use a refreshed API-reported or global catalog price again. Custom
-  prices affect local economics, not the provider invoice.
+  prices affect local API-equivalent estimates, not the provider invoice.
 - OpenAI models use input, output, and cache-read prices. Cache-write fields
   apply only to model families that bill them.
 

@@ -19,9 +19,6 @@ use zenith_relay_core::protocol::{
     RuntimeTargetSummary, SourceSummary,
 };
 use zenith_relay_core::{
-    quota::{
-        attach_quota_plan_benchmarks, quota_economics_summary_for_revision, quota_plan_benchmarks,
-    },
     unix_time_ms, ApiEquivalentSummary, CandidateRuntimeSnapshot, WireApi, QUOTA_STALE_AFTER_MS,
 };
 
@@ -77,7 +74,7 @@ pub async fn get_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut account_summaries = snapshot
+    let account_summaries = snapshot
         .accounts
         .iter()
         .map(|record| {
@@ -95,26 +92,6 @@ pub async fn get_local_runtime_state(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let economics_revision = zenith_relay_core::quota::quota_valuation_revision();
-    let plan_benchmarks = quota_plan_benchmarks(
-        snapshot
-            .accounts
-            .iter()
-            .map(|account| (account.account.id.as_str(), &account.economics)),
-        snapshot_at_ms,
-        economics_revision,
-    );
-    for (record, summary) in snapshot.accounts.iter().zip(&mut account_summaries) {
-        attach_quota_plan_benchmarks(
-            &mut summary.economics,
-            "chatgpt",
-            record.account.subscription.plan_type.as_deref(),
-            &record.account.quota,
-            snapshot.gateway.default_service_tier,
-            economics_revision,
-            &plan_benchmarks,
-        );
-    }
     let mut models = pool_model_summaries(
         &source_summaries,
         &account_summaries,
@@ -346,14 +323,7 @@ fn local_account_summary(
         priority: record.priority,
         weight: record.weight,
         api_equivalent,
-        economics: quota_economics_summary_for_revision(
-            &record.economics,
-            &record.account.quota,
-            settings.default_service_tier,
-            now_ms,
-            quota_stale_after_ms,
-            zenith_relay_core::quota::quota_valuation_revision(),
-        ),
+        purchase_cost_micro_usd: record.purchase_cost_micro_usd,
         subscription: record.account.subscription.clone(),
         quota: record.account.quota.clone(),
         secret_available,

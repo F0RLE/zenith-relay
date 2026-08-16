@@ -704,8 +704,8 @@ mod tests {
                 "gpt-5.4-mini",
                 "vendor/claude-opus-4-8",
                 "vendor/gemini-3.6-flash",
-                "vendor/glm-5.2",
                 "vendor/grok-4.5",
+                "vendor/glm-5.2",
                 "vendor/unknown-model",
             ]
         );

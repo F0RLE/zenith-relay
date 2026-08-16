@@ -181,17 +181,6 @@ impl LocalPoolStore {
         self.replace_accounts_and_keys(next, self.keys.clone())
     }
 
-    pub fn reset_quota_economics_learning(&mut self) -> Result<()> {
-        let mut accounts = self.accounts.clone();
-        for account in &mut accounts {
-            account.economics.reset_learning();
-            account
-                .economics
-                .set_value_revision(zenith_relay_core::quota::quota_valuation_revision());
-        }
-        self.replace_accounts_and_keys(accounts, self.keys.clone())
-    }
-
     pub fn replace_records(
         &mut self,
         sources: Vec<ProviderSourceRecord>,
@@ -1113,7 +1102,7 @@ mod tests {
                 last_used_at_ms: None,
                 last_error_code: None,
             },
-            economics: Default::default(),
+            purchase_cost_micro_usd: None,
             remote_location: None,
             wire_api: WireApi::Responses,
             models: vec!["gpt-test".into()],
