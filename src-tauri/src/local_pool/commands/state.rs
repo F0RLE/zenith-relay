@@ -497,7 +497,10 @@ mod parity_tests {
             dispatches: 0,
         };
         assert_eq!(
-            oauth_account_runtime_available(std::slice::from_ref(&unavailable), "account_unavailable"),
+            oauth_account_runtime_available(
+                std::slice::from_ref(&unavailable),
+                "account_unavailable"
+            ),
             Some(false)
         );
         assert_eq!(
