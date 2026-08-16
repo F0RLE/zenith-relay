@@ -221,6 +221,7 @@ export function RelayShell() {
           ))}
         </nav>
         <div className="sidebar-footer">
+          {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
           {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
           <div className="sidebar-footer-row">
             <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
@@ -238,7 +239,6 @@ export function RelayShell() {
       <div className="relay-content" ref={contentRef}>
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
       </div>
-      {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
       {importRequest ? <Suspense fallback={null}><ImportDialog key={importRequest.id} initialPaths={importRequest.paths} onClose={() => setImportRequest(null)} /></Suspense> : null}
       {updateDialogOpen && availableUpdate ? <UpdateDialog update={availableUpdate} installing={installingUpdate} progress={updateProgress} installError={updateInstallError} onInstall={() => void applyUpdate()} onSkip={skipUpdate} onClose={() => { if (!installingUpdate) setUpdateDialogOpen(false); }} /> : null}
@@ -286,7 +286,14 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
 
   return <div className={`global-feedback ${feedback.kind}${detailsOpen ? " details-open" : ""}`} role="status" aria-label={accessibleLabel}>
     <div className="global-feedback-copy">
-      <span className="global-feedback-status-icon" aria-hidden="true" title={message}>{feedback.kind === "success" ? <CheckCircle2 /> : <CircleAlert />}</span>
+      {feedback.error ? <button
+        className="global-feedback-status-icon global-feedback-status-icon-button"
+        type="button"
+        aria-label={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
+        aria-expanded={detailsOpen}
+        title={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
+        onClick={() => setDetailsOpen((open) => !open)}
+      ><CircleAlert aria-hidden /></button> : <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>}
       <span className="global-feedback-message"><span>{message}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</span>
     </div>
     <div className="global-feedback-actions">

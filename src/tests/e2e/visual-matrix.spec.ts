@@ -1194,24 +1194,29 @@ for (const theme of themes) {
     await page.getByLabel("Название снимка").press("Enter");
     await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
     const shell = page.locator(".relay-shell");
-    const [feedbackBox, shellBox, helpBox, headerAfter] = await Promise.all([
+    const [feedbackBox, shellBox, sidebarBox, helpBox, headerAfter] = await Promise.all([
       page.locator(".global-feedback").boundingBox(),
       page.locator(".relay-shell").boundingBox(),
+      page.locator(".relay-sidebar").boundingBox(),
       page.getByRole("button", { name: "Помощь" }).boundingBox(),
       page.locator(".relay-page-header").boundingBox(),
     ]);
     expect(feedbackBox).not.toBeNull();
     expect(shellBox).not.toBeNull();
+    expect(sidebarBox).not.toBeNull();
     expect(helpBox).not.toBeNull();
     expect(headerAfter).not.toBeNull();
     expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+    expect(feedbackBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x);
     expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
     expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
     expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
+    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
+    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-footer"))).toBe(true);
     expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
     expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
     if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
-      expect(feedbackBox!.width).toBeLessThanOrEqual(89);
+      expect(feedbackBox!.width).toBeLessThanOrEqual(38);
       expect(await page.locator(".global-feedback-message").evaluate((element) => {
         const style = getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -1219,6 +1224,23 @@ for (const theme of themes) {
       })).toBe(true);
       await expect(page.locator(".global-feedback-status-icon")).toHaveAttribute("title", "Снимок профиля создан.");
       await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
+      const closeButton = page.locator(".global-feedback > .global-feedback-actions > .relay-icon-button");
+      expect(await closeButton.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      await page.screenshot({ path: `output/playwright/feedback-bottom-left-resting-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.locator(".global-feedback").hover();
+      await expect.poll(() => closeButton.evaluate((element) => getComputedStyle(element).opacity), { timeout: 1_000 }).toBe("1");
+      const hoveredFeedbackBox = await page.locator(".global-feedback").boundingBox();
+      const statusIcon = page.locator(".global-feedback-status-icon");
+      const statusBox = await statusIcon.boundingBox();
+      const closeBox = await closeButton.boundingBox();
+      expect(hoveredFeedbackBox).not.toBeNull();
+      expect(statusBox).not.toBeNull();
+      expect(closeBox).not.toBeNull();
+      expect(hoveredFeedbackBox!.width).toBeLessThanOrEqual(38);
+      expect(hoveredFeedbackBox!.x + hoveredFeedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
+      expect(await statusIcon.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      expect(Math.abs((statusBox!.x + statusBox!.width / 2) - (closeBox!.x + closeBox!.width / 2))).toBeLessThanOrEqual(1);
+      expect(Math.abs((statusBox!.y + statusBox!.height / 2) - (closeBox!.y + closeBox!.height / 2))).toBeLessThanOrEqual(1);
     } else {
       await expect(page.locator(".global-feedback-message")).toBeVisible();
     }
@@ -1304,11 +1326,21 @@ for (const scenario of [
       return { width: box.width, messageHidden: messageBox.width <= 1 && messageBox.height <= 1 && style.clipPath === "inset(50%)" };
     });
     if (scenario.collapsed) {
-      expect(initialGeometry.width).toBeLessThanOrEqual(89);
+      expect(initialGeometry.width).toBeLessThanOrEqual(38);
       expect(initialGeometry.messageHidden).toBe(true);
     } else {
       expect(initialGeometry.width).toBeGreaterThan(89);
       expect(initialGeometry.messageHidden).toBe(false);
+    }
+
+    if (scenario.collapsed) {
+      await feedback.hover();
+      await expect.poll(async () => (await feedback.boundingBox())?.width ?? 0, { timeout: 1_000 }).toBeGreaterThan(89);
+      await expect(feedback.locator(".global-feedback-message")).toBeVisible();
+      await page.screenshot({ path: `output/playwright/feedback-error-hover-${scenario.name}.png` });
+
+      await feedback.locator(".global-feedback-status-icon-button").click();
+      await expect(feedback).toHaveClass(/details-open/);
     }
 
     const trigger = feedback.locator(".global-feedback-menu summary");
@@ -1332,7 +1364,7 @@ for (const scenario of [
     expect(menuGeometry).toEqual({ withinViewport: true, opensUp: true, detachedFromToast: true, clearOfHelp: true, width: expect.any(Number) });
     expect(menuGeometry.width).toBeLessThanOrEqual(242);
 
-    await menu.getByRole("menuitem", { name: "Show details" }).click();
+    if (!scenario.collapsed) await menu.getByRole("menuitem", { name: "Show details" }).click();
     const details = feedback.getByRole("region", { name: "Error details" });
     await expect(details).toBeVisible();
     const detailsGeometry = await details.evaluate((element) => {
@@ -1343,10 +1375,12 @@ for (const scenario of [
         insideToast: detailsBox.left >= feedbackBox.left && detailsBox.right <= feedbackBox.right && detailsBox.top >= feedbackBox.top && detailsBox.bottom <= feedbackBox.bottom,
         withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= 36 && detailsBox.bottom <= innerHeight,
         aboveHelp: detailsBox.bottom <= helpBox.top + 1,
+        aboveFeedback: detailsBox.bottom <= feedbackBox.top + 1,
       };
     });
-    expect(detailsGeometry).toEqual({ insideToast: true, withinViewport: true, aboveHelp: true });
+    expect(detailsGeometry).toEqual({ insideToast: false, withinViewport: true, aboveHelp: true, aboveFeedback: true });
     if (scenario.collapsed) expect((await feedback.boundingBox())!.width).toBeGreaterThan(89);
+    await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
     await feedback.locator(".relay-icon-button").click();
   });
 }

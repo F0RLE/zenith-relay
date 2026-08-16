@@ -426,9 +426,11 @@
 }
 
 .sidebar-footer {
+  flex: 0 0 auto;
   margin-top: auto;
   min-height: 62px;
   display: grid;
+  grid-auto-rows: max-content;
   gap: 4px;
   padding: 8px 10px;
   border-top: 1px solid var(--relay-border);
@@ -512,7 +514,7 @@
 }
 
 .sidebar-collapsed .sidebar-footer {
-  padding-inline: 8px;
+  padding-inline: 0;
 }
 
 .sidebar-collapsed .sidebar-footer-row {
@@ -981,24 +983,22 @@ textarea:focus-visible {
 }
 
 .global-feedback {
-  position: absolute;
+  position: relative;
   z-index: 300;
-  left: 12px;
-  bottom: 76px;
-  width: min(208px, calc(100vw - 24px));
-  max-width: calc(100% - 24px);
+  width: 100%;
+  max-width: 100%;
   min-height: 36px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
-  margin: 0;
+  margin: 0 0 4px;
   padding: 4px 6px 4px 12px;
   border: 1px solid var(--relay-border-strong);
   border-radius: 7px;
   box-shadow: 0 12px 32px rgb(0 0 0 / 24%);
   font-size: 12px;
-  pointer-events: none;
+  pointer-events: auto;
 }
 
 .global-feedback-copy {
@@ -1022,6 +1022,20 @@ textarea:focus-visible {
 .global-feedback-status-icon svg {
   width: 17px;
   height: 17px;
+}
+
+.global-feedback-status-icon-button {
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+}
+
+.global-feedback-status-icon-button:hover,
+.global-feedback-status-icon-button:focus-visible {
+  background: color-mix(in srgb, currentColor 11%, transparent);
 }
 
 .global-feedback-message {
@@ -1066,6 +1080,12 @@ textarea:focus-visible {
   color: var(--relay-error);
 }
 
+.relay-shell:not(.sidebar-collapsed) .global-feedback.error {
+  width: min(320px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
+  justify-self: start;
+}
+
 .global-feedback .relay-icon-button {
   width: 28px;
   min-height: 28px;
@@ -1073,6 +1093,13 @@ textarea:focus-visible {
   background: transparent;
   color: currentColor;
   pointer-events: auto;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.global-feedback:hover .relay-icon-button,
+.global-feedback:focus-within .relay-icon-button {
+  opacity: 1;
 }
 
 .global-feedback .relay-action-menu {
@@ -1100,37 +1127,39 @@ textarea:focus-visible {
   bottom: 40px;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback {
-  left: 8px;
-  bottom: 86px;
-  width: max-content;
-  min-width: 52px;
-  max-width: min(88px, calc(100vw - 16px));
-  min-height: 42px;
-  grid-template-columns: auto auto;
-  gap: 3px;
-  padding: 4px;
-  border-radius: 10px;
+.sidebar-collapsed .sidebar-footer > .global-feedback {
+  width: 34px;
+  max-width: 34px;
+  min-width: 0;
+  min-height: 34px;
+  justify-self: center;
+  grid-template-columns: 1fr;
+  gap: 0;
+  padding: 0;
+  border-radius: 8px;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-copy {
+.sidebar-collapsed .global-feedback-copy {
+  width: 100%;
   align-items: center;
+  justify-content: center;
   gap: 0;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-status-icon {
-  width: 24px;
-  height: 28px;
-  flex-basis: 24px;
+.sidebar-collapsed .global-feedback-status-icon {
+  width: 34px;
+  height: 32px;
+  flex-basis: 34px;
   margin-top: 0;
+  transition: opacity 120ms ease;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-status-icon svg {
-  width: 20px;
-  height: 20px;
+.sidebar-collapsed .global-feedback-status-icon svg {
+  width: 18px;
+  height: 18px;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-message {
+.sidebar-collapsed .global-feedback-message {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -1143,31 +1172,110 @@ textarea:focus-visible {
   border: 0;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-copy-state {
+.sidebar-collapsed .global-feedback-copy-state,
+.sidebar-collapsed .global-feedback-menu {
   display: none;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .relay-icon-button {
-  width: 24px;
-  min-height: 28px;
+.sidebar-collapsed .global-feedback-actions {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .relay-action-menu summary {
-  width: 24px;
-  height: 28px;
+.sidebar-collapsed .global-feedback-actions .relay-icon-button {
+  position: absolute;
+  inset: 0;
+  width: 34px;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  pointer-events: none;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback:not(.details-open) .global-feedback-actions {
-  gap: 0;
+.sidebar-collapsed .global-feedback.success:hover .global-feedback-status-icon,
+.sidebar-collapsed .global-feedback.success:focus-within .global-feedback-status-icon {
+  opacity: 0;
 }
 
-.relay-shell.sidebar-collapsed .global-feedback.details-open {
-  width: min(340px, calc(100vw - 16px));
-  max-width: calc(100% - 16px);
-  min-width: 0;
+.sidebar-collapsed .global-feedback.success:hover .global-feedback-actions .relay-icon-button,
+.sidebar-collapsed .global-feedback.success:focus-within .global-feedback-actions .relay-icon-button {
+  pointer-events: auto;
+}
+
+.sidebar-collapsed .sidebar-footer > .global-feedback.error:hover,
+.sidebar-collapsed .sidebar-footer > .global-feedback.error:focus-within,
+.sidebar-collapsed .sidebar-footer > .global-feedback.error.details-open {
+  width: min(320px, calc(100vw - 16px));
+  max-width: calc(100vw - 16px);
   grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  justify-self: start;
   padding: 4px 6px 4px 12px;
   border-radius: 7px;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-copy,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-copy,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-copy {
+  width: auto;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-status-icon,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-status-icon,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-status-icon {
+  width: 18px;
+  height: 18px;
+  flex-basis: 18px;
+  margin-top: 1px;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-message,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-message,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-message {
+  position: static;
+  width: auto;
+  height: auto;
+  padding: 0;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: normal;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-actions,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-actions,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-actions {
+  position: static;
+  inset: auto;
+  display: inline-flex;
+  pointer-events: auto;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-copy-state,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-copy-state,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-copy-state,
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-menu,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-menu,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-menu {
+  display: block;
+}
+
+.sidebar-collapsed .global-feedback.error:hover .global-feedback-actions .relay-icon-button,
+.sidebar-collapsed .global-feedback.error:focus-within .global-feedback-actions .relay-icon-button,
+.sidebar-collapsed .global-feedback.error.details-open .global-feedback-actions .relay-icon-button {
+  position: static;
+  width: 28px;
+  min-height: 28px;
+  border-radius: 6px;
+  pointer-events: auto;
 }
 
 .global-feedback-copy-state {
@@ -1182,13 +1290,20 @@ textarea:focus-visible {
 }
 
 .global-feedback-details {
-  grid-column: 1 / -1;
+  position: absolute;
+  z-index: 301;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(320px, calc(100vw - 16px));
   pointer-events: auto;
   min-width: 0;
   max-height: min(220px, calc(100vh - 96px));
   overflow: auto;
   padding: 8px 9px;
-  border-top: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border: 1px solid var(--relay-border-strong);
+  border-radius: 7px;
+  background: var(--relay-surface);
+  box-shadow: var(--relay-shadow);
 }
 
 .global-feedback-details pre {
