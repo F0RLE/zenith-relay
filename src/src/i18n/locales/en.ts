@@ -1470,6 +1470,7 @@ const relayEn = {
     copyError: "Copy error JSON",
     copied: "Copied",
     errorDetails: "Error details",
+    errorPrompt: "Something went wrong. Click to view details.",
     detailsHint: "Only sanitized code and message are included. Secrets are redacted.",
     saved: "Saved.",
     checked: "Check completed.",

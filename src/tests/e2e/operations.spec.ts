@@ -3205,7 +3205,9 @@ test("profile switch errors stay visible until the one-minute timeout", async ({
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  await expect(feedback).toContainText("The profile changed during the operation.");
+  await expect(feedback).toContainText("Something went wrong. Click to view details.");
+  await expect(feedback).not.toContainText("The profile changed during the operation.");
+  await expect(feedback).not.toContainText("profile_restore_blocked");
   await page.clock.runFor(59_000);
   await expect(feedback).toBeVisible();
   await page.clock.runFor(2_000);

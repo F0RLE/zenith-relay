@@ -220,19 +220,21 @@ export function RelayShell() {
             </button>
           ))}
         </nav>
-        <div className="sidebar-footer">
-          {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
-          {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
-          <div className="sidebar-footer-row">
-            <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
-              <CircleHelp aria-hidden />
-              <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
-            </button>
-            <IconButton
-              label={collapsed ? t("shell.expand") : t("shell.collapse")}
-              icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-              onClick={() => setCollapsed((value) => !value)}
-            />
+        <div className="sidebar-bottom">
+          {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /></div> : null}
+          <div className="sidebar-footer">
+            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
+            <div className="sidebar-footer-row">
+              <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
+                <CircleHelp aria-hidden />
+                <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
+              </button>
+              <IconButton
+                label={collapsed ? t("shell.expand") : t("shell.collapse")}
+                icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </div>
           </div>
         </div>
       </aside>
@@ -258,7 +260,8 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   const error = feedback.error;
   const details = error ? JSON.stringify(error, null, 2) : null;
   const message = t(feedback.key);
-  const accessibleLabel = error ? `${message} (${error.code})` : message;
+  const toastMessage = error ? t("feedback.errorPrompt") : message;
+  const accessibleLabel = error ? toastMessage : message;
 
   useEffect(() => {
     setDetailsOpen(false);
@@ -296,7 +299,7 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
         onClick={() => setDetailsOpen(true)}
       >
         <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
-        <span className="global-feedback-message"><span>{message}</span><code>{error.code}</code></span>
+        <span className="global-feedback-message"><span>{toastMessage}</span></span>
       </button> : <div className="global-feedback-copy">
         <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
         <span className="global-feedback-message"><span>{message}</span></span>

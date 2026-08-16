@@ -1194,25 +1194,28 @@ for (const theme of themes) {
     await page.getByLabel("Название снимка").press("Enter");
     await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
     const shell = page.locator(".relay-shell");
-    const [feedbackBox, shellBox, sidebarBox, helpBox, headerAfter] = await Promise.all([
+    const [feedbackBox, shellBox, sidebarBox, footerBox, helpBox, headerAfter] = await Promise.all([
       page.locator(".global-feedback").boundingBox(),
       page.locator(".relay-shell").boundingBox(),
       page.locator(".relay-sidebar").boundingBox(),
+      page.locator(".sidebar-footer").boundingBox(),
       page.getByRole("button", { name: "Помощь" }).boundingBox(),
       page.locator(".relay-page-header").boundingBox(),
     ]);
     expect(feedbackBox).not.toBeNull();
     expect(shellBox).not.toBeNull();
     expect(sidebarBox).not.toBeNull();
+    expect(footerBox).not.toBeNull();
     expect(helpBox).not.toBeNull();
     expect(headerAfter).not.toBeNull();
     expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
     expect(feedbackBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x);
     expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(footerBox!.y + 1);
     expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
     expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
     expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
-    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-footer"))).toBe(true);
+    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-feedback"))).toBe(true);
     expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
     expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
     if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
@@ -1314,7 +1317,9 @@ for (const scenario of [
 
     const shell = page.locator(".relay-shell");
     const feedback = page.locator(".global-feedback.error");
-    await expect(feedback).toContainText("The profile changed during the operation.");
+    await expect(feedback).toContainText("Something went wrong. Click to view details.");
+    await expect(feedback).not.toContainText("The profile changed during the operation.");
+    await expect(feedback).not.toContainText("profile_restore_blocked");
     if (scenario.collapsed) await expect(shell).toHaveClass(/sidebar-collapsed/);
     else await expect(shell).not.toHaveClass(/sidebar-collapsed/);
 
@@ -1334,6 +1339,9 @@ for (const scenario of [
       };
     });
     const initialGeometry = await readGeometry();
+    const footerBox = await page.locator(".sidebar-footer").boundingBox();
+    expect(footerBox).not.toBeNull();
+    expect(initialGeometry.y + initialGeometry.height).toBeLessThanOrEqual(footerBox!.y + 1);
     if (scenario.collapsed) {
       expect(initialGeometry.width).toBeLessThanOrEqual(38);
       expect(initialGeometry.messageHidden).toBe(true);
