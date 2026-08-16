@@ -1185,12 +1185,69 @@ for (const theme of themes) {
     const recovery = page.locator(".profile-recovery");
     const form = page.locator(".profile-snapshot-create");
     const table = page.locator(".profile-snapshot-table");
+    const headerBefore = await page.locator(".relay-page-header").boundingBox();
+    expect(headerBefore).not.toBeNull();
     await expect(page.getByRole("tab")).toHaveCount(0);
     await expect(page.getByText("Исправление истории", { exact: true })).toHaveCount(0);
     const snapshotName = viewport.width === 840 ? "Перед большим обновлением проекта с очень длинным названием рабочей среды" : "Перед обновлением проекта";
     await page.getByLabel("Название снимка").fill(snapshotName);
     await page.getByLabel("Название снимка").press("Enter");
     await expect(page.getByRole("row").filter({ has: page.getByText(snapshotName, { exact: true }) })).toBeVisible();
+    const shell = page.locator(".relay-shell");
+    const [feedbackBox, shellBox, sidebarBox, footerBox, helpBox, headerAfter] = await Promise.all([
+      page.locator(".global-feedback").boundingBox(),
+      page.locator(".relay-shell").boundingBox(),
+      page.locator(".relay-sidebar").boundingBox(),
+      page.locator(".sidebar-footer").boundingBox(),
+      page.getByRole("button", { name: "Помощь" }).boundingBox(),
+      page.locator(".relay-page-header").boundingBox(),
+    ]);
+    expect(feedbackBox).not.toBeNull();
+    expect(shellBox).not.toBeNull();
+    expect(sidebarBox).not.toBeNull();
+    expect(footerBox).not.toBeNull();
+    expect(helpBox).not.toBeNull();
+    expect(headerAfter).not.toBeNull();
+    expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+    expect(feedbackBox!.x).toBeGreaterThanOrEqual(sidebarBox!.x);
+    expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(footerBox!.y + 1);
+    expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
+    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
+    expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
+    expect(await page.locator(".global-feedback").evaluate((element) => element.parentElement?.classList.contains("sidebar-feedback"))).toBe(true);
+    expect(feedbackBox!.y).toBeGreaterThanOrEqual(shellBox!.y - 1);
+    expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
+    if (await shell.evaluate((element) => element.classList.contains("sidebar-collapsed"))) {
+      expect(feedbackBox!.width).toBeLessThanOrEqual(38);
+      expect(await page.locator(".global-feedback-message").evaluate((element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return rect.width <= 1 && rect.height <= 1 && style.clipPath === "inset(50%)";
+      })).toBe(true);
+      await expect(page.locator(".global-feedback-status-icon")).toHaveAttribute("title", "Снимок профиля создан.");
+      await expect(page.locator(".global-feedback")).toHaveAttribute("aria-label", "Снимок профиля создан.");
+      const closeButton = page.locator(".global-feedback > .global-feedback-actions > .relay-icon-button");
+      expect(await closeButton.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      await page.screenshot({ path: `output/playwright/feedback-bottom-left-resting-${theme}-${viewport.width}x${viewport.height}.png` });
+      await page.locator(".global-feedback").hover();
+      await expect.poll(() => closeButton.evaluate((element) => getComputedStyle(element).opacity), { timeout: 1_000 }).toBe("1");
+      const hoveredFeedbackBox = await page.locator(".global-feedback").boundingBox();
+      const statusIcon = page.locator(".global-feedback-status-icon");
+      const statusBox = await statusIcon.boundingBox();
+      const closeBox = await closeButton.boundingBox();
+      expect(hoveredFeedbackBox).not.toBeNull();
+      expect(statusBox).not.toBeNull();
+      expect(closeBox).not.toBeNull();
+      expect(hoveredFeedbackBox!.width).toBeLessThanOrEqual(38);
+      expect(hoveredFeedbackBox!.x + hoveredFeedbackBox!.width).toBeLessThanOrEqual(sidebarBox!.x + sidebarBox!.width + 1);
+      expect(await statusIcon.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      expect(Math.abs((statusBox!.x + statusBox!.width / 2) - (closeBox!.x + closeBox!.width / 2))).toBeLessThanOrEqual(1);
+      expect(Math.abs((statusBox!.y + statusBox!.height / 2) - (closeBox!.y + closeBox!.height / 2))).toBeLessThanOrEqual(1);
+    } else {
+      await expect(page.locator(".global-feedback-message")).toBeVisible();
+    }
+    await page.screenshot({ path: `output/playwright/feedback-bottom-left-${theme}-${viewport.width}x${viewport.height}.png` });
     await page.locator(".global-feedback .relay-icon-button").click();
     await page.getByLabel("Название снимка").fill("Новый снимок");
     const createButton = page.getByRole("button", { name: "Создать снимок" });
@@ -1245,6 +1302,82 @@ for (const theme of themes) {
     await page.screenshot({ path: `output/playwright/profile-recovery-ru-${theme}-${viewport.width}x${viewport.height}.png` });
     });
   }
+}
+
+for (const scenario of [
+  { name: "expanded", viewport: { width: 1160, height: 760 }, collapsed: false },
+  { name: "compact", viewport: { width: 840, height: 560 }, collapsed: true },
+] as const) {
+  test(`feedback error opens without layout shift ${scenario.name}`, async ({ page }) => {
+    await installTauriMock(page, { locale: "en", mode: "local", theme: "dark", populated: true, gatewayRunning: true, profileSwitchError: true });
+    await page.setViewportSize(scenario.viewport);
+    await page.goto("/");
+    await page.getByRole("button", { name: "Pool", exact: true }).click();
+    await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
+
+    const shell = page.locator(".relay-shell");
+    const feedback = page.locator(".global-feedback.error");
+    await expect(feedback).toContainText("Something went wrong. Click to view details.");
+    await expect(feedback).not.toContainText("The profile changed during the operation.");
+    await expect(feedback).not.toContainText("profile_restore_blocked");
+    if (scenario.collapsed) await expect(shell).toHaveClass(/sidebar-collapsed/);
+    else await expect(shell).not.toHaveClass(/sidebar-collapsed/);
+
+    const readGeometry = () => feedback.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const header = document.querySelector<HTMLElement>(".relay-page-header")!.getBoundingClientRect();
+      const message = element.querySelector<HTMLElement>(".global-feedback-message")!;
+      const messageBox = message.getBoundingClientRect();
+      const style = getComputedStyle(message);
+      return {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+        headerY: header.y,
+        messageHidden: messageBox.width <= 1 && messageBox.height <= 1 && style.clipPath === "inset(50%)",
+      };
+    });
+    const initialGeometry = await readGeometry();
+    const footerBox = await page.locator(".sidebar-footer").boundingBox();
+    expect(footerBox).not.toBeNull();
+    expect(initialGeometry.y + initialGeometry.height).toBeLessThanOrEqual(footerBox!.y + 1);
+    if (scenario.collapsed) {
+      expect(initialGeometry.width).toBeLessThanOrEqual(38);
+      expect(initialGeometry.messageHidden).toBe(true);
+    } else {
+      expect(initialGeometry.width).toBeGreaterThan(89);
+      expect(initialGeometry.messageHidden).toBe(false);
+    }
+
+    await feedback.hover();
+    await expect.poll(async () => (await feedback.boundingBox())?.width ?? 0, { timeout: 1_000 }).toBe(initialGeometry.width);
+    const hoveredGeometry = await readGeometry();
+    expect(Math.abs(hoveredGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
+    expect(Math.abs(hoveredGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
+    await expect(page.locator(".global-feedback-details")).toHaveCount(0);
+
+    await feedback.locator(".global-feedback-error-trigger").click();
+    const details = page.getByRole("dialog", { name: "Error details" });
+    await expect(details).toBeVisible();
+    const detailsGeometry = await details.evaluate((element) => {
+      const detailsBox = element.getBoundingClientRect();
+      const centerOffset = Math.abs((detailsBox.left + detailsBox.width / 2) - innerWidth / 2);
+      const verticalCenterOffset = Math.abs((detailsBox.top + detailsBox.height / 2) - (innerHeight + 36) / 2);
+      return {
+        withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= 36 && detailsBox.bottom <= innerHeight,
+        centered: centerOffset <= 2 && verticalCenterOffset <= 2,
+      };
+    });
+    expect(detailsGeometry).toEqual({ withinViewport: true, centered: true });
+    await expect(page.locator(".global-feedback")).toHaveCount(0);
+    await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
+    await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
+    await details.locator("header .relay-icon-button").click();
+    await expect(feedback).toHaveCount(0);
+  });
 }
 
 for (const viewport of viewports) {

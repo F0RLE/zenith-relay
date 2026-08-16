@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Cable, Check, ChevronDown, ChevronUp, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
+import { Activity, ArchiveRestore, Cable, Check, CheckCircle2, ChevronDown, CircleAlert, CircleHelp, Copy, Download, Gauge, Laptop, LayoutDashboard, PanelLeftClose, PanelLeftOpen, Server, Settings, SlidersHorizontal, Upload, X } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -6,7 +6,7 @@ import { APP_VERSION, checkForUpdate, installUpdate, type AppUpdate } from "../.
 import type { PageId, RelayMode } from "../api/types";
 import { OverviewPage } from "../pages/overview/OverviewPage";
 import { useRelayState, type Feedback } from "../state/RelayStateProvider";
-import { ActionMenu, ActionMenuItem, Button, copyText, Dialog, IconButton } from "../components/Ui";
+import { Button, copyText, Dialog, IconButton } from "../components/Ui";
 
 const SKIPPED_UPDATE_KEY = "relay.skippedUpdate";
 type UpdateCheckState = "idle" | "checking" | "current" | "available" | "error" | "skipped";
@@ -220,23 +220,25 @@ export function RelayShell() {
             </button>
           ))}
         </nav>
-        <div className="sidebar-footer">
-          {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
-          <div className="sidebar-footer-row">
-            <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
-              <CircleHelp aria-hidden />
-              <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
-            </button>
-            <IconButton
-              label={collapsed ? t("shell.expand") : t("shell.collapse")}
-              icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
-              onClick={() => setCollapsed((value) => !value)}
-            />
+        <div className="sidebar-bottom">
+          {feedback ? <div className="sidebar-feedback"><GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /></div> : null}
+          <div className="sidebar-footer">
+            {availableUpdate ? <button className="sidebar-update" type="button" aria-label={t("updates.open", { version: availableUpdate.version })} title={t("updates.open", { version: availableUpdate.version })} onClick={() => setUpdateDialogOpen(true)}><Download aria-hidden /><span><strong>{t("updates.available")}</strong><small>v{availableUpdate.version}</small></span></button> : null}
+            <div className="sidebar-footer-row">
+              <button className={`sidebar-help ${page === "help" ? "active" : ""}`} type="button" aria-label={t("common.help")} title={t("common.help")} aria-current={page === "help" ? "page" : undefined} onClick={() => setPage("help")}>
+                <CircleHelp aria-hidden />
+                <span className="sidebar-help-copy"><span>{t("common.help")}</span><small>v{APP_VERSION}</small></span>
+              </button>
+              <IconButton
+                label={collapsed ? t("shell.expand") : t("shell.collapse")}
+                icon={collapsed ? <PanelLeftOpen aria-hidden /> : <PanelLeftClose aria-hidden />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </div>
           </div>
         </div>
       </aside>
       <div className="relay-content" ref={contentRef}>
-        {feedback ? <GlobalFeedback feedback={feedback} clearFeedback={clearFeedback} /> : null}
         {loading ? <div className="relay-loading">{t("common.loading")}</div> : <Suspense key={page} fallback={<div className="relay-loading">{t("common.loading")}</div>}><Page page={page} onImport={() => openImport()} updateCheckState={updateCheckState} updateVersion={availableUpdate?.version ?? null} onCheckUpdates={() => checkUpdates(true, true)} /></Suspense>}
       </div>
       {importDragActive ? <div className="import-drop-overlay" role="status"><span className="import-drop-visual"><Upload aria-hidden /></span><strong>{t("accounts.dropImportFiles")}</strong></div> : null}
@@ -255,7 +257,11 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyTimer = useRef<number | null>(null);
-  const details = feedback.error ? JSON.stringify(feedback.error, null, 2) : null;
+  const error = feedback.error;
+  const details = error ? JSON.stringify(error, null, 2) : null;
+  const message = t(feedback.key);
+  const toastMessage = error ? t("feedback.errorPrompt") : message;
+  const accessibleLabel = error ? toastMessage : message;
 
   useEffect(() => {
     setDetailsOpen(false);
@@ -282,20 +288,43 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
     }
   };
 
-  return <div className={`global-feedback ${feedback.kind}`} role="status">
-    <div className="global-feedback-copy"><span>{t(feedback.key)}</span>{feedback.error ? <code>{feedback.error.code}</code> : null}</div>
-    <div className="global-feedback-actions">
-      {feedback.error ? <>
-        <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
-        <ActionMenu className="global-feedback-menu" label={copied ? t("feedback.copied") : t("feedback.errorActions")}>
-          <ActionMenuItem icon={detailsOpen ? <ChevronUp aria-hidden /> : <CircleAlert aria-hidden />} onClick={() => setDetailsOpen((open) => !open)}>{detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}</ActionMenuItem>
-          <ActionMenuItem icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</ActionMenuItem>
-        </ActionMenu>
-      </> : null}
-      <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
-    </div>
-    {detailsOpen && details ? <div className="global-feedback-details" role="region" aria-label={t("feedback.errorDetails")}><pre><code>{details}</code></pre><p>{t("feedback.detailsHint")}</p></div> : null}
-  </div>;
+  return <>
+    {!detailsOpen ? <div className={`global-feedback ${feedback.kind}`} role="status" aria-label={accessibleLabel}>
+      {error ? <button
+        className="global-feedback-copy global-feedback-error-trigger"
+        type="button"
+        aria-label={t("feedback.showDetails")}
+        aria-expanded={detailsOpen}
+        title={t("feedback.showDetails")}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
+        <span className="global-feedback-message"><span>{toastMessage}</span></span>
+      </button> : <div className="global-feedback-copy">
+        <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
+        <span className="global-feedback-message"><span>{message}</span></span>
+      </div>}
+      <div className="global-feedback-actions">
+        {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
+      </div>
+    </div> : null}
+    {detailsOpen && details ? <Dialog
+      title={t("feedback.errorDetails")}
+      onClose={clearFeedback}
+      footer={<div className="global-feedback-dialog-actions">
+        <span className="global-feedback-dialog-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
+        <Button variant="secondary" icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</Button>
+        <Button variant="primary" onClick={clearFeedback}>{t("common.close")}</Button>
+      </div>}
+    >
+      <div className="global-feedback-dialog-summary">
+        <CircleAlert aria-hidden />
+        <div><strong>{message}</strong><code>{error?.code}</code></div>
+      </div>
+      <div className="config-preview global-feedback-error-json"><pre><code>{details}</code></pre></div>
+      <p className="form-note">{t("feedback.detailsHint")}</p>
+    </Dialog> : null}
+  </>;
 }
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {

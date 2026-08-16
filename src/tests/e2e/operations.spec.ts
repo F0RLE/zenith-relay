@@ -3147,17 +3147,18 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
   const feedback = page.locator(".global-feedback.success");
   await expect(feedback).toContainText("Client launched.");
-  const [feedbackBox, headerBox, poolControlsBox] = await Promise.all([
+  const [feedbackBox, shellBox, helpBox] = await Promise.all([
     feedback.boundingBox(),
-    page.locator(".relay-page-header").boundingBox(),
-    page.locator(".pool-controls").boundingBox(),
+    page.locator(".relay-shell").boundingBox(),
+    page.getByRole("button", { name: "Help" }).boundingBox(),
   ]);
   expect(feedbackBox).not.toBeNull();
-  expect(headerBox).not.toBeNull();
-  expect(poolControlsBox).not.toBeNull();
-  expect(feedbackBox!.x).toBeGreaterThan(page.viewportSize()!.width / 2);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(headerBox!.y);
-  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(poolControlsBox!.y);
+  expect(shellBox).not.toBeNull();
+  expect(helpBox).not.toBeNull();
+  expect(feedbackBox!.x).toBeGreaterThanOrEqual(shellBox!.x);
+  expect(feedbackBox!.x).toBeLessThanOrEqual(helpBox!.x + 2);
+  expect(feedbackBox!.y + feedbackBox!.height).toBeLessThanOrEqual(helpBox!.y + 1);
+  expect(feedbackBox!.x + feedbackBox!.width).toBeLessThanOrEqual(shellBox!.x + shellBox!.width + 1);
 
   const calls = await page.evaluate(() => (window as unknown as { __TAURI_TEST_INVOKES__: Array<{ command: string; args: Record<string, unknown> }> }).__TAURI_TEST_INVOKES__);
   const workflow = calls.filter((call) => ["start_local_gateway", "attach_codex_to_local_gateway", "launch_managed_codex_profile"].includes(call.command));
@@ -3168,15 +3169,21 @@ test("switch ChatGPT uses the backend system key and relaunches ChatGPT without 
   await expect(feedback).toBeHidden({ timeout: 5_000 });
 });
 
-test("profile switch errors remain readable and then dismiss automatically", async ({ page }) => {
+test("profile switch errors stay visible until the one-minute timeout", async ({ page }) => {
   await installTauriMock(page, { mode: "local", locale: "en", populated: true, gatewayRunning: true, profileSwitchError: true });
+  await page.clock.install({ time: 0 });
   await page.goto("/");
   await page.getByRole("button", { name: "Pool", exact: true }).click();
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  await expect(feedback).toContainText("The profile changed during the operation.");
-  await expect(feedback).toBeHidden({ timeout: 9_000 });
+  await expect(feedback).toContainText("Something went wrong. Click to view details.");
+  await expect(feedback).not.toContainText("The profile changed during the operation.");
+  await expect(feedback).not.toContainText("profile_restore_blocked");
+  await page.clock.runFor(59_000);
+  await expect(feedback).toBeVisible();
+  await page.clock.runFor(2_000);
+  await expect(feedback).toHaveCount(0);
 });
 
 test("global errors expose sanitized details and a copy confirmation", async ({ page }) => {
@@ -3187,18 +3194,19 @@ test("global errors expose sanitized details and a copy confirmation", async ({ 
   await page.getByRole("button", { name: "Switch ChatGPT to pool", exact: true }).click();
 
   const feedback = page.locator(".global-feedback.error");
-  const errorMenu = feedback.locator(".global-feedback-menu summary");
-  await expect(errorMenu).toBeVisible();
-  await errorMenu.click();
-  await feedback.getByRole("menuitem", { name: "Show details" }).click();
-  const details = feedback.getByRole("region", { name: "Error details" });
+  await expect(feedback.locator(".global-feedback-actions .relay-icon-button")).toHaveCount(0);
+  await feedback.locator(".global-feedback-error-trigger").click();
+  const details = page.getByRole("dialog", { name: "Error details" });
   await expect(details).toContainText('"code": "profile_restore_blocked"');
   await expect(details).toContainText('"message": "Synthetic profile conflict"');
+  await expect(page.locator(".global-feedback")).toHaveCount(0);
+  await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
 
-  await errorMenu.click();
-  await feedback.getByRole("menuitem", { name: "Copy error JSON" }).click();
-  await expect(feedback.locator(".global-feedback-copy-state")).toHaveText("Copied");
+  await details.getByRole("button", { name: "Copy error JSON" }).click();
+  await expect(details.locator(".global-feedback-dialog-copy-state")).toHaveText("Copied");
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('"profile_restore_blocked"');
+  await details.locator("header .relay-icon-button").click();
+  await expect(feedback).toHaveCount(0);
 });
 
 test("focus refreshes runtime only after a state revision changes", async ({ page }) => {

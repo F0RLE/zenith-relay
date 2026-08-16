@@ -8,6 +8,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Added
 
+- Provider-reported quota windows are shown in Connections and Pool, with
+  separate visibility controls for the optional account value summary.
+- Regression coverage keeps provider quota, API-equivalent usage, and purchase
+  cost as separate values.
 - Usage history now shows the requested reasoning effort and the normalized
   effort actually sent to the selected provider.
 - Streamed Responses-to-Messages continuation coverage, including tool-context
@@ -15,6 +19,10 @@ release entries are kept concise and link to the corresponding tag.
 
 ### Changed
 
+- Global operation notifications now stay in a bottom-left overlay above the
+  Help controls instead of shifting the page from the upper-right corner;
+  compact sidebar mode uses a small status toast and opens error details in a
+  centered dialog.
 - Model lists and source price editors order familiar model families
   semantically by company, tier, version, and variant; unknown model IDs keep
   their upstream order.
@@ -29,6 +37,8 @@ release entries are kept concise and link to the corresponding tag.
   `model_reasoning_effort`. Provider, base URL, authentication, and model
   catalog changes still block managed restore; an explicitly selected full
   snapshot restore may restore the snapshot as a whole.
+- Provider quota presentation ignores expired reset timestamps and selects the
+  next future reset.
 
 ### Maintenance
 
