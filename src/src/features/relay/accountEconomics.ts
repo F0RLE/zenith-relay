@@ -5,6 +5,13 @@ export type PotentialEstimate = {
   approximate: boolean;
 };
 
+export type AccountValueProjection = {
+  purchaseCostMicroUsd: number | null;
+  potential: PotentialEstimate | null;
+  payback: number | null;
+  approximate: boolean;
+};
+
 /**
  * Estimates remaining API-equivalent capacity from observed usage and the
  * limiting provider-reported quota window.
@@ -31,6 +38,26 @@ export function estimateAccountPotential(
   if (!estimates.length) return null;
   return {
     microUsd: Math.min(...estimates),
+    approximate: usage.unpricedTokens > 0,
+  };
+}
+
+/**
+ * Builds the shared display projection for account usage cards.
+ *
+ * These values are estimates only. The projection deliberately has no effect
+ * on quota state, routing, provider cost, or customer billing.
+ */
+export function buildAccountValueProjection(
+  usage: Pick<ApiEquivalentSummary, "microUsd" | "unpricedTokens">,
+  quota: Pick<QuotaSnapshot, "primary" | "secondary">,
+  purchaseCostMicroUsd?: number | null,
+): AccountValueProjection {
+  const purchaseCost = purchaseCostMicroUsd ?? null;
+  return {
+    purchaseCostMicroUsd: purchaseCost,
+    potential: estimateAccountPotential(usage, quota),
+    payback: purchaseCost && purchaseCost > 0 ? usage.microUsd / purchaseCost : null,
     approximate: usage.unpricedTokens > 0,
   };
 }

@@ -5,8 +5,12 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, QuotaSnapshot, QuotaWindow } from "../api/types";
 import { accountErrorTranslationKey } from "../accountStatus";
-import { estimateAccountPotential } from "../accountEconomics";
+import { buildAccountValueProjection } from "../accountEconomics";
+import { formatAccountValueMicroUsd } from "../poolFormatting";
+import { formatDetailedRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 import { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan, type ApiSourceRole } from "../routingOrder";
+
+export { formatDetailedRemainingTime, formatRemainingTime, quotaWindowLabel } from "../quotaFormatting";
 
 export { accountPlanOption, apiSourcePriority, apiSourceRole, compareAccountPlans, formatAccountPlan };
 export type { ApiSourceRole };
@@ -31,26 +35,18 @@ export function AccountPlanBadge({ planType, unknown }: { planType: string | nul
 export function AccountValueStrip({ account }: { account: AccountSummary }) {
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
-  const purchaseCost = account.purchaseCostMicroUsd ?? null;
-  const incompleteEquivalent = account.apiEquivalent.unpricedTokens > 0;
-  const potential = estimateAccountPotential(account.apiEquivalent, account.quota);
-  const payback = purchaseCost && purchaseCost > 0 ? account.apiEquivalent.microUsd / purchaseCost : null;
+  const { purchaseCostMicroUsd: purchaseCost, potential, payback, approximate } = buildAccountValueProjection(account.apiEquivalent, account.quota, account.purchaseCostMicroUsd);
   const paybackTitle = purchaseCost == null
     ? t("accounts.accountValue.purchaseMissing")
     : t("accounts.accountValue.paybackHint", {
-      used: formatMicroUsd(account.apiEquivalent.microUsd, locale),
-      purchase: formatMicroUsd(purchaseCost, locale),
+      used: formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale),
+      purchase: formatAccountValueMicroUsd(purchaseCost, locale),
     });
   return <dl className="account-value-strip">
-    <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.accountValue.used")}</dt><dd>{formatMicroUsd(account.apiEquivalent.microUsd, locale, incompleteEquivalent)}</dd></div>
-    <div title={t("accounts.accountValue.potentialHint")}><dt>{t("accounts.accountValue.potential")}</dt><dd>{potential == null ? "—" : formatMicroUsd(potential.microUsd, locale, potential.approximate)}</dd></div>
-    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.accountValue.payback")}</dt><dd>{payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
+    <div title={t("accounts.accountValue.usedHint", { count: account.apiEquivalent.unpricedTokens })}><dt>{t("accounts.accountValue.used")}</dt><dd>{formatAccountValueMicroUsd(account.apiEquivalent.microUsd, locale, approximate)}</dd></div>
+    <div title={t("accounts.accountValue.potentialHint")}><dt>{t("accounts.accountValue.potential")}</dt><dd>{potential == null ? "—" : formatAccountValueMicroUsd(potential.microUsd, locale, potential.approximate)}</dd></div>
+    <div title={paybackTitle} data-state={payback != null && payback >= 1 ? "paid" : undefined}><dt>{t("accounts.accountValue.payback")}</dt><dd>{payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`}</dd></div>
   </dl>;
-}
-
-function formatMicroUsd(value: number, locale: string, approximate = false) {
-  const formatted = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value / 1_000_000);
-  return `${approximate ? "≈" : ""}${formatted}`;
 }
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: string; actions?: ReactNode }) {
@@ -493,20 +489,6 @@ export function SettingToggle({ label, description, checked, disabled = false, o
   </label>;
 }
 
-export function formatRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
-  const totalSeconds = Math.max(0, Math.floor((targetMs - nowMs) / 1_000));
-  if (totalSeconds >= 86_400) return t("timeShort.days", { count: Math.floor(totalSeconds / 86_400) });
-  if (totalSeconds >= 3_600) return `${t("timeShort.hours", { count: Math.floor(totalSeconds / 3_600) })} ${t("timeShort.minutes", { count: Math.floor(totalSeconds % 3_600 / 60) })}`;
-  if (totalSeconds >= 60) return `${t("timeShort.minutes", { count: Math.floor(totalSeconds / 60) })} ${t("timeShort.seconds", { count: totalSeconds % 60 })}`;
-  return t("timeShort.seconds", { count: totalSeconds });
-}
-
-export function formatDetailedRemainingTime(targetMs: number, nowMs: number, t: TFunction) {
-  const totalMinutes = Math.max(0, Math.floor((targetMs - nowMs) / 60_000));
-  if (totalMinutes < 1_440) return formatRemainingTime(targetMs, nowMs, t);
-  return `${t("timeShort.days", { count: Math.floor(totalMinutes / 1_440) })} ${t("timeShort.hours", { count: Math.floor(totalMinutes % 1_440 / 60) })} ${t("timeShort.minutes", { count: totalMinutes % 60 })}`;
-}
-
 export function QuotaMeter({ window, kind, label, nowMs, concise = false }: { window: QuotaWindow | null; kind?: "primary" | "secondary"; label?: string; nowMs?: number; concise?: boolean }) {
   const { i18n, t } = useTranslation();
   const windowKind = kind ?? window?.kind ?? "primary";
@@ -541,18 +523,6 @@ export function QuotaStack({ snapshot, nowMs, concise = false }: { snapshot: Quo
   ];
   if (!reported.length) return <div className="quota-stack"><QuotaMeter window={null} nowMs={nowMs} concise={concise} /></div>;
   return <div className="quota-stack">{reported.map((item) => <QuotaMeter key={item.id} window={item.window} label={item.label ? `${item.label} · ${quotaWindowLabel(item.window, item.window.kind, t)}` : undefined} nowMs={nowMs} concise={concise} />)}</div>;
-}
-
-export function quotaWindowLabel(window: QuotaWindow | null, kind: "primary" | "secondary", t: TFunction) {
-  const minutes = window?.windowMinutes;
-  if (!minutes) return t(`quota.${kind}`);
-  if (minutes >= 10_080 - 1) {
-    const weeks = Math.ceil(minutes / 10_080);
-    return weeks === 1 ? t("quota.week") : t("quota.weeks", { count: weeks });
-  }
-  if (minutes >= 1_440 - 1) return t("quota.days", { count: Math.ceil(minutes / 1_440) });
-  if (minutes >= 60 - 1) return t("quota.hours", { count: Math.ceil(minutes / 60) });
-  return t("quota.minutes", { count: Math.ceil(minutes) });
 }
 
 export function SecretField({

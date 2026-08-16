@@ -46,9 +46,9 @@ import {
   accountPlanOption,
   compareAccountPlans,
   copyText,
-  formatDetailedRemainingTime,
   useConfirm,
 } from "../../components/Ui";
+import { formatDetailedRemainingTime } from "../../quotaFormatting";
 import { compareRoutingOrder, routingOrderPositions } from "../../routingOrder";
 import { useRelayState } from "../../state/RelayStateProvider";
 import { NoResults, matchesQuery } from "./connectionHelpers";

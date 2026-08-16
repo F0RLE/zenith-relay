@@ -3,8 +3,10 @@ import { Activity, CreditCard, SlidersHorizontal, TrendingUp, X } from "lucide-r
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { AccountSummary, DefaultServiceTier, ErrorOrigin, ReasoningEffort, RoutingDiagnostics, ToolUseDiagnostics, UsageGroup, UsageTotals } from "../../api/types";
-import { estimateAccountPotential } from "../../accountEconomics";
-import { Button, CopyButton, Dialog, EmptyState, formatDetailedRemainingTime, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
+import { buildAccountValueProjection } from "../../accountEconomics";
+import { Button, CopyButton, Dialog, EmptyState, IconButton, OptionMenu, StatusIcon } from "../../components/Ui";
+import { formatAccountValueMicroUsd } from "../../poolFormatting";
+import { formatDetailedRemainingTime, formatQuotaRemaining, formatWindowDuration } from "../../quotaFormatting";
 import { effectiveTokenSpeed, formatTokenSpeed, generationTokenSpeed, tokenSpeed, type TokenSpeedSample } from "../../usageSpeed";
 import { emptyUsageTotals, formatCompactNumber, formatFullNumber } from "../../usageTotals";
 import {
@@ -413,15 +415,12 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const nowMs = Date.now();
-  const purchaseCost = account.purchaseCostMicroUsd ?? null;
-  const incompleteEquivalent = totals.apiEquivalent.unpricedTokens > 0;
-  const potential = estimateAccountPotential(totals.apiEquivalent, account.quota);
-  const payback = purchaseCost && purchaseCost > 0 ? totals.apiEquivalent.microUsd / purchaseCost : null;
+  const { purchaseCostMicroUsd: purchaseCost, potential, payback, approximate } = buildAccountValueProjection(totals.apiEquivalent, account.quota, account.purchaseCostMicroUsd);
   const paybackTitle = purchaseCost == null
     ? t("accounts.accountValue.purchaseMissing")
     : t("accounts.accountValue.paybackHint", {
-      used: formatMicroUsd(totals.apiEquivalent.microUsd, locale),
-      purchase: formatMicroUsd(purchaseCost, locale),
+      used: formatAccountValueMicroUsd(totals.apiEquivalent.microUsd, locale),
+      purchase: formatAccountValueMicroUsd(purchaseCost, locale),
     });
   const windows = (["primary", "secondary"] as const)
     .map((kind) => ({ kind, quota: account.quota[kind] }))
@@ -430,25 +429,10 @@ export function AccountUsageSummary({ account, totals }: { account: AccountSumma
     <header><div><span>{t("usage.selectedAccount")}</span><strong>{account.label}</strong></div><details><summary>{t("usage.howCalculated")}</summary><p>{t("usage.calculationHint")}</p></details></header>
     <div className="usage-account-metrics">
       <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.used")} value={formatApiEquivalent(totals.apiEquivalent, locale)} title={t("accounts.accountValue.usedHint", { count: totals.apiEquivalent.unpricedTokens })} />
-      <UsageMetric icon={<TrendingUp aria-hidden />} label={t("accounts.accountValue.potential")} value={potential == null ? "—" : formatMicroUsd(potential.microUsd, locale, potential.approximate)} title={t("accounts.accountValue.potentialHint")} />
-      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.purchaseCost")} value={purchaseCost == null ? "—" : formatMicroUsd(purchaseCost, locale)} detail={purchaseCost == null ? t("accounts.accountValue.purchaseMissing") : undefined} />
-      <UsageMetric icon={<Activity aria-hidden />} label={t("accounts.accountValue.payback")} value={payback == null ? "—" : `${incompleteEquivalent ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`} title={paybackTitle} />
+      <UsageMetric icon={<TrendingUp aria-hidden />} label={t("accounts.accountValue.potential")} value={potential == null ? "—" : formatAccountValueMicroUsd(potential.microUsd, locale, potential.approximate)} title={t("accounts.accountValue.potentialHint")} />
+      <UsageMetric icon={<CreditCard aria-hidden />} label={t("accounts.accountValue.purchaseCost")} value={purchaseCost == null ? "—" : formatAccountValueMicroUsd(purchaseCost, locale)} detail={purchaseCost == null ? t("accounts.accountValue.purchaseMissing") : undefined} />
+      <UsageMetric icon={<Activity aria-hidden />} label={t("accounts.accountValue.payback")} value={payback == null ? "—" : `${approximate ? "≈" : ""}${new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 0 }).format(payback)}`} title={paybackTitle} />
     </div>
     {windows.length ? <div className="relay-table-wrap"><table className="relay-table usage-window-table"><thead><tr><th>{t("usage.window")}</th><th>{t("usage.remaining")}</th><th>{t("usage.reset")}</th></tr></thead><tbody>{windows.map(({ kind, quota }) => <tr key={kind}><th scope="row">{formatWindowDuration(quota?.windowMinutes ?? null, locale, t("usage.window"))}</th><td>{formatQuotaRemaining(quota?.availableBasisPoints ?? null, locale)}</td><td>{quota?.resetAtMs == null ? "—" : formatDetailedRemainingTime(quota.resetAtMs, nowMs, t)}</td></tr>)}</tbody></table></div> : null}
   </section>;
-}
-function formatWindowDuration(minutes: number | null, locale: string, fallback: string) {
-  if (!minutes) return fallback;
-  const units: Array<[number, Intl.NumberFormatOptions["unit"]]> = [[10_080, "week"], [1_440, "day"], [60, "hour"], [1, "minute"]];
-  const [size, unit] = units.find(([size]) => minutes % size === 0) ?? units[units.length - 1];
-  return new Intl.NumberFormat(locale, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 1 }).format(minutes / size);
-}
-
-function formatMicroUsd(value: number, locale: string, approximate = false) {
-  const amount = new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value / 1_000_000);
-  return `${approximate ? "≈" : ""}${amount}`;
-}
-
-function formatQuotaRemaining(basisPoints: number | null, locale: string) {
-  return basisPoints == null ? "—" : new Intl.NumberFormat(locale, { style: "percent", maximumFractionDigits: 1 }).format(basisPoints / 10_000);
 }

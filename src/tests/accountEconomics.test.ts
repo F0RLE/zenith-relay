@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { estimateAccountPotential } from "../src/features/relay/accountEconomics";
+import { buildAccountValueProjection, estimateAccountPotential } from "../src/features/relay/accountEconomics";
 
 function quota(primary: number | null, secondary: number | null) {
   const window = (kind: "primary" | "secondary", availableBasisPoints: number | null) => availableBasisPoints == null ? null : {
@@ -46,5 +46,44 @@ describe("account potential", () => {
 
   test("does not invent potential without priced usage", () => {
     expect(estimateAccountPotential({ microUsd: 0, unpricedTokens: 100 }, quota(5_000, null))).toBeNull();
+  });
+});
+
+describe("account value projection", () => {
+  test("keeps the same display projection for Connections and Usage", () => {
+    const usage = { microUsd: 10_000_000, unpricedTokens: 0 };
+    const limits = quota(5_000, null);
+    const projection = buildAccountValueProjection(usage, limits, 5_000_000);
+
+    expect(projection).toEqual({
+      purchaseCostMicroUsd: 5_000_000,
+      potential: { microUsd: 10_000_000, approximate: false },
+      payback: 2,
+      approximate: false,
+    });
+    expect(buildAccountValueProjection(usage, limits, 5_000_000)).toEqual(projection);
+  });
+
+  test("marks values approximate when usage contains unpriced tokens", () => {
+    expect(buildAccountValueProjection({ microUsd: 10_000_000, unpricedTokens: 3 }, quota(5_000, null), 5_000_000)).toEqual({
+      purchaseCostMicroUsd: 5_000_000,
+      potential: { microUsd: 10_000_000, approximate: true },
+      payback: 2,
+      approximate: true,
+    });
+  });
+
+  test("preserves missing and zero purchase-cost behavior", () => {
+    const usage = { microUsd: 10_000_000, unpricedTokens: 0 };
+    const limits = quota(5_000, null);
+
+    expect(buildAccountValueProjection(usage, limits)).toMatchObject({ purchaseCostMicroUsd: null, payback: null });
+    expect(buildAccountValueProjection(usage, limits, 0)).toMatchObject({ purchaseCostMicroUsd: 0, payback: null });
+  });
+
+  test("keeps quota-derived potential absent when all windows are full or unknown", () => {
+    const usage = { microUsd: 10_000_000, unpricedTokens: 0 };
+    expect(buildAccountValueProjection(usage, quota(10_000, null), 5_000_000).potential).toBeNull();
+    expect(buildAccountValueProjection(usage, quota(null, null), 5_000_000).potential).toBeNull();
   });
 });
