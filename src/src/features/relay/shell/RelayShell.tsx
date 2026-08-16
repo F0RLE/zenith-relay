@@ -285,38 +285,43 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
     }
   };
 
-  return <div className={`global-feedback ${feedback.kind}${detailsOpen ? " details-open" : ""}`} role="status" aria-label={accessibleLabel}>
-    {error ? <button
-      className="global-feedback-copy global-feedback-error-trigger"
-      type="button"
-      aria-label={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
-      aria-expanded={detailsOpen}
-      aria-controls={detailsOpen ? "global-feedback-error-details" : undefined}
-      title={detailsOpen ? t("feedback.hideDetails") : t("feedback.showDetails")}
-      onClick={() => setDetailsOpen((open) => !open)}
-    >
-      <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
-      <span className="global-feedback-message"><span>{message}</span><code>{error.code}</code></span>
-    </button> : <div className="global-feedback-copy">
-      <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
-      <span className="global-feedback-message"><span>{message}</span></span>
-    </div>}
-    <div className="global-feedback-actions">
-      {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
+  return <>
+    <div className={`global-feedback ${feedback.kind}`} role="status" aria-label={accessibleLabel}>
+      {error ? <button
+        className="global-feedback-copy global-feedback-error-trigger"
+        type="button"
+        aria-label={t("feedback.showDetails")}
+        aria-expanded={detailsOpen}
+        title={t("feedback.showDetails")}
+        onClick={() => setDetailsOpen(true)}
+      >
+        <span className="global-feedback-status-icon" aria-hidden="true"><CircleAlert /></span>
+        <span className="global-feedback-message"><span>{message}</span><code>{error.code}</code></span>
+      </button> : <div className="global-feedback-copy">
+        <span className="global-feedback-status-icon" aria-hidden="true" title={message}><CheckCircle2 /></span>
+        <span className="global-feedback-message"><span>{message}</span></span>
+      </div>}
+      <div className="global-feedback-actions">
+        {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
+      </div>
     </div>
-    {detailsOpen && details ? <div id="global-feedback-error-details" className="global-feedback-details" role="dialog" aria-label={t("feedback.errorDetails")}>
-      <div className="global-feedback-details-header">
-        <div className="global-feedback-details-title"><strong>{message}</strong><code>{error?.code}</code></div>
-        <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} />
+    {detailsOpen && details ? <Dialog
+      title={t("feedback.errorDetails")}
+      onClose={clearFeedback}
+      footer={<div className="global-feedback-dialog-actions">
+        <span className="global-feedback-dialog-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
+        <Button variant="secondary" icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()}>{copied ? t("feedback.copied") : t("feedback.copyError")}</Button>
+        <Button variant="primary" onClick={clearFeedback}>{t("common.close")}</Button>
+      </div>}
+    >
+      <div className="global-feedback-dialog-summary">
+        <CircleAlert aria-hidden />
+        <div><strong>{message}</strong><code>{error?.code}</code></div>
       </div>
-      <pre><code>{details}</code></pre>
-      <p>{t("feedback.detailsHint")}</p>
-      <div className="global-feedback-details-actions">
-        <span className="global-feedback-copy-state" role="status" aria-live="polite">{copied ? t("feedback.copied") : ""}</span>
-        <IconButton label={copied ? t("feedback.copied") : t("feedback.copyError")} icon={copied ? <Check aria-hidden /> : <Copy aria-hidden />} onClick={() => void copyError()} />
-      </div>
-    </div> : null}
-  </div>;
+      <div className="config-preview global-feedback-error-json"><pre><code>{details}</code></pre></div>
+      <p className="form-note">{t("feedback.detailsHint")}</p>
+    </Dialog> : null}
+  </>;
 }
 
 function Page({ page, onImport, updateCheckState, updateVersion, onCheckUpdates }: { page: PageId; onImport: () => void; updateCheckState: UpdateCheckState; updateVersion: string | null; onCheckUpdates: () => Promise<UpdateCheckState> }) {

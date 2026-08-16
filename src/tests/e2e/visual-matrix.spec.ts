@@ -1349,23 +1349,21 @@ for (const scenario of [
     expect(Math.abs(hoveredGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
     expect(Math.abs(hoveredGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
     expect(Math.abs(hoveredGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
-    await expect(feedback.locator(".global-feedback-details")).toHaveCount(0);
+    await expect(page.locator(".global-feedback-details")).toHaveCount(0);
 
     await feedback.locator(".global-feedback-error-trigger").click();
-    const details = feedback.getByRole("dialog", { name: "Error details" });
+    const details = page.getByRole("dialog", { name: "Error details" });
     await expect(details).toBeVisible();
     const detailsGeometry = await details.evaluate((element) => {
       const detailsBox = element.getBoundingClientRect();
-      const feedbackBox = element.closest<HTMLElement>(".global-feedback")!.getBoundingClientRect();
-      const helpBox = document.querySelector<HTMLElement>(".sidebar-help")!.getBoundingClientRect();
+      const centerOffset = Math.abs((detailsBox.left + detailsBox.width / 2) - innerWidth / 2);
+      const verticalCenterOffset = Math.abs((detailsBox.top + detailsBox.height / 2) - (innerHeight + 36) / 2);
       return {
-        insideToast: detailsBox.left >= feedbackBox.left && detailsBox.right <= feedbackBox.right && detailsBox.top >= feedbackBox.top && detailsBox.bottom <= feedbackBox.bottom,
         withinViewport: detailsBox.left >= 0 && detailsBox.right <= innerWidth && detailsBox.top >= 36 && detailsBox.bottom <= innerHeight,
-        aboveHelp: detailsBox.bottom <= helpBox.top + 1,
-        aboveFeedback: detailsBox.bottom <= feedbackBox.top + 1,
+        centered: centerOffset <= 2 && verticalCenterOffset <= 2,
       };
     });
-    expect(detailsGeometry).toEqual({ insideToast: false, withinViewport: true, aboveHelp: true, aboveFeedback: true });
+    expect(detailsGeometry).toEqual({ withinViewport: true, centered: true });
     const openedGeometry = await readGeometry();
     expect(Math.abs(openedGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
     expect(Math.abs(openedGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
@@ -1373,7 +1371,7 @@ for (const scenario of [
     expect(Math.abs(openedGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
     expect(Math.abs(openedGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
     await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
-    await details.locator(".global-feedback-details-header .relay-icon-button").click();
+    await details.locator("header .relay-icon-button").click();
     await expect(feedback).toHaveCount(0);
   });
 }

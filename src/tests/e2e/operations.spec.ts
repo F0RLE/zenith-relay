@@ -3222,14 +3222,14 @@ test("global errors expose sanitized details and a copy confirmation", async ({ 
   const feedback = page.locator(".global-feedback.error");
   await expect(feedback.locator(".global-feedback-actions .relay-icon-button")).toHaveCount(0);
   await feedback.locator(".global-feedback-error-trigger").click();
-  const details = feedback.getByRole("dialog", { name: "Error details" });
+  const details = page.getByRole("dialog", { name: "Error details" });
   await expect(details).toContainText('"code": "profile_restore_blocked"');
   await expect(details).toContainText('"message": "Synthetic profile conflict"');
 
   await details.getByRole("button", { name: "Copy error JSON" }).click();
-  await expect(feedback.locator(".global-feedback-copy-state")).toHaveText("Copied");
+  await expect(details.locator(".global-feedback-dialog-copy-state")).toHaveText("Copied");
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain('"profile_restore_blocked"');
-  await details.locator(".global-feedback-details-header .relay-icon-button").click();
+  await details.locator("header .relay-icon-button").click();
   await expect(feedback).toHaveCount(0);
 });
 
