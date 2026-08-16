@@ -3225,6 +3225,8 @@ test("global errors expose sanitized details and a copy confirmation", async ({ 
   const details = page.getByRole("dialog", { name: "Error details" });
   await expect(details).toContainText('"code": "profile_restore_blocked"');
   await expect(details).toContainText('"message": "Synthetic profile conflict"');
+  await expect(page.locator(".global-feedback")).toHaveCount(0);
+  await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
 
   await details.getByRole("button", { name: "Copy error JSON" }).click();
   await expect(details.locator(".global-feedback-dialog-copy-state")).toHaveText("Copied");

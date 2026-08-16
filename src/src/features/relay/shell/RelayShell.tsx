@@ -286,7 +286,7 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
   };
 
   return <>
-    <div className={`global-feedback ${feedback.kind}`} role="status" aria-label={accessibleLabel}>
+    {!detailsOpen ? <div className={`global-feedback ${feedback.kind}`} role="status" aria-label={accessibleLabel}>
       {error ? <button
         className="global-feedback-copy global-feedback-error-trigger"
         type="button"
@@ -304,7 +304,7 @@ function GlobalFeedback({ feedback, clearFeedback }: { feedback: Exclude<Feedbac
       <div className="global-feedback-actions">
         {!error ? <IconButton label={t("common.close")} icon={<X aria-hidden />} onClick={clearFeedback} /> : null}
       </div>
-    </div>
+    </div> : null}
     {detailsOpen && details ? <Dialog
       title={t("feedback.errorDetails")}
       onClose={clearFeedback}

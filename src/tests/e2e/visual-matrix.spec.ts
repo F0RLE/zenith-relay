@@ -1364,12 +1364,8 @@ for (const scenario of [
       };
     });
     expect(detailsGeometry).toEqual({ withinViewport: true, centered: true });
-    const openedGeometry = await readGeometry();
-    expect(Math.abs(openedGeometry.x - initialGeometry.x)).toBeLessThanOrEqual(1);
-    expect(Math.abs(openedGeometry.y - initialGeometry.y)).toBeLessThanOrEqual(1);
-    expect(Math.abs(openedGeometry.width - initialGeometry.width)).toBeLessThanOrEqual(1);
-    expect(Math.abs(openedGeometry.height - initialGeometry.height)).toBeLessThanOrEqual(1);
-    expect(Math.abs(openedGeometry.headerY - initialGeometry.headerY)).toBeLessThanOrEqual(1);
+    await expect(page.locator(".global-feedback")).toHaveCount(0);
+    await expect(page.locator(".global-feedback-error-trigger")).toHaveCount(0);
     await page.screenshot({ path: `output/playwright/feedback-error-details-${scenario.name}.png` });
     await details.locator("header .relay-icon-button").click();
     await expect(feedback).toHaveCount(0);
