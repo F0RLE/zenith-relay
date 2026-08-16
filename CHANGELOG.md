@@ -19,6 +19,9 @@ Current review set: [PR #49](https://github.com/F0RLE/zenith-relay/pull/49).
 
 ### Changed
 
+- Model lists and source price editors order familiar model families
+  semantically by company, tier, version, and variant; unknown model IDs keep
+  their upstream order.
 - API candidates remain eligible when a provider has not supplied reasoning
   metadata. An explicitly selected reasoning effort is a source/API policy,
   not proof that an account route supports that effort.

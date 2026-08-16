@@ -150,9 +150,9 @@ async fn public_models_follow_the_canonical_model_family_order() {
             "gpt-image-2",
             "vendor/claude-haiku-4-5",
             "vendor/gemini-3.6-flash-low",
+            "vendor/grok-4.5",
             "vendor/glm-5.2",
             "vendor/glm-4.7",
-            "vendor/grok-4.5",
             "private-second",
             "private-first",
         ]

@@ -2482,7 +2482,7 @@ for (const mode of ["local", "remote"] as const) {
 
     const rows = page.locator(".model-rules tbody tr[data-model-id]");
     await expect(rows).toHaveCount(3);
-    expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "gpt-5.4-mini", "o3"]);
+    expect(await rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-model-id")))).toEqual(["gpt-5.4", "o3", "gpt-5.4-mini"]);
     await expect(rows.first().locator(".model-price-value small")).toHaveText(["Input", "Output", "Cache read"]);
     await expect(rows.first().locator(".model-price-value strong")).toHaveText(["$2.5", "$15", "$0.25"]);
     await expect(rows.first().locator(".model-codex-state")).toContainText("Shown in model list");
